@@ -514,7 +514,8 @@ jobs:
     name: product E2E (installed wheel, stdio + HTTP)
     if: *not-release-pr
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # Keep the existing eight-minute journey, bounded apt setup and native proof inside the job.
+    timeout-minutes: 20
     # The job installs and runs earlier published releases; it needs no write access.
     permissions:
       contents: read
@@ -564,6 +565,25 @@ jobs:
       - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         if: steps.scope.outputs.docs_only != 'true'
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 330 --request-timeout 20
+      - name: Install retained-original encryption tools
+        # Cover the helper's update retries, download, installation and kill grace.
+        timeout-minutes: 9
+        if: steps.scope.outputs.docs_only != 'true'
+        run: scripts/ci-apt-install.sh age
+      - name: Cloud frame reads with native codecs
+        if: steps.scope.outputs.docs_only != 'true'
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
+          OPENBLAS_NUM_THREADS: *native-math-threads
+          PYTHONDONTWRITEBYTECODE: "1"
+          FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+        # Keep mandatory decoder proof in this serial job, outside lean worker environments.
+        run: >-
+          uv run --frozen --extra frame-codecs python -m pytest -q
+          tests/test_cloud_video_frames.py -m frame_codecs -o timeout=120
+          --junitxml=test-results/e2e-logs/cloud-frame-junit.xml
       # The harness prints the tail inline; this keeps the whole log for the
       # failures whose cause is older than the tail.
       - name: Upload E2E server logs

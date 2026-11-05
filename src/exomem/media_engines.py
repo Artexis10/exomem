@@ -24,12 +24,13 @@ log = logging.getLogger(__name__)
 
 ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 
-# A closed set: each name is extraction code this package implements, so a new
+# A closed set: each name is media code this package implements, so a new
 # engine is a code change. Which of them run is deployment configuration.
 DOCUMENTS = "documents"
 OCR = "ocr"
 SPEECH = "speech"
-ENGINES = (DOCUMENTS, OCR, SPEECH)
+FRAMES = "frames"
+ENGINES = (DOCUMENTS, OCR, SPEECH, FRAMES)
 #: The engines that run a model. Their text takes minutes to produce again, so a repair
 #: never reruns them (`extraction_parts.sweep`).
 MODEL_ENGINES = frozenset({OCR, SPEECH})
@@ -109,7 +110,12 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
         kinds = [kind for kind in sorted(media_types.KINDS) if engine_for(kind) == engine]
         if engine not in enabled:
             out[engine] = DISABLED
-        elif all(extract.dependencies_present(kind) for kind in kinds):
+        elif engine == FRAMES:
+            from importlib.util import find_spec
+
+            # These are the codec modules of the shipped frame reader, not model engines.
+            out[engine] = ENABLED if find_spec("av") and find_spec("PIL") else UNAVAILABLE
+        elif kinds and all(extract.dependencies_present(kind) for kind in kinds):
             out[engine] = ENABLED
         else:
             out[engine] = UNAVAILABLE

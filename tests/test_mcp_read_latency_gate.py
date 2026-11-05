@@ -7,10 +7,12 @@ runs that produce real fragments are exercised by the gate's own CI jobs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,15 +202,20 @@ def test_the_interval_is_the_student_t_interval_at_the_adjusted_confidence() -> 
         2.0930 / 2.6251, abs=1e-3)
 
 
-# --- Private mode reports the head p95 against the target ------------------------
+# --- Paired private timings cannot establish absolute acceptance ----------------
 
 
-def test_private_mode_reports_a_store_group_against_its_p95_target() -> None:
+def test_private_mode_keeps_absolute_acceptance_unverified_for_paused_workers() -> None:
     ref = {**reference("read", allowance_ms=10), "gating_groups": {"read": {"allowance_ms": 10, "p95_target_ms": 100}}}
-    slow = summarize([fragment([group_cases("read", spread(1), base_ms=150)])], ref, mode="private")
-    fast = summarize([fragment([group_cases("read", spread(1), base_ms=40)])], ref, mode="private")
-    assert row(slow, "read")["target"] == {"p95_target_ms": 100, "result": "misses target"}
-    assert row(fast, "read")["target"] == {"p95_target_ms": 100, "result": "meets target"}
+    environment = {"cpu_pressure_start": 0.0, "cpu_pressure_end": 0.0, "python": "3.12.3", "cpus": 4,
+                   "arms": {"base": {"ready_s": 1.0, "quiescent_s": 1.0},
+                            "head": {"ready_s": 1.0, "quiescent_s": 1.0}}}
+    slow = summarize([fragment([group_cases("read", spread(1), base_ms=150)], environment=environment)], ref, mode="private")
+    fast = summarize([fragment([group_cases("read", spread(1), base_ms=40)], environment=environment)], ref, mode="private")
+    for summary in (slow, fast):
+        assert row(summary, "read")["target"] == {
+            "p95_target_ms": 100, "result": "unverified", "reason": "paused-worker-comparison"}
+        gate.validate_document(summary)
     assert "target" not in row(summarize([fragment([group_cases("read", spread(1), base_ms=40)])], ref), "read")
 
 
@@ -217,6 +224,147 @@ def test_cpu_pressure_reads_the_sixty_second_average_and_names_an_unreadable_fil
     pressure.write_text("some avg10=0.50 avg60=1.25 avg300=0.10 total=1\n")
     assert gate.cpu_pressure(str(pressure)) == 1.25
     assert gate.cpu_pressure(str(tmp_path / "absent")) is None
+
+
+# --- Unpaused absolute measurements --------------------------------------------
+
+
+def absolute_cases():
+    from exomem.recall_canary import load_cases
+
+    return load_cases(json.dumps([
+        {"id": name, "group": "source_read", "tool": "read_memory", "arguments": {"path": name},
+         "expected": {"response_schema": {"type": "object", "required": ["content"]}}}
+        for name in ("first", "second")
+    ]).encode())
+
+
+def absolute_reference():
+    return {**reference(), "gating_groups": {"read": {"p95_target_ms": 100}}}
+
+
+def test_absolute_lifecycle_warms_every_case_before_timing_and_never_pauses(monkeypatch) -> None:
+    events = []
+    busy = False
+
+    class PreparedArm:
+        client = SimpleNamespace()
+
+        async def start(self, **_):
+            events.append("start")
+            return {"ready_s": 0.1, "quiescent_s": 0.1}
+
+        def require_timeable(self):
+            events.append("timeable")
+
+        def run_python(self, _):
+            return json.dumps({"python": "python", "python_version": "3.12", "module_origin": "exomem/__init__.py",
+                               "version": "1.0"})
+
+        async def stop(self):
+            events.append("stop")
+
+    async def call_tool(tool, arguments, **_):
+        nonlocal busy
+        events.append(arguments["path"])
+        busy = arguments["path"] == "second"
+        await asyncio.sleep(0.012)
+        busy = False
+        return SimpleNamespace(is_error=False, data={"content": "neutral"})
+
+    PreparedArm.client.call_tool = call_tool
+    monkeypatch.setattr(gate, "cpu_pressure", lambda: 20.0 if busy else 0.0)
+    result = asyncio.run(gate.measure_absolute(PreparedArm(), absolute_cases(), repeats=2,
+                                               pressure_wait_seconds=0, cadence_seconds=0.003))
+    assert events == ["start", "timeable", "first", "second", "first", "second", "first", "second", "stop"]
+    assert [(s["phase"], s["case"], s["repeat"]) for s in result["samples"]] == [
+        ("warmup", "first", 0), ("warmup", "second", 0),
+        ("timed", "first", 0), ("timed", "second", 0),
+        ("timed", "first", 1), ("timed", "second", 1)]
+    # Quiet endpoints cannot conceal contention in the middle of the measured window.
+    observations = result["environment"]["pressure_observations"]
+    assert observations[0]["avg60"] == 0.0
+    assert observations[-1]["avg60"] == 0.0
+    assert any(o["avg60"] == 20.0 for o in observations[1:-1])
+    assert result["environment"]["pressure_max_gap_seconds"] > 0
+
+
+def absolute_result():
+    return {"samples": [
+        {"case": case.id, "group": case.group, "phase": phase, "repeat": repeat,
+         "elapsed_ms": 40.0, "outcome": "ok", "failure": None, "terminal_received": True}
+        for phase, count in (("warmup", 1), ("timed", 3))
+        for repeat in range(count) for case in absolute_cases()],
+        "environment": {"pressure_observations": [
+            {"monotonic_s": 1.0, "avg60": 0.0, "error": None},
+            {"monotonic_s": 2.0, "avg60": 0.0, "error": None}],
+            "pressure_wait_observations": [], "pressure_cadence_seconds": 1.0,
+            "pressure_max_gap_seconds": 1.0, "pressure_threshold_avg60": 10.0,
+            "timings": {"ready_s": 0.1, "quiescent_s": 0.1}},
+        "runtime": {"python": "python", "python_version": "3.12", "module_origin": "exomem/__init__.py",
+                    "version": "1.0"}}
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "unexpected", "warmup", "timed", "pressure", "unknown"])
+def test_absolute_incomplete_or_contended_series_never_verifies_a_target(damage) -> None:
+    result = absolute_result()
+    if damage == "missing":
+        result["samples"].pop()
+    elif damage == "duplicate":
+        result["samples"].append(result["samples"][-1].copy())
+    elif damage == "unexpected":
+        result["samples"].append({**result["samples"][-1], "case": "unassigned"})
+    elif damage in ("warmup", "timed"):
+        next(s for s in result["samples"] if s["phase"] == damage)["failure"] = "call-failed"
+    else:
+        result["environment"]["pressure_observations"].insert(1, {
+            "monotonic_s": 1.5, "avg60": 20.0 if damage == "pressure" else None,
+            "error": None if damage == "pressure" else "pressure-unavailable"})
+    summary = gate.summarize_absolute(result, absolute_cases(), {"source_read": "read"},
+                                      repeats=3, reference=absolute_reference())
+    assert summary["groups"][0]["target"]["result"] == "unverified"
+    assert summary["acceptance"] == "unverified"
+    assert summary["state"] == ("unverified" if damage in ("pressure", "unknown") else "failed")
+
+
+def test_absolute_binding_preserves_cases_and_validates_before_worker_start(monkeypatch, tmp_path) -> None:
+    cases = absolute_cases()
+    original = [case.model_dump() for case in cases]
+    bindings = gate.absolute_bindings(cases, {"source_read": "read"}, reference=absolute_reference())
+    summary = gate.summarize_absolute(absolute_result(), cases, bindings, repeats=3, reference=absolute_reference())
+    assert summary["groups"][0]["target"]["result"] == "below-target"
+    assert summary["acceptance"] == "unverified"
+    assert [case.model_dump() for case in cases] == original
+    with pytest.raises(MeasurementRefused):
+        gate.absolute_bindings(cases, {}, reference=absolute_reference())
+    with pytest.raises(MeasurementRefused):
+        gate.absolute_bindings(cases, {"source_read": "unknown"}, reference=absolute_reference())
+    cases[1].group = "another_read"
+    with pytest.raises(MeasurementRefused):
+        gate.absolute_bindings(cases, {"source_read": "read", "another_read": "read"}, reference=absolute_reference())
+    cases_file = tmp_path / "cases.json"
+    cases_file.write_text(json.dumps(original))
+    monkeypatch.setattr(gate, "Arm", lambda *a, **k: pytest.fail("invalid bindings started an arm"))
+    args = SimpleNamespace(cases=cases_file, group_bindings=None)
+    with pytest.raises(MeasurementRefused):
+        gate.run_private_absolute(args)
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), -1.0, 101.0])
+def test_absolute_unknown_pressure_stays_unknown(monkeypatch, value) -> None:
+    monkeypatch.setattr(gate, "cpu_pressure", lambda: value)
+    observation = gate.pressure_observation()
+    assert observation["avg60"] is None
+    assert observation["error"] == "pressure-unavailable"
+
+
+def test_absolute_requests_the_watcher_by_omitting_even_a_zero_disable_value(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "0")
+    paired = gate.Arm("paired", "python", tmp_path / "paired", tmp_path, worker_settings={})
+    absolute = gate.Arm("absolute", "python", tmp_path / "absolute", tmp_path,
+                        worker_settings={"EXOMEM_DISABLE_FILE_WATCHER": "0"}, file_watcher=True)
+    assert paired.env["EXOMEM_DISABLE_FILE_WATCHER"] == "1"
+    assert "EXOMEM_DISABLE_FILE_WATCHER" not in absolute.env
 
 
 # --- The two refusals -----------------------------------------------------------
@@ -271,6 +419,13 @@ def test_a_summary_and_its_fragment_validate_against_the_stored_schema() -> None
     gate.validate_document(summary)
     gate.validate_document({"schema_version": 1, "mode": "aggregate", "state": "refused",
                             "failures": [{"code": "arm-not-quiescent", "phase": "quiescence"}]})
+    absolute = gate.summarize_absolute(absolute_result(), absolute_cases(), {"source_read": "read"},
+                                       repeats=3, reference=absolute_reference())
+    gate.validate_document({**absolute, "contract_revision": "request-latency-v5", "contract_sha256": CONTRACT_SHA,
+                            "cases_sha256": "a" * 64, "boundary": "mcp-worker-socket-v1",
+                            "source_commit": "b" * 40, "group_bindings_sha256": "d" * 64})
+    gate.validate_document({"schema_version": 1, "mode": "private-absolute", "state": "refused",
+                            "acceptance": "unverified", "failures": [{"code": "case-group-missing", "phase": "cases"}]})
 
 
 # --- Fixture -------------------------------------------------------------------

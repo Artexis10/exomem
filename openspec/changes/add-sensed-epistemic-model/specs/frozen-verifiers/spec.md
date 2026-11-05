@@ -4,7 +4,7 @@
 
 A model-backed verifier or instrument SHALL run only when all of these hold:
 
-- its opt-in gate has a truthy value: `EXOMEM_CLAIM_POLARITY_NLI` (default off) for the audit's stance verifier, or the sensing setting (`EXOMEM_SENSING`, else the config key `sensing`, default off) for a sensing instrument;
+- its opt-in gate has a truthy value: `EXOMEM_CLAIM_POLARITY_NLI` (default off) for remaining legacy stance-verifier consumers, or the sensing setting (`EXOMEM_SENSING`, else the config key `sensing`, default off) for a sensing instrument;
 - its exact repository-pinned upstream revision is resident;
 - every file in the pin's artifact manifest is present;
 - the manifest's names and bytes match the pinned sha256 digest;
@@ -14,6 +14,9 @@ A model-backed verifier or instrument SHALL run only when all of these hold:
 The pin registry SHALL be a repository artifact: no runtime configuration, environment value, vault content, cache ref, or additional resident revision may add, select, or alter a pin. Files and revisions not named by the pin SHALL NOT affect the digest or loaded identity.
 
 An API instrument is the one exception to resident weights, and it SHALL run only as an explicit opt-in placement (per vault for personal vaults, per tenant for Cloud, off by default). Its identity SHALL be provider, model id and version or snapshot date, flagged `unpinned_weights`. It SHALL pass the same fixture set before its readings are consumed.
+
+Audit enrichment SHALL consume current ledger readings under the sensing setting.
+Legacy claim flags SHALL NOT enable inline audit inference or a synchronous fallback.
 
 The gate being unset, a digest mismatch, a missing artifact, a missing dependency, or an unverified pair SHALL refuse the verifier for the process. The verifier's constructor SHALL receive only the exact resident revision whose declared files matched the pin, with local-only loading forced. A local load failure SHALL refuse, and SHALL NOT retry a repository model name or access the hub. Non-finite model logits SHALL refuse that output.
 

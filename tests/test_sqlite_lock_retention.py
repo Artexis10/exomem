@@ -51,7 +51,6 @@ finally:
     writer.close()
 """
 
-
 def _assert_retained_snapshot(database: Path, reader: sqlite3.Connection) -> None:
     subprocess.run(
         [sys.executable, "-c", _WRITE_CHECKPOINT_CLOSE, os.fspath(database)],
@@ -61,6 +60,19 @@ def _assert_retained_snapshot(database: Path, reader: sqlite3.Connection) -> Non
     wal = Path(f"{database}-wal")
     assert wal.exists() and wal.stat().st_size > 0, "another process discarded the reader's WAL"
     assert reader.execute("SELECT n FROM probe ORDER BY n").fetchall() == [(1,)]
+
+
+def _locks_held_here(path: Path) -> set[str]:
+    """The process's lock coverage; duplicate proc records add no protection."""
+    info = path.stat()
+    file_id = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+    held = set()
+    for line in Path("/proc/locks").read_text().splitlines():
+        # "7: POSIX  ADVISORY  READ 4242 08:30:1234 128 128"; a blocked waiter's line adds "->".
+        fields = line.split()
+        if fields[1] == "POSIX" and fields[4] == str(os.getpid()) and fields[5] == file_id:
+            held.add(" ".join((fields[3], *fields[6:8])))
+    return held
 
 
 def _wal_reader(database: Path) -> sqlite3.Connection:
