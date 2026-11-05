@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import time
 from pathlib import Path
 
 from .media_jobs import worker_lock_path
@@ -54,6 +55,23 @@ class _VaultLock:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
         self._handle = None
+
+
+def _reap_group(pgid: int, timeout: float = 2.0) -> None:
+    """Reap the killed media child's tools that were reparented to this process.
+
+    In a Cloud cell the server is PID 1, so a tool orphaned by a pressure stop becomes
+    its child and stays a zombie unless reaped. `waitpid(-pgid)` waits only on children
+    in the media child's own session, so no other subprocess loses its exit status.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            pid, _status = os.waitpid(-pgid, os.WNOHANG)
+        except ChildProcessError:
+            return  # no child of this process is left in the group
+        if pid == 0:
+            time.sleep(0.05)  # a member is still exiting
 
 
 def arguments(argv: list[str] | None = None) -> argparse.Namespace:
