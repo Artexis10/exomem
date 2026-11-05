@@ -22,6 +22,12 @@ runs:
           ${{ steps.contract.outputs.exports_migration }}
           ${{ steps.contract.outputs.custody_migration }}
           ${{ steps.contract.outputs.imports_migration }}
+    - name: Fetch additive artifact revisions
+      shell: bash
+      run: |
+        jq -r '.artifact_refs // {} | .[]' infra/cellctl/tests/fixtures/substrate-contract.json | sort -u | while IFS= read -r revision; do
+          git -C .substrate-test-contract fetch --no-tags --depth=1 origin "$revision"
+        done
     - name: Select the test contract checkout
       shell: bash
       run: echo "CELLCTL_SUBSTRATE_CONTRACT_ROOT=$GITHUB_WORKSPACE/.substrate-test-contract" >> "$GITHUB_ENV"

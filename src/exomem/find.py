@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from collections import OrderedDict
+from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
@@ -699,15 +699,24 @@ class FreshnessSnapshot:
         if not paths:
             return set()
         parents = None
-        if scope in self._catalogue_scopes and (self._pending is None or self._pending.empty):
+        if scope in self._catalogue_scopes:
             from . import lexstore
 
-            # Reuse structural links, never parent authority. Pending bytes keep their existing overlay path.
+            # Pending custody replaces only its child links; parent authority stays live below.
             published = lexstore.get_store(self._root).recall_emitted_parents(
                 scope, self._expected_recall_checkpoints.get(scope)
             )
-            if published is not None and paths <= published.keys():
+            pending = self._pending
+            stable = paths if pending is None or pending.empty else paths - pending.paths
+            if published is not None and stable <= published.keys():
                 parents = published
+                if pending is not None and not pending.empty:
+                    pending_parents = {
+                        path: page.emitted_parent for path in paths & pending.paths
+                        if (page := pending.page(path)) is not None
+                    }
+                    paths = stable | pending_parents.keys()
+                    parents = ChainMap(pending_parents, published)
         try:
             if parents is None:
                 metadata = _managed_page_metadata(

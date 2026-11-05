@@ -1,0 +1,45 @@
+{
+  "upstreamVersion": "1.19.2",
+  "reason": "Fixed upstream webhook and TLS protocol names; unused cleanup and TTL controllers stay disabled.",
+  "source": "https://github.com/kyverno/kyverno/blob/v1.19.2/pkg/config/config.go",
+  "provenanceSecret": "kyverno-generate-provenance",
+  "tlsSecretSuffixes": [
+    "kyverno-tls-ca",
+    "kyverno-tls-pair"
+  ],
+  "webhooks": [
+    {
+      "kind": "ValidatingWebhookConfiguration",
+      "name": "kyverno-policy-validating-webhook-cfg"
+    },
+    {
+      "kind": "ValidatingWebhookConfiguration",
+      "name": "kyverno-resource-validating-webhook-cfg"
+    },
+    {
+      "kind": "ValidatingWebhookConfiguration",
+      "name": "kyverno-exception-validating-webhook-cfg"
+    },
+    {
+      "kind": "ValidatingWebhookConfiguration",
+      "name": "kyverno-cel-exception-validating-webhook-cfg"
+    },
+    {
+      "kind": "ValidatingWebhookConfiguration",
+      "name": "kyverno-global-context-validating-webhook-cfg"
+    },
+    {
+      "kind": "MutatingWebhookConfiguration",
+      "name": "kyverno-policy-mutating-webhook-cfg"
+    },
+    {
+      "kind": "MutatingWebhookConfiguration",
+      "name": "kyverno-resource-mutating-webhook-cfg"
+    },
+    {
+      "kind": "MutatingWebhookConfiguration",
+      "name": "kyverno-verify-mutating-webhook-cfg"
+    }
+  ],
+  "familyPredicateType": "https://exomem.dev/attestations/image-family/v1"
+}

@@ -32,7 +32,7 @@
 
 - [x] 6.1 Prove preview, start, poll, cancel and receipt for `fix`, `backfill-ids`, `reconcile` and adopt-local through an in-process MCP client over a temporary vault, plus one test per boundary refusal.
 - [ ] 6.2 Measure run time and boundary hold time of `fix`, `backfill-ids` and `reconcile` on a disposable copy of a real-sized vault and record them on the PR.
-- [ ] 6.3 Run Ruff, the privacy gate, the semgrep gate, the scaffold leak test, `scripts/cloud-plugin.py check`, `openspec validate --all --strict` and the full suite.
+- [x] 6.3 Run Ruff, the privacy gate, the semgrep gate, the scaffold leak test, `scripts/cloud-plugin.py check`, `openspec validate --all --strict` and the full suite.
 - [x] 6.4 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
 - [ ] 6.5 After the release and the personal service upgrade, preview and run `backfill-ids` remotely on the personal vault, retry the `edit_note` that needed it, and preview `reconcile` remotely.
 

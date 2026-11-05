@@ -1,0 +1,158 @@
+# Only projected metadata reaches disk buffers and the retained sink.
+data_dir: /var/lib/exomem-access-record
+sources:
+{% if k3s_node_role == 'server' %}
+  audit:
+    type: file
+    include: [{{ access_record_audit_path | to_json }}]
+    read_from: beginning
+    max_line_bytes: 16777216
+{% endif %}
+  journal:
+    type: journald
+    current_boot_only: false
+    include_matches:
+      EXOMEM_ACCESS_RECORD: ["1"]
+      _TRANSPORT: ["audit"]
+  heartbeat:
+    type: static_metrics
+    interval_secs: {{ access_record_heartbeat_seconds }}
+    metrics:
+      - name: access_record_heartbeat
+        kind: absolute
+        tags: {}
+        value:
+          gauge:
+            value: 1
+  internal:
+    type: internal_metrics
+    # Retain diagnostics at the configured heartbeat cadence, not Vector's one-second default.
+    scrape_interval_secs: {{ access_record_heartbeat_seconds }}
+transforms:
+{% if k3s_node_role == 'server' %}
+  audit_metadata:
+    type: remap
+    inputs: [audit]
+    drop_on_error: true
+    drop_on_abort: true
+    source: |
+      raw, error = parse_json(.message)
+      if error != null { abort }
+      uri, error = parse_url("https://audit.invalid" + (string(raw.requestURI) ?? ""))
+      if error != null { abort }
+      . = {
+        "schema_version": 1,
+        "kind": "kubernetes",
+        "source_at": raw.stageTimestamp,
+        "node": "${ACCESS_RECORD_NODE_ID}",
+        "boot_id": "${ACCESS_RECORD_BOOT_ID}",
+        "event_id": (string(raw.auditID) ?? "") + ":" + (string(raw.stage) ?? ""),
+        "identity": raw.user.username,
+        "identity_groups": raw.user.groups,
+        "action": raw.verb,
+        "target": uri.path,
+        "namespace": raw.objectRef.namespace,
+        "resource": raw.objectRef.resource,
+        "subresource": raw.objectRef.subresource
+      }
+{% endif %}
+  journal_metadata:
+    type: remap
+    inputs: [journal]
+    drop_on_error: true
+    drop_on_abort: true
+    source: |
+      raw = .
+      if raw.EXOMEM_ACCESS_RECORD == "1" {
+        . = {
+          "schema_version": 1,
+          "kind": "node_session",
+          "source_at": raw.EXOMEM_SOURCE_AT,
+          "node": "${ACCESS_RECORD_NODE_ID}",
+          "boot_id": raw._BOOT_ID,
+          "event_id": raw.EXOMEM_EVENT_ID,
+          "identity": raw.EXOMEM_IDENTITY,
+          "action": raw.EXOMEM_ACTION,
+          "session_id": raw.EXOMEM_SESSION_ID,
+          "authentication_method": raw.EXOMEM_AUTHENTICATION_METHOD,
+          "fingerprint": raw.EXOMEM_FINGERPRINT,
+          "fingerprint_kind": raw.EXOMEM_FINGERPRINT_KIND,
+          "source_address": raw.EXOMEM_SOURCE_ADDRESS
+        }
+      } else {
+        # Linux audit defines these sudo authentication, command and session tokens.
+        if raw.AUDIT_FIELD_EXE != "/usr/bin/sudo" { abort }
+        micros, error = to_int(raw._SOURCE_REALTIME_TIMESTAMP)
+        if error != null { abort }
+        source_time, error = from_unix_timestamp(micros, unit: "microseconds")
+        if error != null { abort }
+        . = {
+          "schema_version": 1,
+          "kind": "sudo",
+          "source_at": format_timestamp!(source_time, format: "%+"),
+          "node": "${ACCESS_RECORD_NODE_ID}",
+          "boot_id": raw._BOOT_ID,
+          "event_id": raw._AUDIT_ID,
+          "identity": raw._AUDIT_LOGINUID,
+          "action": raw._AUDIT_TYPE_NAME,
+          "target": raw.AUDIT_FIELD_ACCT,
+          "result": raw.AUDIT_FIELD_RES,
+          "session_id": raw._AUDIT_SESSION
+        }
+      }
+  heartbeat_log:
+    type: metric_to_log
+    inputs: [heartbeat]
+  heartbeat_metadata:
+    type: remap
+    inputs: [heartbeat_log]
+    source: |
+      generated = format_timestamp!(now(), format: "%+")
+      . = {"schema_version": 1, "kind": "heartbeat", "source_at": generated,
+           "node": "${ACCESS_RECORD_NODE_ID}", "boot_id": "${ACCESS_RECORD_BOOT_ID}",
+           "event_id": generated, "action": "heartbeat"}
+  internal_metric_log:
+    type: metric_to_log
+    inputs: [internal]
+  internal_metadata:
+    type: remap
+    inputs: [internal_metric_log]
+    drop_on_abort: true
+    source: |
+      # Vector fixes these metric names. They expose buffer pressure and dropped events.
+      if .tags.component_id != "retained" || !includes(["buffer_byte_size", "buffer_max_byte_size", "component_discarded_events_total"], .name) { abort }
+      generated = format_timestamp!(now(), format: "%+")
+      . = {"schema_version": 1, "kind": "shipper_metric", "source_at": generated,
+           "node": "${ACCESS_RECORD_NODE_ID}", "boot_id": "${ACCESS_RECORD_BOOT_ID}",
+           "event_id": generated + ":" + (string(.name) ?? ""), "action": "metric", "target": .name,
+           "result": to_string(.gauge.value) ?? to_string(.counter.value) ?? null}
+sinks:
+  retained:
+    type: aws_s3
+    inputs: [{% if k3s_node_role == 'server' %}audit_metadata, {% endif %}journal_metadata, heartbeat_metadata, internal_metadata]
+    bucket: {{ access_record_bucket | to_json }}
+    endpoint: {{ access_record_endpoint | to_json }}
+    region: {{ access_record_region | to_json }}
+    auth:
+      access_key_id: "${ACCESS_RECORD_WRITER_KEY_ID}"
+      secret_access_key: "${ACCESS_RECORD_WRITER_KEY}"
+    key_prefix: "access/${ACCESS_RECORD_NODE_ID}/%Y/%m/%d/"
+    compression: gzip
+    encoding:
+      codec: json
+    # The retained reader consumes one schema object per line, not a JSON batch array.
+    framing:
+      method: newline_delimited
+    healthcheck:
+      enabled: false
+    batch:
+      timeout_secs: {{ access_record_batch_seconds }}
+      max_bytes: 1048576
+    buffer:
+      type: disk
+      max_size: {{ access_record_buffer_bytes }}
+      when_full: drop_newest
+  metrics:
+    type: prometheus_exporter
+    inputs: [internal]
+    address: {{ access_record_metrics_address | to_json }}

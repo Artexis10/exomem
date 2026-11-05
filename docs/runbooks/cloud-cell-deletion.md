@@ -52,6 +52,27 @@ Do not delete a fleet's shared Secret for one cell.
 `keys_expire_at` stays unknown if any required window or absence proof is missing.
 Past deleted rows receive no invented destruction date.
 
+### Retained access log
+
+The access log and its recovery code are prepared features, disabled until their operational checks pass.
+Their availability does not change the deletion checks above.
+
+When enabled, the authenticated owner can obtain a log-only recovery code before deletion.
+The service stores its digest and the immutable old owner, tenant and cell scope.
+It retains no recovery contact or address fingerprint.
+The code opens only the retained log; it cannot restore Cloud, MCP, billing, provisioning or OAuth access.
+Re-admission at the erased address creates no authority over the old log.
+
+1. Offer the recovery code before deletion; the owner can save the code privately.
+2. Explain that email cannot recover a lost code; the owner understands the recovery limit.
+3. Complete deletion whether the code is saved or not; no save confirmation blocks erasure.
+4. Keep received audit evidence for its configured retention; product sessions and content keys remain revoked.
+
+Use `/exomem/access-log` to exchange the code through its browser challenge for a separate log-only session.
+Expiry or revocation of the log grant invalidates that session.
+Do not reconstruct access for an already-erased owner from another product's contact information.
+The view lists received events and gaps; it does not claim a complete record of node activity.
+
 ### Retained etcd snapshots
 
 K3s encrypts Secrets at rest. Existing etcd snapshots can still retain an
@@ -73,7 +94,7 @@ prune shared cluster snapshots as part of one cell's deletion.
 ## Verify
 
 ```bash
-kubectl get namespaces --selector=exomem.io/cloud-cell=true
+kubectl get namespaces --selector=exomem.io/cloud-cell
 ```
 
 Use the exact private cell identity to verify the absence of its namespace and provider resources.
