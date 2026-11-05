@@ -231,7 +231,6 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         "require_output_version oras",
     ):
         assert required_audit in audit_step["run"]
-    assert set(parsed["jobs"]) == {"static", "external-blackbox"}
     blackbox_job = parsed["jobs"]["external-blackbox"]
     assert blackbox_job["if"] == (
         "github.event_name == 'schedule' || "

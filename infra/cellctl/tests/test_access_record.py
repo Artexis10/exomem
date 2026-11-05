@@ -53,6 +53,50 @@ def test_unknown_identity_and_missing_session_end_are_not_invented():
     assert "end_at" not in parsed
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["jsonl", "gzip-members"])
+def test_truncated_object_cannot_be_accepted_at_a_complete_record_or_gzip_member(compressed):
+    """A complete prefix is not the complete immutable object promised by Content-Length."""
+    import gzip
+    import io
+    import json
+
+    from botocore.exceptions import IncompleteReadError
+    from botocore.response import StreamingBody
+    from botocore.stub import Stubber
+
+    from cellctl.access_record import AccessRecordConfig, AccessVersionReader
+
+    parts = [(json.dumps(dict(
+        schema_version=1, kind="heartbeat", source_at="2026-10-26T12:00:00Z",
+        node="node-a", boot_id="boot-a", event_id=event, action="heartbeat",
+    )) + "\n").encode() for event in ("first", "last")]
+    if compressed:
+        parts = [gzip.compress(part) for part in parts]
+    complete = b"".join(parts)
+    reader = AccessVersionReader(AccessRecordConfig(
+        bucket_id="bucket", bucket_name="synthetic", endpoint="https://storage.example.test",
+        region="test", access_key_id="synthetic", secret_access_key="synthetic",
+        platform_namespace="cloud", platform_workload="cellctl", expected_nodes=["node-a"],
+        heartbeat_max_age_seconds=180, buffer_warn_fraction=0.8,
+    ))
+    expected = {"Bucket": "synthetic", "Key": "access/events", "VersionId": "exact-version"}
+    with Stubber(reader.s3) as transport:
+        prefix = io.BytesIO(parts[0])
+        transport.add_response("get_object", {
+            "Body": StreamingBody(prefix, len(complete)), "ContentLength": len(complete),
+        }, expected)
+        with pytest.raises(IncompleteReadError):
+            reader.records("access/events", "exact-version")
+        assert prefix.closed
+
+        body = io.BytesIO(complete)
+        transport.add_response("get_object", {
+            "Body": StreamingBody(body, len(complete)), "ContentLength": len(complete),
+        }, expected)
+        assert [record["event_id"] for record in reader.records("access/events", "exact-version")] == ["first", "last"]
+        assert body.closed
+
+
 async def test_exact_version_retries_and_observed_placement_keep_tenants_separate(
     cell_db, tmp_path
 ):

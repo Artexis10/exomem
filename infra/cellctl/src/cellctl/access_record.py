@@ -146,12 +146,15 @@ class AccessVersionReader:
     def records(self, key: str, version_id: str) -> list[dict]:
         response = self.s3.get_object(Bucket=self.config.bucket_name, Key=key, VersionId=version_id)
         body = response["Body"]
+        compressed = bytearray()
         try:
-            compressed = body.read(self.config.max_object_bytes + 1)
+            # StreamingBody verifies Content-Length at EOF, even at a complete gzip-member boundary.
+            while chunk := body.read(self.config.max_object_bytes + 1 - len(compressed)):
+                compressed.extend(chunk)
+                if len(compressed) > self.config.max_object_bytes:
+                    raise ValueError("access object exceeds byte bound")
         finally:
             body.close()
-        if len(compressed) > self.config.max_object_bytes:
-            raise ValueError("access object exceeds byte bound")
         source = (
             gzip.GzipFile(fileobj=io.BytesIO(compressed))
             if compressed[:2] == b"\x1f\x8b"
