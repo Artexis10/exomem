@@ -794,16 +794,16 @@ def test_a_handoff_after_a_loan_prices_each_batch_it_re_proves_once(
     index pages the last one moved. Dividing its time by its one new batch would price each
     proof twice over and shrink every later chunk and loan.
     """
-    held = _import_three_sources_while(
-        vault, tmp_path, monkeypatch, _prove_in_place(vault), proof_seconds=0.2
+    proofs, (first, second, third) = _hand_off_three_batches_sharing_a_page(
+        vault, tmp_path, monkeypatch, proof_seconds=0.2
     )
 
-    assert held["outcome"] == "ready" and 2 in held["handoffs"], "the import made no loan"
-    assert 0.2 <= writer_lease.owed_custody_handoff_seconds(vault, more_batches=1) < 0.4
+    assert proofs == [[first], [second, first], [third, second]]
+    assert writer_lease.owed_custody_handoff_seconds(vault, more_batches=1) == pytest.approx(0.2)
 
 
 def _hand_off_three_batches_sharing_a_page(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, proof_seconds: float | None = None,
 ) -> tuple[list[list[str]], list[str]]:
     """Commit three batches in one session under one hold, as an import does.
 
@@ -813,6 +813,10 @@ def _hand_off_three_batches_sharing_a_page(
     its hold hands off the last. Returns the batches each handoff proved and the batch ids,
     oldest first.
     """
+    clock = [0.0]
+    if proof_seconds is not None:
+        # Price actual proofs independently of filesystem and borrower scheduling delays.
+        monkeypatch.setattr(writer_lease, "_fast_ack_monotonic", lambda: clock[0])
     # A governed write gives the vault the canonical generation every proof is bound to.
     _governed_write(
         _manager(tmp_path),
@@ -836,6 +840,8 @@ def _hand_off_three_batches_sharing_a_page(
 
     def recorded_proof(root, receipt, **kwargs):
         proofs[-1].append(receipt.batch_id)
+        if proof_seconds is not None:
+            clock[0] += proof_seconds
         return prove(root, receipt, **kwargs)
 
     monkeypatch.setattr(derived_receipts, "prove_committed", recorded_proof)
@@ -863,7 +869,7 @@ def _hand_off_three_batches_sharing_a_page(
                 )
                 proofs.append([])
                 if index < len(batch_ids) - 1:
-                    writer_lease._handoff_derived_batches(session)
+                    writer_lease._timed_handoff(session)
     finally:
         writer_lease._ACTIVE_FAST_ACK_SESSION.reset(importing)
     assert all(batch.handoff_outcome == "ready" for batch in session.batches)
