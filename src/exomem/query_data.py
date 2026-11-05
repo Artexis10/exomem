@@ -31,16 +31,36 @@ import io
 import itertools
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import access, reserved_paths
 from .query_compat import (
-    DATE_LIKE as _DATE_LIKE, DEFAULT_OP, OPS as _OPS, QueryDataError,
-    coerce_num as _coerce_num, get_field as _get_field, match as _match, sort_key,
-    distinct_key, group_key, latest_aggregate, numeric_aggregate, profile_kind,
+    DATE_LIKE as _DATE_LIKE,
+)
+from .query_compat import (
+    DEFAULT_OP,
+    QueryDataError,
+    distinct_key,
+    group_key,
+    latest_aggregate,
+    numeric_aggregate,
+    profile_kind,
+    sort_key,
+)
+from .query_compat import (
+    OPS as _OPS,
+)
+from .query_compat import (
+    coerce_num as _coerce_num,
+)
+from .query_compat import (
+    get_field as _get_field,
+)
+from .query_compat import (
+    match as _match,
 )
 from .vault import VaultPathError, VaultPathResolution, missing_path_reason, resolve_under_vault
 
@@ -154,12 +174,21 @@ def _locate_array(
     raise QueryDataError("BAD_JSON", "JSON root is neither an array nor an object")
 
 
-def _infer_columns(rows: list[dict]) -> list[str]:
+def _infer_columns(
+    rows: list[dict],
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+) -> list[str]:
     cols: list[str] = []
     seen: set[str] = set()
     for r in rows[:500]:
         if isinstance(r, dict):
-            for k in r:
+            candidates = r
+            if project_values is not None:
+                candidates = {k: v for k, v in r.items() if k not in seen}
+                if not candidates:
+                    continue
+                candidates = project_values(candidates)
+            for k in candidates:
                 if k not in seen:
                     seen.add(k)
                     cols.append(k)
@@ -561,12 +590,14 @@ def evaluate_rows(
     date_column: str | None = None,
     provenance: dict[str, Any] | None = None,
     string_columns: frozenset[str] = frozenset(),
+    project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> QueryDataResult:
     """Apply the dataset query contract to already-loaded adapter rows.
 
     `string_columns` names the columns a manifest declares strings; their filters compare as strings.
+    `project_values` is a trusted field-independent projector. Its caller proves selection is invariant.
     """
-    cols = list(columns_available or _infer_columns(rows))
+    cols = list(columns_available or _infer_columns(rows, project_values))
     warnings = list(warnings or ())
     total_rows = len(rows)
 
@@ -636,6 +667,8 @@ def evaluate_rows(
     window = matched[offset : offset + limit]
     truncated = (offset + len(window)) < total_matched
 
+    if project_values is not None:
+        window = [(i, project_values(r)) for i, r in window]
     if columns:
         out_rows = [{c: _get_field(r, c) for c in columns} for _, r in window]
         out_cols = list(columns)

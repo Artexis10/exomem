@@ -64,6 +64,52 @@ The watcher is requested by omitting its disable setting; startup can still fall
 The checkout revision and interpreter module origin describe separate identities and do not attest served bytes.
 Overall acceptance remains unverified until independent corpus, watcher, runtime, and isolation proof is complete.
 
+### Store queries with staged projection
+
+Eager store materialization governs every authorized row before the evaluator selects results.
+Repeated link resolution, path validation, and authorization can dominate queries that return few rows.
+The repair reduces that work's cardinality while preserving the public query contract.
+It adds no query engine, result cache, stored state, or request parameter.
+
+The existing evaluator accepts an optional trusted projector for eligible store queries.
+Its column inference keeps the same first 500 rows and their source order.
+For each row, it governs only keys that column inference has not yet admitted.
+A field enters the column list at its first governed occurrence, preserving row-major column order.
+The existing evaluator then filters, sorts, and windows rows on projection-invariant selection fields.
+It governs complete window rows before explicit column selection and the existing response cap.
+
+The same projector handles column discovery and returned rows within the current authorized read.
+Only the canonical governance projector enables staging; arbitrary projection callbacks remain eager because they need not support partial maps.
+The adapter retains every authorized row, source version, and snapshot identity.
+Existing result assembly owns totals, continuation offsets, source versions, and rendering.
+No positive authorization cache, path guard bypass, or weakened receipt check is introduced.
+
+Staging applies only to store queries after saved-view expansion and normal field validation.
+Every filter, sort, and effective date root must be a schema-proven scalar without links, or an existing system field.
+Aggregates, child expansion, and `record_presentation` keep eager projection.
+Arrays keep eager selection because projection can remove an empty array, including an array without links.
+Schema collisions with `_profile_system_fields(manifest)` also select eager execution; projection after metadata insertion could otherwise remove a system key.
+Eligibility handles unsupported or malformed shapes without throwing; the existing validation path decides their public outcome.
+
+These restrictions prevent changed selection or metadata, at the cost of retaining existing work for unsupported queries.
+They add no refusal or approval, and callers pay no new failure mode when staging is ineligible.
+File adapters remain eager because their projector can append disclosure outcomes for inspected paths.
+`item_presentation` remains distinct from `record_presentation` and does not itself prevent staging.
+The existing internal `late_link_projection` path and cold-index policy remain unchanged.
+
+Implicit columns can still require every link decision when a field has no surviving value in the first 500 rows.
+The repair therefore makes no guarantee that projection scales only with the returned row count.
+Its worth depends on a measured reduction in work for realistic eligible queries.
+The simpler alternative, removing redundant existence probes, leaves most path validation and authorization work in place.
+The staged path earns its additional maintenance only if boundary measurements show a useful gain with unchanged results.
+
+Proof compares eager and staged results for column order, totals, explicit columns, response limits, continuation pages, and source versions.
+Cases cover hidden link fields, first occurrences at rows 500 and 501, empty matches, missing scalars, string comparisons, and tied sorts.
+Fallback proof covers link and array selection, aggregates, child presentation, schema collisions, malformed inputs, and file adapters.
+Existing RAW, connector, companion, session, and disclosure checks must still govern returned values.
+The shared managed MCP observer checks the candidate against unchanged independently authored source cases.
+Only a matched comparison can establish a latency gain; a bounded diagnostic cannot close the six targets or programme acceptance.
+
 ## Risks / Trade-offs
 
 - Sparse cases produce unstable percentiles → Label them descriptive and preserve configured acceptance minimums.

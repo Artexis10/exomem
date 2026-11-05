@@ -1480,6 +1480,7 @@ def query_collection(
                 project_values=links,
                 project_child_value=links.project_presentation_value,
                 late_link_projection=late_link_projection,
+                stage_store_projection=writer is not None and not late_link_projection,
                 **kwargs,
             )
         egress.emit_boundary_receipt(collector)
