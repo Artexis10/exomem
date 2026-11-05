@@ -41,6 +41,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
         working_set_index,
         working_set_runtime,
     )
+    from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
     from exomem.vault import walk_vault_md
 
@@ -79,6 +80,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                      "- [decision] The quillon vantry window uses a copper latch. ^latch")
     expected = {"hybrid": matching, "keyword": matching, "activate": {carried}}
     counts = RequestCounts(root, monkeypatch)
+    public_limit = 4
     observations = {}
     for size in (400, 1600):
         start = 0 if size == 400 else 375
@@ -135,7 +137,7 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                         return commands.op_activate_context(root, turn=query, include_timings=True)
                     return commands.op_ask_memory(
                         root, query=query, mode=operation, scope="kb", result_level="page",
-                        limit=4, graph=True, rerank=False, include_timings=True,
+                        limit=public_limit, graph=True, rerank=False, include_timings=True,
                     )
 
                 # Maintained indexes alone do not warm the caller's application caches.
@@ -176,6 +178,19 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
             sample["outside_output_reads"] = sorted(
                 set(sample["read_paths"]) - {str(root / path) for path in sources}
             )
+            # The release contract permits a fixed pool before the public limit.
+            hydration_sources = sources
+            if operation != "activate":
+                pool_limit = egress.pool_limit(public_limit) if principal == "admitted" else public_limit
+                assert len(rows) <= public_limit
+                assert 0 < sample["pool_size"] <= pool_limit
+                assert paths <= sample["pool_paths"]
+                hydration_sources = sample["pool_sources"]
+            sample["hydration_bound"] = len(hydration_sources)
+            sample["outside_pool_reads"] = sorted(
+                set(sample["read_paths"]) - {str(root / path) for path in hydration_sources}
+            )
+            assert not sample["outside_pool_reads"], (operation, size, sample["outside_pool_reads"])
             assert sample["steps"] and sample["connections"] and sample["proofs"]
             assert sample["candidates"], "the request must execute real candidate queries"
             observations[size, operation] = sample
@@ -186,6 +201,9 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
         assert small["matched"] == large["matched"]
         assert small["candidates"] == large["candidates"]
         assert small["selected"] == large["selected"]
+        assert small["pool_paths"] == large["pool_paths"]
+        assert small["pool_sources"] == large["pool_sources"]
+        assert small["pool_size"] == large["pool_size"]
         # Aggregate across selections, but retain their connection/proof rows in the report.
         steps = []
         for sample in (small, large):
@@ -211,8 +229,6 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
             if principal == "admitted" and admission_or_settled_match:
                 assert bounded, (operation, key, ratio)
         for size, sample in ((400, small), (1600, large)):
-            if sample["outside_output_reads"]:
-                failures.append((operation, size, "Markdown exceeds selected sources"))
             selections = {
                 selection for selection, store, _scope in sample["connections"]
                 if selection > 0 and store == "lexical"
@@ -243,6 +259,9 @@ def test_public_recall_work_does_not_scale_with_unrelated_pages(
                 "matched_rows": len(sample["matched"]),
                 "unique_page_reads": sample["unique_page_reads"],
                 "selected_sources": sample["read_bound"],
+                "hydration_sources": sample["hydration_bound"],
+                "pooled_candidates": sample["pool_size"] if operation != "activate" else None,
+                "outside_pool_reads": sample["outside_pool_reads"],
                 "outside_output_reads": sample["outside_output_reads"],
             } for size, sample in ((400, small), (1600, large))},
         })
