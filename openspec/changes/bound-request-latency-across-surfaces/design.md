@@ -355,7 +355,7 @@ When epoch coverage is incomplete, only the existing complete-source proof may e
 Admission and finalization check the durable checkpoint and generation floor under the mutation coordinator.
 A foreign advance without a complete local bridge keeps the existing unavailable outcome.
 Both boundaries retain the caller-relative lag proof, current authority and selected-source checks.
-The existing 16-path bound and unknown-deletion behavior remain unchanged.
+The existing 16-path bound and unknown-deletion behavior remain unchanged without an exact source-bound verdict.
 Only successful source-proved replacement or sealed republication establishes a new baseline and detached resolver pair.
 An incremental publication advances an existing association after its final checks; a notification alone proves nothing.
 
@@ -366,7 +366,26 @@ The proof must cover repeated replacements, high-fan-in deletion, independent re
 For a deleted path, missing verdicts, changed authority or unbridgeable history leave the lag visible.
 A failed optional metadata read discards that retention attempt; selected rows still serve.
 The selection creates no historical verdict and copies no corpus map.
-These catalogue proofs do not attest the resolver or graph, whose publication gaps remain separate work.
+
+Graph deletion reuse also requires the catalogue view's vault checkpoint to equal the retained publication's recall checkpoint.
+Each verdict uses its own scope checkpoint and exact SQL generation under fresh caller authority.
+The verdict must explicitly withhold the same full source hash read from that publication's connection-local file row.
+A matching vault checkpoint alone proves nothing when a KB-only catalogue update replaced the shared source row.
+The graph keeps its consumer delta, canonical bridge, incarnation checks and independent deadline.
+
+The inbound projection replaces its source membership set with full hashes computed from text its builder or patcher already reads.
+Those records authorize deletion proof only while associated with a proven complete inbound checkpoint.
+Applying a partial patch invalidates that association; proven publication restores it.
+A request copies only the bounded deleted-path hashes under the existing index lock and checks the same cache generation afterward.
+It never copies the source map, builds the projection or reads deleted source bytes on the request thread.
+
+Both consumers reuse existing immutable catalogue verdict maps and retain no historical decision store.
+An existing request can hold its exact map through publication; a later request cannot recover a retired map.
+The request pins proved deleted paths before constructing its consuming reader.
+Local scopes reuse an outer request's exclusions, and missing scope custody leaves the lag visible.
+Fresh readers preserve the same principal and purpose outside cached policy snapshots at admission and finalization.
+Graph text and edges, inbound source contexts and basename evidence all exclude the pinned paths.
+The owner, changed sources, revoked authority, missing hashes and unpublished inbound associations keep their existing lag outcomes.
 
 The census overlay only adds names. With leftmost-longest matching, deleting a longer alias could expose a shorter withheld name inside it, so removals wait for a base rebuild that proves them.
 

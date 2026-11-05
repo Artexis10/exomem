@@ -7268,19 +7268,18 @@ class _InboundEdit:
     gone: frozenset[str]  # rels whose edges and basename contribution are dropped
     # rel -> signature of the bytes this edit reflects; None for a file seen absent
     applied: dict[str, freshness.FileSignature | None]
+    source_hashes: dict[str, str]
 
 
 @dataclass
 class _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
     stem_counts: dict[str, int]  # basename -> occurrences in walk
-    known_rels: set[str]  # vault-relative POSIX paths already
-    # counted toward stem_counts — lets
-    # apply() tell a rename's "new" side
-    # from an in-place edit.
+    sources: dict[str, str]  # full source hashes for the paths counted toward stem_counts
     # The last checkpoint at which this data was proven complete. A patch can
     # advance data that has one; data without one can only be rebuilt.
     checkpoint: freshness.FreshnessCheckpoint | None = None
+    sources_proven: bool = False  # source records belong to this complete checkpoint, never a partial patch
     stem_paths: dict[str, set[str]] = field(init=False)
     # file -> the bucket keys holding its entries, so a patch visits only those.
     file_targets: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -7293,13 +7292,13 @@ class _InboundIndexData:
 
     def __post_init__(self) -> None:
         self.stem_paths = {}
-        for rel in self.known_rels:
+        for rel in self.sources:
             self.stem_paths.setdefault(PurePosixPath(rel).stem, set()).add(rel)
 
     def _forget(self, rel: str) -> None:
-        if rel not in self.known_rels:
+        if rel not in self.sources:
             return
-        self.known_rels.remove(rel)
+        self.sources.pop(rel)
         stem = PurePosixPath(rel).stem
         paths = self.stem_paths[stem]
         paths.remove(rel)
@@ -7309,10 +7308,11 @@ class _InboundIndexData:
             self.stem_paths.pop(stem)
             self.stem_counts.pop(stem)
 
-    def _remember(self, rel: str) -> None:
-        if rel in self.known_rels:
+    def _remember(self, rel: str, digest: str) -> None:
+        existing = rel in self.sources
+        self.sources[rel] = digest
+        if existing:
             return
-        self.known_rels.add(rel)
         stem = PurePosixPath(rel).stem
         paths = self.stem_paths.setdefault(stem, set())
         paths.add(rel)
@@ -7321,9 +7321,9 @@ class _InboundIndexData:
     def count_after(self, edit: _InboundEdit) -> int:
         """How many files this index would know after `edit`, without applying it."""
         return (
-            len(self.known_rels)
-            + sum(1 for rel in edit.reread if rel not in self.known_rels)
-            - sum(1 for rel in edit.gone if rel in self.known_rels)
+            len(self.sources)
+            + sum(1 for rel in edit.reread if rel not in self.sources)
+            - sum(1 for rel in edit.gone if rel in self.sources)
         )
 
     def apply(self, edit: _InboundEdit) -> None:
@@ -7335,6 +7335,8 @@ class _InboundIndexData:
         file's order against files touched at another time does not mirror a
         fresh walk, but the set of entries per target always matches a rebuild.
         """
+        # Partial rows cannot authorize deletion proof at their earlier complete checkpoint.
+        self.sources_proven = False
         affected = edit.gone | frozenset(edit.reread)
         stale_keys: set[str] = set()
         for rel in affected:
@@ -7368,7 +7370,7 @@ class _InboundIndexData:
         for rel in edit.gone:
             self._forget(rel)
         for rel in edit.reread:
-            self._remember(rel)
+            self._remember(rel, edit.source_hashes[rel])
 
 
 def _plan_inbound_edit(
@@ -7405,6 +7407,7 @@ def _plan_inbound_edit(
         else:
             changed.discard(rel)
     reread: dict[str, list[tuple[int, str, str, str]]] = {}
+    source_hashes: dict[str, str] = {}
     gone = set(deleted)
     applied: dict[str, freshness.FileSignature | None] = {rel: None for rel in deleted}
     for rel in changed:
@@ -7424,9 +7427,10 @@ def _plan_inbound_edit(
             (lineno, context, raw, _inbound_bucket_key(raw))
             for lineno, context, raw in _scan_wikilinks(text)
         ]
+        source_hashes[rel] = content_hash(text)
         if before == after:  # bytes changed while read: apply them, never vouch for them
             applied[rel] = after
-    return _InboundEdit(reread=reread, gone=frozenset(gone), applied=applied)
+    return _InboundEdit(reread=reread, gone=frozenset(gone), applied=applied, source_hashes=source_hashes)
 
 
 @dataclass
@@ -7487,7 +7491,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
 
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
-    known_rels: set[str] = set()
+    sources: dict[str, str] = {}
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
     for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
@@ -7497,7 +7501,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
         except (OSError, UnicodeDecodeError, PathGuardError, ValueError):
             continue
         stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
-        known_rels.add(md_rel)
+        sources[md_rel] = content_hash(text)
         keys: list[str] = []
         for lineno, context, raw in _scan_wikilinks(text):
             normalized = _inbound_bucket_key(raw)
@@ -7517,7 +7521,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     return _InboundIndexData(
         buckets=buckets,
         stem_counts=stem_counts,
-        known_rels=known_rels,
+        sources=sources,
         file_targets=file_targets,
         next_seq=seq,
     )
@@ -7618,6 +7622,7 @@ def _catch_up_inbound(
                 break  # nothing more is coming: an unreadable page or a pending external change
             continue
         data.checkpoint, data.applied = delta.to, {}
+        data.sources_proven = True
         with _INBOUND_INDEX_LOCK:
             if state.generation != generation:
                 break
@@ -7625,6 +7630,7 @@ def _catch_up_inbound(
                 _INBOUND_INDEX[root] = (delta.to.triple, data)
                 return True
     data.checkpoint, data.applied = None, {}
+    data.sources_proven = False
     return False
 
 
@@ -7775,6 +7781,7 @@ def on_inbound_files_changed(
             data.applied.update(edit.applied)
             if proven:
                 data.checkpoint = bridge.to
+                data.sources_proven = True
                 data.applied = {}
                 _INBOUND_INDEX[root] = (bridge.to.triple, data)
 
@@ -7812,7 +7819,7 @@ def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _Inbound
     return _InboundIndexData(
         buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
-        known_rels=set(data.stem_paths.get(basename, ())),
+        sources={rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())},
     )
 
 
@@ -7869,6 +7876,9 @@ def cached_inbound_wikilinks(
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
     """
+    from .governance import egress
+    from .published_admission import admission_of
+
     root = str(vault_root.resolve())
     state = _INBOUND_INDEX_GENERATIONS.get(root)
     if state is None:
@@ -7896,29 +7906,88 @@ def cached_inbound_wikilinks(
     finally:
         _INBOUND_INDEX_LOCK.release()
 
+    admission = admission_of(visible)
+    authority = admission.identity() if admission is not None else None
+    reading = visible
+    checked: tuple[freshness.FreshnessCheckpoint, int | None] | None = None
+
+    def registry_current() -> bool:
+        if checked is None:
+            return False
+        target, pending_epoch = checked
+        # Instance and generation identify this exact endpoint without rehashing the registry map.
+        return (
+            freshness.consumer_checkpoint_instance() == target.instance_id
+            and freshness.generation(vault_root, "vault") == target.generation
+            and freshness.external_pending_epoch(vault_root) == pending_epoch
+        )
+
+    def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
+        if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
+            return frozenset()
+        try:
+            if (
+                state.generation != cache_generation or _INBOUND_INDEX.get(root) is not cached
+                or cached[1].checkpoint != checkpoint or not cached[1].sources_proven
+            ):
+                return frozenset()
+            source_hashes = {path: cached[1].sources[path] for path in paths if path in cached[1].sources}
+        finally:
+            _INBOUND_INDEX_LOCK.release()
+        return view_lag.source_withheld_paths(vault_root, reader, source_hashes)
+
     def current() -> bool:
         """The registry has nothing this reader could see that the data lacks."""
+        nonlocal reading, checked
+        reader = None
+        if isinstance(visible, egress.ReaderView) and authority is not None:
+            reader = visible.fresh(withheld=frozenset())
+            current_admission = admission_of(reader)
+            if reader is None or current_admission is None or current_admission.identity() != authority:
+                return False
+        pending_epoch = freshness.external_pending_epoch(vault_root)
+        target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
             and freshness.consumer_checkpoint_instance() == instance
             and freshness.generation(vault_root, "vault") == generation
             and not freshness.external_pending(vault_root)
         ):
-            return True
-        # No deleted-page proof: the verdict store is stamped by another checkpoint than this index.
-        return visible is not None and view_lag.consumer_lag_only_withheld(
-            vault_root, checkpoint, visible, pending=True
-        )
+            held = frozenset()
+        elif visible is None:
+            return False
+        else:
+            try:
+                delta = freshness.delta_since(vault_root, "vault", checkpoint)
+            except Exception as error:  # noqa: BLE001 - an unreadable optional proof retains the lag
+                view_lag._report_fault("cached_inbound_wikilinks", error)
+                return False
+            target = delta.to
+            held = view_lag.withheld_lag(
+                vault_root, delta, reader if reader is not None else visible, pending=True,
+                withheld_before=(lambda paths: withheld_before(paths, reader)) if reader is not None else None,
+            )
+        if held is None or not egress.pin_proven_withheld(held):
+            return False
+        if reader is not None:
+            # Pinning changes the request's exclusions, not predicates already constructed.
+            reading = reader.fresh()
+            current_admission = admission_of(reading)
+            if reading is None or current_admission is None or current_admission.identity() != authority:
+                return False
+        checked = target, pending_epoch
+        return registry_current()
 
     if not current():
         return None
-    result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading)
     if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
         if (
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
+            or not registry_current()
         ):
             return None
     finally:
@@ -7968,6 +8037,7 @@ def _select_inbound_wikilinks(
         for e in sorted(candidates, key=lambda e: e.seq)
         # Skip the target file itself (self-references aren't inbound).
         if e.path.removesuffix(".md") not in self_keys
+        and (visible is None or visible(e.path))
     ]
 
 

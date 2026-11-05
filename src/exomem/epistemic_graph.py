@@ -52,6 +52,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    view_lag,
     vocabulary_recovery,
 )
 from . import find as find_module
@@ -2669,7 +2670,9 @@ class EpistemicGraphIndex:
                     conn.close()
                     return None
             if (
-                not self._published_read_is_current(publication, visible, deadline=deadline)
+                not self._published_read_is_current(
+                    publication, visible, deadline=deadline, conn=conn,
+                )
                 or time.monotonic() >= deadline
             ):
                 conn.close()
@@ -2718,10 +2721,25 @@ class EpistemicGraphIndex:
 
     def _published_read_is_current(
         self, publication: graph_read_publication.Publication,
-        visible: Callable[[str], bool], *, deadline: float,
+        visible: Callable[[str], bool], *, deadline: float, conn: sqlite3.Connection,
     ) -> bool:
+        def withheld_before(paths: frozenset[str]) -> frozenset[str]:
+            # Read the same connection-local complete publication that serves the correction rows.
+            source_hashes = {
+                path: row[0] for path in paths
+                if (row := conn.execute(
+                    "SELECT source_hash FROM graph_nodes "
+                    "WHERE node_key = ? AND path = ? AND kind = 'file'",
+                    ("file:" + path, path),
+                ).fetchone()) is not None and row[0]
+            }
+            return view_lag.source_withheld_paths(
+                self.vault_root, visible, source_hashes, recall_checkpoint=publication.recall,
+            )
+
         return graph_read_publication.admissible(
             self.vault_root, publication, visible, deadline=deadline,
+            withheld_before=withheld_before,
         ) and self._snapshot_instance_is_current(
             dict(publication.token).get("instance"), deadline=deadline, retained=True,
         )

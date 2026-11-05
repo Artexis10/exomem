@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -118,12 +118,62 @@ def consumer_lag_only_withheld(
 
     The delta is read here, so that a fault reading it reports the lag as well.
     """
+    return consumer_withheld_lag(vault_root, checkpoint, visible, pending=pending) is not None
+
+
+@_fault_reports_the_lag
+def consumer_withheld_lag(
+    vault_root: Path,
+    checkpoint: freshness.FreshnessCheckpoint,
+    visible: Callable[[str], bool],
+    *,
+    pending: bool = False,
+    withheld_before: Callable[[frozenset[str]], frozenset[str]] | None = None,
+) -> frozenset[str] | None:
+    """The consumer lag's deleted paths that the supplied source proof already withheld."""
+    return withheld_lag(
+        vault_root, freshness.delta_since(vault_root, "vault", checkpoint), visible,
+        pending=pending, withheld_before=withheld_before,
+    )
+
+
+def source_withheld_paths(
+    vault_root: Path,
+    visible: Callable[[str], bool],
+    source_hashes: Mapping[str, str],
+    *,
+    recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+) -> frozenset[str]:
+    """Read existing catalogue verdicts over these exact retained consumer bytes.
+
+    Each scope uses its own checkpoint. A graph additionally supplies its
+    vault recall checkpoint; checkpoint equality alone never proves its bytes.
+    """
+    from . import lexstore
+    from .published_admission import admission_of
+
+    admission = admission_of(visible)
+    if admission is None or not source_hashes or len(source_hashes) > MAX_DECIDED_PATHS:
+        return frozenset()
+    view = lexstore._admitted_catalog_view(vault_root)
+    owned = view is None
+    if owned:
+        view = lexstore.get_store(vault_root)._capture_read_view()
+    if view is None:
+        return frozenset()
     try:
-        delta = freshness.delta_since(vault_root, "vault", checkpoint)
-    except Exception as error:  # noqa: BLE001 - a lag that cannot be read is reported, as in `withheld_lag`
-        _report_fault("consumer_lag_only_withheld", error)
-        return False
-    return only_withheld(vault_root, delta, visible, pending=pending)
+        if recall_checkpoint is not None and view.checkpoints.get("vault") != recall_checkpoint:
+            return frozenset()
+        view.retain_withheld_verdicts(admission)
+        return frozenset(
+            path for scope, checkpoint in view.checkpoints.items()
+            for path in view.published_withheld_paths(
+                scope, checkpoint, admission, source_hashes.keys(), source_hashes=source_hashes,
+            )
+        )
+    finally:
+        if owned:
+            view.close()
 
 
 @_fault_reports_the_lag

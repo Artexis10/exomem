@@ -74,7 +74,7 @@ def _content(data: vault_module._InboundIndexData) -> tuple:
             for key, entries in data.buckets.items()
         },
         dict(data.stem_counts),
-        set(data.known_rels),
+        dict(data.sources),
         {rel: set(keys) for rel, keys in data.file_targets.items()},
     )
 

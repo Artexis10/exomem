@@ -130,6 +130,17 @@ callers and deployments with event-maintained indexes disabled MAY keep their sy
 - **AND** the restricted response matches the response without that publication
 - **AND** a visible change, changed authority or invalid selected source retains the existing incomplete or unavailable outcome
 
+#### Scenario: A withheld source leaves a retained consumer publication
+
+- **WHEN** a bounded, bridged consumer delta deletes a source that an existing exact catalogue verdict withheld under the caller's fresh authority
+- **THEN** the retained Graph or direct inbound result may remain complete only when the verdict's full source hash matches that consumer's earlier source
+- **AND** Graph reads the expected hash from the same retained SQL publication and requires its recall checkpoint to match the catalogue view's vault checkpoint
+- **AND** every catalogue verdict uses its own scope checkpoint and exact SQL generation
+- **AND** inbound source records authorize proof only at their proven complete checkpoint, with partial patches invalidating that association
+- **AND** the request pins proved deleted paths before constructing the consuming reader and preserves an outer request's exclusions
+- **AND** retained text, edges, inbound contexts and basename evidence from those paths remain withheld
+- **AND** changed bytes, revoked authority, missing proof, unavailable scope custody and existing unbridgeable or over-bound history keep the incomplete outcome
+
 #### Scenario: Partial graph repair preserves a complete published view
 
 - **WHEN** a partial graph repair changes rows after a complete publication

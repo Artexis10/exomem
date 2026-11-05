@@ -275,6 +275,7 @@ def read_boundary(
 def admissible(
     root: Path, publication: Publication, visible: Callable[[str], bool], *,
     deadline: float | None = None,
+    withheld_before: Callable[[frozenset[str]], frozenset[str]] | None = None,
 ) -> bool:
     """Admit retained rows only through an exact current local association."""
     try:
@@ -296,24 +297,29 @@ def admissible(
             ):
                 return False
         # Release decisions may read policy and sources; keep them outside the boundary.
-        if not view_lag.consumer_lag_only_withheld(
+        withheld = view_lag.consumer_withheld_lag(
             root,
             publication.consumer,
             visible,
             pending=True,
-        ):
+            withheld_before=withheld_before,
+        )
+        if withheld is None:
             return False
         with read_boundary(root, operation="graph_read_publication_recheck", deadline=deadline) as held:
             if not held:
                 return False
             with _lock:
                 current = _states.get(root)
-            return (
+            admitted = (
                 current is not None
                 and current.bridge is state.bridge
                 and current.publication.lineage is publication.lineage
                 and _current(root, state.bridge)
             )
+        from .governance import egress
+
+        return admitted and egress.pin_proven_withheld(withheld)
     except Exception:  # noqa: BLE001 - uncertainty keeps the existing unavailable result
         return False
 

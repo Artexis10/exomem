@@ -7790,7 +7790,7 @@ _PROVEN_WITHHELD: ContextVar[_ProvenWithheld | None] = ContextVar(
 
 
 @contextmanager
-def proven_withheld_scope() -> Iterator[None]:
+def proven_withheld_scope(*, reuse: bool = False) -> Iterator[None]:
     """Hold, for one request, the pages that its reader views reject although they left the vault.
 
     A request served a lexical catalogue older than itself reads pages that have since left the
@@ -7802,7 +7802,12 @@ def proven_withheld_scope() -> Iterator[None]:
     The set belongs to this scope alone. A scope starts empty, also under another, and ends with
     the request: nothing persists across requests, threads or the next request on this thread.
     A thread that copies no context starts with none, as it starts without the request's principal.
+    With `reuse`, a nested consumer keeps the open request's holder and its exclusions.
     """
+    current = _PROVEN_WITHHELD.get()
+    if reuse and current is not None and current.paths is not None:
+        yield
+        return
     held = _ProvenWithheld()
     token = _PROVEN_WITHHELD.set(held)
     try:
@@ -7951,6 +7956,14 @@ class ReaderView:
         """The page predicate's `Admission`, for the catalogue to publish."""
         return admission_of(self._pages)
 
+    def fresh(self, *, withheld: frozenset[str] | None = None) -> ReaderView | None:
+        """Rebuild this caller's authority outside the request's cached policy."""
+        with policy_module.outside_request_policy_snapshot():
+            return reader_view(
+                self._root, principal=self._principal, purpose=self._purpose,
+                unit_identity_only=self._unit_identity_only, withheld=withheld,
+            )
+
     def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
         """Project one actual clipped bundle before it spends a compiler slot."""
         try:
@@ -8012,14 +8025,18 @@ def reader_view(
     argument of the same name. `keep` is a restricted caller's release
     decision that the request already built (`page_filter_over`), so its
     verdicts are reused."""
+    who = principal if principal is not None else current_principal()
     pages = (
-        visible_page_filter(vault_root, principal=principal, purpose=purpose, withheld=withheld)
+        visible_page_filter(vault_root, principal=who, purpose=purpose, withheld=withheld)
         if keep is None
         else page_filter_over(vault_root, keep, withheld=withheld)
     )
     if pages is None:
         return None
-    return ReaderView(vault_root, pages, principal=principal, purpose=purpose, unit_identity_only=unit_identity_only)
+    return ReaderView(
+        vault_root, pages, principal=who if who is not None else effective_principal(),
+        purpose=purpose, unit_identity_only=unit_identity_only,
+    )
 
 
 def release_allows_download(
