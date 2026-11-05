@@ -7909,6 +7909,18 @@ def cached_inbound_wikilinks(
     admission = admission_of(visible)
     authority = admission.identity() if admission is not None else None
     reading = visible
+    checked: tuple[freshness.FreshnessCheckpoint, int | None] | None = None
+
+    def registry_current() -> bool:
+        if checked is None:
+            return False
+        target, pending_epoch = checked
+        # Instance and generation identify this exact endpoint without rehashing the registry map.
+        return (
+            freshness.consumer_checkpoint_instance() == target.instance_id
+            and freshness.generation(vault_root, "vault") == target.generation
+            and freshness.external_pending_epoch(vault_root) == pending_epoch
+        )
 
     def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
         if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
@@ -7926,13 +7938,15 @@ def cached_inbound_wikilinks(
 
     def current() -> bool:
         """The registry has nothing this reader could see that the data lacks."""
-        nonlocal reading
+        nonlocal reading, checked
         reader = None
         if isinstance(visible, egress.ReaderView) and authority is not None:
             reader = visible.fresh(withheld=frozenset())
             current_admission = admission_of(reader)
             if reader is None or current_admission is None or current_admission.identity() != authority:
                 return False
+        pending_epoch = freshness.external_pending_epoch(vault_root)
+        target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
             and freshness.consumer_checkpoint_instance() == instance
@@ -7943,8 +7957,14 @@ def cached_inbound_wikilinks(
         elif visible is None:
             return False
         else:
-            held = view_lag.consumer_withheld_lag(
-                vault_root, checkpoint, reader if reader is not None else visible, pending=True,
+            try:
+                delta = freshness.delta_since(vault_root, "vault", checkpoint)
+            except Exception as error:  # noqa: BLE001 - an unreadable optional proof retains the lag
+                view_lag._report_fault("cached_inbound_wikilinks", error)
+                return False
+            target = delta.to
+            held = view_lag.withheld_lag(
+                vault_root, delta, reader if reader is not None else visible, pending=True,
                 withheld_before=(lambda paths: withheld_before(paths, reader)) if reader is not None else None,
             )
         if held is None or not egress.pin_proven_withheld(held):
@@ -7955,7 +7975,8 @@ def cached_inbound_wikilinks(
             current_admission = admission_of(reading)
             if reading is None or current_admission is None or current_admission.identity() != authority:
                 return False
-        return True
+        checked = target, pending_epoch
+        return registry_current()
 
     if not current():
         return None
@@ -7966,6 +7987,7 @@ def cached_inbound_wikilinks(
         if (
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
+            or not registry_current()
         ):
             return None
     finally:

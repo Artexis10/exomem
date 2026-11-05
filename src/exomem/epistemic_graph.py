@@ -2670,7 +2670,9 @@ class EpistemicGraphIndex:
                     conn.close()
                     return None
             if (
-                not self._published_read_is_current(publication, visible, deadline=deadline, conn=conn)
+                not self._published_read_is_current(
+                    publication, visible, deadline=deadline, conn=conn,
+                )
                 or time.monotonic() >= deadline
             ):
                 conn.close()
@@ -2726,7 +2728,8 @@ class EpistemicGraphIndex:
             source_hashes = {
                 path: row[0] for path in paths
                 if (row := conn.execute(
-                    "SELECT source_hash FROM graph_nodes WHERE node_key = ? AND path = ? AND kind = 'file'",
+                    "SELECT source_hash FROM graph_nodes "
+                    "WHERE node_key = ? AND path = ? AND kind = 'file'",
                     ("file:" + path, path),
                 ).fetchone()) is not None and row[0]
             }

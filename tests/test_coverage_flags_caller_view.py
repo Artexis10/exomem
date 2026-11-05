@@ -226,6 +226,33 @@ def test_revocation_during_deleted_inbound_selection_discards_the_retained_reply
         assert _links(served, restricted=True)["inbound"] is None
 
 
+@pytest.mark.parametrize("deleted", [False, True], ids=["changed", "deleted"])
+def test_inbound_finalization_reports_a_visible_write_after_the_lag_proof(
+    served: Path, monkeypatch: pytest.MonkeyPatch, deleted: bool,
+) -> None:
+    """The registry can advance before its event reaches the resident inbound index."""
+    _hold_verdicts(served)
+    assert _links(served, restricted=True)["inbound"] is not None
+    if deleted:
+        _delete_as_the_service_does(served, HIDDEN)
+    else:
+        _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nChanged private source.\n")
+    prove = view_lag.withheld_lag
+    proofs = []
+
+    def write_after_final_proof(*args, **kwargs):
+        result = prove(*args, **kwargs)
+        proofs.append(result)
+        if len(proofs) == 2:
+            _write_as_the_service_does(served, NEWCOMER, "# New source\n\n[[coverage-anchor]]\n")
+        return result
+
+    monkeypatch.setattr(view_lag, "withheld_lag", write_after_final_proof)
+
+    assert _links(served, restricted=True)["inbound"] is None
+    assert (served / NEWCOMER).is_file()
+
+
 def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served: Path) -> None:
     """A reconcile that replaced the registry leaves nothing to say what changed."""
     _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten.\n")
