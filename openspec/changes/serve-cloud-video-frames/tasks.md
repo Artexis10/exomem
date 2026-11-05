@@ -15,8 +15,8 @@
 ## 3. Integrated proof and source delivery
 
 - [x] 3.1 Run the registered Cloud tool on an isolated retained-original video with real decoding. Record native JPEGs, timestamps, resource use, duration and unchanged source identity under admitted scoped execution.
-- [ ] 3.2 Run scoped frame, custody, governance, media selection and cancellation regressions; then the full completion corpus on CI or the desktop. Run lint, privacy and strict OpenSpec checks.
-- [ ] 3.3 Obtain one independent adversarial review of the exact integrated batch, including security, C4, C6 and product/proof weight. Close findings and merge after current CI passes.
+- [x] 3.2 Run scoped frame, custody, governance, media selection and cancellation regressions; then the full completion corpus on CI or the desktop. Run lint, privacy and strict OpenSpec checks.
+- [x] 3.3 Obtain one independent adversarial review of the exact integrated batch, including security, C4, C6 and product/proof weight. Close findings and merge after current CI passes.
 - [ ] 3.4 Obtain the containing ordinary release and immutable package/image qualification from its delivery owner. Preserve default-off configuration and all live activation holds.
 - [ ] 3.5 Synchronize and archive the delivered source contract through the OpenSpec CLI after required source tasks close; preserve the separate operational acceptance below.
 

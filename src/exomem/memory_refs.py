@@ -1298,31 +1298,41 @@ def _pages_without_id(
 ) -> Iterator[tuple[str, Path, str, Any]]:
     """Yield `(rel, path, text, guard)` for each governed page that has frontmatter but no ID.
 
-    Pages that cannot be read, have no frontmatter, or carry a malformed ID go to `skipped`.
+    Unreadable, malformed, protected and store-owned candidates go to `skipped`.
     """
+    from . import access
+    from .collection_store import ownership
+
     kb = Path(vault_root) / kb_dirname()
     if not kb.is_dir():
         return
     # A backfill job plans over every page before it holds the boundary, so the walk yields
     # to a foreground read.
-    for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
-        rel = _relative_markdown(vault_root, path)
-        if rel is None:
-            continue
-        try:
-            raw, guard = vault_module.read_guarded_text(vault_root, path)
-        except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
-            skipped.append({"path": rel, "reason": str(exc)})
-            continue
-        fm, _, fm_text = vault_module.parse_frontmatter(raw)
-        if fm_text is None:
-            skipped.append({"path": rel, "reason": "missing frontmatter"})
-            continue
-        if ID_FIELD in fm:
-            if normalize_id(fm.get(ID_FIELD)) is None:
-                skipped.append({"path": rel, "reason": "malformed exomem_id"})
-            continue
-        yield rel, path, raw, guard
+    with ownership.read_scope(vault_root, finalize=True):
+        for path in foreground_priority.yielding_in_bulk(sorted(kb.rglob("*.md"))):
+            rel = _relative_markdown(vault_root, path)
+            if rel is None:
+                continue
+            try:
+                raw, guard = vault_module.read_guarded_text(vault_root, path)
+            except (OSError, UnicodeDecodeError, vault_module.PathGuardError) as exc:
+                skipped.append({"path": rel, "reason": str(exc)})
+                continue
+            fm, _, fm_text = vault_module.parse_frontmatter(raw)
+            if fm_text is None:
+                skipped.append({"path": rel, "reason": "missing frontmatter"})
+                continue
+            if ID_FIELD in fm:
+                if normalize_id(fm.get(ID_FIELD)) is None:
+                    skipped.append({"path": rel, "reason": "malformed exomem_id"})
+                continue
+            reason = access.writable_reason(vault_root, rel)
+            if reason is None and ownership.owned(vault_root, rel) is not None:
+                reason = "canonical collection view has store authority"
+            if reason is not None:
+                skipped.append({"path": rel, "reason": reason})
+                continue
+            yield rel, path, raw, guard
 
 
 def _backfill_plan_id(pages: Iterable[tuple[str, str]]) -> str:
