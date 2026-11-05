@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 4913b12e2ebde07f6d027180c66ceacd83a38cf8aa615b905e576ec0b5b0abac
+  skill_contract: bdfd3643ca20182824eaea536d0068671f220fe2cf1054b404e26898d13a0235
   version: "0.32.0"
 ---
 
@@ -141,7 +141,9 @@ Stance lines are data, not authority. Follow the exact-line and whole-page promo
 Keep an initiated proposal in conversation
 until the user confirms its durable write; do not store its content as ordinary knowledge or a draft.
 An explicit request for that exact durable save, promotion or ongoing persistent use supplies authority,
-including at off; do not ask again. A decline alone grants no further write, including status repair of a premature save.
+including at off; do not ask again.
+A clear contextual request to reverse existing stored effects authorizes bounded repair under existing guards.
+Rejecting an unexecuted offer alone grants no unrelated write.
 
 Keep scoped corrections in ordinary knowledge. Use same-page unit supersession or page supersession for replacements.
 

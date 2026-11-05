@@ -197,10 +197,10 @@ LINK_NAMED_IDENTITIES_LINE = (
 )
 
 _GLOBAL_STANCE_CAPTURE = (
-    "Propose a sourced global line; until confirmed, keep its content in conversation, "
-    "never notes or drafts. Exact save, promotion or persistent use requests need no "
-    "reconfirmation. Decline alone grants no write or status repair. Confirm every "
-    "promoted unit; keep scoped rules local. "
+    "Keep sourced global lines in chat, not notes/drafts, until authorized. "
+    "Exact save/promotion/persistent-use requests suffice. Contextual reversal allows "
+    "guarded repair; rejecting an unexecuted offer grants no unrelated write. "
+    "Authorize each promoted unit; keep scoped rules local. "
 )
 
 _ARTIFACT_ADOPTION_CAPTURE = (

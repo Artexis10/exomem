@@ -34,7 +34,7 @@ The task layer stays deferred. Publication follows normal review and delivery; l
 
 ## 5. Capture and incident workflow
 
-- [ ] 5.1 Teach the exact global-line and existing-page promotion route through maintained scaffold sources. Verify explicit durable requests work at off, unconfirmed content stays in conversation, and decline alone grants no repair write.
+- [ ] 5.1 Teach the exact global-line and existing-page promotion route through maintained scaffold sources. Verify explicit durable requests work at off, unconfirmed content stays in conversation, and contextual reversal authorizes bounded repair without unrelated writes.
 - [x] 5.2 Keep replacements on the same page or use page supersession. Verify the earlier contradictory line stops serving without adding cross-page unit logic.
 - [x] 5.3 Preserve engagement semantics and compact bootstrap bounds on all carriers. Run the scaffold leak guard and existing relevant bootstrap checks.
 - [x] 5.4 Link an incident to composed response metadata by `served_context_id`. Verify lookup or an explicit evidence gap, without claiming receipt or use.
