@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .. import memory_refs, mutation_lock
+from .. import memory_refs, mutation_lock, request_budget
 from ..mutation_lock import (
     VaultMutationCoordinator,
     _open_secure_directory,
@@ -516,10 +516,28 @@ def _open_windows_month_fd(
             os.close(fd)
 
 
-def _monthly_evidence_names(instance_dir: Path) -> tuple[list[str], list[dict[str, str]]]:
+def _monthly_evidence_names(
+    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
     names: list[str] = []
     issues: list[dict[str, str]] = []
-    for candidate in sorted(instance_dir.glob("????-??.jsonl")):
+    # Monthly file names are the fixed JSONL evidence protocol.
+    pattern = "????-??.jsonl"
+    candidates = instance_dir.glob(pattern)
+    if checkpoint is not None:
+        candidates = []
+        try:
+            with os.scandir(instance_dir) as entries:
+                for entry in entries:
+                    checkpoint()
+                    candidate = Path(entry.path)
+                    if candidate.match(pattern):
+                        candidates.append(candidate)
+        except FileNotFoundError:
+            return names, issues
+    for candidate in sorted(candidates):
+        if checkpoint is not None:
+            checkpoint()
         if not _valid_month_name(candidate.name):
             issues.append({"code": "invalid_month_filename", "path": str(candidate), "detail": "month is not calendar-real"})
             continue
@@ -621,14 +639,18 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
         os.close(directory_fd)
 
 
-def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+def _read_records(
+    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
     if not instance_dir.exists():
         return records, issues
-    names, path_issues = _monthly_evidence_names(instance_dir)
+    names, path_issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
     issues.extend(path_issues)
     for name in names:
+        if checkpoint is not None:
+            checkpoint()
         path = instance_dir / name
         try:
             with _open_month_fd(instance_dir, name) as fd:
@@ -638,13 +660,20 @@ def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[s
                     line_no = 0
                     saw_data = False
                     final_newline = True
-                    while raw_line := source.readline(MAX_RECORD_BYTES + 1):
+                    while True:
+                        if checkpoint is not None:
+                            checkpoint()
+                        raw_line = source.readline(MAX_RECORD_BYTES + 1)
+                        if not raw_line:
+                            break
                         saw_data = True
                         line_no += 1
                         line_offset = offset
                         offset += len(raw_line)
                         oversized = len(raw_line) > MAX_RECORD_BYTES
                         while oversized and not raw_line.endswith(b"\n"):
+                            if checkpoint is not None:
+                                checkpoint()
                             chunk = source.readline(8192)
                             if not chunk:
                                 break
@@ -683,13 +712,17 @@ def _read_records(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[s
     return records, issues
 
 
-def _chain_state(instance_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    records, issues = _read_records(instance_dir)
+def _chain_state(
+    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    records, issues = _read_records(instance_dir, checkpoint=checkpoint)
     valid_records: list[dict[str, Any]] = []
     expected_hash = GENESIS_HASH
     expected_seq = 1
     previous_month: str | None = None
     for record in records:
+        if checkpoint is not None:
+            checkpoint()
         path = str(record.pop("_path"))
         offset = int(record.pop("_offset"))
         month = Path(path).stem
@@ -1716,12 +1749,20 @@ def _scanned_locator_matches(
     durable_hash: str,
     locator: str | None,
     byte_offset: int | None,
+    *,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> bool:
     if locator is None or byte_offset is None:
         return False
     if durable_seq == 0:
         return durable_hash == GENESIS_HASH and locator == "" and byte_offset == 0
-    record = next((item for item in records if item.get("seq") == durable_seq), None)
+    record = None
+    for item in records:
+        if checkpoint is not None:
+            checkpoint()
+        if item.get("seq") == durable_seq:
+            record = item
+            break
     if record is None or record.get("hash") != durable_hash:
         return False
     try:
@@ -1762,11 +1803,17 @@ def _anchor_issues(
     instance_dir: Path,
     records: list[dict[str, Any]],
     anchor: tuple[int, str, int, str, str | None, int | None],
+    *,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
     actual_seq, actual_hash = _tail(records)
     durable_seq, durable_hash, observed_seq, observed_hash, locator, byte_offset = anchor
-    hashes = {item["seq"]: item["hash"] for item in records}
+    hashes = {}
+    for item in records:
+        if checkpoint is not None:
+            checkpoint()
+        hashes[item["seq"]] = item["hash"]
     if durable_seq > actual_seq or hashes.get(durable_seq, GENESIS_HASH) != durable_hash:
         issues.append({"code": "durable_anchor_divergence", "path": str(instance_dir), "detail": "durable head is not in chain"})
     if locator is None or byte_offset is None or (durable_seq > 0 and not locator):
@@ -1783,6 +1830,7 @@ def _anchor_issues(
         durable_hash,
         locator,
         byte_offset,
+        checkpoint=checkpoint,
     ):
         issues.append({
             "code": "locator_divergence",
@@ -1795,7 +1843,10 @@ def _anchor_issues(
     return issues
 
 
-def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dict[str, Any]:
+def verify_chain(
+    vault_root: Path, *, authority_root: Path | None = None,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> dict[str, Any]:
     """Verify physical evidence against its authority without changing either.
 
     Restore staging may hold destination evidence after rollback. Its separate
@@ -1809,6 +1860,8 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
     unanchored. It is not an issue: each machine anchors only its own instance,
     so a synced vault always holds instances that this machine cannot anchor.
     """
+    if checkpoint is not None:
+        checkpoint()
     instances: dict[str, dict[str, Any]] = {}
     all_issues: list[dict[str, str]] = []
     root = _events_root(vault_root)
@@ -1839,9 +1892,19 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
     active_seen = False
     if root.exists():
         for path in root.rglob("*"):
+            if checkpoint is not None:
+                checkpoint()
             if is_conflict_copy(path.name):
                 all_issues.append({"code": "evidence_conflict", "path": str(path), "detail": "conflicted receipt evidence"})
-        for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+        candidates = []
+        for path in root.iterdir():
+            if checkpoint is not None:
+                checkpoint()
+            if path.is_dir():
+                candidates.append(path)
+        for candidate in sorted(candidates):
+            if checkpoint is not None:
+                checkpoint()
             if active_anchor is not None and candidate.name == active_anchor[0]:
                 active_seen = True
             try:
@@ -1850,7 +1913,7 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
                 code = "invalid_instance_id" if "id is invalid" in str(exc) else "instance_path_escape"
                 all_issues.append({"code": code, "path": str(candidate), "detail": str(exc)})
                 continue
-            records, issues = _chain_state(instance_dir)
+            records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
             actual_seq, actual_hash = _tail(records)
             anchor = active_anchor[2] if active_anchor is not None and instance_dir.name == active_anchor[0] else None
             if anchor is None:
@@ -1861,16 +1924,23 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
             if authority_root is not None and anchor is None:
                 issues.append({"code": "anchor_absent", "path": str(instance_dir), "detail": "destination has no durable head for this instance"})
             if anchor is not None:
-                issues.extend(_anchor_issues(vault_root, instance_dir, records, anchor))
-            terminals = {str(item.get("causation_id")) for item in records if item.get("phase") in {"committed", "aborted"}}
+                issues.extend(_anchor_issues(vault_root, instance_dir, records, anchor, checkpoint=checkpoint))
+            terminals: set[str] = set()
             terminal_phases: dict[str, set[str]] = {}
             for item in records:
+                if checkpoint is not None:
+                    checkpoint()
                 if item.get("phase") in {"committed", "aborted"}:
+                    terminals.add(str(item.get("causation_id")))
                     terminal_phases.setdefault(str(item.get("causation_id")), set()).add(str(item["phase"]))
             for causation_id, phases in terminal_phases.items():
+                if checkpoint is not None:
+                    checkpoint()
                 if len(phases) > 1:
                     issues.append({"code": "competing_terminals", "path": str(instance_dir), "detail": causation_id})
             for item in records:
+                if checkpoint is not None:
+                    checkpoint()
                 if item.get("phase") == "intent" and str(item.get("event_id")) not in terminals:
                     issues.append({"code": "unresolved_intent", "path": str(instance_dir), "detail": str(item.get("event_id"))})
             instances[instance_dir.name] = {
@@ -1883,7 +1953,7 @@ def verify_chain(vault_root: Path, *, authority_root: Path | None = None) -> dic
             all_issues.extend(issues)
     if active_anchor is not None and not active_seen:
         instance_id, instance_dir, anchor = active_anchor
-        issues = _anchor_issues(vault_root, instance_dir, [], anchor)
+        issues = _anchor_issues(vault_root, instance_dir, [], anchor, checkpoint=checkpoint)
         instances[instance_id] = {
             "tail_seq": 0,
             "tail_hash": GENESIS_HASH,

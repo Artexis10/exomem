@@ -5891,6 +5891,13 @@ def postfilter(
         request_budget.checkpoint()
         value = _postfilter(command_name, result, vault_root, request_kwargs=request_kwargs)
         request_budget.checkpoint()
+        if checkpoint is not None:
+            # Filtering cannot remove a withheld page's contribution from aggregate counts.
+            with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
+                refusal = owner_only_aggregate(vault_root, checkpoint=checkpoint)
+            checkpoint()
+            if refusal is not None:
+                return refusal
         return value
 
 
@@ -7676,6 +7683,7 @@ def owner_only_aggregate(
     *,
     principal: RequestPrincipal | None = None,
     raw_admitted: bool = False,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> dict[str, Any] | None:
     """Refuse a whole-vault aggregate without unrestricted content authority.
 
@@ -7696,6 +7704,8 @@ def owner_only_aggregate(
     the caller may not see. When it fires wrongly a restricted caller,
     including an owner with a connector ceiling, loses the aggregate.
     """
+    if checkpoint is not None:
+        checkpoint()
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
     if writer is not None and (who is None or (raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who))):
@@ -7703,7 +7713,9 @@ def owner_only_aggregate(
 
         operation = writer._operation
         try:
-            for entry in reserved_paths.list_generic_tree(vault_root, "."):
+            for entry in reserved_paths.list_generic_tree(vault_root, ".", checkpoint=checkpoint):
+                if checkpoint is not None:
+                    checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
                 if entry.identity.kind != "file" or not path.startswith(f"{kb_dirname()}/"):

@@ -292,50 +292,6 @@ def test_interrupted_resolver_proof_does_not_start_a_disk_fallback(vault, monkey
             find.writer_resolver_snapshot(vault)
 
 
-def test_concurrent_withholding_is_fresh_and_expired_release_contains_no_metadata(vault, monkeypatch):
-    from test_governance_egress import _external, write_rule, write_scope
-
-    from exomem import published_admission, writer_lease
-    from exomem.cli_ops import _AuditBudgetExhausted, error_dict
-    from exomem.governance.principal import request_scope
-
-    path = "Knowledge Base/Notes/withheld.md"
-    (vault / path).write_text("---\ntype: insight\n---\nPrivate evidence", encoding="utf-8")
-    report = {"findings": [{"path": path, "detail": "private evidence"}], "summary": {"orphan_entity": 9}}
-    body_scope = []
-    decisions = []
-    budget = request_budget.RequestBudget(seconds=50)
-    command = next(item for item in commands.COMMANDS if item.name == "audit")
-
-    def body(*args, **kwargs):
-        body_scope.append(published_admission.request_decisions())
-        write_scope(vault, paths=path)
-        write_rule(vault, ceiling=0)
-        return report
-
-    decide = egress._decide_path
-
-    def withhold_then_expire(*args, **kwargs):
-        decision = decide(*args, **kwargs)
-        if request_budget.current_checkpoint() is not None:
-            assert published_admission.request_decisions() is not body_scope[0]
-            decisions.append(decision)
-            budget.deadline = 0
-        return decision
-
-    monkeypatch.setattr(writer_lease.get_manager(), "invoke", body)
-    monkeypatch.setattr(egress, "_decide_path", withhold_then_expire)
-    token = request_budget.set_current(budget)
-    try:
-        with request_scope(_external()):
-            with pytest.raises(_AuditBudgetExhausted) as caught:
-                writer_lease.invoke_command(command, vault)
-    finally:
-        request_budget.reset_current(token)
-    assert decisions and decisions[0].level < egress.RELEASE_FLOOR
-    terminal = error_dict(caught.value)
-    assert terminal["code"] == "AUDIT_BUDGET_EXHAUSTED"
-    assert path not in str(terminal) and "orphan_entity" not in str(terminal)
 
 
 def test_audit_allowance_interrupts_guarded_hashing_and_releases_descriptors(vault, monkeypatch):
@@ -456,3 +412,386 @@ def test_store_authorization_can_use_the_final_release_reserve(service):
             release.set()
         owner.result(timeout=5)
         assert audited.result(timeout=5) == "fresh authorization"
+
+
+def test_receipt_audit_stops_at_the_record_where_its_allowance_expires(vault, monkeypatch):
+    import json
+
+    directory = vault / "Knowledge Base/_Governance/events" / ("a" * 32)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "2026-11.jsonl").write_bytes(b"{}\n" * 1000)
+    load = json.loads
+    parsed = []
+
+    def expire_at_first_record(value, *args, **kwargs):
+        if value == b"{}":
+            parsed.append(value)
+            request_budget.current().deadline = 0
+        return load(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", expire_at_first_record)
+    budget = request_budget.RequestBudget(seconds=50)
+    report = audit.audit(vault, categories=["governance_receipts"], budget=budget)
+
+    assert len(parsed) == 1
+    assert report.findings == [] and report.summary == {}
+    assert report.metadata["coverage"]["complete"] is False
+    assert report.metadata["coverage"]["completed_categories"] == []
+    assert "audit.governance_receipts" in budget.truncated
+
+
+def test_an_audit_checkpoint_does_not_cancel_ordinary_receipt_verification_or_append(vault):
+    from exomem.governance import receipts
+
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    expired = request_budget.RequestBudget(seconds=0)
+    with request_budget.checking(request_budget.ReadCheckpoint(expired)):
+        assert receipts.verify_chain(vault)["valid"] is True
+        receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    verified = receipts.verify_chain(vault)
+    assert verified["valid"] is True
+    assert next(iter(verified["instances"].values()))["tail_seq"] == 2
+
+
+def test_unavailable_requested_category_is_not_a_completed_check(vault, monkeypatch):
+    from exomem.collection_store import ownership
+
+    def unavailable(*args, **kwargs):
+        raise ownership.unavailable()
+
+    monkeypatch.setattr(ownership, "current", unavailable)
+    report = audit.audit(vault, categories=["collection_view_corrections"],
+                         budget=request_budget.RequestBudget(seconds=50))
+    coverage = report.as_public_dict()["metadata"]["coverage"]
+    assert coverage["collection_view_corrections"] == "unknown"
+    assert coverage["completed_categories"] == []
+    assert coverage["complete"] is False
+    local = audit.audit(vault, categories=["collection_view_corrections"])
+    assert local.metadata == {"coverage": {"collection_view_corrections": "unknown"}}
+
+
+def test_capped_producer_does_not_hide_an_independently_complete_category(vault, monkeypatch):
+    from exomem import artifact_role_state
+
+    finding = audit.AuditFinding(category="artifact_role_promotion", severity="info",
+                                 path="Knowledge Base/Notes/observed.md", detail="Observed role review")
+    monkeypatch.setattr(artifact_role_state, "inspect", lambda *args, **kwargs: ([finding], {
+        "artifact_role_promotion": "capped", "transient_state_review": "complete",
+    }))
+    report = audit.audit(vault, categories=["artifact_role_promotion", "transient_state_review"],
+                         budget=request_budget.RequestBudget(seconds=50))
+    coverage = report.as_public_dict()["metadata"]["coverage"]
+    assert coverage["artifact_role_promotion"] == "capped"
+    assert coverage["completed_categories"] == ["transient_state_review"]
+    assert coverage["complete"] is False
+    assert report.findings == [finding]
+
+
+def test_receipt_audit_stops_when_record_validation_exhausts_its_allowance(vault, monkeypatch):
+    from exomem.governance import receipts
+
+    directory = vault / "Knowledge Base/_Governance/events" / ("a" * 32)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "2026-11.jsonl").write_bytes(b"{}\n" * 1000)
+    envelope_error = receipts._envelope_error
+    validated = []
+
+    def expire_at_first_validation(record):
+        validated.append(record)
+        request_budget.current().deadline = 0
+        return envelope_error(record)
+
+    monkeypatch.setattr(receipts, "_envelope_error", expire_at_first_validation)
+    budget = request_budget.RequestBudget(seconds=50)
+    report = audit.audit(vault, categories=["governance_receipts"], budget=budget)
+
+    assert len(validated) == 1
+    assert report.findings == [] and report.summary == {}
+    assert report.metadata["coverage"]["completed_categories"] == []
+    assert "audit.governance_receipts" in budget.truncated
+
+
+@pytest.mark.parametrize("revoke_at,budgeted", [("audit", True), ("filter", True), (None, True), (None, False)])
+def test_actual_owner_audit_releases_no_aggregate_after_revocation(vault, monkeypatch, revoke_at, budgeted):
+    from exomem import writer_lease
+    from exomem.governance import raw_protection
+    from exomem.governance.principal import owner_principal, request_scope
+
+    path = "Knowledge Base/Notes/" + raw_protection.PREFIX + "record.md"
+    (vault / path).write_text("---\ntype: insight\n---\nPrivate evidence", encoding="utf-8")
+    permitted = [True]
+    finding = audit.AuditFinding(category="tag_inconsistency", severity="warn", path=path, detail="Tag variants")
+    monkeypatch.setattr(raw_protection, "_authority", lambda *args, **kwargs: (permitted[0], None))
+
+    def check(*args, **kwargs):
+        if revoke_at == "audit":
+            permitted[0] = False
+        return [finding]
+
+    filtered = egress._postfilter
+
+    def filter_then_revoke(*args, **kwargs):
+        result = filtered(*args, **kwargs)
+        if revoke_at == "filter":
+            permitted[0] = False
+        return result
+
+    monkeypatch.setattr(audit, "_check_tag_inconsistency", check)
+    monkeypatch.setattr(egress, "_postfilter", filter_then_revoke)
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke",
+                        lambda command, injected, kwargs, **rest: command.leaf(*injected, **kwargs))
+    command = next(item for item in commands.COMMANDS if item.name == "audit")
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50) if budgeted else None)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            result = writer_lease.invoke_command(command, vault, categories=["tag_inconsistency"])
+    finally:
+        request_budget.reset_current(token)
+    if revoke_at is None:
+        assert result["findings"] == [finding.as_dict()]
+        assert result["summary"] == {"tag_inconsistency": 1}
+        assert result["presentation"]["actionable_count"] == 1
+    else:
+        assert result == {"available": False, "reason": egress.AUDIENCE_RESTRICTED}
+
+
+def test_fresh_aggregate_walk_stops_under_the_audit_allowance(service, monkeypatch):
+    from exomem import held_fs
+    from exomem.collection_store import preview, runtime
+    from exomem.governance.principal import owner_principal, request_scope
+
+    budget = request_budget.RequestBudget(seconds=50)
+    checkpoint = request_budget.ReadCheckpoint(budget)
+    proving = [False]
+    visited = []
+    with held_fs.acquire(service.root).require() as filesystem:
+        filesystem_type = type(filesystem)
+    children = filesystem_type.children
+
+    def expire_at_first_child(filesystem, directory, *, name_filter=None):
+        if proving[0] and name_filter is not None:
+            admit = name_filter
+
+            def name_filter(name):
+                visited.append(name)
+                budget.deadline = 0
+                return admit(name)
+        return children(filesystem, directory, name_filter=name_filter)
+
+    monkeypatch.setattr(filesystem_type, "children", expire_at_first_child)
+
+    def authorize():
+        writer = preview.bound_writer(service.root)
+        with writer.read_snapshot():
+            proving[0] = True
+            try:
+                return egress.owner_only_aggregate(service.root, checkpoint=checkpoint)
+            finally:
+                proving[0] = False
+
+    with request_scope(owner_principal(surface="mcp")), request_budget.checking(checkpoint):
+        with pytest.raises(request_budget.ReadBudgetExhausted):
+            runtime._server(service.root).call(authorize, read_only=True, wake_maintenance=False)
+    assert len(visited) == 1
+
+
+def test_expired_final_aggregate_proof_uses_the_fixed_terminal_without_a_cold_census(vault, monkeypatch):
+    from exomem import writer_lease
+    from exomem.cli_ops import _AuditBudgetExhausted, error_dict
+    from exomem.governance.principal import owner_principal, request_scope
+
+    command = next(item for item in commands.COMMANDS if item.name == "audit")
+    aggregate = egress.owner_only_aggregate
+    budget = request_budget.RequestBudget(seconds=50)
+
+    def forbid_cold_gate(*args, **kwargs):
+        pytest.fail("the expired aggregate proof started an artifact census")
+
+    def expire_in_final_proof(*args, **kwargs):
+        checkpoint = kwargs.get("checkpoint")
+        if checkpoint is not None:
+            budget.deadline = 0
+            monkeypatch.setattr(egress, "_ArtifactReferenceGate", forbid_cold_gate)
+        return aggregate(*args, **kwargs)
+
+    monkeypatch.setattr(egress, "owner_only_aggregate", expire_in_final_proof)
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke",
+                        lambda command, injected, kwargs, **rest: command.leaf(*injected, **kwargs))
+    token = request_budget.set_current(budget)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            with pytest.raises(_AuditBudgetExhausted) as caught:
+                writer_lease.invoke_command(command, vault, categories=["tag_inconsistency"])
+    finally:
+        request_budget.reset_current(token)
+    assert error_dict(caught.value)["code"] == "AUDIT_BUDGET_EXHAUSTED"
+
+
+@pytest.mark.parametrize("expire_at", ["body", "authorization", "error_filter", "error_ownership", "result_ownership"])
+def test_admitted_audit_error_delivery_stops_when_its_allowance_expires(vault, monkeypatch, expire_at):
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem import writer_lease
+    from exomem.cli_ops import _AuditBudgetExhausted, error_dict
+    from exomem.collection_store import ownership
+    from exomem.governance import artifact_census
+    from exomem.governance.principal import owner_principal, request_scope
+
+    write_scope(vault)
+    write_rule(vault, ceiling=0)
+    artifact_census.clear()
+    budget = request_budget.RequestBudget(seconds=50)
+    command = next(item for item in commands.COMMANDS if item.name == "audit")
+    failure = OpError("COLLECTION_STORE_UNAVAILABLE", "Cannot authorize Knowledge Base/Notes/neutral.md")
+    bodies, post_expiry_reads = [], []
+    failed = False
+    filter_entries = egress.filter_withheld_entries
+    list_directory = artifact_census._list_directory
+    finish = ownership.ReadScope.finish
+
+    def invoke(command, injected, kwargs, **rest):
+        result = command.leaf(*injected, **kwargs)
+        assert "findings" in result, "the audit must be admitted before its release fails"
+        bodies.append(result)
+        if expire_at == "body":
+            budget.deadline = 0
+            raise failure
+        return result
+
+    def fail_authorization(*args, **kwargs):
+        nonlocal failed
+        checkpoint = request_budget.current_checkpoint()
+        if checkpoint is not None and checkpoint.budget is budget and expire_at != "result_ownership":
+            failed = True
+            if expire_at == "authorization":
+                budget.deadline = 0
+            raise failure
+        return filter_entries(*args, **kwargs)
+
+    def enumerate_directory(path, *args, **kwargs):
+        if bodies and budget.remaining() == 0:
+            post_expiry_reads.append(path)
+        listing = list_directory(path, *args, **kwargs)
+        if failed and expire_at == "error_filter":
+            budget.deadline = 0
+        return listing
+
+    def finish_ownership(scope):
+        if bodies and expire_at in ("error_ownership", "result_ownership"):
+            budget.deadline = 0
+        return finish(scope)
+
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke", invoke)
+    monkeypatch.setattr(egress, "filter_withheld_entries", fail_authorization)
+    monkeypatch.setattr(artifact_census, "_list_directory", enumerate_directory)
+    monkeypatch.setattr(ownership.ReadScope, "finish", finish_ownership)
+    token = request_budget.set_current(budget)
+    try:
+        with request_scope(owner_principal(surface="mcp")):
+            with pytest.raises(OpError) as caught:
+                writer_lease.invoke_command(command, vault, categories=["tag_inconsistency"])
+    finally:
+        request_budget.reset_current(token)
+    assert len(bodies) == 1
+    assert not post_expiry_reads, "error delivery continued its artifact census after expiry"
+    assert type(caught.value) is _AuditBudgetExhausted
+    assert error_dict(caught.value) == _AuditBudgetExhausted().as_public_dict()
+
+
+@pytest.mark.parametrize("terminal_at", ["body", "error_filter"])
+def test_fixed_budget_terminal_finishes_dispatch_with_an_expired_allowance(vault, monkeypatch, terminal_at):
+    from exomem import writer_lease
+    from exomem.cli_ops import _AuditBudgetExhausted
+    from exomem.collection_store import ownership
+
+    terminal = _AuditBudgetExhausted()
+    budget = request_budget.RequestBudget(seconds=50)
+
+    def fail(*args, **kwargs):
+        if terminal_at == "error_filter":
+            raise OpError("COLLECTION_STORE_UNAVAILABLE", "ordinary failure")
+        budget.deadline = 0
+        raise terminal
+
+    def filter_error(*args, **kwargs):
+        budget.deadline = 0
+        raise terminal
+
+    def forbid_proof(*args, **kwargs):
+        pytest.fail("the fixed terminal attempted content filtering or ownership proof")
+
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke", fail)
+    monkeypatch.setattr(egress, "postfilter_error", filter_error)
+    monkeypatch.setattr(egress, "_ArtifactReferenceGate", forbid_proof)
+    monkeypatch.setattr(ownership.ReadScope, "finish", forbid_proof)
+    command = next(item for item in commands.COMMANDS if item.name == "audit")
+    token = request_budget.set_current(budget)
+    try:
+        with pytest.raises(_AuditBudgetExhausted) as caught:
+            writer_lease.invoke_command(command, vault, categories=["tag_inconsistency"])
+    finally:
+        request_budget.reset_current(token)
+    assert caught.value is terminal
+
+
+@pytest.mark.parametrize("name,budgeted", [("audit", True), ("audit", False), ("attention", True)])
+def test_ordinary_dispatch_errors_keep_their_identity_and_chain(vault, monkeypatch, name, budgeted):
+    from exomem import writer_lease
+
+    failure = OpError("COLLECTION_STORE_UNAVAILABLE", "ordinary failure")
+    cause = ValueError("original cause")
+
+    def fail(*args, **kwargs):
+        raise failure from cause
+
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke", fail)
+    command = next(item for item in commands.COMMANDS if item.name == name)
+    budget = request_budget.RequestBudget(seconds=50 if name == "audit" else 0) if budgeted else None
+    token = request_budget.set_current(budget)
+    try:
+        with pytest.raises(OpError) as caught:
+            writer_lease.invoke_command(command, vault)
+    finally:
+        request_budget.reset_current(token)
+    assert caught.value is failure
+    assert caught.value.__cause__ is cause
+    assert caught.value.message == "ordinary failure"
+
+
+@pytest.mark.parametrize("fail_at", ["body", "error_filter", "ownership"])
+def test_audit_expiry_does_not_replace_fatal_or_cancellation_signals(vault, monkeypatch, fail_at):
+    from asyncio import CancelledError
+
+    from exomem import writer_lease
+    from exomem.collection_store import ownership
+
+    if fail_at == "body":
+        failure = CancelledError()
+    elif fail_at == "error_filter":
+        failure = SystemExit(70)
+    else:
+        failure = KeyboardInterrupt()
+    budget = request_budget.RequestBudget(seconds=50)
+
+    def fatal(*args, **kwargs):
+        budget.deadline = 0
+        raise failure
+
+    def invoke(*args, **kwargs):
+        if fail_at == "body":
+            fatal()
+        raise OpError("COLLECTION_STORE_UNAVAILABLE", "ordinary failure")
+
+    monkeypatch.setattr(writer_lease.get_manager(), "invoke", invoke)
+    if fail_at == "error_filter":
+        monkeypatch.setattr(egress, "postfilter_error", fatal)
+    elif fail_at == "ownership":
+        monkeypatch.setattr(ownership.ReadScope, "finish", fatal)
+    command = next(item for item in commands.COMMANDS if item.name == "audit")
+    token = request_budget.set_current(budget)
+    try:
+        with pytest.raises(type(failure)) as caught:
+            writer_lease.invoke_command(command, vault)
+    finally:
+        request_budget.reset_current(token)
+    assert caught.value is failure

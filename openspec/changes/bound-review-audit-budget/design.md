@@ -98,8 +98,9 @@ The final budget error prevents release without a completed authorization proof;
 
 1. Add focused deadline and coverage regressions in isolated temporary state; the current implementation fails them.
 2. Implement the audit and release changes; complete independent review and the normal release checks.
-3. Publish the ordinary release; promote within an approved personal maintenance window after gaming ends, preserving the media pause.
-4. Run one audit through the real connector; verify its terminal, coverage and server ledger before the client times out.
+3. Publish the ordinary release.
+4. After the operator confirms the existing approved timing condition, promote the service with media still paused.
+5. Run one audit through the real connector; verify its terminal, coverage and server ledger before the client times out.
 
 No state migration is required.
 Recover a failed promotion through the managed transition record; never start an older release over changed state.

@@ -612,7 +612,13 @@ def audit(
                 budget.note_truncated(f"audit.{name}")
                 metadata.setdefault("coverage", {})[name] = "unknown"
         else:
-            completed.extend(names)
+            for name in names:
+                coverage = metadata.get("coverage", {}).get(name, "complete")
+                if isinstance(coverage, Mapping):
+                    coverage = coverage.get("status")
+                # The producer coverage protocol proves a full check only with "complete".
+                if budget is None or coverage == "complete":
+                    completed.append(name)
 
     role_families = selected & {"artifact_role_promotion", "transient_state_review"}
     with stage(role_families) as run:
@@ -2071,7 +2077,7 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
     """Project receipt-chain evidence problems without touching its sidecar."""
     from .governance import receipts
 
-    report = receipts.verify_chain(vault_root)
+    report = receipts.verify_chain(vault_root, checkpoint=request_budget.current_checkpoint())
     findings = [
         AuditFinding(
             category="governance_receipts",

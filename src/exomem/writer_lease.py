@@ -8794,52 +8794,64 @@ def invoke_command(
     with ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector, \
             published_admission.deciding():
+        from .cli_ops import _AuditBudgetExhausted
+
+        budget = request_budget.current()
+        checkpoint = (
+            request_budget.ReadCheckpoint(budget)
+            if budget is not None and invocation_is_audit(command, kwargs) else None
+        )
+
+        def finish_ownership(check: request_budget.ReadCheckpoint | None) -> None:
+            with request_budget.checking(check), call_spans.span("command.ownership_finish"):
+                if check is not None:
+                    check()
+                ownership_scope.finish()
+                if check is not None:
+                    check()
+
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
-            # Fixed phase labels carry timing only, never caller or vault data.
-            with body_meter as measured, call_spans.span("command.body", measured):
-                result = _invoke()
-            # The terminal filter decides the store-owned pages in a scope of its own, so it asks the
-            # store live rather than replaying the body's verdict; the one place that scope can
-            # withhold the pages is here, so this is also where the owner is told it did.
-            budget = request_budget.current()
-            checkpoint = (
-                request_budget.ReadCheckpoint(budget)
-                if budget is not None and invocation_is_audit(command, kwargs) else None
-            )
-            with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
-                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
-                                    checkpoint=checkpoint)
-                result = store_preview.note_withheld_pages(command.name, result, injected[0])
-            if checkpoint is not None:
-                with request_budget.checking(checkpoint), call_spans.span("command.ownership_finish"):
-                    checkpoint()
-                    ownership_scope.finish()
-                    checkpoint()
-        except BaseException as error:
-            budget_exhausted = isinstance(error, request_budget.ReadBudgetExhausted)
-            if budget_exhausted:
-                from .cli_ops import _AuditBudgetExhausted
-
-                request_budget.current().note_truncated("audit.release")
-                error = _AuditBudgetExhausted()
             try:
-                with call_spans.span("command.terminal_filter"):
-                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            finally:
+                # Fixed phase labels carry timing only, never caller or vault data.
+                with body_meter as measured, call_spans.span("command.body", measured):
+                    result = _invoke()
+                # The terminal filter asks the store live rather than replaying the body's verdict.
+                with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
+                    result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
+                                        checkpoint=checkpoint)
+                    result = store_preview.note_withheld_pages(command.name, result, injected[0])
+                finish_ownership(checkpoint)
+            except BaseException as error:
+                # This exact internal terminal contains no content to scan or prove again.
+                if type(error) is _AuditBudgetExhausted:
+                    raise
                 try:
-                    if not budget_exhausted:
-                        ownership_scope.finish()
-                finally:
-                    with call_spans.span("command.disclosure_receipt"):
-                        emit_boundary_receipt(collector)
-            if budget_exhausted:
-                raise error from None
-            raise
-        try:
-            with call_spans.span("command.ownership_finish"):
-                ownership_scope.finish()
+                    if isinstance(error, request_budget.ReadBudgetExhausted):
+                        raise
+                    # Fatal signals keep their existing filtering and ownership finalization.
+                    error_checkpoint = checkpoint if isinstance(error, Exception) else None
+                    with request_budget.checking(error_checkpoint):
+                        try:
+                            if error_checkpoint is not None:
+                                error_checkpoint()
+                            with call_spans.span("command.terminal_filter"):
+                                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+                            if error_checkpoint is not None:
+                                error_checkpoint()
+                        except request_budget.ReadBudgetExhausted:
+                            raise
+                        except BaseException as filtering_error:
+                            if type(filtering_error) is not _AuditBudgetExhausted:
+                                finish_ownership(error_checkpoint if isinstance(filtering_error, Exception) else None)
+                            raise
+                        finish_ownership(error_checkpoint)
+                except request_budget.ReadBudgetExhausted:
+                    if budget is not None:
+                        budget.note_truncated("audit.release")
+                    raise _AuditBudgetExhausted() from None
+                raise
         finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)
