@@ -5,7 +5,7 @@ import json
 import random
 import sys
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -155,7 +155,7 @@ def test_failed_reverse_allocation_rolls_back_the_unregistered_row(tmp_path: Pat
 
 @pytest.mark.usefixtures("model_free")
 def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Path, monkeypatch) -> None:
-    """Sibling sources share physical facts; each fresh phase closes its registry observations."""
+    """Borrowed published rows share one physical phase without rebuilding unchanged accounting state."""
     import inspect
     import os
     from collections import Counter
@@ -173,6 +173,21 @@ def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Pat
         caller = context_views.CallerView.current(root)
         with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
             assert result[0].pages == len(paths)
+        build = next(iter(store._released_corpus_builds.values()))
+        before = tuple(getattr(build, name) for name in (
+            "checkpoint", "validation", "validation_cursor", "preparation", "preparation_cursor",
+            "aggregation", "result", "fingerprint", "epoch",
+        ))
+        def refreshed(*args, **kwargs):
+            pytest.fail("an unchanged published borrow must not walk mutable build accounting")
+        monkeypatch.setattr(lexstore, "_refresh_released_memory", refreshed)
+        request_floor = lexstore._request_floor
+        request_charge = []
+        def charged(build, refs, workspace, **kwargs):
+            floor = request_floor(build, refs, workspace, **kwargs)
+            request_charge.append((workspace, floor))
+            return floor
+        monkeypatch.setattr(lexstore, "_request_floor", charged)
         reads = []
         registries = []
         scandir = os.scandir
@@ -189,8 +204,14 @@ def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Pat
         monkeypatch.setattr(registry, "load", loaded)
         with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
             assert result[0].pages == len(paths)
-    assert reads and set(Counter(reads).values()) == {2}
-    assert registries and set(Counter(registries).values()) == {4}
+            workspace, incoming_floor = request_charge[-1]
+            assert workspace.floor_bytes >= incoming_floor + sys.getsizeof(result[2]) + sys.getsizeof(result)
+    assert reads and set(Counter(reads).values()) == {1}
+    assert registries and set(Counter(registries).values()) == {2}
+    assert all(current is previous for current, previous in zip((getattr(build, name) for name in (
+        "checkpoint", "validation", "validation_cursor", "preparation", "preparation_cursor",
+        "aggregation", "result", "fingerprint", "epoch",
+    )), before, strict=True))
     build = next(iter(store._released_corpus_builds.values()))
     proof = build.rows[paths[0]].proof
     changed_expectation = replace(proof, registries=tuple(
@@ -250,6 +271,191 @@ def test_registry_phase_refuses_growth_before_reading_or_retaining_the_tuple(tmp
     assert not facts.registries and facts.retained_bytes == before
 
 
+@pytest.mark.usefixtures("model_free")
+def test_borrow_cancellation_while_charging_new_request_refs_keeps_the_published_build(tmp_path: Path, monkeypatch) -> None:
+    """A new request must own its references before reading proofs or changing a published generation."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem.governance import egress
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        build = next(iter(store._released_corpus_builds.values()))
+        result, epoch, charge = build.result, build.epoch, build.reservation.reserved
+        fresh_paths = {path.encode().decode() for path in paths}
+        def expired(_build, refs, _workspace, **kwargs):
+            assert refs[0] is fresh_paths
+            raise TimeoutError("request ended while charging its references")
+        def unexpected(*args, **kwargs):
+            pytest.fail("no proof or build accounting may precede the new request charge")
+        monkeypatch.setattr(lexstore, "_request_floor", expired)
+        monkeypatch.setattr(lexstore, "_refresh_released_memory", unexpected)
+        monkeypatch.setattr(egress, "validate_source_release_proofs", unexpected)
+        with pytest.raises(TimeoutError), store.released_task_corpus(
+                fresh_paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pytest.fail("an expired request must not publish")
+        assert build.result is result and build.epoch is epoch and build.reservation.reserved == charge
+    assert runtime_resources._preparation_bytes == 0
+
+
+@pytest.mark.usefixtures("model_free")
+def test_unobserved_source_edit_on_borrow_reprojects_only_the_affected_source(tmp_path: Path, monkeypatch) -> None:
+    """Complete empty history cannot hide a source edit discovered by the borrow's physical guards."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem import context_task, freshness
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        build = next(iter(store._released_corpus_builds.values()))
+        previous = dict(build.rows)
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        edited = paths[0], paths[-1]
+        for path in edited:
+            (root / path).write_text((root / path).read_text() + "\nUnobserved additional specimen.\n")
+        assert freshness.consumer_checkpoint(root, "vault") == checkpoint
+        prepared = []
+        project = context_task.project_source
+        def projected(root, path, *args, **kwargs):
+            prepared.append(path)
+            return project(root, path, *args, **kwargs)
+        monkeypatch.setattr(context_task, "project_source", projected)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            fresh = {path: bm25.tokenize(json.dumps(project(root, path, caller, hydrate=False).public,
+                                                  sort_keys=True, ensure_ascii=False)) for path in paths}
+            assert result[0] == bm25.CorpusStatistics.of(fresh)
+        assert prepared == list(edited)
+        assert all(build.rows[path] is not previous[path] for path in edited)
+        assert build.rows[paths[1]] is previous[paths[1]]
+
+
+def test_borrow_rechecks_a_proven_omission_after_an_unobserved_membership_edit(vault: Path, monkeypatch) -> None:
+    """A changed omitted source must be prepared again while an independent released row stays reusable."""
+    import yaml
+    from test_context_catalogue import _built, _page
+    from test_governance_egress import _external
+    from test_lexstore import _seed_live_scopes
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import context_task
+    from exomem.governance import artifact_census
+
+    hidden = _page(vault, "withheld-source", "tags: [private-reference]\n", body="Newly visible specimen.\n")
+    visible = _page(vault, "independent", body="Independent public specimen.\n")
+    _withhold(vault, hidden, ceiling=0)
+    scope = vault / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    definition = yaml.safe_load(scope.read_text())
+    definition.pop("paths")
+    definition["tags"] = ["private-reference"]
+    scope.write_text(yaml.safe_dump(definition))
+    _seed_live_scopes(vault)
+    _built(vault).close()
+    monkeypatch.setattr(artifact_census, "_CENSUS_RACY_NS", 0)
+    artifact_census.rebuild_published(vault, eager=True)
+    store = lexstore.get_store(vault)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(vault)
+        with store.released_task_corpus({visible, hidden}, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0].pages == 1
+        build = next(iter(store._released_corpus_builds.values()))
+        assert build.result is not None and build.omissions[hidden].proof is not None
+        previous = build.omissions[hidden]
+        independent = build.rows[visible]
+    path = vault / hidden
+    path.write_text(path.read_text().replace("tags: [private-reference]", "tags: []"))
+    prepared = []
+    project = context_task.project_source
+    def projected(root, path, *args, **kwargs):
+        prepared.append(path)
+        return project(root, path, *args, **kwargs)
+    monkeypatch.setattr(context_task, "project_source", projected)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(vault)
+        fresh = {}
+        for relative in (visible, hidden):
+            source = project(vault, relative, caller, hydrate=False)
+            if source is not None:
+                fresh[relative] = bm25.tokenize(json.dumps(source.public, sort_keys=True, ensure_ascii=False))
+        with store.released_task_corpus({visible, hidden}, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0] == bm25.CorpusStatistics.of(fresh)
+            assert result[2] == frozenset(fresh)
+        assert prepared == [hidden]
+        current = build.rows.get(hidden) or build.omissions[hidden]
+        assert current.proof is not None and current.proof is not previous.proof
+        assert build.rows[visible] is independent
+
+
+@pytest.mark.usefixtures("model_free")
+@pytest.mark.parametrize("failure", [None, "after_eviction", "after_insertion"])
+def test_same_slot_postings_changes_refresh_the_retained_graph(tmp_path: Path, monkeypatch, failure) -> None:
+    """Equal slot totals and failures after mutation must not hide changed retained cache memory."""
+    from collections import OrderedDict
+
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem import freshness
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    (root / paths[0]).write_text((root / paths[0]).read_text() + "\n" + "a" * 2048 + "\n")
+    freshness.on_files_changed(root, [root / paths[0]])
+    store = lexstore.get_store(root)
+    monkeypatch.setattr(bm25, "POSTINGS_SLOTS_MAX", 1)
+    armed = False
+    class FailedEviction(OrderedDict):
+        def popitem(self, *args, **kwargs):
+            result = super().popitem(*args, **kwargs)
+            if armed:
+                raise MemoryError("allocation failed after cache eviction")
+            return result
+    if failure == "after_eviction":
+        monkeypatch.setattr(bm25, "OrderedDict", FailedEviction)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            statistics, postings = result[:2]
+            short = next(word for word, count in statistics.document_frequency.items() if count == 1 and len(word) < 10)
+            long = next(word for word, count in statistics.document_frequency.items() if count == 1 and len(word) >= 2048)
+            postings.counted_from_page_terms([short.encode().decode()], statistics.document_frequency)
+        build = next(iter(store._released_corpus_builds.values()))
+        old_charge, slots = build.reservation.reserved, postings._slots
+        refresh = lexstore._refresh_released_memory
+        refreshed = []
+        def measured(*args, **kwargs):
+            refreshed.append(True)
+            return refresh(*args, **kwargs)
+        monkeypatch.setattr(lexstore, "_refresh_released_memory", measured)
+        keep = bm25.CorpusPostings._keep
+        if failure == "after_insertion":
+            def inserted(self, *args, **kwargs):
+                keep(self, *args, **kwargs)
+                raise MemoryError("request ended after cache insertion")
+            monkeypatch.setattr(bm25.CorpusPostings, "_keep", inserted)
+        armed = True
+        with pytest.raises(MemoryError) if failure else nullcontext():
+            with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+                assert result[1] is postings
+                postings.counted_from_page_terms([long.encode().decode()], statistics.document_frequency)
+        assert refreshed
+        assert postings._slots == slots
+        assert build.reservation.reserved != old_charge
+        assert build.retained_bytes >= _independent_bytes([build]) + build.accounting_bytes
+    assert runtime_resources._preparation_bytes == 0
+
+
 @pytest.mark.usefixtures("private_instances")
 def test_phase_close_detects_a_canonical_registry_binding_change(vault: Path, request) -> None:
     """An assigned instance must not close under the storage binding that preceded a rearm."""
@@ -297,7 +503,7 @@ def test_final_registry_close_withdraws_an_overlay_edit_without_a_basis_change(t
         closes = []
         def edited(self, root, **kwargs):
             closes.append(self)
-            if len(closes) == 2:
+            if len(closes) == 1:
                 overlay.write_text(overlay.read_text() + "\n# A later overlay revision.\n")
                 registry.invalidate(root)
                 assert egress.current_source_release_basis(root) == basis
@@ -400,14 +606,17 @@ def test_final_phase_cannot_publish_after_observing_a_new_source_generation(tmp_
             pass
         validate = egress.validate_source_release_proofs
         phases = []
+        checked = 0
         changed = False
         def validated(root, basis, proofs, **kwargs):
-            nonlocal changed
+            nonlocal changed, checked
             result = validate(root, basis, proofs, **kwargs)
             phase = kwargs.get("directory_facts")
             if phase is not None and all(phase is not current for current in phases):
                 phases.append(phase)
-            if len(phases) == 2 and not changed:
+            if kwargs.get("check_paths", True):
+                checked += 1
+            if checked == len(paths) and not changed:
                 changed = True
                 path = root / paths[0]
                 path.write_text(path.read_text() + "\nA later source generation.\n")
@@ -667,6 +876,10 @@ def test_shared_row_accounting_does_not_refuse_the_next_canonical_source(tmp_pat
         with lexstore.get_store(root).released_task_corpus(
                 paths, caller, check=lambda: None, max_bytes=1024 * 1024) as result:
             assert result[0].pages == len(paths)
+        published = next(iter(lexstore.get_store(root)._released_corpus_builds.values())).result
+        with lexstore.get_store(root).released_task_corpus(
+                paths, caller, check=lambda: None, max_bytes=1024 * 1024) as result:
+            assert result[0] is published[0] and result[1] is published[1]
     peak = runtime_resources.semantic_preparation_status()["peak_reserved_bytes"]
     build = next(iter(lexstore.get_store(root)._released_corpus_builds.values()))
     assert len(build.rows) == len(paths) and build.result is not None

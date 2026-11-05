@@ -88,6 +88,14 @@ Retain physical directory and registry facts only within an admitted validation 
 Retain only each registry's binding revision, content hash and effective digest.
 At phase close, reread each distinct registry through its canonical owner; withdraw preparation if a binding or content changed.
 Clear them before preparation; use fresh facts for terminal validation and recheck freshness before publication.
+An unchanged published generation may be borrowed without changing its preparation state or repeating its resident accounting walk.
+Require matching candidates and checkpoint, complete empty history, an accounting epoch and reservation, and no pending invalidation or retirement.
+Account for incoming request references before borrowing, then validate every row and omission in one full physical phase immediately before publication.
+Keep ancestor checks local to each row; a previously observed parent identity cannot prove that the parent remains unchanged.
+Close registry observations, clear phase facts and recheck the existing authority and freshness fences before yielding.
+An invalid or unsupported proof ends the borrow and enters canonical preparation in the same request, preserving independent rows.
+Mark owned state changed before discarding a proof, and refresh accounting after any owned mutation.
+Advance the postings memory revision before insertion or eviction; equal slot counts do not establish unchanged memory.
 Keep one row reservation through canonical projection, proof completion, packing and transfer to resident state.
 After canonical projection returns, replace completed parser claims with measured live output and capture state before proof completion.
 Measure the whole source projection, capture and memo; include the completed proof before packing.

@@ -3623,19 +3623,20 @@ class _ReleasedEpoch:
         return added
 
 
-def _request_floor(build, request_refs, workspace):
-    return _released_size(request_refs, skip=build.epoch.identities if build.epoch is not None else None,
-                          reserve=lambda needed: workspace.reserve(max(workspace.floor_bytes, needed)))
+def _request_floor(build, request_refs, workspace, *, shallow_bytes=0):
+    return shallow_bytes + _released_size(request_refs, skip=build.epoch.identities if build.epoch is not None else None,
+                          reserve=lambda needed: workspace.reserve(max(workspace.floor_bytes, shallow_bytes + needed)))
 
 
-def _refresh_released_memory(build, *, transient=None, workspace=None, request_refs=()):
+def _refresh_released_memory(build, *, transient=None, workspace=None, request_refs=(), request_shallow_bytes=0):
     """Rebase once after invalidation, then measure mutable state outside the immutable forest."""
     from . import runtime_resources
 
     if workspace is None:
         with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=build.reservation.limit) as measured:
             measured.reserve(65536)
-            return _refresh_released_memory(build, transient=transient, workspace=measured, request_refs=request_refs)
+            return _refresh_released_memory(build, transient=transient, workspace=measured, request_refs=request_refs,
+                                            request_shallow_bytes=request_shallow_bytes)
     old_metadata = build.last_accounting_bytes
     old_payload = max(0, build.retained_bytes - build.mutable_bytes - old_metadata)
     if build.epoch is None:
@@ -3665,7 +3666,7 @@ def _refresh_released_memory(build, *, transient=None, workspace=None, request_r
     build.last_accounting_bytes = build.accounting_bytes
     build.retained_bytes = total
     build.workspace_peak_bytes = max(build.workspace_peak_bytes, workspace.reserved + workspace._child_bytes)
-    workspace.replace_phase(_request_floor(build, request_refs, workspace), workspace=65536)
+    workspace.replace_phase(_request_floor(build, request_refs, workspace, shallow_bytes=request_shallow_bytes), workspace=65536)
 
 
 def _prepare_released_row(root, build, path, caller, *, check, max_bytes, workspace, request_refs):
@@ -5546,6 +5547,7 @@ class LexicalStore:
             basis = egress.current_source_release_basis(root, purpose=caller.purpose)
             unsupported = set()
             request_refs = paths, basis, candidates, unsupported
+            request_shallow_bytes = 0
             checkpoint = freshness.consumer_checkpoint(root, "vault")
             reusable = basis is not None and checkpoint.triple is not None and not freshness.external_pending(root)
             with self._term_frequency_cache_lock:
@@ -5574,13 +5576,82 @@ class LexicalStore:
                 reusable = False
                 build.lock.acquire()
             previous_result = id(build.result)
-            previous_slots = build.result[1]._slots if build.result is not None else 0
+            previous_revision = build.result[1]._memory_revision if build.result is not None else None
             memory_changed = True
             try:
+                from .governance.source_release import _ValidationFacts
+
+                def validation_memory(extra=0):
+                    workspace.reserve(workspace.floor_bytes + extra + 65536)
+
+                def corpus_changed():
+                    return (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
+                            or freshness.external_pending(root)
+                            or build.pending or build.invalidated
+                            or egress.current_source_release_basis(root, purpose=caller.purpose) != basis)
+
+                def corpus_result():
+                    nonlocal request_refs, request_shallow_bytes
+                    # CPython's sparse set table and resize overlap fit within 128 bytes per entry.
+                    workspace.reserve(workspace.floor_bytes + 65536 + 256 + 128 * len(build.rows)
+                                      + 3 * sys.getsizeof(request_refs))
+                    released = frozenset(build.rows)
+                    result = build.result[0], build.result[1], released, bool(build.omissions)
+                    request_shallow_bytes = sys.getsizeof(result) + sys.getsizeof(result[3])
+                    previous_refs_bytes = sys.getsizeof(request_refs)
+                    request_refs = (*request_refs, released)
+                    workspace.replace_phase(workspace.floor_bytes + sys.getsizeof(released) + request_shallow_bytes
+                                            + sys.getsizeof(request_refs) - previous_refs_bytes, workspace=65536)
+                    return result
+
+                delta = freshness.delta_since(root, "vault", build.checkpoint)
+                if (reusable and build.result is not None and build.aggregation is not None
+                        and build.aggregation.result is build.result and build.fingerprint is not None
+                        and build.result[1].keeps_page_terms and build.epoch is not None
+                        and build.reservation is not None and build.candidates == candidates
+                        and build.checkpoint == checkpoint and delta.complete and delta.to == checkpoint
+                        and not delta.changed and not delta.deleted and not build.pending
+                        and not build.invalidated and not build.retired and not build.retire_requested):
+                    memory_changed = False
+                    workspace.replace_phase(_request_floor(build, request_refs, workspace), workspace=65536)
+                    borrowed = True
+                    directory_facts = _ValidationFacts()
+                    try:
+                        for path in candidates:
+                            check()
+                            row = build.rows.get(path) or build.omissions.get(path)
+                            if row is None or row.proof is None or not egress.validate_source_release_proofs(
+                                    root, basis, (row.proof,), memo={}, preparation_owner=workspace,
+                                    memory=validation_memory, directory_facts=directory_facts)[0]:
+                                workspace.reserve(workspace.floor_bytes + 65536
+                                                  + 3 * sys.getsizeof(build.retired) + 256)
+                                memory_changed = True
+                                build.discard(path)
+                                build.validation = None
+                                build.validation_cursor = 0
+                                borrowed = False
+                                break
+                        row = None
+                        if borrowed and not directory_facts.registries_current(root, memory=validation_memory):
+                            memory_changed = True
+                            build.result = None
+                            raise RuntimeError("released task corpus changed during preparation")
+                    finally:
+                        row = None
+                        directory_facts.clear()
+                        directory_facts = None
+                    workspace.replace_phase(workspace.floor_bytes, workspace=65536)
+                    if borrowed:
+                        check()
+                        if corpus_changed():
+                            memory_changed = True
+                            build.result = None
+                            raise RuntimeError("released task corpus changed during preparation")
+                        yield corpus_result()
+                        return
                 if build.reservation is None:
                     build.reservation = runtime_resources.ReleasedCorpusMemory(max_bytes)
                     _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
-                delta = freshness.delta_since(root, "vault", build.checkpoint)
                 with self._term_frequency_cache_lock:
                     pending, build.pending = build.pending, set()
                     invalidated, build.invalidated = build.invalidated, False
@@ -5632,11 +5703,6 @@ class LexicalStore:
                     workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
                     build.validation = tuple(path for path in candidates if path in build.rows or path in build.omissions)
                     build.validation_cursor = 0
-                from .governance.source_release import _ValidationFacts
-
-                def validation_memory(extra=0):
-                    workspace.reserve(workspace.floor_bytes + extra + 65536)
-
                 directory_facts = _ValidationFacts()
                 try:
                     # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
@@ -5667,7 +5733,6 @@ class LexicalStore:
                 workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
                 build.preparation = tuple(path for path in candidates if path not in build.rows and path not in build.omissions)
                 build.preparation_cursor = 0
-                memory_changed = bool(build.preparation) or build.result is None
                 _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
                 for path in build.preparation:
                     check()
@@ -5691,10 +5756,7 @@ class LexicalStore:
                         workspace=lambda amount: workspace.reserve(workspace.floor_bytes + amount + 65536)):
                     _refresh_released_memory(build, workspace=workspace, request_refs=request_refs)
                 check()
-                if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
-                        or freshness.external_pending(root)
-                        or build.pending or build.invalidated
-                        or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
+                if corpus_changed():
                     build.result = None
                     raise RuntimeError("released task corpus changed during preparation")
                 directory_facts = _ValidationFacts()
@@ -5719,10 +5781,7 @@ class LexicalStore:
                     build.result = None
                     raise RuntimeError("released task corpus proof changed during preparation")
                 check()
-                if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
-                        or freshness.external_pending(root)
-                        or build.pending or build.invalidated
-                        or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
+                if corpus_changed():
                     build.result = None
                     raise RuntimeError("released task corpus changed during preparation")
                 build.result = build.aggregation.result
@@ -5745,7 +5804,7 @@ class LexicalStore:
                 statistics, postings, _base = build.result
                 if not postings.keeps_page_terms:
                     raise RuntimeError("released task corpus term allowance exceeded")
-                yield statistics, postings, frozenset(build.rows), bool(build.omissions)
+                yield corpus_result()
             except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
                 with self._term_frequency_cache_lock:
                     if self._released_corpus_builds.get(basis) is build:
@@ -5763,10 +5822,11 @@ class LexicalStore:
                         build.discard(path)
                         build.retired.pop(path, None)
                     if (memory_changed or id(build.result) != previous_result
-                            or build.result is not None and build.result[1]._slots != previous_slots):
+                            or build.result is not None and build.result[1]._memory_revision != previous_revision):
                         if reusable and build.reservation is not None:
                             try:
-                                _refresh_released_memory(build, transient=request_memory, workspace=workspace, request_refs=request_refs)
+                                _refresh_released_memory(build, transient=request_memory, workspace=workspace, request_refs=request_refs,
+                                                         request_shallow_bytes=request_shallow_bytes)
                             except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
                                 with self._term_frequency_cache_lock:
                                     if self._released_corpus_builds.get(basis) is build:

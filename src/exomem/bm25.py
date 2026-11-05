@@ -617,6 +617,7 @@ class CorpusPostings:
         self._page_terms = page_terms
         self._postings: OrderedDict[str, Mapping[str, int]] = OrderedDict()
         self._slots = 0
+        self._memory_revision = 0
         self._lock = threading.Lock()
 
     @property
@@ -677,6 +678,7 @@ class CorpusPostings:
             for word, pages in postings.items():
                 if word in self._postings or len(pages) > POSTINGS_SLOTS_MAX:
                     continue
+                self._memory_revision += 1  # A failed mutation after eviction still changes retained ownership.
                 while self._postings and self._slots + len(pages) > POSTINGS_SLOTS_MAX:
                     self._slots -= len(self._postings.popitem(last=False)[1])
                 self._postings[word] = pages

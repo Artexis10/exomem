@@ -108,6 +108,10 @@ These facts SHALL retain no caller or source body and SHALL consume the existing
 Each phase SHALL recheck every observed registry identity through the canonical loader before accepting its proofs.
 A changed or unavailable registry identity SHALL withdraw preparation without publishing its result.
 The final validation phase SHALL use fresh facts and recheck current fences before publication.
+A complete unchanged generation MAY reuse its resident charge while accounting for incoming request references and validating every retained row and omission before publication.
+This reuse SHALL preserve per-row ancestor checks and all current authority, registry, namespace and freshness fences.
+An invalid or unsupported proof SHALL enter canonical preparation in the same request, preserving independently reusable rows.
+Any owned mutation, including postings replacement with unchanged slot counts or interrupted eviction, SHALL trigger admitted accounting refresh before reuse.
 Timeouts and admission failures SHALL remain preparation failures.
 Allocation failures SHALL propagate after cleanup.
 Shared immutable objects SHALL be charged once per live accounting epoch, which ends before registered objects can be removed.
