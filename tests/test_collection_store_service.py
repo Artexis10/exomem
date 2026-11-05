@@ -144,6 +144,45 @@ def test_a_withheld_selection_without_a_service_is_indistinguishable_from_missin
     assert {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*.md")} == before
 
 
+def test_public_progress_review_compares_file_intent_with_canonical_outcomes(service):
+    """A review must reach canonical rows even when its Planning selector lives in files."""
+    import yaml
+    from test_plan_progress_review import _committed
+
+    root = service.root
+    front, body, _ = vault.parse_frontmatter(summary_text(), strict=True)
+    front["views"] = {"observed": {"query": {"filters": []}}}
+    guards = call(root, "record_memory", action="inspect", collection=CID)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=CID,
+         manifest_text="---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body,
+         why="declare the observed outcome view", **guards)
+
+    file_front, file_body, _ = vault.parse_frontmatter((root / B_PATH).read_text(), strict=True)
+    file_front["item_schema"]["fields"]["progress_evidence"] = {"type": "array", "items": {"type": "object"}}
+    guards = call(root, "plan_memory", action="inspect", collection=B_PATH)["lifecycle_guards"]
+    call(root, "plan_memory", action="revise", collection=B_PATH,
+         manifest_text="---\n" + yaml.safe_dump(file_front, sort_keys=False) + "---\n" + file_body,
+         why="declare the progress binding", **guards)
+    call(root, "plan_memory", action="add", collection=B_PATH,
+         item=_committed("File intent with canonical outcome", [
+             {"collection": f"exomem://memory/{CID}", "role": "progress", "view": "observed"},
+         ]), why="link observed work without completing the intention")
+    before = store_meta(root)[schema.META_COMMIT_SEQ]
+    intent_before = call(root, "plan_memory", action="query", collection=B_PATH)["snapshot"]
+
+    for selector in (B_PATH, None):
+        result = call(root, "review_memory", mode="plan-progress", **({"path": selector} if selector else {}))
+        assert result["collections_scanned"] == 1
+        assert result["collections_unavailable"] == 0
+        assert result["items_reviewed"] == 1
+        assert result["bindings_executed"] == 1
+        assert result["items"][0]["evidence"][0]["observed"]["matched"] == 1
+        assert result["items"][0]["intent"]["status"] == "active"
+
+    assert store_meta(root)[schema.META_COMMIT_SEQ] == before
+    assert call(root, "plan_memory", action="query", collection=B_PATH)["snapshot"] == intent_before
+
+
 @dataclass
 class Service:
     root: Path
