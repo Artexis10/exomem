@@ -96,7 +96,7 @@ jobs:
         run: uvx --from "ruff==${RUFF_VERSION}" ruff check src tests
       - name: Platform chart dependency build, lint and template
         run: |
-          uv run --project infra/cellctl --locked python infra/scripts/helm_dependencies.py infra/helm/platform
+          uv run --frozen --project infra/cellctl python infra/scripts/helm_dependencies.py infra/helm/platform
           helm lint infra/helm/platform --strict \
             --namespace exomem-platform \
             --values infra/helm/platform/values.validation.yaml
@@ -249,7 +249,7 @@ jobs:
           echo "CELLCTL_PG_BIN=/usr/lib/postgresql/16/bin" >> "$GITHUB_ENV"
       - name: Build the platform chart dependencies the suite renders
         run: |
-          uv run --project infra/cellctl --locked python infra/scripts/helm_dependencies.py infra/helm/platform
+          uv run --frozen --project infra/cellctl python infra/scripts/helm_dependencies.py infra/helm/platform
       - name: Read the source image build metadata
         if: matrix.suite == 'protected-import'
         id: import-meta

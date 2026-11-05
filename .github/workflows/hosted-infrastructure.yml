@@ -219,6 +219,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
       - name: Install the pinned node source tools
+        timeout-minutes: 9
         run: |
           source infra/tool-versions.env
           uv sync --project infra/cellctl --locked
@@ -234,8 +235,7 @@ jobs:
           printf '%s  %s\n' "$vector_sha" "$RUNNER_TEMP/vector.tar.gz" | sha256sum --check
           mkdir "$RUNNER_TEMP/vector-node"
           tar --extract --gzip --file "$RUNNER_TEMP/vector.tar.gz" --directory "$RUNNER_TEMP/vector-node" --strip-components=2
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq openssh-server
+          scripts/ci-apt-install.sh openssh-server
       - name: Prove SSH, PAM, sudo and the native metadata projection
         run: |
           sudo env RUN_ACCESS_RECORD_NODE_TEST=1 VECTOR_BIN="$RUNNER_TEMP/vector-node/bin/vector" ANSIBLE_PLAYBOOK_BIN="$PWD/infra/cellctl/.venv/bin/ansible-playbook" infra/cellctl/.venv/bin/python -m pytest -q -s infra/cellctl/tests/test_access_record_node.py --basetemp="$RUNNER_TEMP/access-record-node"
