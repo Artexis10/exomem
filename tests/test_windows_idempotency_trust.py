@@ -41,7 +41,8 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
 
     def finish_delete() -> None:
         try:
-            release.wait(timeout=5)
+            # The main thread's finally releases this; a timer must not erase the pending state.
+            release.wait()
             mutation_lock._windows_close_handle(handle)
             if unsafe_replacement:
                 sidecar.write_bytes(b"\0")
