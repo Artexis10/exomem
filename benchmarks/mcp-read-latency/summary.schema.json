@@ -114,8 +114,12 @@
             "result": {
               "enum": [
                 "meets target",
-                "misses target"
+                "misses target",
+                "unverified"
               ]
+            },
+            "reason": {
+              "const": "paused-worker-comparison"
             }
           }
         }
@@ -947,6 +951,380 @@
           }
         }
       ]
+    },
+    "private-absolute": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "acceptance",
+            "contract_revision",
+            "contract_sha256",
+            "cases_sha256",
+            "boundary",
+            "source_commit",
+            "group_bindings_sha256",
+            "group_bindings",
+            "repeats",
+            "watcher_requested",
+            "unverified_proofs",
+            "runtime",
+            "environment",
+            "samples",
+            "groups",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "const": "private-absolute"
+            },
+            "state": {
+              "enum": [
+                "measured",
+                "unverified",
+                "failed"
+              ]
+            },
+            "acceptance": {
+              "const": "unverified"
+            },
+            "contract_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "cases_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boundary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "group_bindings_sha256": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "group_bindings": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "repeats": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "watcher_requested": {
+              "const": true
+            },
+            "unverified_proofs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "runtime": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "python",
+                "python_version",
+                "module_origin",
+                "version"
+              ],
+              "properties": {
+                "python": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "python_version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "module_origin": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "environment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "timings",
+                "pressure_wait_observations",
+                "pressure_observations",
+                "pressure_cadence_seconds",
+                "pressure_max_gap_seconds",
+                "pressure_threshold_avg60"
+              ],
+              "properties": {
+                "timings": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "ready_s",
+                    "quiescent_s"
+                  ],
+                  "properties": {
+                    "ready_s": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "quiescent_s": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  }
+                },
+                "pressure_wait_observations": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/pressure_observation"
+                  }
+                },
+                "pressure_observations": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "$ref": "#/$defs/pressure_observation"
+                  }
+                },
+                "pressure_cadence_seconds": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "pressure_max_gap_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "pressure_threshold_avg60": {
+                  "const": 10.0
+                }
+              }
+            },
+            "samples": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "case",
+                  "group",
+                  "phase",
+                  "repeat",
+                  "elapsed_ms",
+                  "outcome",
+                  "failure",
+                  "terminal_received"
+                ],
+                "properties": {
+                  "case": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "group": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "phase": {
+                    "enum": [
+                      "warmup",
+                      "timed"
+                    ]
+                  },
+                  "repeat": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "elapsed_ms": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "failure": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "terminal_received": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "group",
+                  "cases",
+                  "attempts",
+                  "p50_ms",
+                  "p95_ms"
+                ],
+                "properties": {
+                  "group": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "cases": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempts": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "p50_ms": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "p95_ms": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "target": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "p95_target_ms",
+                      "result"
+                    ],
+                    "properties": {
+                      "p95_target_ms": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "result": {
+                        "enum": [
+                          "below-target",
+                          "at-or-above-target",
+                          "unverified"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "failures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "mode",
+            "state",
+            "acceptance",
+            "failures"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "mode": {
+              "const": "private-absolute"
+            },
+            "state": {
+              "const": "refused"
+            },
+            "acceptance": {
+              "const": "unverified"
+            },
+            "failures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/problem"
+              },
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "pressure_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "monotonic_s",
+        "avg60",
+        "error"
+      ],
+      "properties": {
+        "monotonic_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "avg60": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     }
   }
 }

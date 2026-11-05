@@ -98,7 +98,13 @@ def get_frames(
     vault_root: Path, path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None, end_sec: float | None = None,
 ) -> FramesResult:
-    from . import originals
+    from . import cloud_cell, originals
+
+    if cloud_cell.cloud_mode_enabled():
+        from .video_frames_worker import get_frames as cloud_frames
+
+        return cloud_frames(vault_root, path, max_frames=max_frames,
+                            start_sec=start_sec, end_sec=end_sec)
     from .media_store import open_original
 
     if originals.binding_for(vault_root) is None:
@@ -161,10 +167,26 @@ def _get_frames_local(
     if media_type_for(abs_path) != "video":
         raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
 
+    return sample_stream(io.BytesIO(snapshot.data), rel_path, max_frames=max_frames,
+                         start_sec=start_sec, end_sec=end_sec)
+
+
+def sample_stream(
+    source: BinaryIO, rel_path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
+    start_sec: float | None = None, end_sec: float | None = None,
+    resize_candidates: bool = False,
+) -> FramesResult:
+    """Sample one retained seekable stream; the caller owns custody and disclosure."""
+    if start_sec is not None and start_sec < 0:
+        raise VideoFramesError("BAD_RANGE", "start_sec must be >= 0")
+    if end_sec is not None and end_sec <= (start_sec or 0.0):
+        raise VideoFramesError("BAD_RANGE", "end_sec must be greater than start_sec")
     effective = max(1, min(max_frames, _tool_frames_cap()))
     windowed = start_sec is not None or end_sec is not None
+    hashes = [] if resize_candidates else None
+    options = {"max_edge": FRAME_JPEG_MAX_EDGE, "hashes": hashes} if resize_candidates else {}
     try:
-        duration = _probe_duration(io.BytesIO(snapshot.data))
+        duration = _probe_duration(source)
         if duration is not None and duration > 0:
             lo = start_sec if start_sec is not None else 0.0
             if lo >= duration:
@@ -175,10 +197,13 @@ def _get_frames_local(
             hi = min(end_sec, duration) if end_sec is not None else duration
             n = CANDIDATE_MULTIPLIER * effective
             ts_list = [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
-            images = embeddings._decode_frames_at(io.BytesIO(snapshot.data), ts_list)
+            source.seek(0)
+            images = embeddings._decode_frames_at(source, ts_list, **options)
             candidates = [
                 (t, img) for t, img in zip(ts_list, images, strict=True) if img is not None
             ]
+            if hashes is not None:
+                hashes = [value for image, value in zip(images, hashes, strict=True) if image is not None]
         elif windowed:
             raise VideoFramesError(
                 "NO_DECODABLE_FRAMES",
@@ -186,7 +211,8 @@ def _get_frames_local(
                 "unavailable — retry without start_sec/end_sec",
             )
         else:
-            candidates = embeddings._sample_video_keyframes(io.BytesIO(snapshot.data))
+            source.seek(0)
+            candidates = embeddings._sample_video_keyframes(source, **options)
     except VideoFramesError:
         raise
     except embeddings.ClipUnavailable as e:
@@ -202,7 +228,8 @@ def _get_frames_local(
             "NO_DECODABLE_FRAMES", f"no decodable video frames in {rel_path}"
         )
 
-    kept = embeddings._dedup_keyframes(candidates)
+    kept = (embeddings._dedup_keyframes(candidates, hashes=hashes) if hashes is not None
+            else embeddings._dedup_keyframes(candidates))
     dropped = len(candidates) - len(kept)
     if len(kept) > effective:  # uniform subsample preserving time order
         idx = sorted(set(np.linspace(0, len(kept) - 1, effective).round().astype(int).tolist()))

@@ -698,12 +698,23 @@ class FreshnessSnapshot:
             paths = {path for path in candidates if admit_path(path)}
         if not paths:
             return set()
-        try:
-            metadata = _managed_page_metadata(
-                self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
-                pending=self._pending, parents_only=True,
+        parents = None
+        if scope in self._catalogue_scopes and (self._pending is None or self._pending.empty):
+            from . import lexstore
+
+            # Reuse structural links, never parent authority. Pending bytes keep their existing overlay path.
+            published = lexstore.get_store(self._root).recall_emitted_parents(
+                scope, self._expected_recall_checkpoints.get(scope)
             )
-            parents = {path: row.parent for path, row in metadata.items()}
+            if published is not None and paths <= published.keys():
+                parents = published
+        try:
+            if parents is None:
+                metadata = _managed_page_metadata(
+                    self._root, paths, scope=scope, freshness_key=self.for_scope(scope),
+                    pending=self._pending, parents_only=True,
+                )
+                parents = {path: row.parent for path, row in metadata.items()}
         except RetrievalIndexWarming:
             if readiness.runtime_managed():
                 raise

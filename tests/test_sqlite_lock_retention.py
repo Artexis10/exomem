@@ -51,7 +51,6 @@ finally:
     writer.close()
 """
 
-
 def _assert_retained_snapshot(database: Path, reader: sqlite3.Connection) -> None:
     subprocess.run(
         [sys.executable, "-c", _WRITE_CHECKPOINT_CLOSE, os.fspath(database)],

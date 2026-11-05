@@ -167,7 +167,7 @@ A broken instrument SHALL fail the run: a failed case, a missing pair, a group b
 
 The runner SHALL refuse to time an arm in two cases, each with a closed reason. It SHALL refuse an arm whose vault state directory was created during the run, because state is keyed by the vault path and a new path starts cold. It SHALL refuse an arm when any derived collection in its derived store is not ready, because the store retries a rebuilding collection under the writer lease and adds a tail to unrelated calls. It SHALL refuse an arm that does not become quiet.
 
-The same runner SHALL accept a private prepared vault, its cases and two fixed arm roots outside the repository. It SHALL report each store group's head p95 against the configured target as meets or misses, and the host CPU pressure at the start and at the end of the run. Private inputs SHALL NOT enter the repository, the tests or CI.
+The same runner SHALL accept a private prepared vault, its cases and two fixed arm roots outside the repository. It SHALL report each store group's descriptive head p95 and configured target, and the host CPU pressure at the start and at the end of the run. A paired run that pauses workers SHALL mark absolute acceptance unverified with reason `paused-worker-comparison`. Absolute acceptance SHALL require a continuously runnable worker and CPU pressure observations throughout the measured interval. Private inputs SHALL NOT enter the repository, the tests or CI.
 
 #### Scenario: A group slower than its allowance fails
 
@@ -204,8 +204,27 @@ The same runner SHALL accept a private prepared vault, its cases and two fixed a
 - **WHEN** the vault state directory of an arm did not exist before its timed start
 - **THEN** the runner refuses to time that arm and reports a closed reason
 
-#### Scenario: A private store group misses its target
+#### Scenario: A paused private comparison cannot establish absolute acceptance
 
-- **WHEN** a private run measures a store group whose head p95 exceeds the configured target
-- **THEN** the summary reports that group as missing its target
+- **WHEN** a paired private run pauses workers between calls
+- **THEN** the summary retains each store group's descriptive head p95 and configured target
+- **AND** it marks absolute acceptance unverified regardless of the observed percentile
 - **AND** it records the CPU pressure at the start and at the end of the run
+
+#### Scenario: A prepared arm runs continuously through absolute measurement
+
+- **GIVEN** one fixed prepared arm and cases whose source labels resolve to configured groups
+- **WHEN** the private absolute runner measures that arm
+- **THEN** it finishes all retained warm-ups before timed rounds and never pauses the worker between calls
+- **AND** it retains opening, periodic, and closing monotonic CPU pressure observations, the cadence, and the largest observed gap
+- **AND** missing or invalid pressure remains unknown, and contention anywhere leaves numeric targets unverified
+- **AND** every expected warm-up and timed repeat must succeed exactly once before a numeric target comparison is verified
+- **AND** it reports configured targets without paired base samples or the CI case floor
+- **AND** overall acceptance remains unverified until independent corpus, active-watcher, runtime, and isolation proof is complete
+
+#### Scenario: Group bindings preserve source cases and reject invalid assignments
+
+- **GIVEN** unchanged observer cases and an optional external source-group binding
+- **WHEN** a used label is unresolved, a target is undeclared, distinct source labels merge, or a target group has no case
+- **THEN** the runner refuses before worker startup
+- **AND** a valid run retains the case digest, binding file digest, and original case labels

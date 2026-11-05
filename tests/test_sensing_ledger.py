@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+import sensing_fixture as sf
 
 from exomem import sensing, sensing_ledger
 
@@ -160,3 +161,121 @@ def test_the_ledger_and_its_directory_are_private(tmp_path: Path) -> None:
     ledger.connect().close()
     assert ledger.path.stat().st_mode & 0o777 == 0o600
     assert ledger.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_version_two_roundtrip_keeps_sql_schema_one_and_foreign_refs_private(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    texts = ("A current claim.", "Another current claim.")
+    inputs = tuple(
+        sensing.InputSlot(
+            f"old-{slot}", f"old-{slot}.md", slot, "page-claim-v1", sensing.text_sha256(text)
+        )
+        for slot, text in zip(("a", "b"), texts, strict=True)
+    )
+    request = sensing.SenseRequest(sensing.PAIR_RELATION, 2, inputs, texts)
+    reading = sensing.make_request_reading(
+        request,
+        sf.STUB,
+        vectors={"ab": sf.CONTRA, "ba": sf.CONTRA},
+        abstain_reason=None,
+        sensed_at="2026-01-01T00:00:00Z",
+    )
+    ledger = sensing_ledger.Ledger(tmp_path)
+    conn = ledger.connect()
+    assert ledger.append(conn, [reading]) == 1
+    assert ledger.append(conn, [reading]) == 0
+    [stored] = sensing_ledger.by_input_key(conn, sensing.PAIR_RELATION, request.input_key)
+    assert stored.output_version == 2 and stored.columns == (
+        "entailment",
+        "neutral",
+        "contradiction",
+    )
+    assert stored.vectors == {"ab": sf.CONTRA, "ba": sf.CONTRA}
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == ("1",)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM readings")
+    conn.close()
+    moved = replace(
+        request,
+        inputs=tuple(
+            replace(item, path=f"current-{item.slot}.md", unit_ref="current") for item in inputs
+        ),
+    )
+    current = sensing_ledger.lookup_current(
+        tmp_path, moved, {sf.STUB.instrument_id: sf.STUB}, "relation-v1"
+    )
+    assert current.reading_id == reading.reading_id and current.verdict.label == "contradicts"
+    assert not hasattr(current, "inputs") and "old-" not in repr(current)
+
+
+@pytest.mark.parametrize(
+    "vectors,columns",
+    [
+        ({"ab": [0.01, 0.02, 0.97]}, ("entailment", "neutral", "contradiction")),
+        (
+            {"ab": [0.01, 0.02, 0.97], "ba": [0.01, float("nan"), 0.97]},
+            ("entailment", "neutral", "contradiction"),
+        ),
+        ({"ab": [0.01, 0.97], "ba": [0.01, 0.97]}, ("entailment", "neutral", "contradiction")),
+        (
+            {"ab": [0.01, 0.02, 0.97], "ba": [0.01, 0.02, 0.97]},
+            ("contradiction", "neutral", "entailment"),
+        ),
+    ],
+)
+def test_consumer_refuses_unusable_stored_vectors(vectors, columns) -> None:
+    assert (
+        sensing.rederive(
+            vectors, sensing.Verdict("contradicts", 0.97), "relation-v1", columns=columns
+        )
+        is None
+    )
+
+
+def test_injected_question_can_roundtrip_one_answer_vector(tmp_path: Path, monkeypatch) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    question = replace(
+        sensing.question(sensing.PAIR_RELATION),
+        question_type="test.fixed-question",
+        label_map_version="test-map-v1",
+        slot_names=("left", "right"),
+        extractors=("test-extractor-v1",),
+        vector_names=("answer",),
+    )
+    mapping = SimpleNamespace(
+        columns=("same", "different", "abstain"),
+        apply_vectors=lambda vectors: sensing.Verdict("same", vectors["answer"][0]),
+    )
+    monkeypatch.setitem(sensing.QUESTIONS, question.question_type, question)
+    monkeypatch.setitem(sensing.LABEL_MAPS, question.label_map_version, mapping)
+    identity = replace(
+        sf.STUB, label_map_version=question.label_map_version, label_token_map="test-tokens-v1"
+    )
+    texts = ("First explicit context.", "Second explicit context.")
+    inputs = tuple(
+        sensing.InputSlot(slot, f"{slot}.md", slot, "test-extractor-v1", sensing.text_sha256(text))
+        for slot, text in zip(("left", "right"), texts, strict=True)
+    )
+    request = sensing.SenseRequest(question.question_type, 2, inputs, texts)
+    reading = sensing.make_request_reading(
+        request,
+        identity,
+        vectors={"answer": [0.98, 0.01, 0.01]},
+        abstain_reason=None,
+        sensed_at="2026-01-01T00:00:00Z",
+    )
+    ledger = sensing_ledger.Ledger(tmp_path)
+    conn = ledger.connect()
+    ledger.append(conn, [reading])
+    [stored] = sensing_ledger.by_input_key(conn, question.question_type, request.input_key)
+    conn.close()
+    assert stored.vectors == {"answer": [0.98, 0.01, 0.01]}
+    current = sensing_ledger.lookup_current(
+        tmp_path, request, {identity.instrument_id: identity}, question.label_map_version
+    )
+    assert current.verdict == sensing.Verdict("same", 0.98)

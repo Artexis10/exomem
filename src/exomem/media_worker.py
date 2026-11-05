@@ -70,6 +70,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .media_worker_child import _reap_group
 from .ocr_facts import OcrFacts
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -1874,24 +1875,31 @@ class MediaWorker:
                         else _MEMORY_RECOVERY_SECONDS
                     )
                     self._memory_recovery_at = _clock() + self._memory_recovery_interval
-                if child is not None:
-                    signature = _job_store_signature(self._store)
-                    settled = (
-                        idle_signature is not None
-                        and signature is not None
-                        and signature == idle_signature
-                        and _clock() < forced_recheck_at
-                    )
-                    if not settled:
-                        if self._store.has_parent_work():
-                            # A retained result may make no write; retry next pass.
-                            idle_signature = None
-                            self._drain_parent_results()
-                        else:
-                            # Capture after close; the check can change the WAL.
-                            idle_signature = _job_store_signature(self._store)
-                            # Sidecar-only edits and folded writes need a fixed backstop.
-                            forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                # Retry polling without replaying child-exit bookkeeping.
+                try:
+                    if child is not None:
+                        signature = _job_store_signature(self._store)
+                        settled = (
+                            idle_signature is not None
+                            and signature is not None
+                            and signature == idle_signature
+                            and _clock() < forced_recheck_at
+                        )
+                        if not settled:
+                            if self._store.has_parent_work():
+                                # A retained result may make no write; retry next pass.
+                                idle_signature = None
+                                self._drain_parent_results()
+                            else:
+                                # Capture after close; the check can change the WAL.
+                                idle_signature = _job_store_signature(self._store)
+                                # Sidecar-only edits and folded writes need a fixed backstop.
+                                forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                except OpError as exc:
+                    if exc.code not in _TRANSIENT_OPERATION_CODES:
+                        raise
+                    idle_signature = None
+                    log.info("media worker: parent poll deferred after %s", exc.code)
                 if child is not None and child.poll() is not None:
                     returncode = child.returncode
                     child_pid = child.pid
@@ -1966,76 +1974,83 @@ class MediaWorker:
                         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
                     relaunch_after = max(_clock() + delay, self._memory_hold_until)
                     recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                if gpu_hold:
-                    # Every path that queues work writes the store, so a changed signature is the cue to look.
-                    # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
-                    # more on the way, so one probe is the whole cost.
-                    signature = _job_store_signature(self._store)
-                    if signature is None or signature != hold_signature:
-                        if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
-                            relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
-                            gpu_hold = False
-                        else:
-                            hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
-                if self._child is None and _clock() >= relaunch_after:
-                    now = _clock()
-                    signature = _job_store_signature(self._store)
-                    if (
-                        idle_signature is not None
-                        and signature is not None
-                        and signature != idle_signature
-                    ):
-                        # Someone wrote the store since the last idle answer.
-                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                    settled = (
-                        idle_signature is not None
-                        and signature is not None
-                        and signature == idle_signature
-                        and now < forced_recheck_at
-                    )
-                    parent_work = not settled and self._store.has_parent_work()
-                    if parent_work:
-                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                        self._drain_parent_results()
-                    elif not settled and self._store.needs_worker():
-                        idle_signature = None
-                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                        refusal = _probe_writer_authority()
-                        if brakes and not self._room_for_next_job():
-                            # No child starts into pressure or without room for its
-                            # job: it would only be stopped or exit unrun.
-                            relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
-                        elif refusal is not None:
-                            relaunch_after = _clock() + _authority_recheck_seconds(
-                                refusal
-                            )
-                        elif brakes and self._slot is not None and not self._ask_slot():
-                            # No node slot yet, or no answer: wait as a memory-blocked job waits.
-                            relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
-                        else:
-                            try:
-                                self._child_stopped = False
-                                self._child = self._launch_child()
-                                self._child_started_at = _clock()
-                            except OSError:
-                                self._release_slot()
-                                log.exception("media worker: could not start child")
-                                relaunch_after = _clock() + 5.0
-                    elif not settled:
-                        # Nothing to do.  Record the signature AFTER the check,
-                        # not the one read before it: `needs_worker()` opens the
-                        # store, and that open writes to the WAL, so a
-                        # before-signature would never match again and the skip
-                        # would never engage.
-                        if gpu_wait_recorded:
-                            # No work is pending, so no speech job waits for a GPU: end the record of that wait.
-                            self._record_status(MediaJobStore.clear_gpu_wait)
-                            gpu_wait_recorded = False
-                        idle_signature = _job_store_signature(self._store)
-                        forced_recheck_at = _clock() + recheck_interval
-                        recheck_interval = min(
-                            recheck_interval * 2, _SUPERVISE_FORCED_RECHECK_MAX_SECONDS
+                try:
+                    if gpu_hold:
+                        # Every path that queues work writes the store, so a changed signature is the cue to look.
+                        # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
+                        # more on the way, so one probe is the whole cost.
+                        signature = _job_store_signature(self._store)
+                        if signature is None or signature != hold_signature:
+                            if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
+                                relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
+                                gpu_hold = False
+                            else:
+                                hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
+                    if self._child is None and _clock() >= relaunch_after:
+                        now = _clock()
+                        signature = _job_store_signature(self._store)
+                        if (
+                            idle_signature is not None
+                            and signature is not None
+                            and signature != idle_signature
+                        ):
+                            # Someone wrote the store since the last idle answer.
+                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                        settled = (
+                            idle_signature is not None
+                            and signature is not None
+                            and signature == idle_signature
+                            and now < forced_recheck_at
                         )
+                        parent_work = not settled and self._store.has_parent_work()
+                        if parent_work:
+                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                            self._drain_parent_results()
+                        elif not settled and self._store.needs_worker():
+                            idle_signature = None
+                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                            refusal = _probe_writer_authority()
+                            if brakes and not self._room_for_next_job():
+                                # No child starts into pressure or without room for its
+                                # job: it would only be stopped or exit unrun.
+                                relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
+                            elif refusal is not None:
+                                relaunch_after = _clock() + _authority_recheck_seconds(
+                                    refusal
+                                )
+                            elif brakes and self._slot is not None and not self._ask_slot():
+                                # No node slot yet, or no answer: wait as a memory-blocked job waits.
+                                relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
+                            else:
+                                try:
+                                    self._child_stopped = False
+                                    self._child = self._launch_child()
+                                    self._child_started_at = _clock()
+                                except OSError:
+                                    self._release_slot()
+                                    log.exception("media worker: could not start child")
+                                    relaunch_after = _clock() + 5.0
+                        elif not settled:
+                            # Nothing to do.  Record the signature AFTER the check,
+                            # not the one read before it: `needs_worker()` opens the
+                            # store, and that open writes to the WAL, so a
+                            # before-signature would never match again and the skip
+                            # would never engage.
+                            if gpu_wait_recorded:
+                                # No work is pending, so no speech job waits for a GPU: end the record of that wait.
+                                self._record_status(MediaJobStore.clear_gpu_wait)
+                                gpu_wait_recorded = False
+                            idle_signature = _job_store_signature(self._store)
+                            forced_recheck_at = _clock() + recheck_interval
+                            recheck_interval = min(
+                                recheck_interval * 2, _SUPERVISE_FORCED_RECHECK_MAX_SECONDS
+                            )
+                except OpError as exc:
+                    if exc.code not in _TRANSIENT_OPERATION_CODES:
+                        raise
+                    idle_signature = None
+                    relaunch_after = max(relaunch_after, _clock() + _authority_recheck_seconds(exc.code))
+                    log.info("media worker: dispatch deferred after %s", exc.code)
                 if self._wake.wait(_SUPERVISE_POLL_SECONDS):
                     # Cleared only once it has fired, so a wake that lands
                     # after a timed-out wait is still seen on the next one. A
@@ -2588,23 +2603,6 @@ def _engines_loaded(job: _Job) -> list[str | None]:
 def _budget_for(job: _Job, config: media_brakes.Settings) -> media_brakes.Budget:
     """The budget of everything the job's child loads, or the default."""
     return config.budget_for_loaded(_engines_loaded(job))
-
-
-def _reap_group(pgid: int, timeout: float = 2.0) -> None:
-    """Reap the killed media child's tools that were reparented to this process.
-
-    In a Cloud cell the server is PID 1, so a tool orphaned by a pressure stop becomes
-    its child and stays a zombie unless reaped. `waitpid(-pgid)` waits only on children
-    in the media child's own session, so no other subprocess loses its exit status.
-    """
-    deadline = _clock() + timeout
-    while _clock() < deadline:
-        try:
-            pid, _status = os.waitpid(-pgid, os.WNOHANG)
-        except ChildProcessError:
-            return  # no child of this process is left in the group
-        if pid == 0:
-            time.sleep(0.05)  # a member is still exiting
 
 
 def _join_with_timeout(q: queue.Queue, timeout: float) -> None:

@@ -8018,6 +8018,7 @@ def release_allows_frames(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
     """True only at full disclosure.
 
@@ -8027,7 +8028,7 @@ def release_allows_frames(
     return partial pixels.
     """
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, derived=True):
+    if not content_permits(vault_root, rel_path, who, derived=True, artifact_copy=artifact_copy):
         return False
     return _binary_boundary(
         vault_root,
@@ -8036,6 +8037,7 @@ def release_allows_frames(
         minimum_level=LEVEL_FULL,
         principal=principal,
         purpose=purpose,
+        artifact_copy=artifact_copy,
     )
 
 
