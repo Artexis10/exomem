@@ -307,12 +307,15 @@ def publish_corpus_delta(
     ``populate_on_miss`` passes through to
     :func:`semantic_contract.publish_corpus_files_changed_classified`.
     """
-    from . import semantic_contract
+    from . import graph_read_publication, semantic_contract
 
     changed_values = tuple(Path(path) for path in changed)
     deleted_values = tuple(deleted)
     if not changed_values and not deleted_values:
         return True
+    observation = graph_read_publication.begin_observation(
+        vault_root, changed_values, deleted_values,
+    )
     bounded_attempts = max(1, min(int(attempts), 2))
     failure: semantic_contract.CorpusPublicationFailure | None = None
     for attempt in range(1, bounded_attempts + 1):
@@ -331,6 +334,7 @@ def publish_corpus_delta(
                 semantic_contract.CORPUS_PUBLICATION_REGISTRY_ADVANCE, error
             )
         if failure is None:
+            graph_read_publication.finish_observation(vault_root, observation)
             return True
         log.warning(
             "canonical corpus publication failed (attempt %d/%d, stage=%s)",

@@ -213,7 +213,18 @@ def test_a_schema_migration_that_drops_the_file_rows_retires_the_stored_proof(
     vault: Path,
 ) -> None:
     """`DROP TABLE` fires no row trigger, and coverage outlives the file rows it described."""
-    _sql(vault, "ALTER TABLE graph_nodes DROP COLUMN activation_unregistered;")
+    connection = sqlite3.connect(epistemic_graph.sidecar_path(vault))
+    try:
+        # The older node schema predates the publication capture triggers.
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+            "AND name GLOB 'graph_saved_nodes_*'"
+        ).fetchall():
+            connection.execute(f'DROP TRIGGER "{name}"')
+        connection.execute("ALTER TABLE graph_nodes DROP COLUMN activation_unregistered")
+        connection.commit()
+    finally:
+        connection.close()
     assert _recorded(vault)
 
     EpistemicGraphIndex(vault)._connect().close()
@@ -444,7 +455,8 @@ def test_opening_a_sidecar_with_an_older_proof_trigger_leaves_only_the_current_o
         names = {
             name
             for (name,) in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name GLOB 'trg_*_dependency_proof_*'"
             )
         }
     finally:
