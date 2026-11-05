@@ -55,9 +55,12 @@ class StoreAdapter:
             source = collections.SourceVersion(row_source(manifest, item), item.get("public_version") or self.writer._version(item))
             stored = json.loads(item["values_json"])
             values = {name: stored[name] for name in fields if name in stored}
+            if self.project_values is not None:
+                with call_spans.span("store.project_values"):
+                    values = self.project_values(values)
             records.append(record_formats.Record(
                 collections.ItemIdentity(manifest.collection_id, item["item_key"]),
-                values if self.project_values is None else self.project_values(values),
+                values,
                 source, record_formats.SourceSpan(0, 0), body=item["body"],
             ))
             if manifest.storage.strategy == "markdown-items" and manifest.view_mode == "items":
