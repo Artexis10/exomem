@@ -281,6 +281,18 @@ class OpError(Exception):
         return f"{self.code}: {self.message}"
 
 
+
+class _AuditBudgetExhausted(OpError):
+    """A fixed, content-free terminal that needs no artifact reference census."""
+
+    def __init__(self):
+        super().__init__(
+            "AUDIT_BUDGET_EXHAUSTED",
+            "The audit could not finish fresh authorization within its request budget.",
+            "Retry the audit with fewer categories.",
+        )
+
+
 def envelope(success: bool, data: Any = None, error: dict | None = None) -> dict:
     """Build the shared envelope. Success carries `data`; failure carries `error`."""
     if success:

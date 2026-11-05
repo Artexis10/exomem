@@ -95,9 +95,11 @@ def seams(monkeypatch):
         )
         return real_invoke(command, *injected, **kwargs)
 
-    def postfilter(name, result, root, *, request_kwargs=None):
+    def postfilter(name, result, root, *, request_kwargs=None, checkpoint=None):
         seen.egress.append((name, dict(request_kwargs or {})))
-        return real_postfilter(name, result, root, request_kwargs=request_kwargs)
+        return real_postfilter(
+            name, result, root, request_kwargs=request_kwargs, checkpoint=checkpoint
+        )
 
     def postfilter_error(name, error, root, *, request_kwargs=None):
         seen.egress.append((name, dict(request_kwargs or {})))

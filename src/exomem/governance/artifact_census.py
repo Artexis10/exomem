@@ -35,7 +35,7 @@ from re._casefix import _EXTRA_CASES as _SRE_EXTRA_CASES
 from types import MappingProxyType
 from urllib.parse import unquote
 
-from .. import held_fs, vault
+from .. import held_fs, request_budget, vault
 from ..kbdir import kb_dirname
 
 #: A literal alias starts and ends where the text does not continue a path.
@@ -201,6 +201,7 @@ def _list_directory(path: str, racy_after: int) -> _Listing:
         cacheable = True
         with os.scandir(path) as entries:
             for entry in entries:
+                request_budget.checkpoint()
                 try:
                     # Linked file kinds can change without changing any name in this directory.
                     if entry.is_symlink() or getattr(entry, "is_junction", lambda: False)():
@@ -237,6 +238,7 @@ def _walk_listings(
     listings: dict[str, _Listing] = {}
     pending = [start]
     while pending:
+        request_budget.checkpoint()
         relative = pending.pop()
         if between is not None:
             between()
@@ -342,7 +344,9 @@ class _Tables:
 def _census_from(listings: Mapping[str, _Listing]) -> ArtifactCensus:
     tables = _Tables()
     for directory, listing in listings.items():
+        request_budget.checkpoint()
         for name in listing.files:
+            request_budget.checkpoint()
             tables.add_file(f"{directory}/{name}" if directory else name)
     return tables.census(listings)
 
@@ -350,6 +354,7 @@ def _census_from(listings: Mapping[str, _Listing]) -> ArtifactCensus:
 def _census_from_rels(rels: Iterable[str]) -> ArtifactCensus:
     tables = _Tables()
     for rel in rels:
+        request_budget.checkpoint()
         tables.add_file(rel)
     return tables.census({})
 

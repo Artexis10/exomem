@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import __version__, audit, entity_types, relation_registry
+from . import __version__, audit, entity_types, relation_registry, request_budget
 from .collection_store.ownership import reader
 from .kbdir import kb_prefix
 
@@ -370,6 +370,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         return value.astimezone(dt.UTC) if value.tzinfo is not None else None
 
     for entry in log["entries"]:
+        request_budget.checkpoint()
         data = entry.get("provenance")
         legacy_path = entry["path"].removesuffix(".md") + ".md"
         if legacy_path not in reader.pages:
@@ -1198,12 +1199,14 @@ def _census_payload(
         checks[name]["violations"] += int(violated)
 
     for row in reader.rows():
+        request_budget.checkpoint()
         source = row.source_path
         if not row.in_view:
             if source in eligible and row.origin in _AUTHORED_ORIGINS:
                 unresolved_target_edges += 1
             continue
         for page in (row.src_page, row.dst_page):
+            request_budget.checkpoint()
             if page != source:
                 inbound.add(page)
         if source not in eligible:

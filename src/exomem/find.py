@@ -8043,6 +8043,7 @@ def writer_resolver_snapshot(
     `disk_declined`, instead of a resolver built from disk. Inside
     `planned_pages`, the snapshot also holds the planned pages.
     """
+    request_budget.checkpoint()
     resolver = _writer_resolver_snapshot(
         vault_root, freshness_key=freshness_key, allow_disk=allow_disk
     )
@@ -8095,6 +8096,7 @@ def _writer_resolver_snapshot(
         if not allow_disk:
             measured["disk_declined"] = 1
             return None
+        request_budget.checkpoint()
         measured["disk"] = 1
         return WikilinkResolver(root)
 

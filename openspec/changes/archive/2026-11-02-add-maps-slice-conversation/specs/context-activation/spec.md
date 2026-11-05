@@ -39,4 +39,4 @@ In a served `maps` packet, `generation.conversation` SHALL be the state that the
 
 #### Scenario: With the slice off, the conversation is not read
 - **WHEN** `EXOMEM_ACTIVATION_TURN_SLICE` is `off` and the request carries a `conversation`
-- **THEN** `generation.conversation` is `absent`, and the packet is the map alone
+- **THEN** `generation.conversation` is `absent`, and the packet omits the turn slice

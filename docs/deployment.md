@@ -1478,6 +1478,13 @@ A client that holds the current map can send its `continuity` token back. When t
 call would serve has the generation in that token, the `map` block has `unchanged: true` and no
 items. A token from the `anchors` mode, an older token and a malformed token get the whole map.
 
+`generation.continuity` in a `maps` packet reports the token that the call received. It is `absent`
+without a token. It is `applied` when the token carries a map generation and the service minted it
+under the role registry and conventions that serve the call. A change of the map does not change
+this report. It is `stale` for any other token, including one that the service minted before an edit
+of the role registry or the conventions. `map.unchanged` alone decides whether the client keeps its
+held map, and it can be `true` while `generation.continuity` is `stale`.
+
 ## Reranking and languages
 
 The cross-encoder reranker reorders a query's top candidates. It runs on explicit

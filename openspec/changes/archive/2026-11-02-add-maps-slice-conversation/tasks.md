@@ -19,5 +19,12 @@
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Run the scoped activation, slice, maps, conversation and latency tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate and `openspec validate --all --strict`.
-- [ ] 3.2 After release, replay a recorded turn and its follow-up on the installed service with the conversation that the hook sends, and record the slice, the reports and the timings beside the same request on the earlier release.
+- [x] 3.1 Run the scoped activation, slice, maps, conversation and latency tests and compare failure names with the `origin/main` baseline; run Ruff, the privacy gate and `openspec validate --all --strict`.
+- [x] 3.2 After release, replay a recorded turn and its follow-up on the installed service with the conversation that the hook sends, and record the slice, the reports and the timings beside the same request on the earlier release.
+
+Installed acceptance on 2026-11-05 used release 0.161.1 and the recorded two-turn conversation.
+The follow-up reports conversation and continuity applied, with an unchanged map generation.
+The focus refresh also reports conversation applied.
+Private evidence retains the earlier report and complete current requests, responses and timings.
+The current hook bounds one earlier assistant excerpt to 300 characters.
+These single observations establish no latency or retrieval-quality gain.

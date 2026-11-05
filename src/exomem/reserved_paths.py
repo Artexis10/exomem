@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import replace as dataclass_replace
@@ -2285,14 +2285,21 @@ def _list_candidate_records(
     identities: IdentityCatalogue | None,
     require_complete: bool = False,
     recursive: bool = True,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases."""
 
     records: list[held_fs.SagaRecord] = []
 
     def walk(directory: held_fs.HeldDirectory, prefix: str) -> None:
+        if checkpoint is not None:
+            checkpoint()
         _require_current_generic_directory(filesystem, directory)
         def admit_name(name: str) -> bool:
+            if checkpoint is not None:
+                checkpoint()
+            if not require_complete:
+                return True
             relative = f"{prefix}/{name}" if prefix else name
             child = relative if source_relative == "." else f"{source_relative.rstrip('/')}/{relative}"
             classification = classify_logical(child)
@@ -2304,7 +2311,8 @@ def _list_candidate_records(
         names = None
         if require_complete:
             names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
-        children = filesystem.children(directory, name_filter=admit_name) if require_complete else filesystem.children(directory)
+        children = (filesystem.children(directory, name_filter=admit_name)
+                    if require_complete or checkpoint is not None else filesystem.children(directory))
         if not children.ok:
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
@@ -2312,6 +2320,8 @@ def _list_candidate_records(
         if names is not None and names != {record.relative_path for record in observed}:
             raise ReservedPathLeafError("UNSAFE_PATH")
         for record in observed:
+            if checkpoint is not None:
+                checkpoint()
             relative = (
                 f"{prefix}/{record.relative_path}"
                 if prefix
@@ -2362,6 +2372,7 @@ def list_generic_tree(
     identities: IdentityCatalogue | None = None,
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> tuple[GenericTreeEntry, ...]:
     """Enumerate an ordinary tree while structurally removing private state.
 
@@ -2372,7 +2383,7 @@ def list_generic_tree(
 
     with open_generic_tree(
         vault_root, value, recursive=recursive, identities=identities,
-        select=select, require_complete=require_complete,
+        select=select, require_complete=require_complete, checkpoint=checkpoint,
     ) as entries:
         return tuple(entries)
 
@@ -2387,13 +2398,15 @@ def open_generic_tree(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ):
     """Yield entries under one held walk; exhaust it before publishing a census."""
-    with _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
+    with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
+            _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         entries = _iter_generic_tree_held(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete,
-            markdown_header_limit=markdown_header_limit,
+            markdown_header_limit=markdown_header_limit, checkpoint=checkpoint,
         )
         try:
             yield entries
@@ -2427,8 +2440,11 @@ def _iter_generic_tree_held(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> Iterator[GenericTreeEntry]:
 
+    if checkpoint is not None:
+        checkpoint()
     if value == ".":
         relative = "."
     else:
@@ -2451,14 +2467,14 @@ def _iter_generic_tree_held(
         with source_result.require() as source_directory:
             _refuse_private_identity(source_directory.identity, identities)
             _require_current_generic_directory(filesystem, source_directory)
-            if recursive or require_complete:
+            if recursive or require_complete or checkpoint is not None:
                 records = _list_candidate_records(
                     filesystem,
                     source_directory,
                     relative,
                     identities=identities,
                     require_complete=require_complete,
-                    recursive=recursive,
+                    recursive=recursive, checkpoint=checkpoint,
                 )
             else:
                 enumerated = filesystem.children(source_directory)
@@ -2472,6 +2488,8 @@ def _iter_generic_tree_held(
                 records = enumerated.require()
             candidates: list[tuple[held_fs.SagaRecord, str]] = []
             for record in records:
+                if checkpoint is not None:
+                    checkpoint()
                 if any(
                     record.relative_path == prefix
                     or record.relative_path.startswith(f"{prefix}/")
@@ -2497,6 +2515,8 @@ def _iter_generic_tree_held(
             )
             selected_versions: dict[str, held_fs.FileVersion] = {}
             for record, child in candidates:
+                if checkpoint is not None:
+                    checkpoint()
                 if chosen is not None and record.relative_path not in chosen:
                     continue
                 parent_path, leaf = _leaf_spelling(child)
@@ -2612,11 +2632,13 @@ def _iter_generic_tree_held(
             if require_complete:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
-                    require_complete=True, recursive=recursive,
+                    require_complete=True, recursive=recursive, checkpoint=checkpoint,
                 )
                 if current_records != records:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 for child, version in selected_versions.items():
+                    if checkpoint is not None:
+                        checkpoint()
                     parent_path, leaf = _leaf_spelling(child)
                     with filesystem.parent(parent_path).require() as parent:
                         _refuse_private_identity(parent.identity, identities)
