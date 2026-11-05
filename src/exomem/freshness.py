@@ -1248,8 +1248,33 @@ def recall_delta_since(
 ) -> RecallDelta:
     """Coalesced projected changes, refusing foreign/reprojected history."""
     current = recall_checkpoint(vault_root, scope)
+    return _recall_delta_since(vault_root, scope, checkpoint, current)
+
+
+def recall_delta_since_live(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint,
+) -> RecallDelta | None:
+    """Read maintained history without a cold walk or policy reprojection."""
+    current = live_recall_checkpoint(vault_root, scope)
+    if current is None:
+        return None
+    return _recall_delta_since(vault_root, scope, checkpoint, current, require_live=True)
+
+
+def _recall_delta_since(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint,
+    current: RecallFreshnessCheckpoint, *, require_live: bool = False,
+) -> RecallDelta:
     key = _key(vault_root, scope)
     with _lock:
+        if require_live and (
+            not event_indexes_enabled() or key not in _recall_live
+            or _recall_generations.get(key, 0) != current.generation
+            or _recall_identities.get(key) != (
+                current.policy_version, current.access_policy_fingerprint,
+            )
+        ):
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         # A foreign checkpoint is bridgeable only where this process has adopted
         # it against a proof (`adopt_recall_origin`); the origin it was adopted
         # at is then the generation the history is read from, and everything

@@ -495,7 +495,7 @@ def _recover_from_trash_local(
                     trash_rel=trash_rel,
                     source_rel=restore_rel,
                     restored_paths=[
-                        (entry.restore_path, content_hash(entry.source))
+                        (entry.restore_path, entry.source)
                         for entry in recovery_entries
                     ],
                 )

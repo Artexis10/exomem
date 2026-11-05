@@ -747,22 +747,29 @@ def test_a_fault_reading_the_lag_is_reported_to_the_restricted_reader_not_raised
     assert served["generation"]["index_stale"] is True
 
 
+@pytest.mark.parametrize("publication_phase", ["before_compile", "after_compile"])
 def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
-    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, publication_phase: str
 ) -> None:
     """Another publisher moves the catalogue by a withheld page after readiness."""
     before = _activate(activation.vault)
     published: list[bool] = []
     real_compile = working_set.compile_packet
 
-    def compile_then_publish(*args, **kwargs):
-        packet = real_compile(*args, **kwargs)
+    def publish():
         if not published:
             _write_hidden_hub(activation.vault, "Second.")
             working_set_index.WorkingSetIndex(activation.vault).update(
                 freshness_stamp=_stamp(activation.vault)
             )
             published.append(True)
+
+    def compile_then_publish(*args, **kwargs):
+        if publication_phase == "before_compile":
+            publish()
+        packet = real_compile(*args, **kwargs)
+        if publication_phase == "after_compile":
+            publish()
         return packet
 
     monkeypatch.setattr(working_set, "compile_packet", compile_then_publish)
@@ -775,16 +782,16 @@ def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
     assert served == before
 
 
+@pytest.mark.parametrize("publication_phase", ["before_compile", "after_compile"])
 def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
-    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, publication_phase: str
 ) -> None:
     _activate(activation.vault)
     published: list[bool] = []
     real_compile = working_set.compile_packet
     page = activation.vault / "Knowledge Base/Products/Cargo Sled.md"
 
-    def compile_then_publish(*args, **kwargs):
-        packet = real_compile(*args, **kwargs)
+    def publish():
         if not published:
             _write_as_the_service_does(
                 activation.vault, "Knowledge Base/Products/Cargo Sled.md",
@@ -795,6 +802,13 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
                 freshness_stamp=_stamp(activation.vault)
             )
             published.append(True)
+
+    def compile_then_publish(*args, **kwargs):
+        if publication_phase == "before_compile":
+            publish()
+        packet = real_compile(*args, **kwargs)
+        if publication_phase == "after_compile":
+            publish()
         return packet
 
     monkeypatch.setattr(working_set, "compile_packet", compile_then_publish)
@@ -803,6 +817,52 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+@pytest.mark.parametrize("visible_change", [False, True])
+def test_a_rebased_compilation_rechecks_changes_before_serving(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, visible_change: bool
+) -> None:
+    """A forward rebase cannot conceal a later change to an unselected visible page."""
+    before = _activate(activation.vault)
+    real_compile = working_set.compile_packet
+    units_lane = working_set._units_lane
+    changed: list[bool] = []
+
+    def publish_then_compile(*args, **kwargs):
+        _write_hidden_hub(activation.vault, "Second.")
+        working_set_index.WorkingSetIndex(activation.vault).update(
+            freshness_stamp=_stamp(activation.vault)
+        )
+        return real_compile(*args, **kwargs)
+
+    def select_then_change(*args, **kwargs):
+        result = units_lane(*args, **kwargs)
+        if not changed:
+            view = lexstore._admitted_catalog_view(activation.vault)
+            assert view is not None and view.connection is not None
+            if visible_change:
+                _write_as_the_service_does(
+                    activation.vault, "Knowledge Base/Notes/Insights/new-context.md",
+                    "# New context\n\nA separate context arrived.\n",
+                )
+            else:
+                _write_as_the_service_does(
+                    activation.vault, HIDDEN_HUB, HUB_BODY.format("Third."),
+                )
+            changed.append(True)
+        return result
+
+    monkeypatch.setattr(working_set, "compile_packet", publish_then_compile)
+    monkeypatch.setattr(working_set, "_units_lane", select_then_change)
+
+    served = _activate(activation.vault)
+
+    assert changed == [True]
+    if visible_change:
+        assert served.get("abstention") == {"reason": "unavailable"}
+    else:
+        assert served == before
 
 
 # ---- the pages a turn names ----------------------------------------------

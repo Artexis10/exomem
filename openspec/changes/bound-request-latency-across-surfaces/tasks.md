@@ -75,7 +75,12 @@
   - Closed since: the activation lexical lane, units, materials, dependence check, carry retrieval, title listing and canonical-page lookup read one reader checkpoint per request; a fault reading a lag reports the lag instead of failing the request; `ensure_unlisted` and the map's project entries follow the caller's view; a deleted page counts as withheld when the caller's own published verdict for that generation proves it (#2079 and this change). The anchors surface serves project anchors to every reader, so a registry edit stays a reported lag there by design.
   - Still open in the same class:
     - The packet's correction context needs the exact-checkpoint resolver and the graph read snapshot, so a hidden write still makes it unavailable to a restricted caller until both are published. Closing it needs published-generation proofs for those two structures.
+      Preserve first row predecessors and complete publication metadata while partial repair advances maintenance rows; retain the existing immutable resolver.
+      Prove independent readers, replacement and marker lifetimes, high-fan-in deletion, and the durable-to-local bridge before admitting a historical publication.
+      Canonical epochs must cover the complete resolver domain and mutation endpoints; non-KB inputs use existing full recovery, with a complete post-upgrade baseline.
     - A catalogue publication between the request's pinned checkpoint and a later lane's query makes that lane report stale for the request.
+      Compilation must keep its captured checkpoint local and prove both selections equivalent under current authority at admission and finalization.
+      Verify publication before compilation as well as after it; visible publications must retain their existing reported lag.
     - The direct-read and graph callers of `only_withheld` have no deleted-page proof, so a deleted withheld page still counts as visible there. Their lag is stamped by the consumer registry, and the published verdicts are stamped by the catalogue, so no generation of one proves a verdict of the other.
     - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
 - [x] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.

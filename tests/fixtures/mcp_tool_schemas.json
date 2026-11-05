@@ -5599,6 +5599,35 @@
                 "next_window_bytes": {
                   "type": "integer",
                   "description": "Sender only: that window's bytes."
+                },
+                "view": {
+                  "description": "For run `status`, summary by default; inventory, selection, plan, outcomes or stale pages. Full is the explicit browser compatibility view.",
+                  "enum": [
+                    "summary",
+                    "inventory",
+                    "selection",
+                    "plan",
+                    "outcomes",
+                    "stale",
+                    "full"
+                  ],
+                  "type": "string",
+                  "default": "summary"
+                },
+                "offset": {
+                  "minimum": 0,
+                  "type": "integer",
+                  "default": 0
+                },
+                "limit": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer",
+                  "default": 100
+                },
+                "revision": {
+                  "type": "string",
+                  "description": "For status pages, the preceding summary's revision; restart paging if it changed."
                 }
               },
               "required": [

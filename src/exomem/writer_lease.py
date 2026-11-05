@@ -203,7 +203,7 @@ _ACTIVE_MUTATION_TRACE: ContextVar[tuple[str, str, str] | None] = ContextVar(
 _ACTIVE_MUTATION_COMMITTED: ContextVar[bool] = ContextVar(
     "exomem_active_mutation_committed", default=False
 )
-_ACTIVE_MUTATION_PROTOCOL: ContextVar[tuple[str | None, str | None] | None] = ContextVar(
+_ACTIVE_MUTATION_PROTOCOL: ContextVar[tuple[str | None, str | None, str | None, bool] | None] = ContextVar(
     "exomem_active_mutation_protocol", default=None
 )
 _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
@@ -1450,19 +1450,22 @@ def mark_active_mutation_committed() -> None:
 
 @contextmanager
 def active_mutation_claim_context(
-    *, claim_token: str | None, command_digest: str | None
+    *, claim_token: str | None, command_digest: str | None,
+    identity_digest: str | None = None, reconciling: bool = False,
 ) -> Iterator[None]:
     """Bind opaque per-claim protocol identity for canonical helper calls.
 
-    The idempotency state-machine lane supplies the durable claim token.  The
-    existing invocation path sets only its already-computed command digest, so
-    existing callers retain their standalone random checkpoint identity.
+    The idempotency store supplies the attempt claim and the full namespaced
+    identity digest. Canonical helpers retain scope across reconciled attempts
+    without receiving raw caller keys, principal identifiers or arguments.
     """
     if claim_token is not None and re.fullmatch(r"[0-9a-f]{24}", claim_token) is None:
         raise ValueError("claim token must be lowercase 24-hex")
     if command_digest is not None and re.fullmatch(r"[0-9a-f]{64}", command_digest) is None:
         raise ValueError("command digest must be lowercase SHA-256")
-    token = _ACTIVE_MUTATION_PROTOCOL.set((claim_token, command_digest))
+    if identity_digest is not None and re.fullmatch(r"[0-9a-f]{64}", identity_digest) is None:
+        raise ValueError("identity digest must be lowercase SHA-256")
+    token = _ACTIVE_MUTATION_PROTOCOL.set((claim_token, command_digest, identity_digest, reconciling))
     try:
         yield
     finally:
@@ -1481,6 +1484,14 @@ def active_mutation_command_digest() -> str | None:
     return active[1] if active is not None else None
 
 
+def active_mutation_recovery_identity() -> tuple[str, str, bool] | None:
+    """Return the opaque namespaced identity, command digest and reconciliation flag."""
+    active = _ACTIVE_MUTATION_PROTOCOL.get()
+    if active is None or active[1] is None or active[2] is None:
+        return None
+    return active[2], active[1], active[3]
+
+
 class _PostCommitOutcomeUncertain(OpError):
     """Sanitized terminal state for an unexpected exception after canonical commit."""
 
@@ -1497,7 +1508,7 @@ class _PostCommitOutcomeUncertain(OpError):
     def __init__(self) -> None:
         super().__init__(
             "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
-            "the mutation completed but its exact terminal result could not be persisted",
+            "the mutation committed data but its exact terminal result could not be persisted",
             "Do not rerun with a new identity; reconcile and retry only with the same identity.",
             details={"status": "committed", "committed": True},
         )
@@ -1533,6 +1544,7 @@ class _ExecutionAttempt:
     commit_token: str
     commit_secret: bytes
     handle: Any | None
+    reconciling: bool = False
 
 
 class _WindowsDPAPISecretProtector:
@@ -3531,6 +3543,7 @@ class IdempotencyStore:
         resume_canonically_committed=None,  # noqa: ANN001
         commit_evidence=None,  # noqa: ANN001
         legacy_graph_pending_proof=None,  # noqa: ANN001
+        reconcile_abandoned: bool = False,
     ) -> Any:
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
@@ -3555,6 +3568,7 @@ class IdempotencyStore:
                     expires_after,
                     commit_evidence=commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    reconcile_abandoned=reconcile_abandoned,
                 )
             if disposition == "owner":
                 break
@@ -3565,9 +3579,11 @@ class IdempotencyStore:
                     on_replay=on_replay,
                     commit_evidence=commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    reconcile_abandoned=reconcile_abandoned,
                 )
                 if waited is _RETRY_IDEMPOTENCY_CLAIM:
-                    continue
+                    # The waiter already acquired the new attempt under the SQLite transaction.
+                    break
                 disposition, stored = waited
             if disposition == "canonical_resume":
                 if resume_canonically_committed is None:
@@ -3625,6 +3641,8 @@ class IdempotencyStore:
                 with active_mutation_claim_context(
                     claim_token=attempt.commit_token,
                     command_digest=digest if re.fullmatch(r"[0-9a-f]{64}", digest) else None,
+                    identity_digest=hashlib.sha256(key.encode("utf-8")).hexdigest(),
+                    reconciling=attempt.reconciling,
                 ):
                     try:
                         leaf_started = True
@@ -3748,12 +3766,13 @@ class IdempotencyStore:
             # intentionally retained for exact evidence/outcome-unknown
             # classification instead.
             if (
-                not leaf_returned
+                not attempt.reconciling
+                and not leaf_returned
                 and isinstance(error, Exception)
                 and (commit_observed is None or not commit_observed())
             ):
                 self._delete_executing(key, digest, attempt)
-            elif not leaf_started:
+            elif not leaf_started and not attempt.reconciling:
                 self._delete_executing(key, digest, attempt)
             elif not canonical_persisted:
                 # A returned leaf without a durable exact receipt is the
@@ -3772,6 +3791,7 @@ class IdempotencyStore:
         *,
         commit_evidence=None,
         legacy_graph_pending_proof=None,
+        reconcile_abandoned: bool = False,
     ) -> tuple[str, Any]:
         now = self.clock()
         with self._connect() as conn:
@@ -3795,9 +3815,14 @@ class IdempotencyStore:
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
                 )
                 if row is not None:
-                    return self._decode_disposition(row, digest, commit_evidence=commit_evidence)
+                    disposition = self._decode_disposition(row, digest, commit_evidence=commit_evidence)
+                    if disposition[0] != "outcome_unknown" or not reconcile_abandoned:
+                        return disposition
+                    if row[4] and _probe_owner_liveness(self.state_dir, row[4]):
+                        return disposition
             self._ensure_private_runtime_state()
             attempt = _new_attempt()
+            attempt.reconciling = row is not None
             try:
                 stored_commit_secret = self._stored_commit_secret(digest, attempt)
             except Exception as error:
@@ -3815,19 +3840,24 @@ class IdempotencyStore:
                 )
             try:
                 self._ensure_private_runtime_state()
-                conn.execute(
-                    "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, commit_secret) "
-                    "VALUES (?, ?, 'reserved', ?, ?, ?, ?, ?)",
-                    (
-                        key,
-                        digest,
-                        now,
-                        attempt.attempt_id,
-                        attempt.attempt_id,
-                        attempt.commit_token,
-                        stored_commit_secret,
-                    ),
-                )
+                if attempt.reconciling:
+                    # A command-specific reconciler, never generic replay, owns this exact unknown identity.
+                    cursor = conn.execute(
+                        "UPDATE mutations SET state = 'reserved', result = NULL, updated_at = ?, "
+                        "owner = ?, attempt_id = ?, commit_token = ?, commit_secret = ? "
+                        "WHERE key = ? AND digest = ? AND state = ?",
+                        (now, attempt.attempt_id, attempt.attempt_id, attempt.commit_token,
+                         stored_commit_secret, key, digest, row[1]),
+                    )
+                    if cursor.rowcount != 1:
+                        raise self._reconciliation_error("abandoned mutation claim")
+                else:
+                    conn.execute(
+                        "INSERT INTO mutations(key, digest, state, updated_at, owner, attempt_id, commit_token, commit_secret) "
+                        "VALUES (?, ?, 'reserved', ?, ?, ?, ?, ?)",
+                        (key, digest, now, attempt.attempt_id, attempt.attempt_id,
+                         attempt.commit_token, stored_commit_secret),
+                    )
                 cursor = conn.execute(
                     "UPDATE mutations SET state = 'executing' WHERE key = ? AND state = 'reserved' "
                     "AND attempt_id = ? AND commit_token = ?",
@@ -4146,6 +4176,7 @@ class IdempotencyStore:
         on_replay=None,  # noqa: ANN001
         commit_evidence=None,  # noqa: ANN001
         legacy_graph_pending_proof=None,  # noqa: ANN001
+        reconcile_abandoned: bool = False,
     ) -> Any:
         _log_mutation_event("pending", receipt=_receipt_tag(key))
         deadline = self.monotonic() + self.wait_seconds
@@ -4158,6 +4189,7 @@ class IdempotencyStore:
                 None,
                 commit_evidence=commit_evidence,
                 legacy_graph_pending_proof=legacy_graph_pending_proof,
+                reconcile_abandoned=reconcile_abandoned,
             )
             if disposition == "owner":
                 return _RETRY_IDEMPOTENCY_CLAIM
@@ -4454,6 +4486,9 @@ def _receipt_tag(key: str) -> str:
 
 
 def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
+    if command.name == "adoption_studio" and kwargs.get("action") != "status":
+        # nosemgrep: ep-word-membership -- Status-only schema fields cannot change pre-upgrade mutation identities.
+        kwargs = {key: value for key, value in kwargs.items() if key not in ("view", "offset", "limit", "revision")}
     return hashlib.sha256(
         json.dumps(
             {"command": command.name, "kwargs": kwargs},
@@ -6859,6 +6894,7 @@ class LeaseManager:
                     resume_canonically_committed=resume_graph_sync,
                     commit_evidence=exact_commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
+                    reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") == "apply",
                 )
 
             from .command_surface import OPEN_WORLD_OPS
