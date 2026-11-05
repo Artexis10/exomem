@@ -225,9 +225,35 @@ Episode state SHALL bind a logical episode identity, input revision and original
 
 - **WHEN** recovery resolves a stored page or exact semantic-unit reference
 - **THEN** it binds disclosure and the recorded version to the same immutable current snapshot
-- **AND** changed evidence is stale, while missing, ambiguous, withheld or superseded evidence is unavailable, without returning replacement text
+- **AND** changed evidence is stale, while missing, ambiguous, withheld or superseded evidence is unavailable, except for the exact previously bound recorder proof below
 - **AND** a response budget cannot silently truncate input and still classify it as complete recovery
 - **AND** the response excludes raw journal events, sealed execution plans and unrestricted candidate payloads
+
+#### Scenario: A newer recorder recap retires a previously bound input
+
+- **WHEN** recovery resolves a previously bound recorder recap in the current audience's journal after a newer recap supersedes it
+- **THEN** the reserved recorder format, audience-scoped filename group, episode identity and exact journal reference identify the eligible historical input
+- **AND** current release authorizes the same guarded snapshot without requiring access to the successor
+- **AND** the system first compares current evidence under the binding's recorded digest scheme
+- **AND** if necessary, it compares one in-memory candidate that removes only top-level `status`, `updated` and `superseded_by` entries through YAML parser spans
+- **AND** only an exact stored-digest match permits recovery, without changing Source bytes, journal history or global evidence hashing
+- **AND** a matching whole-parent binding supplies the same episode root before and after retirement
+
+#### Scenario: Retirement compatibility preserves scope and legacy limits
+
+- **WHEN** a retired recorder input binds an exact unit or a legacy raw-content digest
+- **THEN** recovery retains the exact unit reference, fingerprint and span, and a unit-only binding cannot prove its whole parent
+- **AND** raw-content digests remain raw while `evidence-v1` retains typed material hashing and its existing backlink exclusion
+- **AND** changed body or other bound metadata, or prior retirement-field values that cannot be reconstructed, remain stale or unavailable
+- **AND** generic Sources and compiled notes retain ordinary lifecycle refusal, including registry-reclassified statuses
+- **AND** new bindings still refuse superseded inputs, and origin bindings retain their exact version and selected-fingerprint checks
+
+#### Scenario: Inspection reports recorded recovery classes
+
+- **WHEN** a caller inspects an episode's input revisions
+- **THEN** each recovery class describes its recorded binding, and `recovery_current` is `unchecked`
+- **AND** inspection checks only the latest reference's visibility and downgrades a withheld latest input to unavailable
+- **AND** inspection does not claim current recovery of every historical input or recover their bodies to list metadata
 
 #### Scenario: Conversation input was not retained canonically
 
@@ -524,7 +550,7 @@ Episode work SHALL have explicit per-pass resource bounds, durable continuation 
 
 ### Requirement: An episode recap is retained canonically, bounded and attributable
 
-The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the audience's previous live revisions of the episode superseded, guarded by the content each was read with, so after any completed write one episode has one live recap per audience. Marking a revision superseded writes only system-managed frontmatter (`status`, `updated`, `superseded_by`) and leaves its body byte-identical, on the same footing as `ingested_into`. The caller's principal SHALL be resolved before any write. Each audience SHALL keep its own ledger history and its own revisions of an episode key, and SHALL NOT list, supersede or replay another audience's recap. Memory references a recap concerns SHALL be retained only in the recording audience's ledger, never on the shared page. A restricted writer's recap SHALL be written in its inbox as a Source capture is, and its revisions SHALL be listed and superseded only there.
+The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the audience's previous live revisions of the episode superseded, guarded by the content each was read with, so after any completed write one episode has one live recap per audience. Marking a revision superseded writes only system-managed frontmatter (`status`, `updated`, `superseded_by`) and leaves its body byte-identical. Historical recovery SHALL admit that bookkeeping only through the exact previously bound recorder proof above; global material hashing SHALL continue excluding only `ingested_into`. The caller's principal SHALL be resolved before any write. Each audience SHALL keep its own ledger history and its own revisions of an episode key, and SHALL NOT list, supersede or replay another audience's recap. Memory references a recap concerns SHALL be retained only in the recording audience's ledger, never on the shared page. A restricted writer's recap SHALL be written in its inbox as a Source capture is, and its revisions SHALL be listed and superseded only there.
 
 #### Scenario: A record retains a bounded recap and binds it as input
 

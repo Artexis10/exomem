@@ -1285,6 +1285,7 @@ def test_inspect_lists_revisions_and_the_latest_source(vault: Path) -> None:
             {"revision": 2, "recovery": "available"},
         ],
         "latest_source_ref": second["source"]["ref"],
+        "recovery_current": "unchecked",
         "coverage_current": "unchecked",
     }
 

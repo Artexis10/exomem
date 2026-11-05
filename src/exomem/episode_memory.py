@@ -435,6 +435,7 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
 
     An unknown key and a key only another audience holds are the same
     `EPISODE_NOT_FOUND`: the ledger is per audience and lists nothing across.
+    Recovery classes were recorded at binding; current recovery is unchecked.
     """
     if not isinstance(episode, str) or not episode_capture.EPISODE_KEY_RE.fullmatch(episode):
         raise EpisodeError("EPISODE_KEY_INVALID", "episode must be an ep- key of 32 lowercase hex")
@@ -453,5 +454,6 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
         "episode": episode,
         "revisions": revisions,
         "latest_source_ref": latest,
+        "recovery_current": "unchecked",
         "coverage_current": "unchecked",
     }
