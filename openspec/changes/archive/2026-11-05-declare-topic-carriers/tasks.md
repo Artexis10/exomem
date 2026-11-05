@@ -24,5 +24,5 @@
 
 - [x] 5.1 Add the fixture end-to-end check: undeclared carriers, then inferred declarations, then topics on the map and domain maps returning members.
 - [x] 5.2 Run the real-model check on dogfood vaults, including the hostile cases.
-- [ ] 5.3 After release, run the workflow on the personal vault through the governed route, coordinated with its configuration-hold owner, and report the declared topics to the owner for review.
-- [ ] 5.4 Once `compile-context-maps-and-profiles` is archived, carry a MODIFIED block of its requirement "Topic membership is declared" against the canonical spec, naming carriers and homes as routes.
+- [x] 5.3 After release, run the workflow on the personal vault through the governed route, coordinated with its configuration-hold owner, and report the declared topics to the owner for review.
+- [x] 5.4 Once the canonical spec contains "Topic membership is declared", carry its MODIFIED block naming carriers and homes. Preserve later requirements and scenarios.
