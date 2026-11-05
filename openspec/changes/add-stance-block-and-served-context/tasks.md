@@ -48,10 +48,16 @@ The task layer stays deferred. Publication follows normal review and delivery; l
 - [x] 7.1 Compare activation stage latency before and after on the same benchmark fixture with timings. Report stance, record and move costs; do not claim zero overhead.
 - [x] 7.2 Compare recorded fields with final authorized responses on a small built development run. Verify zero metadata disagreements, exact upkeep identities and truthful unknown usage.
 - [ ] 7.3 Verify actor-visible delivery before behavioral scoring. On real models, exercise each retained move, scoped/global distinction, exact requests, confirmation/decline, unexpected input and a transport provider outage.
-- [ ] 7.4 Use independent source-derived keys and report paired case-level differences with intervals. Preserve failed delivery; an interval containing zero is no change. State the allowance estimate and obtain any required spend agreement before generation.
+- [x] 7.4 Use independent source-derived keys and report paired case-level differences with intervals. Preserve failed delivery; an interval containing zero is no change. State the allowance estimate and obtain any required spend agreement before generation.
 - [ ] 7.5 Run the full corpus in CI-shaped shards at the implementation boundary. Complete independent exact-content review, correction rechecks, CI, merge and the ordinary release.
 
 ## 8. Closure
 
 - [ ] 8.1 Verify the delivered outcome on its release bytes within install ownership. Record any remaining live dependency explicitly.
 - [ ] 8.2 Synchronize and archive only after nonoptional implementation tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after the archive.
+
+## Verified scope and remaining checks
+
+A paired development comparison did not establish a measured gain.
+Delivery records and source reads do not prove semantic use.
+The positive related-candidate carrier, final isolated writer check and installed acceptance remain open.
