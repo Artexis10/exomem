@@ -17,9 +17,11 @@
 - [x] 3.1 Run the registered Cloud tool on an isolated retained-original video with real decoding. Record native JPEGs, timestamps, resource use, duration and unchanged source identity under admitted scoped execution.
 - [x] 3.2 Run scoped frame, custody, governance, media selection and cancellation regressions; then the full completion corpus on CI or the desktop. Run lint, privacy and strict OpenSpec checks.
 - [x] 3.3 Obtain one independent adversarial review of the exact integrated batch, including security, C4, C6 and product/proof weight. Close findings and merge after current CI passes.
-- [ ] 3.4 Obtain the containing ordinary release and immutable package/image qualification from its delivery owner. Preserve default-off configuration and all live activation holds.
-- [ ] 3.5 Synchronize and archive the delivered source contract through the OpenSpec CLI after required source tasks close; preserve the separate operational acceptance below.
+- [x] 3.4 Obtain the containing ordinary release and immutable package/image qualification from its delivery owner. Preserve default-off configuration and all live activation holds.
+- [x] 3.5 Synchronize and archive the delivered source contract through the OpenSpec CLI after required source tasks close; preserve the separate operational acceptance below.
 
 ## Operational acceptance retained outside source closure
 
 Actual Cloud configuration, node-sized resource acceptance, connected-client image rendering and provider review require their existing operational authority. A source release does not close or authorize those actions. No model or provider spend is selected by this change.
+
+Source delivery evidence: [v0.161.0](https://github.com/Artexis10/exomem/releases/tag/v0.161.0), source `7594b9fa80845314631d460a95a7fa083aa544ab`. [Publication run 41963138492](https://github.com/Artexis10/exomem/actions/runs/41963138492) qualified the exact Python distributions and verified retained provenance for all five images. Operational activation remains separate.
