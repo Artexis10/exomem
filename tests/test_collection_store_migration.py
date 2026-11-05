@@ -272,6 +272,28 @@ def test_offline_migrate_routes_every_records_and_planning_collection_without_ch
         service.stop()
 
 
+def test_public_progress_review_reads_canonical_planning_without_evidence(env):
+    """A store-backed intention remains reviewable without trusting its Markdown view."""
+    root = env
+    legacy_vault(root)
+    assert migrate(root, "apply") == 0
+    service = start_service(root)
+    try:
+        call(root, "plan_memory", action="add", collection=PLANNING,
+             item={"title": "Continue the accepted work", "kind": "outcome", "status": "active",
+                   "commitment": "committed", "horizon": "quarter", "priority": "high"},
+             why="retain the explicitly started intention")
+        before = call(root, "plan_memory", action="query", collection=PLANNING)["snapshot"]
+        for selector in (PLANNING, None):
+            result = call(root, "review_memory", mode="plan-progress", **({"path": selector} if selector else {}))
+            assert result["collections_scanned"] == 1
+            assert result["collections_unavailable"] == 0
+            assert result["items_reviewed"] == 0
+        assert call(root, "plan_memory", action="query", collection=PLANNING)["snapshot"] == before
+    finally:
+        service.stop()
+
+
 def test_a_second_apply_on_a_migrated_vault_reports_nothing_to_migrate(env, capsys):
     """An apply that fails when there is nothing left to migrate, which breaks a script that
     applies and then starts the service on every upgrade."""

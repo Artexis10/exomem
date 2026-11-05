@@ -85,6 +85,21 @@ def test_the_filename_group_is_scoped_by_audience() -> None:
     assert owner.digest == other.digest
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_retirement_candidate_preserves_raw_yaml_and_nested_fields(newline: str) -> None:
+    """Retirement removal must not add a blank line or remove nested namesakes."""
+    from exomem.replace import _mark_superseded
+
+    original = (
+        "---\n# Preserve this comment and quoted scalar.\nsummary: 'A # literal'\n"
+        "capture:\n  status: retained\n  updated: earlier\n  superseded_by: [unchanged]\n"
+        "tags: [one, two]\n---\n\nOriginal α body.\n"
+    ).replace("\n", newline)
+    retired = _mark_superseded(original, "Later recap", "2026-09-21")
+    assert retired != original
+    assert capture.pre_retirement_content(retired) == original
+
+
 def test_any_authored_change_moves_the_digest() -> None:
     base = _prepare().digest
     assert _prepare(summary="Chose the chrome lamp instead.").digest != base
