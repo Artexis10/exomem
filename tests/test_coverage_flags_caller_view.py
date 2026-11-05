@@ -151,6 +151,81 @@ def test_the_owner_still_sees_every_write_as_a_lag(served: Path) -> None:
     assert _pack_truncation(served, restricted=False) == ([], BOTH_SIDES_UNKNOWN)
 
 
+def test_deleted_withheld_sources_keep_the_direct_read_complete_without_retained_evidence(
+    served: Path,
+) -> None:
+    """Deletion keeps neither a hidden backlink nor its competing basename in the direct reply."""
+    shadow = "Knowledge Base/Notes/Patterns/coverage-anchor.md"
+    _write_as_the_service_does(served, shadow, "# Private shadow\n\nPrivate context [[coverage-anchor]].\n")
+    lexstore.ensure_fresh(served)
+    assert vault_module.prime_inbound_index(served, eager=True)
+    assert HIDDEN not in _hold_verdicts(served)
+    before = _links(served, restricted=True)
+    assert [item["path"] for item in before["inbound"]] == [BACKLINKER]
+
+    _delete_as_the_service_does(served, HIDDEN)
+    _delete_as_the_service_does(served, shadow)
+
+    assert _links(served, restricted=True) == before
+    assert _links(served, restricted=False)["inbound"] is None
+    with egress.proven_withheld_scope():
+        assert egress.pin_proven_withheld(frozenset({BACKLINKER}))
+        assert _links(served, restricted=True)["inbound"] == []
+
+
+def test_a_verdict_for_newer_bytes_cannot_hide_an_inbound_source_deletion(served: Path) -> None:
+    """The resident index holds earlier bytes, even when the catalogue's vault stamp is unchanged."""
+    store = lexstore.get_store(served)
+    vault_checkpoint = store.published_recall_checkpoint("vault")
+    kb_checkpoint = store.published_recall_checkpoint("kb")
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nDifferent private context [[coverage-anchor]].\n")
+    store.apply_catalog_delta("kb", freshness.recall_delta_since(served, "kb", kb_checkpoint))
+    assert store.published_recall_checkpoint("vault") == vault_checkpoint
+    assert HIDDEN not in _hold_verdicts(served)
+
+    _delete_as_the_service_does(served, HIDDEN)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_a_partial_inbound_patch_cannot_authorize_a_deleted_source(served: Path) -> None:
+    """A patched source hash has no association with the cache's earlier complete checkpoint."""
+    _withhold_from_external(served, 'tags: ["private-proof"]')
+    _seed_live_recall(served)
+    assert lexstore.get_store(served).rebuild_atomic()
+    assert vault_module.prime_inbound_index(served, eager=True)
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nUnpatched change.\n")
+    _write_as_the_service_does(served, BACKLINKER, (
+        "---\ntags: [private-proof]\n---\n# Private backlink\n\n[[coverage-anchor]]\n"
+    ))
+    vault_module.on_inbound_files_changed(served, [BACKLINKER], [])
+    lexstore.ensure_fresh(served)
+    assert BACKLINKER not in _hold_verdicts(served)
+
+    _delete_as_the_service_does(served, BACKLINKER)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_revocation_during_deleted_inbound_selection_discards_the_retained_reply(
+    served: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy
+
+    _hold_verdicts(served)
+    _delete_as_the_service_does(served, HIDDEN)
+    select = vault_module._select_inbound_wikilinks
+
+    def revoke_after_selection(*args, **kwargs):
+        links = select(*args, **kwargs)
+        _withhold_from_external(served, f'paths: ["{BACKLINKER}"]')
+        return links
+
+    monkeypatch.setattr(vault_module, "_select_inbound_wikilinks", revoke_after_selection)
+    with policy.request_policy_snapshot():
+        assert _links(served, restricted=True)["inbound"] is None
+
+
 def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served: Path) -> None:
     """A reconcile that replaced the registry leaves nothing to say what changed."""
     _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten.\n")

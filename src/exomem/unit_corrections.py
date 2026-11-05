@@ -16,7 +16,7 @@ from . import (
     relation_registry,
     request_budget,
 )
-from .governance import egress, policy
+from .governance import egress
 from .published_admission import admission_of
 
 # nosemgrep: ep-word-set -- closed relation-schema families whose authored facts inform a claim.
@@ -30,14 +30,7 @@ def reader_view(root: Path, purpose: str | None = None) -> Callable[[str], bool]
     return egress.reader_view(root, purpose=purpose)
 
 
-def _current_reader(root: Path, reader: egress.ReaderView) -> egress.ReaderView | None:
-    # Rebuild the same caller's authority without its request's cached policy or deleted-page verdicts.
-    with policy.outside_request_policy_snapshot():
-        return egress.reader_view(
-            root, principal=reader._principal, purpose=reader._purpose, withheld=frozenset(),
-        )
-
-
+@egress.proven_withheld_scope(reuse=True)
 def discover(
     root: Path,
     unit_refs: Sequence[str],
@@ -79,7 +72,7 @@ def discover(
         index = epistemic_graph.EpistemicGraphIndex(root)
         publication = None
         authority = None
-        current_reader = _current_reader(root, keep) if isinstance(keep, egress.ReaderView) else None
+        current_reader = keep.fresh(withheld=frozenset()) if isinstance(keep, egress.ReaderView) else None
         if current_reader is not None and (admission := admission_of(current_reader)) is not None:
             authority = admission.identity()
             if authority is not None:
@@ -89,6 +82,11 @@ def discover(
                     conn, publication = retained
         if publication is not None:
             resolver = publication.resolver
+            # Admission pinned deleted sources; a predicate created earlier captured the old set.
+            current_reader = current_reader.fresh()
+            current_admission = admission_of(current_reader)
+            if current_reader is None or current_admission is None or current_admission.identity() != authority:
+                return result("unavailable")
         else:
             checkpoint = freshness.live_recall_checkpoint(root, "vault")
             if checkpoint is None:
@@ -228,12 +226,12 @@ def discover(
         )
         check_deadline()
         if publication is not None:
-            final_reader = _current_reader(root, keep)
+            final_reader = keep.fresh(withheld=frozenset())
             final_admission = admission_of(final_reader)
             proof_current = (
                 final_reader is not None and final_admission is not None
                 and final_admission.identity() == authority
-                and index._published_read_is_current(publication, final_reader, deadline=deadline)
+                and index._published_read_is_current(publication, final_reader, deadline=deadline, conn=conn)
             )
             check_deadline()
             if not proof_current:

@@ -81,7 +81,10 @@
     - A catalogue publication between the request's pinned checkpoint and a later lane's query makes that lane report stale for the request.
       Compilation must keep its captured checkpoint local and prove both selections equivalent under current authority at admission and finalization.
       Verify publication before compilation as well as after it; visible publications must retain their existing reported lag.
-    - The direct-read and graph callers of `only_withheld` have no deleted-page proof, so a deleted withheld page still counts as visible there. Their lag is stamped by the consumer registry, and the published verdicts are stamped by the catalogue, so no generation of one proves a verdict of the other.
+    - Direct-read and graph deletion reuse requires a source-bound verdict, not equality between consumer and catalogue generations.
+      The implementation reuses exact catalogue maps under fresh authority and matches their hashes to retained Graph rows or proven inbound source records.
+      Verify matching deletion without retained text, edges or basename evidence; changed source bytes, partial inbound patches and revocation retain the lag.
+      Integrated review and delivery remain pending.
     - A lag longer than the decision bound (16 paths), or an unbridgeable change history, reports the lag without deciding each path, so a burst of withheld writes can still flip a restricted caller's flag until the structure is published.
 - [x] 3.15 Publish admitted sets for structured eligibility and the activation carry. Key them by audience, purpose, grants, tombstone generation and catalogue generation. Patch them from catalogue deltas, and abstain on a key mismatch.
   - Verify: a revoked or retagged page leaves the next request's eligibility and rarity.

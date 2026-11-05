@@ -322,24 +322,23 @@ def test_an_observed_rename_still_reports_a_deletion_without_a_prior_verdict(
 @pytest.mark.parametrize("advance", ["canonical", "local"])
 def test_a_target_advance_during_the_release_decision_invalidates_admission(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     advance: str,
 ) -> None:
     root, _index, _metadata, publication = _baseline(tmp_path)
     _commit(root, SOURCE)
     assert index_sync.publish_corpus_delta(root, changed=[root / SOURCE], populate_on_miss=False)
-    decide = view_lag.consumer_lag_only_withheld
+    advanced = []
 
-    def advance_after_decision(*args, **kwargs):
-        result = decide(*args, **kwargs)
-        if advance == "canonical":
-            _commit(root, DUP_TARGET)
-        else:
-            other = root / DUP_TARGET
-            other.write_text(other.read_text() + "\nAn editor changed the target.\n")
-            freshness.on_files_changed(root, changed=[other])
-        return result
+    def visible(_rel):
+        if not advanced:
+            if advance == "canonical":
+                _commit(root, DUP_TARGET)
+            else:
+                other = root / DUP_TARGET
+                other.write_text(other.read_text() + "\nAn editor changed the target.\n")
+                freshness.on_files_changed(root, changed=[other])
+            advanced.append(True)
+        return False
 
-    monkeypatch.setattr(view_lag, "consumer_lag_only_withheld", advance_after_decision)
-
-    assert not bridge.admissible(root, publication, lambda _rel: False)
+    assert not bridge.admissible(root, publication, visible)
+    assert advanced

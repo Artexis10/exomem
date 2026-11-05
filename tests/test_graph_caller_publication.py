@@ -69,6 +69,79 @@ def test_partial_hidden_repair_preserves_the_restricted_correction_context(
     assert _discover(state) == before
 
 
+def test_deleted_withheld_source_keeps_corrections_without_its_text_or_edges(
+    published_graph: SimpleNamespace,
+) -> None:
+    from test_activate_context_request_path import _seed_live_recall
+    from test_coverage_flags_caller_view import _hold_verdicts
+
+    from exomem import graph_sync, index_sync, lexstore
+
+    state = published_graph
+    hidden = "Knowledge Base/Notes/Patterns/frag-target.md"
+    _write(state.root, hidden, (
+        "---\ntype: insight\n---\n# Private target\n\n## Decision\n"
+        f"- category: config\n- id: hidden\n- relations: answers: [[{TARGET}#rich-1]]\n\n"
+        "Private correction text.\n"
+    ))
+    _seed_live_recall(state.root)
+    _publish(state.index)
+    assert lexstore.get_store(state.root).rebuild_atomic()
+    assert hidden not in _hold_verdicts(state.root)
+    before = _discover(state)
+    assert before["status"] == "available" and before["units"]
+    assert all(row["path"] != hidden for row in before["units"])
+
+    with state.index._mutation_coordinator.hold():
+        epoch = graph_sync.prepare_deletion_epoch(state.root, [hidden])
+        assert epoch is not None
+        (state.root / hidden).unlink()
+        graph_sync.commit_deletion_epoch(epoch)
+    assert index_sync.publish_corpus_delta(
+        state.root, deleted=[state.root / hidden], populate_on_miss=False,
+    )
+
+    assert _discover(state) == before
+
+
+def test_a_withheld_verdict_for_changed_source_bytes_cannot_hide_graph_deletion(
+    published_graph: SimpleNamespace,
+) -> None:
+    from test_activate_context_request_path import _seed_live_recall
+    from test_coverage_flags_caller_view import _hold_verdicts, _withhold_from_external
+
+    from exomem import freshness, graph_read_publication, graph_sync, index_sync, lexstore
+
+    state = published_graph
+    _withhold_from_external(state.root, 'tags: ["private-proof"]')
+    _seed_live_recall(state.root)
+    _publish(state.index)
+    assert lexstore.get_store(state.root).rebuild_atomic()
+    before = _discover(state)
+    assert before["status"] == "available" and before["units"]
+    store = lexstore.get_store(state.root)
+    checkpoint = store.published_recall_checkpoint("kb")
+    publication = graph_read_publication.published(state.root)
+    path = state.root / SOURCE
+    with request_scope(RequestPrincipal(audience_id="owner", surface="cli")), state.index._mutation_coordinator.hold():
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(path, path.read_text().replace("type: insight\n", "type: insight\ntags: [private-proof]\n"))],
+            vault_root=state.root, post_commit_fanout=False,
+        )
+        assert file_watcher.register_self_write_and_close(state.root, [path], ())
+    store.apply_catalog_delta("kb", freshness.recall_delta_since(state.root, "kb", checkpoint))
+    assert store.published_recall_checkpoint("vault") == publication.recall
+    assert SOURCE not in _hold_verdicts(state.root)
+    with state.index._mutation_coordinator.hold():
+        epoch = graph_sync.prepare_deletion_epoch(state.root, [SOURCE])
+        assert epoch is not None
+        path.unlink()
+        graph_sync.commit_deletion_epoch(epoch)
+    assert index_sync.publish_corpus_delta(state.root, deleted=[path], populate_on_miss=False)
+
+    assert _discover(state) == {"status": "unavailable", "units": []}
+
+
 @pytest.mark.parametrize("reset_all", [False, True])
 def test_idle_release_retains_context_until_an_explicit_resolver_reset(
     published_graph: SimpleNamespace, reset_all: bool,
