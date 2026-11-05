@@ -3199,10 +3199,53 @@ def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
 def _page_token_terms(words: Sequence[str]) -> tuple[int, tuple[str, ...], Sequence[int]]:
     """Pack the maintained token list directly, without another joined text or split list."""
     counted = Counter(words)
+    return _pack_page_counts(counted, len(words))
+
+
+def _pack_page_counts(counted: Mapping[str, int], length: int, *, reserve=None):
     most = max(counted.values(), default=0)
     # The narrowest width that holds the page's largest count: most pages repeat no word 256 times.
     width = "B" if most < 1 << 8 else "H" if most < 1 << 16 else "I"
-    return len(words), tuple(map(sys.intern, counted)), array(width, counted.values())
+    if reserve is not None:
+        # Tuple/array allocation and interning metadata overlap the live ordered counter.
+        reserve(256 + (72 + array(width).itemsize) * len(counted))
+    return length, tuple(map(sys.intern, counted)), array(width, counted.values())
+
+
+def _released_public_terms(public, proof, transient, check):
+    """Admit canonical JSON, ordered counts and packing before each allocation."""
+    from . import bm25 as bm25_module
+
+    public_bytes = _released_size(public, reserve=transient.reserve)
+    proof_bytes = _released_size(proof, reserve=lambda amount: transient.reserve(public_bytes + amount))
+    # JSON escaping can expand a character sixfold. Cover the public tree,
+    # sorted keys, encoder chunks, writer over-allocation and the joined output.
+    transient.reserve(17 * public_bytes + proof_bytes + 65536)
+    text = json.dumps(public, sort_keys=True, ensure_ascii=False)
+    live_bytes = public_bytes + proof_bytes + sys.getsizeof(text)
+    counted: dict[str, int] = {}
+    counter_bytes = sys.getsizeof(counted)
+    workspace = length = 0
+
+    def reserve_tokens(amount):
+        nonlocal workspace
+        workspace = amount
+        transient.reserve(live_bytes + counter_bytes + amount)
+
+    for token in bm25_module.iter_tokens(text, reserve=reserve_tokens, check=check):
+        count = counted.get(token, 0)
+        if count == 0:
+            growth = 96 + sys.getsizeof(token) + sys.getsizeof(1)
+        else:
+            # Admit a possible new integer digit before incrementing the count.
+            growth = sys.int_info.sizeof_digit if count.bit_length() % sys.int_info.bits_per_digit == 0 else 0
+        transient.reserve(live_bytes + counter_bytes + growth + workspace)
+        counted[token] = count + 1
+        counter_bytes += growth
+        length += 1
+    return _pack_page_counts(
+        counted, length, reserve=lambda amount: transient.reserve(live_bytes + counter_bytes + amount),
+    )
 
 
 class _AdmittedCorpusBuild:
@@ -3219,7 +3262,7 @@ class _AdmittedCorpusBuild:
         self.statistics = None
         self.result = None
 
-    def advance(self, *, steps: int = 64, check=None) -> bool:
+    def advance(self, *, steps: int = 64, check=None, reserve=None) -> bool:
         from . import bm25 as bm25_module
 
         if self.result is not None:
@@ -3232,16 +3275,22 @@ class _AdmittedCorpusBuild:
                     statistics = self.statistics.result
                     retained = (_AdmittedBase(self.pages, statistics.document_frequency)
                                 if self.kept_terms <= _ADMITTED_BASE_TERMS_MAX else None)
+                    if reserve is not None:
+                        reserve(1024 + 128 * len(self.lengths))
                     postings = bm25_module.CorpusPostings(self.lengths, self.terms if retained is not None else None)
                     self.result = statistics, postings, retained
                     return True
                 continue
             if self.cursor == len(self.ordered):
+                if reserve is not None:
+                    reserve(1024)
                 self.statistics = bm25_module._CorpusStatisticsBuild(len(self.pages), self.length, self.frequency)
                 continue
             path = self.ordered[self.cursor]
-            self.cursor += 1
             page = self.pages[path]
+            if reserve is not None:
+                reserve(512 + 96 * len(page.terms))
+            self.cursor += 1
             self.length += page.length
             self.kept_terms += len(page.terms)
             self.lengths[path] = page.length
@@ -3348,7 +3397,7 @@ class ReleasedCorpusBuild:
             self.reservation = None
 
 
-def _released_size(value: Any, seen: set[int] | None = None) -> int:
+def _released_size(value: Any, seen: set[int] | None = None, *, reserve=None, resident_bytes: int = 0) -> int:
     """Charge the actual Python representation, sharing objects only once in this measurement."""
     from . import bm25 as bm25_module
 
@@ -3360,16 +3409,23 @@ def _released_size(value: Any, seen: set[int] | None = None) -> int:
         identity = id(item)
         if identity in seen:
             continue
+        if reserve is not None:
+            reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + 1) + 65536)
         seen.add(identity)
         size += sys.getsizeof(item)
         if isinstance(item, (str, bytes, int, float, bool, array, type(None))):
             continue
         if isinstance(item, Mapping):
             if not isinstance(item, dict):
-                size += sys.getsizeof(dict(item))
+                # Account the hidden backing table without allocating a second dictionary.
+                size += sys.getsizeof({}) + 64 * len(item)
+            if reserve is not None:
+                reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + 2 * len(item)) + 65536)
             pending.extend(item.keys())
             pending.extend(item.values())
         elif isinstance(item, (tuple, list, set, frozenset)):
+            if reserve is not None:
+                reserve(max(0, size - resident_bytes) + 128 * (len(seen) + len(pending) + len(item)) + 65536)
             pending.extend(item)
         elif is_dataclass(item) and not isinstance(item, type):
             # Closed implementation fields do not retain corpus content.
@@ -3380,6 +3436,17 @@ def _released_size(value: Any, seen: set[int] | None = None) -> int:
         elif isinstance(item, bm25_module.CorpusPostings):
             pending.extend((item.lengths, item._page_terms, item._postings))
     return size
+
+
+def _refresh_released_memory(build, *, transient=None):
+    """Charge visitor scratch alongside resident bytes, transferring only new retained growth."""
+    from . import runtime_resources
+
+    resident = build.reservation.reserved + (transient.reserved if transient is not None else 0)
+    with runtime_resources.parser_preparation(0, bulk=True, limit_bytes=build.reservation.limit) as visitor:
+        retained = _released_size(build, reserve=visitor.reserve, resident_bytes=resident)
+        build.reservation.reserve(retained, transient=transient if transient is not None else visitor)
+    build.retained_bytes = retained
 
 
 @dataclass(frozen=True, slots=True)
@@ -5134,9 +5201,8 @@ class LexicalStore:
     # -------------------------------------------------------------- plumbing
 
     @contextlib.contextmanager
-    def released_task_corpus(self, paths, caller, *, check, max_bytes):
+    def released_task_corpus(self, paths, caller, *, check, max_bytes, request_memory=None):
         """Reuse canonical FULL file terms, advancing only private complete-source work."""
-        from . import bm25 as bm25_module
         from . import context_task, freshness, runtime_resources
         from .governance import artifact_census, egress
 
@@ -5180,8 +5246,7 @@ class LexicalStore:
         try:
             if build.reservation is None:
                 build.reservation = runtime_resources.ReleasedCorpusMemory(max_bytes)
-                build.retained_bytes = _released_size(build)
-                build.reservation.reserve(build.retained_bytes)
+                _refresh_released_memory(build)
             delta = freshness.delta_since(root, "vault", build.checkpoint)
             with self._term_frequency_cache_lock:
                 pending, build.pending = build.pending, {}
@@ -5234,8 +5299,7 @@ class LexicalStore:
             for path in build.preparation:
                 check()
                 if max_bytes - build.reservation.reserved < 8 * (root / path).stat().st_size + 65536:
-                    build.retained_bytes = _released_size(build)
-                    build.reservation.reserve(build.retained_bytes)
+                    _refresh_released_memory(build)
                 with egress.source_release_proof(root, basis, source_ref=path, memo=memo) as capture:
                     source = context_task.project_source(
                         root, path, caller, hydrate=False, check=check,
@@ -5245,14 +5309,15 @@ class LexicalStore:
                 if source is None:
                     row = _ReleasedOmission(proof)
                 else:
-                    text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
-                    tokens = bm25_module.tokenize(text)
-                    with runtime_resources.parser_preparation(0, limit_bytes=max_bytes, check=check) as transient:
-                        transient.reserve(_released_size((source.public, text, tokens)))
-                        length, terms, counts = _page_token_terms(tokens)
+                    with runtime_resources.parser_preparation(
+                            (root / path).stat().st_size, limit_bytes=max_bytes, check=check) as transient:
+                        length, terms, counts = _released_public_terms(source.public, proof, transient, check)
                         row = ReleasedSourceTerms(source.version, source.raw_hash,
                                                   _PageTerms(bytes.fromhex(source.version), length, terms, counts), proof)
-                    del source, text, tokens
+                        del source
+                        # Transfer the row's charge before the transient lease ends or reverse maps grow.
+                        row_bytes = _released_size((path, row), {id(basis)}) + 256 * len(proof.paths if proof else ())
+                        build.reservation.reserve(build.retained_bytes + row_bytes, transient=transient)
                 if proof is None:
                     unsupported.add(path)
                 build.install(path, row)
@@ -5262,13 +5327,15 @@ class LexicalStore:
                 try:
                     build.reservation.reserve(build.retained_bytes)
                 except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
-                    build.retained_bytes = _released_size(build)
-                    build.reservation.reserve(build.retained_bytes)
+                    _refresh_released_memory(build)
+            def reserve_aggregation(amount):
+                build.reservation.reserve(build.reservation.reserved + amount)
+
             if build.aggregation is None:
+                reserve_aggregation(1024 + 160 * len(build.rows))
                 build.aggregation = _AdmittedCorpusBuild({path: row.terms for path, row in build.rows.items()})
-            while not build.aggregation.advance(check=check):
-                build.retained_bytes = _released_size(build)
-                build.reservation.reserve(build.retained_bytes)
+            while not build.aggregation.advance(check=check, reserve=reserve_aggregation):
+                _refresh_released_memory(build)
             check()
             if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
                     or freshness.external_pending(root)
@@ -5291,8 +5358,7 @@ class LexicalStore:
                     [(path, row.public_version) for path, row in sorted(build.rows.items())],
                     separators=(",", ":"), ensure_ascii=False,
                 ).encode()).digest()
-                build.retained_bytes = _released_size(build)
-                build.reservation.reserve(build.retained_bytes)
+                _refresh_released_memory(build)
             statistics, postings, _base = build.result
             if not postings.keeps_page_terms:
                 raise RuntimeError("released task corpus term allowance exceeded")
@@ -5315,10 +5381,9 @@ class LexicalStore:
                     build.retired.pop(path, None)
                 if (memory_changed or build.result is not previous_result
                         or build.result is not None and build.result[1]._slots != previous_slots):
-                    build.retained_bytes = _released_size(build)
                     if reusable and build.reservation is not None:
                         try:
-                            build.reservation.reserve(build.retained_bytes)
+                            _refresh_released_memory(build, transient=request_memory)
                         except (runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
                             with self._term_frequency_cache_lock:
                                 if self._released_corpus_builds.get(basis) is build:

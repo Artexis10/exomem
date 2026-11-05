@@ -580,15 +580,19 @@ class ReleasedCorpusMemory:
         self.limit = min(limit_bytes, SEMANTIC_PREPARATION_BYTES)
         self.reserved = 0
 
-    def reserve(self, amount: int) -> None:
-        global _released_corpus_bytes, _preparation_peak
+    def reserve(self, amount: int, *, transient: SemanticPreparation | None = None) -> None:
+        global _released_corpus_bytes, _preparation_bytes, _preparation_peak
         if amount > self.limit:
             raise PreparationBudgetExceeded("released task corpus preparation allowance exceeded")
-        _reclaim_released_corpora(max(0, amount - self.reserved))
+        transfer = min(max(0, amount - self.reserved), transient.reserved) if transient is not None else 0
+        _reclaim_released_corpora(max(0, amount - self.reserved - transfer))
         with _preparation_lock:
-            total = _preparation_bytes + _released_corpus_bytes + amount - self.reserved
+            total = _preparation_bytes + _released_corpus_bytes + amount - self.reserved - transfer
             if total > SEMANTIC_PREPARATION_BYTES:
                 raise PreparationCapacityBusy("semantic preparation capacity busy")
+            if transient is not None:
+                transient.reserved -= transfer
+                _preparation_bytes -= transfer
             _released_corpus_bytes += amount - self.reserved
             self.reserved = amount
             _preparation_peak = max(_preparation_peak, total)
@@ -603,13 +607,14 @@ class ReleasedCorpusMemory:
 @contextlib.contextmanager
 def parser_preparation(
     source_bytes: int, *, limit_bytes: int | None = None,
-    check: Callable[[], None] | None = None,
+    check: Callable[[], None] | None = None, bulk: bool | None = None,
 ):
     """Hold the shared reservation while a bounded source is read and parsed.
 
     The full file size selects the existing policy; only bytes read are charged.
     """
-    bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
+    if bulk is None:
+        bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
     preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check)
     try:
         yield preparation

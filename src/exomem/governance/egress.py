@@ -2245,6 +2245,7 @@ def _decide_path(
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
+        source_release.observed_content(vault_root, rel_path, live_content_hash)
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
@@ -5299,6 +5300,8 @@ def _release_level_for_markdown_snapshot(
     principal: RequestPrincipal, purpose: str | None, policy: Policy,
 ) -> int:
     """Authorize a retained Markdown image under the current release policy."""
+    content_hash = hashlib.sha256(raw).hexdigest()
+    source_release.observed_content(vault_root, rel_path, content_hash)
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return DISCLOSURE_MIN
     if not content_permits(vault_root, rel_path, principal, snapshot=raw):
@@ -5313,7 +5316,7 @@ def _release_level_for_markdown_snapshot(
     decision = _decide_markdown_snapshot(
         vault_root, rel_path, raw, parsed, policy=policy, principal=principal,
         purpose=_declared_purpose(vault_root, principal, purpose),
-        content_hash=hashlib.sha256(raw).hexdigest(),
+        content_hash=content_hash,
     )
     if decision is None:
         source_release.unsupported()

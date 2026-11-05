@@ -54,6 +54,9 @@ Restricted callers rank only a complete corpus from canonical released FULL sour
 Reuse source terms through the existing admitted-corpus statistics and postings code; keep this representation distinct from raw lexical text.
 A current effective caller basis and complete source-release proof must justify each reused row.
 A raw source hash, caller binding, conversation identifier or earlier grant alone cannot supply that proof.
+The proof binds hashes produced by the exact reads that the release owners classified.
+A pre-read guard cannot certify a later decision if the source changes and returns to its earlier bytes.
+Conflicting observed hashes decline reuse without changing canonical read order.
 Revalidate the incoming principal and authorization session on every request; never retain a bearer or caller object.
 
 The egress owner records a closed set of supported release dependencies where it resolves them.
@@ -63,6 +66,9 @@ A row that consults managed origin evidence stays uncacheable until its owner su
 Unsupported or unknown proofs use canonical preparation; a cache miss does not create a new refusal.
 
 Keep only public versions, ordered term counts and private proof facts after projection; discard source bodies and full token lists.
+Stream tokens through the maintained tokenizer owner and preserve its one-shot output contract.
+Admit normalization workspace, counter growth and packing overlap before allocation.
+Whole-stretch normalization preserves combining sequences; bounded iteration must not split that semantic operation.
 Reproject affected rows from complete freshness history and reverse dependencies.
 An ordinary source edit must preserve reusable rows whose dependencies did not change.
 Every successful reprojection atomically replaces its raw guard, complete proof, omission facts and reverse dependencies.

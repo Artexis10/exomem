@@ -1374,8 +1374,21 @@ def task_candidates(
         statistics = None
         metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
         if restricted:
+            from . import runtime_resources
+
+            request_memory = corpus_scope.enter_context(runtime_resources.parser_preparation(
+                0, bulk=True, limit_bytes=TASK_CORPUS_MAX_BYTES, check=context_task._deadline_check,
+            ))
+            query_bytes = query_workspace = 0
+
+            def reserve_postings(amount):
+                nonlocal query_bytes
+                request_memory.reserve(query_bytes + query_workspace + amount)
+                query_bytes += amount
+
             statistics, postings, released, omitted = corpus_scope.enter_context(lexstore.get_store(vault_root).released_task_corpus(
                 allowed, caller, check=context_task._deadline_check, max_bytes=TASK_CORPUS_MAX_BYTES,
+                request_memory=request_memory,
             ))
             allowed = set(released)
             if omitted:
@@ -1411,8 +1424,12 @@ def task_candidates(
                 tokens = list(dict.fromkeys(stem for unit in selected for stem in unit.stems))
                 context_task._deadline_check()
                 if tokens:
+                    query_workspace = 65536 + 128 * sum(statistics.document_frequency.get(word, 0) for word in tokens)
+                    request_memory.reserve(query_bytes + query_workspace)
                     absent = postings.missing(tokens)
-                    counted = postings.counted_from_page_terms(absent, statistics.document_frequency) if absent else {}
+                    counted = postings.counted_from_page_terms(
+                        absent, statistics.document_frequency, reserve=reserve_postings,
+                    ) if absent else {}
                     held = {**postings.kept(tokens), **(counted or {})}
                     candidates = set().union(*(held[word] for word in tokens if word in held))
                     hits = statistics.score_counts(postings.documents(candidates, held), tokens, limit + 1)

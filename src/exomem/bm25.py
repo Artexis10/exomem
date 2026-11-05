@@ -59,8 +59,6 @@ log = logging.getLogger(__name__)
 #: catalogue) carry it inside their own schema version.
 TOKENIZER_VERSION = 2
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
 _STEMMER_LOCAL = threading.local()
 
 #: The kanji that turns a counter into a question word (何度, 何時, 何月).
@@ -183,99 +181,159 @@ def _latin_fold(word: str) -> str | None:
 
 @lru_cache(maxsize=16384)
 def _word_unit(word: str, query: bool) -> TokenUnit:
-    surface = stem_word(word)
+    return _make_word_unit(word, query, stem_word)
+
+
+def _make_word_unit(word: str, query: bool, stem) -> TokenUnit:
+    surface = stem(word)
     folded = None if query else _latin_fold(word)
     if folded is None:
         return TokenUnit((surface,), False)
-    variant = stem_word(folded)
+    variant = stem(folded)
     stems = (surface,) if variant == surface else (surface, variant)
     return TokenUnit(stems, False)
 
 
-def _run_unit(run: str, characters: re.Pattern[str]) -> TokenUnit:
-    parts = characters.findall(run)
-    if len(parts) < 2:
-        return TokenUnit((run,), True)
-    return TokenUnit(tuple(left + right for left, right in zip(parts, parts[1:], strict=False)), True)
-
-
-#: Stretches of raw text between ASCII separators. An all-ASCII stretch is
-#: exactly one v1 word; only a stretch holding a non-ASCII character is
-#: normalised and scanned, so English prose with a typographic dash pays the
-#: scanner only around the dash.
+#: Stretches are the existing tokenizer's character classes, not a vocabulary.
 _STRETCH_RE = re.compile("[A-Za-z0-9\u0080-\U0010ffff]+")
+_TOKEN_SCRATCH_BYTES = 65536
 
 
-def _normalized_tokens(stretch: str) -> list[str]:
-    """Letter/number tokens of one non-ASCII stretch, after the raw-text
-    table, NFKC and casefolding."""
-    table = text_scripts.character_tables()[1]
-    normalized = unicodedata.normalize("NFKC", stretch.translate(table)).casefold()
-    return _scanner()[0].findall(normalized)
+@lru_cache(maxsize=128)
+def _scalar_decomposition_length(codepoint: int, compatibility: bool) -> int:
+    # Retain integer lengths only; no normalized source fragments enter this cache.
+    return len(unicodedata.normalize("NFKD" if compatibility else "NFD", chr(codepoint)))
 
 
-def _nonascii_units(token: str, query: bool) -> list[TokenUnit]:
-    """Units of one normalised token that holds a non-ASCII character."""
-    _runs, parts, characters = _scanner()
-    return [
-        _run_unit(part.group(), characters)
-        if part.lastgroup == "run"
-        else _word_unit(part.group(), query)
-        for part in parts.finditer(token)
-    ]
+def _token_admission(reserve, check, amount: int) -> None:
+    if check is not None:
+        check()
+    if reserve is not None:
+        reserve(amount + _TOKEN_SCRATCH_BYTES)
 
 
-def _scan_units(text: str, query: bool) -> list[TokenUnit]:
-    """Units of non-ASCII `text`."""
-    units: list[TokenUnit] = []
-    for stretch in _STRETCH_RE.findall(text):
-        if stretch.isascii():
-            units.append(TokenUnit((stem_word(stretch.lower()),), False))
+def _word_tokens(text, start, end, *, lower, query, reserve, check, held):
+    length = end - start
+    workspace = 16 * length
+    _token_admission(reserve, check, held + workspace)
+    if reserve is not None and not query and not lower:
+        decomposed = 0
+        for position in range(start, end):
+            if check is not None:
+                check()
+            decomposed += _scalar_decomposition_length(ord(text[position]), False)
+        # CPython 3.11-3.14 join first materializes the generator's fragments.
+        # Cover NFD, the one-character strings/list, join, NFC and stemming together.
+        workspace += 128 * decomposed
+    _token_admission(reserve, check, held + workspace)
+    word = text[start:end]
+    if lower:
+        word = word.lower()
+    if word.isascii():
+        yield stem_word(word) if reserve is None else stem_word.__wrapped__(word)
+    elif reserve is None:
+        yield from _word_unit(word, query).stems
+    else:
+        # The admitted corpus owns its terms; global word caches must not retain another copy.
+        yield from _make_word_unit(word, query, stem_word.__wrapped__).stems
+
+
+def _run_tokens(text, start, end, *, reserve, check, held):
+    characters = _scanner()[2].finditer(text, start, end)
+    left = next(characters, None)
+    if left is None:
+        return
+    right = next(characters, None)
+    if right is None:
+        _token_admission(reserve, check, held + 4 * (left.end() - left.start()))
+        yield left.group()
+        return
+    while right is not None:
+        # Admit before extracting either character or concatenating the bigram.
+        _token_admission(reserve, check, held + 16 * (right.end() - left.start()))
+        yield left.group() + right.group()
+        left, right = right, next(characters, None)
+
+
+def _token_groups(text: str, *, query: bool, reserve=None, check=None):
+    _token_admission(reserve, check, 0)
+    ascii_text = text.isascii()
+    for match in _STRETCH_RE.finditer(text):
+        start, end = match.span()
+        ascii_stretch = ascii_text
+        if not ascii_stretch:
+            ascii_stretch = True
+            for position in range(start, end):
+                if check is not None:
+                    check()
+                if ord(text[position]) >= 128:
+                    ascii_stretch = False
+                    break
+        if ascii_stretch:
+            yield _word_tokens(text, start, end, lower=True, query=query,
+                               reserve=reserve, check=check, held=0), False
             continue
-        for token in _normalized_tokens(stretch):
-            if token.isascii():
-                units.append(TokenUnit((stem_word(token),), False))
-            else:
-                units.extend(_nonascii_units(token, query))
-    return units
-
-
-def _scan_stems(text: str, query: bool) -> list[str]:
-    """`_scan_units` flattened, without building a unit per ASCII word."""
-    stems: list[str] = []
-    for stretch in _STRETCH_RE.findall(text):
-        if stretch.isascii():
-            stems.append(stem_word(stretch.lower()))
-            continue
-        for token in _normalized_tokens(stretch):
-            if token.isascii():
-                stems.append(stem_word(token))
-            else:
-                for unit in _nonascii_units(token, query):
-                    stems.extend(unit.stems)
-    return stems
+        length = end - start
+        if reserve is not None:
+            table = text_scripts.character_tables()[1]
+            decomposed = 0
+            for position in range(start, end):
+                if check is not None:
+                    check()
+                codepoint = ord(text[position])
+                translated = table.get(codepoint, codepoint)
+                if translated is not None:
+                    decomposed += _scalar_decomposition_length(
+                        translated if isinstance(translated, int) else ord(translated), True,
+                    )
+            # CPython 3.11-3.14 uses UCS4 decomposition/reordering buffers, plus
+            # at most ten spare scalars. Composition cannot increase this count.
+            # See Modules/unicodedata.c in those branches and Unicode UAX #15.
+            _token_admission(reserve, check, 16 * length + 16 * decomposed)
+        else:
+            _token_admission(reserve, check, 0)
+        translated = text[start:end].translate(text_scripts.character_tables()[1])
+        normalized = unicodedata.normalize("NFKC", translated)
+        del translated
+        if reserve is not None:
+            folded = 0
+            for character in normalized:
+                if check is not None:
+                    check()
+                folded += len(character.casefold())
+            # Objects/unicodeobject.c case_operation uses 3*m UCS4 scratch;
+            # include the input and output strings before calling casefold.
+            _token_admission(reserve, check, 16 * len(normalized) + 4 * folded)
+        normalized = normalized.casefold()
+        held = sys.getsizeof(normalized)
+        runs, parts, _characters = _scanner()
+        for token in runs.finditer(normalized):
+            for part in parts.finditer(normalized, *token.span()):
+                if part.lastgroup == "run":
+                    yield _run_tokens(normalized, *part.span(), reserve=reserve, check=check, held=held), True
+                else:
+                    yield _word_tokens(normalized, *part.span(), lower=False, query=query,
+                                       reserve=reserve, check=check, held=held), False
 
 
 def token_units(text: str, *, query: bool = False) -> list[TokenUnit]:
-    """The stems of `text` grouped by the word or unspaced run they came from.
+    """Group stems by their original word or unspaced run, preserving tokenizer v2."""
+    return [TokenUnit(tuple(stems), run) for stems, run in _token_groups(text, query=query)]
 
-    `query=True` is the query side: surface forms only, no folded variants.
-    Flattening the units gives `tokenize(text, query=query)`.
+
+def iter_tokens(text: str, *, query: bool = False, reserve=None, check=None) -> Iterator[str]:
+    """Yield tokenizer v2 stems, admitting each normalization and token workspace first.
+
+    ``reserve`` receives the current workspace bound; callers add their live input
+    and retained output. No run character list or complete bigram tuple is built.
     """
-    if text.isascii():
-        return [TokenUnit((stem_word(w),), False) for w in _TOKEN_RE.findall(text.lower())]
-    return _scan_units(text, query)
+    for stems, _run in _token_groups(text, query=query, reserve=reserve, check=check):
+        yield from stems
 
 
 def tokenize(text: str, *, query: bool = False) -> list[str]:
-    """The stems of `text`, in order: index side by default, query side on request.
-
-    On ASCII text both sides equal tokenizer v1 (lowercase, `[a-z0-9]+`,
-    English Snowball). See the module docstring for everything else.
-    """
-    if text.isascii():
-        return [stem_word(w) for w in _TOKEN_RE.findall(text.lower())]
-    return _scan_stems(text, query)
+    """Materialize tokenizer v2 stems in their canonical index or query order."""
+    return list(iter_tokens(text, query=query))
 
 
 def word_forms(word: str) -> tuple[str, ...]:
@@ -593,13 +651,15 @@ class CorpusPostings:
         return self._keep(found, document_frequency)
 
     def counted_from_page_terms(
-        self, words: Iterable[str], document_frequency: Mapping[str, int],
+        self, words: Iterable[str], document_frequency: Mapping[str, int], *, reserve=None,
     ) -> dict[str, Mapping[str, int]] | None:
         """`counted` over the corpus's own page terms, which hold every page; None when it keeps none."""
         held = self._page_terms
         if held is None:
             return None
         wanted = set(words)
+        if reserve is not None:
+            reserve(96 * sum(document_frequency.get(word, 0) for word in wanted) + 512 * len(wanted))
         found: dict[str, dict[str, int]] = {word: {} for word in wanted}
         for path in self.lengths:
             terms, counts = held[path]

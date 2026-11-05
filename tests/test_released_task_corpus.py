@@ -9,6 +9,50 @@ from exomem import bm25, lexstore
 from exomem.governance import artifact_census
 
 
+def test_release_proof_binds_the_decision_bytes_across_an_a_b_a_write(vault: Path, monkeypatch) -> None:
+    """Restoring A after an owner authorizes B must not seal B's decision with A's earlier guard."""
+    import yaml
+    from test_context_catalogue import _page
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import vault as vault_module
+    from exomem.governance import egress, principal, source_release
+
+    path = _page(vault, "changing-reference", "tags: [private-reference]\n", body="Current reference.\n")
+    _withhold(vault, path, ceiling=0)
+    scope = vault / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    definition = yaml.safe_load(scope.read_text())
+    definition.pop("paths")
+    definition["tags"] = ["private-reference"]
+    scope.write_text(yaml.safe_dump(definition))
+    raw_a = (vault / path).read_bytes()
+    raw_b = raw_a.replace(b"tags: [private-reference]", b"tags: []")
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False)
+    with principal.request_scope(_external()):
+        policy = egress.policy_module.load(vault)
+        basis = egress.current_source_release_basis(vault)
+        with egress.source_release_proof(vault, basis, source_ref=path) as capture:
+            source_release.path_dependency(vault, path)
+            (vault / path).write_bytes(raw_b)
+            decision = egress._decide_path(vault, path, policy=policy, principal=_external(),
+                                          audience=_external().audience_id, purpose=None,
+                                          grants_hash=egress._grants_hash(policy))
+            (vault / path).write_bytes(raw_a)
+    assert decision.level == egress.LEVEL_FULL
+    assert capture.finish() is None
+
+    # Two owners observing different snapshots cannot be sealed by whichever guard was installed last.
+    with principal.request_scope(_external()):
+        with egress.source_release_proof(vault, basis, source_ref=path) as capture:
+            assert egress._release_level_for_markdown_snapshot(
+                vault, path, raw_a, principal=_external(), purpose=None, policy=policy,
+            ) == egress.DISCLOSURE_MIN
+            (vault / path).write_bytes(raw_b)
+            egress.connector_boundary._membership_sets(vault, path, policy, content=raw_b, who=_external())
+        assert capture.finish() is None
+
+
 def test_idle_view_eviction_releases_capacity_for_ordinary_canonical_preparation(vault: Path, monkeypatch) -> None:
     """Two views and a failed build must not occupy transient parser reservations while idle."""
     import pytest
@@ -19,27 +63,33 @@ def test_idle_view_eviction_releases_capacity_for_ordinary_canonical_preparation
     from exomem import context_views, runtime_resources
     from exomem.governance import principal
 
-    paths = {_page(vault, f"capacity-{number}", body="Visible alignment comparison.\n") for number in range(24)}
+    paths = {_page(vault, f"capacity-{number}", body="Visible alignment comparison.\n") for number in range(12)}
     _seed_live_scopes(vault)
     _built(vault).close()
     lexstore.release_released_corpus_memory()
-    monkeypatch.setattr(runtime_resources, "SEMANTIC_PREPARATION_BYTES", 192 * 1024)
-    monkeypatch.setattr(runtime_resources, "SEMANTIC_SMALL_RESERVE_BYTES", 128 * 1024)
+    monkeypatch.setattr(runtime_resources, "SEMANTIC_PREPARATION_BYTES", 512 * 1024)
+    monkeypatch.setattr(runtime_resources, "SEMANTIC_SMALL_RESERVE_BYTES", 256 * 1024)
     monkeypatch.setattr(lexstore, "_ADMITTED_STATISTICS_MAX", 1)
     store = lexstore.get_store(vault)
     for purpose in ("comparison", "inspection"):
         with principal.request_scope(_external()):
             caller = context_views.CallerView.current(vault, purpose=purpose)
-            with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=192 * 1024) as result:
+            with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=512 * 1024) as result:
                 assert result[0].pages == len(paths)
+                with (pytest.raises(runtime_resources.PreparationCapacityBusy),
+                      runtime_resources.parser_preparation(0) as first,
+                      runtime_resources.parser_preparation(0) as second):
+                    first.reserve(first.limit)
+                    second.reserve(second.limit)
         assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
     assert len(store._released_corpus_builds) == 1
     retained = runtime_resources._released_corpus_bytes
     assert retained > 0
-    # Dense small inputs can reserve the entire small-parser allowance through the ordinary owner API.
-    with runtime_resources.parser_preparation(0) as reader:
-        reader.reserve(reader.limit)
-        assert runtime_resources._preparation_bytes + runtime_resources._released_corpus_bytes <= 192 * 1024
+    # Concurrent ordinary readers can claim the shared envelope after an idle view yields its rows.
+    with runtime_resources.parser_preparation(0) as first, runtime_resources.parser_preparation(0) as second:
+        first.reserve(first.limit)
+        second.reserve(second.limit)
+        assert runtime_resources._preparation_bytes + runtime_resources._released_corpus_bytes <= 512 * 1024
     assert runtime_resources._released_corpus_bytes < retained
     def ends_after_one_source():
         if any(build.rows for build in store._released_corpus_builds.values()):
@@ -47,7 +97,7 @@ def test_idle_view_eviction_releases_capacity_for_ordinary_canonical_preparation
     with principal.request_scope(_external()):
         caller = context_views.CallerView.current(vault)
         with pytest.raises(TimeoutError), store.released_task_corpus(
-                paths, caller, check=ends_after_one_source, max_bytes=192 * 1024):
+                paths, caller, check=ends_after_one_source, max_bytes=512 * 1024):
             pass
     assert sum(len(build.rows) for build in store._released_corpus_builds.values()) == 1
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0

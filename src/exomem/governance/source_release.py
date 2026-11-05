@@ -110,6 +110,7 @@ class SourceReleaseCapture:
     source: str | None = None
     supported: bool = True
     paths: dict = field(default_factory=dict)
+    observed_hashes: dict = field(default_factory=dict)
     decisions: dict = field(default_factory=dict)
     names: dict = field(default_factory=dict)
     directories: dict = field(default_factory=dict)
@@ -190,6 +191,21 @@ def path_dependency(root: Path, path: str, *, guard=None) -> None:
         capture.paths[path] = guard
     except (OSError, ValueError, runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
         unsupported()
+
+
+def observed_content(root: Path, path: str, digest: str) -> None:
+    """Bind a dependency to bytes actually read by its decision owner."""
+    capture = _CAPTURE.get()
+    if capture is None or capture.root != root:
+        return
+    path_dependency(root, path)
+    previous = capture.observed_hashes.setdefault(path, digest)
+    guard = capture.paths.get(path)
+    if previous != digest or guard is None or guard.leaf_policy == "absent":
+        unsupported()
+        return
+    # A pre-read stat or hash cannot stand for a later read across an A -> B -> A write.
+    capture.paths[path] = replace(guard, leaf_policy="content", expected_content_hash=digest)
 
 
 def directory_dependency(root: Path, directory: Path, name: str, resolved: str | None) -> None:
@@ -284,7 +300,13 @@ def validate_source_release_proofs(
                 key = "guard", guard
                 if key not in memo:
                     try:
-                        guard.recheck(root, memo.setdefault("ancestors", set()))
+                        if guard.leaf_policy == "content":
+                            size = guard.expected_content_size or 0
+                            with runtime_resources.parser_preparation(size) as preparation:
+                                preparation.reserve(8 * size + 65536)
+                                guard.recheck(root, memo.setdefault("ancestors", set()))
+                        else:
+                            guard.recheck(root, memo.setdefault("ancestors", set()))
                         memo[key] = True
                     except (ValueError, OSError):
                         memo[key] = False

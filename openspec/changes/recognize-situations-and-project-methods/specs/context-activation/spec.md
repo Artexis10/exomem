@@ -87,6 +87,7 @@ Restricted task discovery SHALL derive statistics and rankings from a complete c
 Reuse SHALL preserve document frequencies, term order, score floors, scores and ties of fresh canonical preparation.
 The corpus SHALL retain ordered terms and counts rather than source bodies or complete token lists.
 Each reused row SHALL carry a complete current release proof owned by the authorities that resolved its dependencies.
+Proofs SHALL bind the exact bytes that those owners classified, including concurrent changes that later restore earlier bytes.
 Current incoming principal and session validity SHALL be checked on every request.
 An earlier raw hash, caller binding or session identifier SHALL NOT establish reuse authority.
 Unsupported or unavailable proof types SHALL fall back to canonical preparation without a cache-specific refusal.
@@ -99,6 +100,7 @@ Unchanged public versions MAY reuse statistics.
 Selected sources and held methods SHALL still receive current canonical projection before delivery.
 
 Retained and transient state SHALL fit existing resource bounds, including overlapping publication generations.
+Canonical token streaming SHALL preserve existing tokens and order while admitting normalization, count growth and packing before allocation.
 An incomplete build MAY retain private progress but SHALL publish no prefix statistics, ranking or absence conclusion.
 With an unchanged effective basis and complete dependency history, resumption SHALL advance validation and aggregation without restarting the retained prefix.
 No request SHALL retain authority for source reads after that request ends.

@@ -403,10 +403,14 @@ def _membership_sets(root: Path, path: str, compiled: policy.Policy,
             # The capture invariant gives every page there the membership of its path, so a name no page holds yet has it too.
             return (membership.evaluate_path_selectors(root, path, compiled),)
         raw = content if content is not None else reserved_paths.read_generic_bytes(root, path).data
+        from . import source_release
+
+        digest = hashlib.sha256(raw).hexdigest()
+        source_release.observed_content(root, path, digest)
         page = find_corpus.parse_page(root / path, 0, root, content=raw)
         if page is None:
             raise BoundaryUnavailable()
-        return (membership.evaluate_snapshot(page, compiled, content_hash=hashlib.sha256(raw).hexdigest()),)
+        return (membership.evaluate_snapshot(page, compiled, content_hash=digest),)
     return (membership.evaluate_path_only(root, path, compiled, proposed_companion=proposed_companion,
                                           artifact_copy=artifact_copy).require_classified(),)
 
