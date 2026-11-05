@@ -232,6 +232,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         media_jobs,
         memory_refs,
         review_state,
+        served_context,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -275,6 +276,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "refs-store",
         "review-state",
         "source-corrections",
+        "served-context",
         "voice-profile-store",
     }
 
@@ -312,6 +314,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
             "graph-receipts",
         ),
         (review_state.state_path(root), "review-state"),
+        (served_context.sidecar_path(root), "served-context"),
         (
             review_state.state_path(root).with_name(
                 f".{review_state.STATE_FILENAME}.abc123_4.tmp"

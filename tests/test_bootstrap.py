@@ -718,9 +718,8 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
     """Consolidation must not cost capability.
 
     The catalog is the intended agent entry point, so a product command that no
-    action names is capability an agent cannot reach through it. `bootstrap` is
-    the one exception: it is the call that returns the catalog, so it cannot sit
-    behind it.
+    action names is capability an agent cannot reach through it. The MCP
+    catalog covers commands on that surface. `bootstrap` returns the catalog.
 
     The companion assertion in `test_simple_action_catalog_is_registry_routed`
     checks the other direction -- every route names a known command -- which is
@@ -739,7 +738,10 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
         )
         reachable.update(entry["advanced"])
 
-    unreachable = {command.public_name for command in commands.PRODUCT_COMMANDS if not set(command.callable_names) & reachable}
+    mcp_commands = (*commands.product_commands_for("mcp"),
+                    *commands.product_commands_for("mcp", cloud=True))
+    unreachable = {command.public_name for command in mcp_commands
+                   if not set(command.callable_names) & reachable}
     assert unreachable == {"bootstrap"}, (
         "every product command must be reachable from some action; unreachable: "
         f"{sorted(unreachable - {'bootstrap'})}"

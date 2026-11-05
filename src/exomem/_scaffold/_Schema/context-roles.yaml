@@ -138,7 +138,9 @@ roles:
   methods:
     description: Reusable approaches and designs that apply here.
     lane: units
-    categories: [technique, design]
+    # A packet shape implemented by the server; the categories remain editable knowledge.
+    projection: method
+    categories: [technique, design, procedure]
     anchor_defaults: [hub]
     cues: ["how do i", "how to", "what is the best way", "approach"]
     evidence_cues: ["how do i", "how to", "what is the best way", "approach"]

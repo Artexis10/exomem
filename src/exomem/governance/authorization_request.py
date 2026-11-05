@@ -114,6 +114,7 @@ _OPTIONAL_COMMANDS = frozenset(
         "replace",
         "replace_memory",
         "review_item_context",
+        "served_context",
         "review_memory",
         "schema_memory",
         "search",

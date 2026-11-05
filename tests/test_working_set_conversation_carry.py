@@ -13,12 +13,17 @@ import re
 from pathlib import Path
 
 import pytest
-from conversation_vault import seed
-from anaphor_round6_sets import FIFTH_NEGATIVES, FIFTH_POSITIVES, earlier as repeated_earlier
+from anaphor_round6_sets import FIFTH_NEGATIVES, FIFTH_POSITIVES
+from anaphor_round6_sets import earlier as repeated_earlier
 from anaphor_round7_sets import (
-    CODE_TURNS, CONTENT_FREE_FIFTH_IDS, CONTENT_FREE_VARIANTS,
-    RESIDUAL_TOPIC_SWITCH_IDS, STEM_COLLISION_WORDS, TOPIC_SWITCH_VARIANTS,
+    CODE_TURNS,
+    CONTENT_FREE_FIFTH_IDS,
+    CONTENT_FREE_VARIANTS,
+    RESIDUAL_TOPIC_SWITCH_IDS,
+    STEM_COLLISION_WORDS,
+    TOPIC_SWITCH_VARIANTS,
 )
+from conversation_vault import seed
 from test_governance_egress import _reset_caches
 from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_hot_projection import _live, _one_old_tick
@@ -363,7 +368,10 @@ def test_round7_conversation_footprint_preserves_the_ordinary_budget(cvault: Pat
     _assert_bounded_conversation(carried, "Ottilie Marsh", limit)
     named = _activate(cvault, "which one should we review for Ottilie Marsh", max_chars=limit)
     assert named["generation"].get("carried_by") != "conversation"
-    assert _carry_cost(named) > limit // 3
+    from exomem import read_next_action
+
+    # Required move prose has its own reserve; ordinary material exceeds the conversation share.
+    assert _carry_cost(named) > (limit - read_next_action.MAX_CHARS) // 3
     assert named["budget"]["limit_chars"] == limit
 
 

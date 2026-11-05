@@ -717,7 +717,7 @@ SERVER_INSTRUCTIONS = (
     'Reuse live policy; bootstrap first if absent/stale. Connection grants no recall/save. off: '
     'explicit-only; light: clear relevance. When recall is warranted, recall_context once '
     'initially, turn verbatim; skip a turn whose Exomem working set a hook already injected. Echo '
-    'continuity unchanged; ambiguity/correction: set `anchor`. `conversation` (see the tool): '
+    'continuity unchanged. Follow `next_action` when present. `conversation` (see the tool): '
     'relevant excerpts, never full history. New evidence/task: trigger=task_refresh, keep turn, use '
     '`conversation.focus`; initiator=agent labels origin. No refresh from memory replies alone. '
     'search_memory/read_memory: gaps. On a map, pull by ref (read_memory) or search_memory before '
