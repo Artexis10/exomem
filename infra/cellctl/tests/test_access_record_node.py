@@ -20,9 +20,9 @@ ROLE = ROOT / "infra/ansible/roles/access_record"
 RUN_NODE = os.environ.get("RUN_ACCESS_RECORD_NODE_TEST") == "1"
 
 
-def run(argv, *, input=None, check=True):
+def run(argv, *, input=None, check=True, timeout=30):
     return subprocess.run(
-        argv, input=input, text=True, capture_output=True, check=check, timeout=30
+        argv, input=input, text=True, capture_output=True, check=check, timeout=timeout
     )
 
 
@@ -159,6 +159,26 @@ LogLevel ERROR
             != 0
         )
         run(["journalctl", "--sync"])
+        expected_connections = 5
+        deadline = time.monotonic() + 10
+        # Poll only the fixed journal/PAM/audit metadata needed for delivery readiness.
+        while (remaining := deadline - time.monotonic()) > 0:
+            snapshot = run([
+                "journalctl", "--since", f"@{int(started)}", "-o", "json", "--no-pager",
+                "--output-fields=EXOMEM_ACCESS_RECORD,EXOMEM_ACTION,EXOMEM_SESSION_ID,AUDIT_FIELD_EXE,AUDIT_FIELD_RES",
+            ], timeout=remaining).stdout
+            metadata = [json.loads(line) for line in snapshot.splitlines()]
+            opened = [event for event in metadata if event.get("EXOMEM_ACCESS_RECORD") == "1"
+                      and event.get("EXOMEM_ACTION") == "open_session"]
+            closed = {event.get("EXOMEM_SESSION_ID") for event in metadata
+                      if event.get("EXOMEM_ACCESS_RECORD") == "1" and event.get("EXOMEM_ACTION") == "close_session"}
+            sudo_results = {event.get("AUDIT_FIELD_RES") for event in metadata
+                            if event.get("AUDIT_FIELD_EXE") == "/usr/bin/sudo"}
+            if (len(opened) == expected_connections
+                    and {event.get("EXOMEM_SESSION_ID") for event in opened} == closed
+                    and {"success", "failed"} <= sudo_results):
+                break
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
         journal = run(
             ["journalctl", "--since", f"@{int(started)}", "-o", "json", "--no-pager"]
         ).stdout
@@ -166,7 +186,7 @@ LogLevel ERROR
         sessions = [event for event in events if event.get("EXOMEM_ACCESS_RECORD") == "1"]
         opens = [event for event in sessions if event.get("EXOMEM_ACTION") == "open_session"]
         closes = [event for event in sessions if event.get("EXOMEM_ACTION") == "close_session"]
-        assert len(opens) == 5, [
+        assert len(opens) == expected_connections, [
             (event.get("EXOMEM_ACTION"), event.get("EXOMEM_SESSION_ID")) for event in sessions
         ]
         assert {event["EXOMEM_SESSION_ID"] for event in opens} == {
