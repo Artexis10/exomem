@@ -754,6 +754,13 @@ _DECLARED_UNBOUNDED_JOINS = {
         "renewer.join",
     ): "guard-owned fixed-token renewal teardown: stop scheduling and join the in-flight renewal "
     "before ending the guard; coordinator I/O has no absolute wall deadline",
+    (
+        "collection_store/runtime.py",
+        "StoreServer._call",
+        "request.done.wait",
+    ): "accepted audited reads stop at their next bounded checkpoint; retain ownership "
+    "until worker cleanup sets done in finally instead of abandoning the accepted work",
+
 }
 
 

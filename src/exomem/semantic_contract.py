@@ -35,6 +35,7 @@ from . import (
     note_types,
     relation_endpoints,
     relation_registry,
+    request_budget,
     semantic_authoring,
     semantic_language_registry,
     semantic_units,
@@ -1497,6 +1498,7 @@ def _parse_page_state(
     complete_authored_effects: bool = False,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string."""
+    request_budget.checkpoint()
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
     raw_source = source
@@ -1519,6 +1521,7 @@ def _parse_page_state(
         "withheld": provenance.withheld_spans(body, owner_path=rel_path),
     }
     for start, end in reversed(owned):
+        request_budget.checkpoint()
         body = body[:start] + re.sub(r"[^\n]", " ", body[start:end]) + body[end:]
     candidates = semantic_units.scan_semantic_units(body, path=rel_path)
     document = semantic_units.parse_semantic_units(
@@ -1549,6 +1552,7 @@ def _parse_page_state(
     body_links: list[tuple[str, int]] = []
     seen_link_targets: set[str] = set()
     for match in vault.find_body_wikilinks(body):
+        request_budget.checkpoint()
         if not complete_authored_effects and len(body_links) >= _MAX_WIKILINK_FACTS_PER_PAGE:
             break
         target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
@@ -1848,7 +1852,7 @@ def current_reference_identity_snapshot(
             declined[f"declined_{reason}"] = 1
 
     root = Path(vault_root)
-    with _CORPUS_CONTEXT_UPDATE_LOCK:
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
         if not tolerate_external_pending and freshness.external_pending(root):
             return decline("external_pending")
         if not freshness.is_live(root, "vault"):
@@ -1892,7 +1896,7 @@ def reference_identity_snapshot_is_current(
     :func:`current_reference_identity_snapshot`.
     """
     root = Path(vault_root)
-    with _CORPUS_CONTEXT_UPDATE_LOCK:
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
         if (
             not tolerate_external_pending and freshness.external_pending(root)
         ) or not freshness.is_live(root, "vault"):
@@ -1936,6 +1940,7 @@ def current_writer_resolver_entries(
     `declined_<reason>` counter for its timing span.
     """
 
+    request_budget.checkpoint()
     def decline(reason: str) -> None:
         if declined is not None:
             declined[f"declined_{reason}"] = 1
@@ -1946,7 +1951,7 @@ def current_writer_resolver_entries(
     except Exception:  # noqa: BLE001 - an unkeyable root has no authority
         return decline("unkeyable")
 
-    with _CORPUS_CONTEXT_UPDATE_LOCK:
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
         if freshness.external_pending(root):
             return decline("external_pending")
         if not freshness.is_live(root, "vault"):
@@ -1994,7 +1999,7 @@ def current_writer_resolver_entries(
     ):
         return decline("identity_changed")
 
-    with _CORPUS_CONTEXT_UPDATE_LOCK:
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
         if (
             freshness.external_pending(root)
             or not freshness.is_live(root, "vault")
@@ -2276,6 +2281,7 @@ def _corpus_census(root: Path) -> tuple | None:
     ``None`` when the tree cannot be fingerprinted safely; callers must then
     build uncached so the build path surfaces its own safety errors.
     """
+    request_budget.checkpoint()
     entries: set[tuple[str, str, int, int]] = set()
     kb = vault.kb_root(root)
 
@@ -2283,6 +2289,7 @@ def _corpus_census(root: Path) -> tuple | None:
         # Mirror of _build_identity_census: every canonical entry under KB,
         # alias-free. Closed runtime namespaces are never knowledge inputs.
         for child in os.scandir(directory):
+            request_budget.checkpoint()
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
@@ -2323,6 +2330,7 @@ def _corpus_census(root: Path) -> tuple | None:
         # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
         # with the same is_dir()/is_file() semantics (which traverse links).
         for child in os.scandir(directory):
+            request_budget.checkpoint()
             path = Path(child.path)
             if child.is_dir():
                 if vault.in_excluded_scan_dir(path.relative_to(root).as_posix()):
@@ -2357,6 +2365,7 @@ def _corpus_census(root: Path) -> tuple | None:
             strict_walk(kb)
         loose_walk(root)
         for extra in _config_inputs(root):
+            request_budget.checkpoint()
             marker = str(extra.relative_to(root).as_posix())
             try:
                 info = extra.stat()
@@ -2674,7 +2683,7 @@ def _identity_guarded_delta_source(root: Path, rel_path: str) -> str | None:
             f"could not safely inspect stable identity at {rel_path}",
         ) from error
     try:
-        source = source_path.read_bytes().decode("utf-8")
+        source = _read_corpus_source(root, source_path)
         guard.recheck(root)
     except (OSError, UnicodeDecodeError, vault.PathGuardError) as error:
         governed_writable = (
@@ -2710,6 +2719,7 @@ def _reconcile_markdown_delta(
     paths. Any read or identity ambiguity raises through the same full-build
     validation types instead of blessing partial state.
     """
+    request_budget.checkpoint()
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
     identities = dict(previous_identities)
@@ -2719,6 +2729,7 @@ def _reconcile_markdown_delta(
     reference_only = dict(previous_reference_only)
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     for rel_path in changed_paths:
+        request_budget.checkpoint()
         reference_only_path = _is_reference_only_path(rel_path)
         if reference_only_path:
             # Read as the reference scan reads it and as leniently: a deleted
@@ -2738,7 +2749,7 @@ def _reconcile_markdown_delta(
             source = _identity_guarded_delta_source(root, rel_path)
         else:
             try:
-                source = source_path.read_bytes().decode("utf-8")
+                source = _read_corpus_source(root, source_path)
             except FileNotFoundError:
                 source = None
         if source is None:
@@ -3197,6 +3208,7 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
             relation_definitions=relation_definitions,
             language=language,
         )
+        request_budget.checkpoint()
         build_ms = (time.perf_counter() - started) * 1000.0
         # Keep the publisher's full-build cost visible independently of warmup.
         metrics.observe_duration_ms(
@@ -3233,7 +3245,10 @@ def _build_and_admit_corpus_context(root: Path, cache_key: tuple[str, str]) -> b
         )
         return True
     except BaseException as error:
-        flight.error = error
+        if isinstance(error, request_budget.ReadBudgetExhausted):
+            flight.discarded = True
+        else:
+            flight.error = error
         raise
     finally:
         flight.discarded = flight.result is None and flight.error is None
@@ -3514,6 +3529,7 @@ def _build_corpus_context_with_census(
     afterward). A caller that gets ``None`` here has no cheaper option than
     its own fresh walk — same as before this existed.
     """
+    request_budget.checkpoint()
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.core_registry()
     language = language_registry or semantic_language_registry.core_registry()
@@ -3569,7 +3585,7 @@ def _build_corpus_context_with_census(
                 with _CORPUS_CONTEXT_CACHE_LOCK:
                     entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
                 if entry is not None and entry[0] == census:
-                    with _CORPUS_CONTEXT_UPDATE_LOCK, _CORPUS_CONTEXT_CACHE_LOCK:
+                    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK), _CORPUS_CONTEXT_CACHE_LOCK:
                         current = _CORPUS_CONTEXT_CACHE.get(cache_key)
                         if current is not entry:
                             entry = current
@@ -3603,7 +3619,7 @@ def _build_corpus_context_with_census(
                             relation_definitions=relation_definitions,
                             language=language,
                         )
-                        with _CORPUS_CONTEXT_UPDATE_LOCK:
+                        with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
                             confirmed = _deferred_corpus_census(root, walk_log, "census")
                             with _CORPUS_CONTEXT_CACHE_LOCK:
                                 current = _CORPUS_CONTEXT_CACHE.get(cache_key)
@@ -3669,8 +3685,12 @@ def _build_corpus_context_with_census(
                         else max(0.0, join_deadline - time.monotonic())
                     )
                     # Any thread may own the flight, a bulk pass included.
+                    check = request_budget.current_checkpoint()
+                    if check is not None:
+                        remaining = min(remaining, check.remaining())
                     with foreground_priority.awaiting_bulk():
                         completed = flight.done.wait(timeout=remaining)
+                request_budget.checkpoint()
             if not completed or (
                 not warm
                 and (not same_inputs or flight.discarded)
@@ -3752,13 +3772,14 @@ def _build_corpus_context_with_census(
         if census is not None and cache_key is not None:
             # Entered outside the update lock, so its queued samples are
             # emitted only after that lock releases.
-            with _census_walk_log() as publish_log, _CORPUS_CONTEXT_UPDATE_LOCK:
+            with _census_walk_log() as publish_log, request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
                 stable_census = census
                 # A busy watcher/media worker can change Markdown while the cold
                 # build runs. Once publication begins, serialize with event
                 # freshness+cache updates, absorb exact deltas, then stamp the same
                 # state atomically so a newer event context cannot be overwritten.
                 for _ in range(3):
+                    request_budget.checkpoint()
                     confirmed = _deferred_corpus_census(root, publish_log, "census")
                     if confirmed == stable_census:
                         break
@@ -3816,7 +3837,10 @@ def _build_corpus_context_with_census(
         )
     except BaseException as error:
         if flight is not None:
-            flight.error = error
+            if isinstance(error, request_budget.ReadBudgetExhausted):
+                flight.discarded = True
+            else:
+                flight.error = error
             _finish_corpus_context_flight(cache_key, flight)
         raise
     if flight is not None:
@@ -3832,10 +3856,12 @@ def _build_corpus_context_uncached(
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
+    request_budget.checkpoint()
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
     for disk_path in sorted(vault.walk_vault_md(root), key=lambda item: item.as_posix()):
+        request_budget.checkpoint()
         try:
             rel_path = disk_path.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
@@ -3856,10 +3882,11 @@ def _build_corpus_context_uncached(
     identity_census, _ = _build_identity_census(root, consume=consume)
     kb_prefix = vault.kb_root(root).relative_to(root).as_posix() + "/"
     for rel_path, disk_path in eligible.items():
+        request_budget.checkpoint()
         if rel_path.startswith(kb_prefix):
             continue
         try:
-            source = disk_path.read_bytes().decode("utf-8")
+            source = _read_corpus_source(root, disk_path)
         except (OSError, UnicodeDecodeError) as error:
             if (
                 activation.is_managed_governed_path(root, disk_path)
@@ -3884,12 +3911,20 @@ def _build_corpus_context_uncached(
     )
 
 
+
+def _read_corpus_source(root: Path, path: Path) -> str:
+    if request_budget.current_checkpoint() is None:
+        return path.read_bytes().decode("utf-8")
+    return vault.read_guarded_text(root, path)[0]
+
+
 def _build_identity_census(
     root: Path,
     *,
     consume: Callable[[str, str], None] | None = None,
 ) -> tuple[StableIdentityCensus, Mapping[str, str]]:
     """Validate canonical KB pages and immediately consume each page's raw text."""
+    request_budget.checkpoint()
     kb = vault.kb_root(root)
     entries: list[StableIdentityEntry] = []
 
@@ -3902,6 +3937,7 @@ def _build_identity_census(
                 "could not enumerate the stable-identity census",
             ) from error
         for child in children:
+            request_budget.checkpoint()
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
@@ -3960,7 +3996,7 @@ def _build_identity_census(
                 )
             rel = path.relative_to(root).as_posix()
             try:
-                source = path.read_bytes().decode("utf-8")
+                source = _read_corpus_source(root, path)
             except FileNotFoundError:
                 # Deleted between the stat and the read: the same window #528
                 # closed one call earlier, and the same answer. Splitting the
@@ -4047,6 +4083,7 @@ def _context_from_state_map(
     *,
     writer_visibility: Any = _DECIDE,
 ) -> SemanticCorpusContext:
+    request_budget.checkpoint()
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)

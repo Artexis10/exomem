@@ -91,6 +91,7 @@ import unicodedata
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache, wraps
 from pathlib import Path, PurePosixPath
@@ -109,6 +110,7 @@ from . import (
     logging_config,
     note_types,
     relation_registry,
+    request_budget,
     reserved_paths,
     semantic_language_registry,
     semantic_units,
@@ -351,12 +353,21 @@ class AuditReport:
         """Project raw diagnostic truth for action-first product consumers."""
         validate_presentation_controls(detail, legacy_sample_limit)
         upstream = _semantic_upstream_facts(self.metadata)
+        incomplete_presentation = (
+            {
+                "observation_complete": upstream["observation_complete"],
+                "legacy_backlog_complete": upstream["observation_complete"],
+            }
+            if (self.metadata or {}).get("coverage", {}).get("complete") is False
+            else {}
+        )
         if detail == "full":
             full_value = self.as_dict()
             full_value["detail"] = "full"
             full_value["presentation"] = {
                 "grouped_legacy_backlog": False,
                 "upstream_findings_complete": upstream["findings_complete"],
+                **incomplete_presentation,
                 "upstream_omitted_count": upstream["omitted_count"],
             }
             return full_value
@@ -399,6 +410,7 @@ class AuditReport:
             "grouped_legacy_backlog": bool(observed_count),
             "actionable_count": len(actionable),
             "upstream_findings_complete": upstream["findings_complete"],
+            **incomplete_presentation,
             "upstream_omitted_count": upstream["omitted_count"],
         }
         if self.metadata:
@@ -427,12 +439,13 @@ def _semantic_upstream_facts(metadata: dict | None) -> dict[str, Any]:
     omitted = semantic.get("omitted_counts") or {}
     truncation = semantic.get("truncation") or {}
     omitted_count = int(omitted.get("semantic_contract_findings") or 0)
+    complete = (metadata or {}).get("coverage", {}).get("complete", True)
     return {
         "summary": dict(semantic.get("semantic_contract_summary") or {}),
         "category_summary": dict(semantic.get("semantic_category_summary") or {}),
-        "omitted_count": omitted_count,
-        "observation_complete": bool(truncation.get("observation_complete", omitted_count == 0)),
-        "findings_complete": bool(truncation.get("findings_complete", omitted_count == 0)),
+        "omitted_count": None if semantic.get("interrupted") else omitted_count,
+        "observation_complete": bool(complete and truncation.get("observation_complete", omitted_count == 0)),
+        "findings_complete": bool(complete and truncation.get("findings_complete", omitted_count == 0)),
     }
 
 
@@ -500,8 +513,18 @@ def _one_log_parse(function: Callable[..., AuditReport]) -> Callable[..., AuditR
     def wrapped(*args: Any, **kwargs: Any) -> AuditReport:
         from . import usage
 
-        with usage.read_scope():
-            return function(*args, **kwargs)
+        budget = kwargs.get("budget")
+        if budget is None:
+            with usage.read_scope():
+                return function(*args, **kwargs)
+        token = request_budget.set_current(budget)
+        try:
+            with usage.read_scope(), request_budget.leaving(request_budget.DELIVERY_RESERVE_SECONDS):
+                check = request_budget.ReadCheckpoint(request_budget.current()) if budget is not None else None
+                with request_budget.checking(check):
+                    return function(*args, **kwargs)
+        finally:
+            request_budget.reset_current(token)
 
     return wrapped
 
@@ -518,6 +541,7 @@ def audit(
     retain_reflected_observations: bool = False,
     status_basis: lifecycle_statuses.Basis | None = None,
     source_context: bool = True,
+    budget: request_budget.RequestBudget | None = None,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
@@ -538,162 +562,254 @@ def audit(
     projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
     sense_scope = None
     release = _AUDIT_RELEASE_DEFAULT
-    if "corpus_contradictions" in selected:
-        sense_scope, release = _capture_audit_scope(vault_root)
     # An explicit entity-recurrence sweep reads only the pages that changed since the
     # last one. Every other composition keeps the full parse.
     from_store = selected == {"entity_recurrence"}
-    pages = (
-        []
-        if from_store or selected <= projection_checks
-        else _parse_all(kb, vault_root, keep=release)
-    )
+    corpus_complete = True
+    pages = []
+    try:
+        request_budget.checkpoint()
+        if "corpus_contradictions" in selected:
+            sense_scope, release = _capture_audit_scope(vault_root)
+        if not from_store and not selected <= projection_checks:
+            pages = _parse_all(kb, vault_root, keep=release)
+        request_budget.checkpoint()
+    except request_budget.ReadBudgetExhausted:
+        corpus_complete = False
+        budget.note_truncated("audit.corpus")
 
     findings: list[AuditFinding] = []
     metadata: dict = {}
     role_state = None
     backfill_cursors: dict[str, str] = {}
-    role_families = selected & {"artifact_role_promotion", "transient_state_review"}
-    if role_families:
-        from . import artifact_role_state
-        from .governance import egress
-        try:
-            with call_spans.span("audit.artifact_roles"):
-                role_state = artifact_role_state.build(vault_root, pages)
-                authorize = (
-                    egress.release_walk_filter(vault_root) if role_state["origins"] else None
-                ) or (lambda _path: True)
-                role_findings, coverage = artifact_role_state.inspect(
-                    vault_root, role_state, authorize, status_basis=status_basis
-                )
-            findings.extend(f for f in role_findings if f.category in role_families)
-            metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
-        except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
-            log.debug("artifact role audit unavailable", exc_info=True)
-            metadata["coverage"] = dict.fromkeys(sorted(role_families), "unknown")
-    link_categories = selected & {"broken_wikilink", "forward_reference"}
-    if link_categories:
-        findings.extend(_check_wikilinks(vault_root, pages, link_categories))
-    if "orphan_entity" in selected:
-        findings.extend(_check_orphan_entities(vault_root, pages))
-    if "unprocessed_source" in selected:
-        findings.extend(
-            _check_unprocessed_sources(
-                vault_root, pages, today=today, source_context=source_context
-            )
-        )
-    if "unresolved_source_citation" in selected:
-        findings.extend(_check_unresolved_source_citations(vault_root, pages))
-    if "index_drift" in selected:
-        findings.extend(_check_index_drift(vault_root))
-    if "tag_inconsistency" in selected:
-        findings.extend(_check_tag_inconsistency(pages))
-    if "frontmatter_compliance" in selected:
-        findings.extend(_check_frontmatter_compliance(pages, vault_root, status_basis=status_basis))
-    if "entity_type_unregistered" in selected:
-        findings.extend(_check_unregistered_entity_types(vault_root, pages))
-    if "unregistered_project_key" in selected:
-        findings.extend(_check_unregistered_project_keys(vault_root, pages))
-    if "embedding_drift" in selected:
-        findings.extend(_check_embedding_drift(vault_root))
-    if "graph_drift" in selected:
-        findings.extend(_check_graph_drift(vault_root))
-    if "reference_identity" in selected:
-        findings.extend(_check_reference_identity(vault_root))
-    if "relevance_pairs_pending" in selected:
-        findings.extend(_check_relevance_pairs_pending())
-    if "stale_review" in selected:
-        findings.extend(
-            _check_stale_review(vault_root, pages, today=today, status_basis=status_basis)
-        )
-    if "unfinished_experiments" in selected:
-        findings.extend(
-            _check_unfinished_experiments(vault_root, pages, today=today, status_basis=status_basis)
-        )
-    if "prediction_window" in selected:
-        findings.extend(
-            _check_prediction_window(vault_root, pages, today=today, status_basis=status_basis)
-        )
-    if "question_aging" in selected:
-        findings.extend(
-            _check_question_aging(vault_root, pages, today=today, status_basis=status_basis)
-        )
-    if "unreflected_outcomes" in selected:
-        outcome_findings, outcome_metadata = _check_unreflected_outcomes(vault_root)
-        findings.extend(outcome_findings)
-        if outcome_metadata:
-            metadata["unreflected_outcomes"] = outcome_metadata
-    if "unreflected_observations" in selected:
-        findings.extend(
-            _check_unreflected_observations(
-                vault_root,
-                pages,
-                now=now,
-                retain_reflected=retain_reflected_observations,
-                cursors_out=backfill_cursors,
-                status_basis=status_basis,
-            )
-        )
-    if "supersession_integrity" in selected:
-        findings.extend(_check_supersession_integrity(vault_root, pages))
-    if "corpus_contradictions" in selected:
-        findings.extend(
-            _check_corpus_contradictions(
-                vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
-            )
-        )
-    if "scope_divergence_semantic" in selected:
-        findings.extend(
-            _check_scope_divergence_semantic(vault_root, pages, status_basis=status_basis)
-        )
-    if "entity_recurrence" in selected:
-        findings.extend(
-            _check_entity_recurrence_from_store(vault_root, kb, status_basis=status_basis)
-            if from_store
-            else _check_entity_recurrence(vault_root, pages, status_basis=status_basis)
-        )
-    if "collection_candidate" in selected:
-        findings.extend(_check_collection_candidate(vault_root, pages, status_basis=status_basis))
-    if "relation_registry" in selected:
-        findings.extend(_check_relation_registry(vault_root))
-    if "relation_debt" in selected:
-        findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
-    if RELATION_GENERIC_SHARE_CATEGORY in selected:
-        from . import relation_census
+    completed: list[str] = []
 
-        review_findings, coverage = relation_census.generic_share_review(vault_root)
-        findings.extend(review_findings)
-        metadata.setdefault("coverage", {})[RELATION_GENERIC_SHARE_CATEGORY] = coverage
-    if "missing_sources" in selected:
-        findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
-    if "derivation_double_counting" in selected:
-        findings.extend(
-            _check_derivation_double_counting(vault_root, pages, status_basis=status_basis)
-        )
-    if "governance_receipts" in selected:
-        findings.extend(_check_governance_receipts(vault_root))
-    if "bridge_review" in selected:
-        findings.extend(_check_bridge_review(vault_root, today=today))
-    if "duplicated_sidecar" in selected:
-        findings.extend(_check_duplicated_sidecars(vault_root))
-    if "semantic_recall_isolation" in selected:
-        findings.extend(_check_semantic_recall_isolation(vault_root))
-    if "path_variants" in selected:
-        findings.extend(_check_path_variants(vault_root))
-    if "collection_view_corrections" in selected:
-        correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
-        findings.extend(correction_findings)
-        if correction_coverage is not None:
-            metadata.setdefault("coverage", {})["collection_view_corrections"] = correction_coverage
+    @contextmanager
+    def stage(names):
+        names = sorted(({names} if isinstance(names, str) else names) & selected)
+        if not names:
+            yield False
+            return
+        check = request_budget.current_checkpoint()
+        if not corpus_complete or (check is not None and check.remaining() <= 0):
+            for name in names:
+                budget.note_skipped(f"audit.{name}")
+                metadata.setdefault("coverage", {})[name] = "unknown"
+            yield False
+            return
+        before = len(findings)
+        previous_metadata = dict(metadata)
+        if "coverage" in metadata:
+            previous_metadata["coverage"] = dict(metadata["coverage"])
+        try:
+            yield True
+            request_budget.checkpoint()
+        except request_budget.ReadBudgetExhausted:
+            del findings[before:]
+            metadata.clear()
+            metadata.update(previous_metadata)
+            for name in names:
+                budget.note_truncated(f"audit.{name}")
+                metadata.setdefault("coverage", {})[name] = "unknown"
+        else:
+            for name in names:
+                coverage = metadata.get("coverage", {}).get(name, "complete")
+                if isinstance(coverage, Mapping):
+                    coverage = coverage.get("status")
+                # The producer coverage protocol proves a full check only with "complete".
+                if budget is None or coverage == "complete":
+                    completed.append(name)
+
+    role_families = selected & {"artifact_role_promotion", "transient_state_review"}
+    with stage(role_families) as run:
+        if run:
+            from . import artifact_role_state
+            from .governance import egress
+            try:
+                with call_spans.span("audit.artifact_roles"):
+                    role_state = artifact_role_state.build(vault_root, pages)
+                    authorize = (
+                        egress.release_walk_filter(vault_root) if role_state["origins"] else None
+                    ) or (lambda _path: True)
+                    role_findings, coverage = artifact_role_state.inspect(
+                        vault_root, role_state, authorize, status_basis=status_basis
+                    )
+                findings.extend(f for f in role_findings if f.category in role_families)
+                metadata["coverage"] = {key: coverage[key] for key in sorted(role_families)}
+            except Exception:  # noqa: BLE001 - measurement failure is explicit, never a write failure
+                log.debug("artifact role audit unavailable", exc_info=True)
+                metadata["coverage"] = dict.fromkeys(sorted(role_families), "unknown")
+    link_categories = selected & {"broken_wikilink", "forward_reference"}
+    with stage(link_categories) as run:
+        if run:
+            findings.extend(_check_wikilinks(vault_root, pages, link_categories))
+    with stage('orphan_entity') as run:
+        if run:
+            findings.extend(_check_orphan_entities(vault_root, pages))
+    with stage('unprocessed_source') as run:
+        if run:
+            findings.extend(
+                _check_unprocessed_sources(
+                    vault_root, pages, today=today, source_context=source_context
+                )
+            )
+    with stage('unresolved_source_citation') as run:
+        if run:
+            findings.extend(_check_unresolved_source_citations(vault_root, pages))
+    with stage('index_drift') as run:
+        if run:
+            findings.extend(_check_index_drift(vault_root))
+    with stage('tag_inconsistency') as run:
+        if run:
+            findings.extend(_check_tag_inconsistency(pages))
+    with stage('frontmatter_compliance') as run:
+        if run:
+            findings.extend(_check_frontmatter_compliance(pages, vault_root, status_basis=status_basis))
+    with stage('entity_type_unregistered') as run:
+        if run:
+            findings.extend(_check_unregistered_entity_types(vault_root, pages))
+    with stage('unregistered_project_key') as run:
+        if run:
+            findings.extend(_check_unregistered_project_keys(vault_root, pages))
+    with stage('embedding_drift') as run:
+        if run:
+            findings.extend(_check_embedding_drift(vault_root))
+    with stage('graph_drift') as run:
+        if run:
+            findings.extend(_check_graph_drift(vault_root))
+    with stage('reference_identity') as run:
+        if run:
+            findings.extend(_check_reference_identity(vault_root))
+    with stage('relevance_pairs_pending') as run:
+        if run:
+            findings.extend(_check_relevance_pairs_pending())
+    with stage('stale_review') as run:
+        if run:
+            findings.extend(
+                _check_stale_review(vault_root, pages, today=today, status_basis=status_basis)
+            )
+    with stage('unfinished_experiments') as run:
+        if run:
+            findings.extend(
+                _check_unfinished_experiments(vault_root, pages, today=today, status_basis=status_basis)
+            )
+    with stage('prediction_window') as run:
+        if run:
+            findings.extend(
+                _check_prediction_window(vault_root, pages, today=today, status_basis=status_basis)
+            )
+    with stage('question_aging') as run:
+        if run:
+            findings.extend(
+                _check_question_aging(vault_root, pages, today=today, status_basis=status_basis)
+            )
+    with stage('unreflected_outcomes') as run:
+        if run:
+            outcome_findings, outcome_metadata = _check_unreflected_outcomes(vault_root)
+            findings.extend(outcome_findings)
+            if outcome_metadata:
+                metadata["unreflected_outcomes"] = outcome_metadata
+    with stage('unreflected_observations') as run:
+        if run:
+            findings.extend(
+                _check_unreflected_observations(
+                    vault_root,
+                    pages,
+                    now=now,
+                    retain_reflected=retain_reflected_observations,
+                    cursors_out=backfill_cursors,
+                    status_basis=status_basis,
+                )
+            )
+    with stage('supersession_integrity') as run:
+        if run:
+            findings.extend(_check_supersession_integrity(vault_root, pages))
+    with stage('corpus_contradictions') as run:
+        if run:
+            findings.extend(
+                _check_corpus_contradictions(
+                    vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
+                )
+            )
+    with stage('scope_divergence_semantic') as run:
+        if run:
+            findings.extend(
+                _check_scope_divergence_semantic(vault_root, pages, status_basis=status_basis)
+            )
+    with stage('entity_recurrence') as run:
+        if run:
+            findings.extend(
+                _check_entity_recurrence_from_store(vault_root, kb, status_basis=status_basis)
+                if from_store
+                else _check_entity_recurrence(vault_root, pages, status_basis=status_basis)
+            )
+    with stage('collection_candidate') as run:
+        if run:
+            findings.extend(_check_collection_candidate(vault_root, pages, status_basis=status_basis))
+    with stage('relation_registry') as run:
+        if run:
+            findings.extend(_check_relation_registry(vault_root))
+    with stage('relation_debt') as run:
+        if run:
+            findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
+    with stage(RELATION_GENERIC_SHARE_CATEGORY) as run:
+        if run:
+            from . import relation_census
+
+            review_findings, coverage = relation_census.generic_share_review(vault_root)
+            findings.extend(review_findings)
+            metadata.setdefault("coverage", {})[RELATION_GENERIC_SHARE_CATEGORY] = coverage
+    with stage('missing_sources') as run:
+        if run:
+            findings.extend(_check_missing_sources(vault_root, pages, status_basis=status_basis))
+    with stage('derivation_double_counting') as run:
+        if run:
+            findings.extend(
+                _check_derivation_double_counting(vault_root, pages, status_basis=status_basis)
+            )
+    with stage('governance_receipts') as run:
+        if run:
+            findings.extend(_check_governance_receipts(vault_root))
+    with stage('bridge_review') as run:
+        if run:
+            findings.extend(_check_bridge_review(vault_root, today=today))
+    with stage('duplicated_sidecar') as run:
+        if run:
+            findings.extend(_check_duplicated_sidecars(vault_root))
+    with stage('semantic_recall_isolation') as run:
+        if run:
+            findings.extend(_check_semantic_recall_isolation(vault_root))
+    with stage('path_variants') as run:
+        if run:
+            findings.extend(_check_path_variants(vault_root))
+    with stage('collection_view_corrections') as run:
+        if run:
+            correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
+            findings.extend(correction_findings)
+            if correction_coverage is not None:
+                metadata.setdefault("coverage", {})["collection_view_corrections"] = correction_coverage
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
-    if semantic_categories:
-        semantic_findings, semantic_metadata = _check_semantic_contract_drift(
-            vault_root,
-            categories=semantic_categories,
-            detail=semantic_detail,
-        )
-        findings.extend(semantic_findings)
-        metadata["semantic_contract_drift"] = semantic_metadata
+    with stage(semantic_categories) as run:
+        if run:
+            semantic_findings, semantic_metadata = _check_semantic_contract_drift(
+                vault_root,
+                categories=semantic_categories,
+                detail=semantic_detail,
+            )
+            findings.extend(semantic_findings)
+            metadata["semantic_contract_drift"] = semantic_metadata
+
+    if budget is not None:
+        coverage = metadata.setdefault("coverage", {})
+        coverage["corpus_complete"] = corpus_complete and semantic_categories <= set(completed)
+        coverage["completed_categories"] = completed
+        coverage["requested_categories"] = sorted(selected)
+        coverage["complete"] = coverage["corpus_complete"] and selected <= set(completed)
+        if semantic_categories and not semantic_categories <= set(completed):
+            metadata["semantic_contract_drift"] = {
+                "interrupted": True,
+                "truncation": {"findings_complete": False, "observation_complete": False},
+            }
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -746,6 +862,7 @@ def _check_bridge_review(
     effective_today = today or dt.date.today()
     findings: list[AuditFinding] = []
     for grant in compiled.release_grants:
+        request_budget.checkpoint()
         signal = bridges.review_signal(
             Path(vault_root),
             grant,
@@ -794,6 +911,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     """
     findings: list[AuditFinding] = []
     for directory, subdirs, files in os.walk(vault_root):
+        request_budget.checkpoint()
         subdirs[:] = sorted(
             name for name in subdirs
             if not name.startswith(".") and name not in VAULT_WALK_SKIP_DIRS
@@ -803,16 +921,19 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
         prefix = "" if parent == "." else f"{parent}/"
         defects: dict[str, list[str]] = {}
         for name in names:
+            request_budget.checkpoint()
             defects.setdefault(vault_module.vault_name_key(name), []).append(name)
         loose: dict[str, list[str]] = {}
         for name in names:
             # Letters and digits only: separators and punctuation are not identity.
+            request_budget.checkpoint()
             loose_key = "".join(
                 char for char in vault_module.vault_name_key(name, form="NFKC") if char.isalnum()
             )
             loose.setdefault(loose_key, []).append(name)
         in_defect = {name for group in defects.values() if len(group) > 1 for name in group}
         for group in defects.values():
+            request_budget.checkpoint()
             if len(group) > 1:
                 findings.append(
                     AuditFinding(
@@ -831,6 +952,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                     )
                 )
         for key, group in loose.items():
+            request_budget.checkpoint()
             if key and len(group) > 1 and not set(group) <= in_defect:
                 findings.append(
                     AuditFinding(
@@ -862,6 +984,7 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
 
     findings: list[AuditFinding] = []
     for sidecar in sidecar_repair.iter_media_sidecars(vault_root):
+        request_budget.checkpoint()
         try:
             content, _guard = vault_module.read_guarded_text(vault_root, sidecar)
         except (OSError, UnicodeError, vault_module.PathGuardError):
@@ -1882,6 +2005,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     census = semantic_recall_isolation_census(vault_root)
     for item in census.safe_dicts():
+        request_budget.checkpoint()
         component = item["component"]
         findings.append(
             AuditFinding(
@@ -1894,6 +2018,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             )
         )
     for item in census.corrupt_dicts():
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
                 category="semantic_recall_isolation",
@@ -1905,6 +2030,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             )
         )
     for row in census.missing_rows:
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
                 category="semantic_recall_isolation",
@@ -1916,6 +2042,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             )
         )
     for component, remaining in census.truncation.items():
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
                 category="semantic_recall_isolation",
@@ -1931,6 +2058,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
             )
         )
     for component, code in census.incomplete.items():
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
                 category="semantic_recall_isolation",
@@ -1949,7 +2077,7 @@ def _check_governance_receipts(vault_root: Path) -> list[AuditFinding]:
     """Project receipt-chain evidence problems without touching its sidecar."""
     from .governance import receipts
 
-    report = receipts.verify_chain(vault_root)
+    report = receipts.verify_chain(vault_root, checkpoint=request_budget.current_checkpoint())
     findings = [
         AuditFinding(
             category="governance_receipts",
@@ -2001,6 +2129,7 @@ def _check_semantic_contract_drift(
     out: list[AuditFinding] = []
     selected = set(categories or {"semantic_contract_drift"})
     for item in batch["semantic_contract_findings"]:
+        request_budget.checkpoint()
         projected_categories = _selected_semantic_categories(item, selected)
         if not projected_categories:
             continue
@@ -2019,6 +2148,7 @@ def _check_semantic_contract_drift(
         ).hexdigest()[:16]
         actions = item["actions"]
         for category in projected_categories:
+            request_budget.checkpoint()
             out.append(
                 AuditFinding(
                     category=category,
@@ -2129,6 +2259,7 @@ def _parse_all(
     )
     pages: list[find_module.ParsedPage] = []
     for path in find_module._walk_md(kb):
+        request_budget.checkpoint()
         rel = path.relative_to(vault_root).as_posix()
         if not egress.content_permits(vault_root, rel, who):
             continue
@@ -2161,6 +2292,7 @@ def _check_unregistered_entity_types(
     prefix = f"{kb_prefix()}Entities/"
     entities: list[tuple[find_module.ParsedPage, str]] = []
     for page in pages:
+        request_budget.checkpoint()
         if not page.rel_path.startswith(prefix):
             continue
         remainder = page.rel_path[len(prefix):]
@@ -2222,6 +2354,7 @@ def _check_unregistered_entity_types(
         base = derived_folder(type_id)
         attempt = 0
         while attempt <= 1000:
+            request_budget.checkpoint()
             if attempt == 0:
                 folder = source_folder
             elif attempt == 1:
@@ -2281,6 +2414,7 @@ def _check_unregistered_entity_types(
     authored_type_folder_spelling: dict[tuple[str, str], str] = {}
     unknown_entities: list[tuple[find_module.ParsedPage, str, str]] = []
     for page, folder in sorted(entities, key=lambda item: item[0].rel_path):
+        request_budget.checkpoint()
         key = folder.casefold()
         folder_pages.setdefault(key, []).append(page)
         folder_spelling.setdefault(key, folder)
@@ -2312,6 +2446,7 @@ def _check_unregistered_entity_types(
 
     carrier_path_by_type_folder: dict[tuple[str, str], str] = {}
     for page, folder, type_id in unknown_entities:
+        request_budget.checkpoint()
         carrier_path_by_type_folder.setdefault((type_id, folder.casefold()), page.rel_path)
 
     def proposal_meta(
@@ -2355,6 +2490,7 @@ def _check_unregistered_entity_types(
 
     findings: list[AuditFinding] = []
     for page, folder, type_id in unknown_entities:
+        request_budget.checkpoint()
         raw_type = str(page.frontmatter["entity_type"])
         label = type_id.replace("-", " ").title()
         entry, proposal, reason = proposed_entry(
@@ -2383,6 +2519,7 @@ def _check_unregistered_entity_types(
         )
 
     for key in sorted(folder_pages):
+        request_budget.checkpoint()
         members = sorted(folder_pages[key], key=lambda page: page.rel_path)
         if len(members) < 3 or registry.by_folder.get(key) is not None:
             continue
@@ -2447,6 +2584,7 @@ def _check_wikilinks(
     names_to_paths: dict[str, list[str]] = {}  # bare filename (no ext) → vault-rel paths
     titles_to_paths: dict[str, list[str]] = {}  # lower(frontmatter title) → paths
     for md_path in _walk_vault_md(vault_root):
+        request_budget.checkpoint()
         try:
             rel = md_path.relative_to(vault_root).as_posix()
         except ValueError:
@@ -2469,8 +2607,10 @@ def _check_wikilinks(
     for page in pages:
         # Skip wikilinks inside fenced code blocks and inline code spans —
         # `[[:space:]]` and similar regex/bash snippets aren't real links.
+        request_budget.checkpoint()
         body_masked = _mask_code_spans(page.body)
         for match in WIKILINK_PATTERN.finditer(body_masked):
+            request_budget.checkpoint()
             target = match.group(1).strip()
             if target.endswith("/"):
                 # Folder hub link, not a page link.
@@ -2590,6 +2730,7 @@ def _check_unresolved_source_citations(
     type_basis = note_types.Basis(root)
     findings: list[AuditFinding] = []
     for page in sorted(pages, key=lambda item: item.rel_path.encode("utf-8")):
+        request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.compiled) or not page.frontmatter.get(
             "sources"
         ):
@@ -2697,21 +2838,26 @@ def _check_orphan_entities(
     for page in pages:
         # Don't count self-references and don't count from inside Entities/index.md
         # (those are hub listings, not real "uses").
+        request_budget.checkpoint()
         if page.rel_path.endswith("/Entities/index.md") or page.rel_path == (
             f"{kb_prefix()}Entities/index.md"
         ):
             continue
         # A carrier is recorded data, not a use of the entity it names.
         for match in WIKILINK_PATTERN.finditer(provenance_module.without_carriers(page.body)):
+            request_budget.checkpoint()
             target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
             if target:
                 referenced.add(target)
         # Frontmatter wikilinks (sources, related, supersedes, etc.) count too.
         for value in page.frontmatter.values():
+            request_budget.checkpoint()
             for link in _extract_wikilinks_from_value(value):
+                request_budget.checkpoint()
                 referenced.add(link.removeprefix(kb_prefix()).lstrip("/"))
 
     for page in pages:
+        request_budget.checkpoint()
         if not page.rel_path.startswith(f"{kb_prefix()}Entities/"):
             continue
         if page.path.name == "index.md":
@@ -2793,6 +2939,7 @@ def _check_unprocessed_sources(
 
     rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
     for page in pages:
+        request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.captured_source):
             continue
         # A conversation recap is not a backlog item: every conversation writes
@@ -2905,6 +3052,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
         return findings
     declared: dict[str, int] = {}
     for m in _COUNTS_ROW_PATTERN.finditer(text):
+        request_budget.checkpoint()
         label, subcat, count = m.group(1), (m.group(2) or "").strip().lower(), int(m.group(3))
         key = f"{label.lower()}:{subcat}" if subcat else label.lower()
         declared[key] = count
@@ -2919,12 +3067,15 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
         "entities": sum(entities.values()),
     }
     for type_key, n in notes.items():
+        request_budget.checkpoint()
         actual[f"notes:{type_key}"] = n
     for type_key, n in entities.items():
+        request_budget.checkpoint()
         actual[f"entities:{type_key}"] = n
 
     # Compare. Only flag drift for keys present in declared (the index defines what's tracked).
     for key, declared_count in declared.items():
+        request_budget.checkpoint()
         actual_count = actual.get(key)
         if actual_count is None:
             findings.append(
@@ -3008,21 +3159,26 @@ def _check_tag_inconsistency(
     # raw_tag -> list of pages using it
     raw_to_pages: dict[str, list[str]] = {}
     for page in pages:
+        request_budget.checkpoint()
         for raw in _extract_tags(page.frontmatter.get("tags")):
+            request_budget.checkpoint()
             raw_to_pages.setdefault(raw, []).append(page.rel_path)
 
     # Group raw tags by normalized key.
     norm_to_raws: dict[str, list[str]] = {}
     for raw in raw_to_pages:
+        request_budget.checkpoint()
         norm_to_raws.setdefault(_normalize_tag(raw), []).append(raw)
 
     # Variant clusters: normalized keys with >1 raw variant.
     for raws in norm_to_raws.values():
+        request_budget.checkpoint()
         if len(raws) < 2:
             continue
         # Canonical = the most-used raw variant; ties broken by lex order.
         canonical = max(raws, key=lambda r: (len(raw_to_pages[r]), r))
         for raw in raws:
+            request_budget.checkpoint()
             if raw == canonical:
                 continue
             using_pages = raw_to_pages[raw]
@@ -3092,6 +3248,7 @@ def _check_frontmatter_compliance(
     type_basis = note_types.Basis(vault_root)
     tenant_scoped = project_keys_module.load_project_registry(vault_root).tenant_scoped
     for page in pages:
+        request_budget.checkpoint()
         fm = page.frontmatter
         excluded = vault_module.first_excluded_field(fm)
         if excluded is not None:
@@ -3254,6 +3411,7 @@ def _check_unregistered_project_keys(
     valid = set(registry.project_to_folder.keys())
     findings: list[AuditFinding] = []
     for page in pages:
+        request_budget.checkpoint()
         fm = page.frontmatter
         if not isinstance(fm, dict):
             continue
@@ -3264,9 +3422,11 @@ def _check_unregistered_project_keys(
         plural = fm.get("projects")
         if isinstance(plural, list):
             for v in plural:
+                request_budget.checkpoint()
                 if isinstance(v, str) and v:
                     seen.append(("projects", v))
         for field, key in seen:
+            request_budget.checkpoint()
             if key in valid:
                 continue
             findings.append(
@@ -3300,6 +3460,7 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
 
     findings: list[AuditFinding] = []
     for item in memory_refs.scan_issues(vault_root):
+        request_budget.checkpoint()
         kind = item["kind"]
         value = item["value"]
         findings.append(
@@ -3316,6 +3477,7 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
             )
         )
     for item in memory_refs.drift(vault_root):
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
             category="reference_identity",
@@ -3336,6 +3498,7 @@ def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
 
     findings: list[AuditFinding] = []
     for item in epistemic_graph.graph_drift(vault_root):
+        request_budget.checkpoint()
         path = str(item.get("path") or kb_prefix())
         if path.lower().endswith(".md"):
             safe_path = _safe_persisted_markdown_rel(path)
@@ -3368,6 +3531,7 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
     report = memory_schema.validate_relation_registry(vault_root)
     findings: list[AuditFinding] = []
     for item in report["findings"]:
+        request_budget.checkpoint()
         findings.append(
             AuditFinding(
             category="relation_registry",
@@ -3425,6 +3589,7 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         conn.close()
     seen: set[str] = set()
     for rel_path, row_mtime in rows:
+        request_budget.checkpoint()
         safe_rel = _safe_persisted_markdown_rel(rel_path)
         if safe_rel is None or safe_rel in seen:
             continue
@@ -3487,6 +3652,7 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     scope = index_paths.index_scope()
     never_walk = index_paths.iter_index_markdown(vault_root)
     for md in never_walk:
+        request_budget.checkpoint()
         if not index_paths.is_embeddable_path(md):
             continue
         try:
@@ -3577,6 +3743,7 @@ def _check_relevance_pairs_pending(
     new_queries: set[str] = set()
     pairs_in_window = 0
     for w in writes:
+        request_budget.checkpoint()
         if w.get("tool") not in ("note", "replace"):
             continue
         try:
@@ -3587,6 +3754,7 @@ def _check_relevance_pairs_pending(
         if not cited:
             continue
         for q in queries:
+            request_budget.checkpoint()
             try:
                 q_ts = dt.datetime.fromisoformat(q.get("ts", ""))
             except (ValueError, TypeError):
@@ -3668,6 +3836,7 @@ def _check_relation_debt(
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
     for page in pages:
+        request_budget.checkpoint()
         if not relation_debt_eligible(
             vault_root,
             page_type=page.page_type,
@@ -3740,6 +3909,7 @@ def _check_missing_sources(
     type_basis = note_types.Basis(vault_root)
     findings: list[AuditFinding] = []
     for page in pages:
+        request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.sources_required):
             continue
         if page.path.name in ("index.md", "log.md"):
@@ -4028,6 +4198,7 @@ def _check_derivation_double_counting(
 
     # -- circular derivation: any node with outgoing `sources:` edges may loop.
     for key in sorted(direct_sources):
+        request_budget.checkpoint()
         if not direct_sources[key]:
             continue
         result = walk(key)
@@ -4070,6 +4241,7 @@ def _check_derivation_double_counting(
     # snapshot page is EXPECTED to fan its `sources:` out from a shared root
     # and would otherwise dominate this queue with non-actionable noise.
     for page in pages:
+        request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.sources_required):
             continue
         if page.path.name in ("index.md", "log.md"):
@@ -4091,6 +4263,7 @@ def _check_derivation_double_counting(
         closures: dict[str, frozenset[str]] = {}
         page_reasons: set[str] = set()
         for source_key in directs:
+            request_budget.checkpoint()
             result = walk(source_key)
             closures[source_key] = frozenset({source_key}) | result.ancestors
             page_reasons |= result.truncated_reasons
@@ -4098,8 +4271,11 @@ def _check_derivation_double_counting(
 
         collapse_roots: dict[str, set[str]] = {}
         for i, a in enumerate(directs):
+            request_budget.checkpoint()
             for b in directs[i + 1 :]:
+                request_budget.checkpoint()
                 for shared_root in closures[a] & closures[b]:
+                    request_budget.checkpoint()
                     collapse_roots.setdefault(shared_root, set()).update({a, b})
         # A page can never be its own shared ancestor — a back-citing source
         # placing `key` in its own closure is a cycle, reported separately.
@@ -4111,6 +4287,7 @@ def _check_derivation_double_counting(
         collapse_roots = _nearest_shared_roots(collapse_roots, walk)
 
         for root in sorted(collapse_roots):
+            request_budget.checkpoint()
             via = sorted(collapse_roots[root])
             findings.append(
                 AuditFinding(
@@ -4246,6 +4423,7 @@ def _check_unfinished_experiments(
     today = today or dt.date.today()
     rows: list[tuple[int, str, AuditFinding]] = []
     for page in pages:
+        request_budget.checkpoint()
         if page.page_type != "experiment":
             continue
         if page.path.name in ("index.md", "log.md"):
@@ -4375,6 +4553,7 @@ def _check_prediction_window(
 
     rows: list[tuple[int, str, str, AuditFinding]] = []
     for page in pages:
+        request_budget.checkpoint()
         if page.path.name in ("index.md", "log.md"):
             continue
         if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
@@ -4398,6 +4577,7 @@ def _check_prediction_window(
             page_type=page.page_type,
         )
         for unit in document.rich_units:
+            request_budget.checkpoint()
             if not unit.check_by:
                 continue
             due = _parse_fm_date(unit.check_by)
@@ -5270,6 +5450,7 @@ def _check_unreflected_observations(
     stored_cursors = stored_cursors if isinstance(stored_cursors, Mapping) else {}
     scans: dict[str, dict[str, Any]] = {}
     for target in targets:
+        request_budget.checkpoint()
         manifest = due_state._load_manifest(root, str(target.collection))
         if manifest is None:
             continue
@@ -5290,6 +5471,7 @@ def _check_unreflected_observations(
         (target, collection_claims.normalize_terms(target.claims)) for target in targets
     ]
     for page in sorted(pages, key=lambda page: page.rel_path):
+        request_budget.checkpoint()
         if not (
             page.rel_path.startswith(f"{kb_prefix()}Notes/")
             or page.rel_path.startswith(f"{kb_prefix()}Evidence/")
@@ -5320,6 +5502,7 @@ def _check_unreflected_observations(
                 observation_ref, observed_at.isoformat(), artifact_path
             )
             for target in _backfill_prefilter(page, prefilter_targets):
+                request_budget.checkpoint()
                 scan = scans.get(str(target.collection))
                 if scan is None or page.rel_path <= scan["start"]:
                     continue
@@ -5350,6 +5533,7 @@ def _check_unreflected_observations(
         matched = list(routing.get("matched_terms") or ())
         reflectors = []
         for record in snapshot.records if snapshot is not None else ():
+            request_budget.checkpoint()
             if record.ambiguous:
                 continue
             support = _record_observation_support(
@@ -5409,6 +5593,7 @@ def _check_unreflected_observations(
     for collection, scan in sorted(scans.items()):
         # The window this recompute scanned: after the start cursor, up to the
         # last charged page when the budget ran out, else to the end.
+        request_budget.checkpoint()
         end = scan["last"] if scan["exhausted"] else None
         next_cursor = end or ""
         if cursors_out is not None and next_cursor:
@@ -5417,6 +5602,7 @@ def _check_unreflected_observations(
         prior = previous.get(collection)
         if prior is not None and prior.get("claims_signal") == scan["signal"]:
             for row in prior.get("pages") or ():
+                request_budget.checkpoint()
                 path = row.get("path") if isinstance(row, Mapping) else None
                 if type(path) is not str or path in rows:
                     continue
@@ -5560,6 +5746,7 @@ def _check_collection_candidate(
     relations = relation_registry.load_registry(root)
     rows: list[dict[str, Any]] = []
     for page in pages:
+        request_budget.checkpoint()
         if not page.rel_path.startswith(f"{kb_prefix()}Notes/") or not authorize(
             page.rel_path
         ):
@@ -5581,6 +5768,7 @@ def _check_collection_candidate(
             page_type=page.page_type,
         )
         for unit in document.units:
+            request_budget.checkpoint()
             if not unit.unit_ref:
                 continue
             rows.append(
@@ -5722,6 +5910,7 @@ def _check_unreflected_outcomes(
     bindings, unevaluated = _outcome_bindings(vault_root, authorize=authorize)
     findings: list[AuditFinding] = []
     for binding in bindings:
+        request_budget.checkpoint()
         pair_findings, _ = _unreflected_for_binding(vault_root, binding, authorize)
         findings.extend(pair_findings)
     findings.sort(key=lambda finding: (finding.path, str((finding.meta or {}).get("plan_item"))))
@@ -5800,6 +5989,7 @@ def _check_question_aging(
 
     rows: list[tuple[int, str, str, AuditFinding]] = []
     for page in pages:
+        request_budget.checkpoint()
         if page.path.name in ("index.md", "log.md"):
             continue
         if not status_basis.classify(page.frontmatter.get("status"), path=page.rel_path, frontmatter=page.frontmatter).live:
@@ -5827,6 +6017,7 @@ def _check_question_aging(
             page_type=page.page_type,
         )
         for unit in document.rich_units:
+            request_budget.checkpoint()
             if unit.category != _QUESTION_CATEGORY:
                 continue
             if unit.verdict:
@@ -5946,6 +6137,7 @@ def _check_supersession_integrity(
     known: set[str] = set()
     by_stem: dict[str, list[str]] = {}
     for page in pages:
+        request_budget.checkpoint()
         rel = page.rel_path
         known.add(rel)
         known.add(rel[:-3] if rel.endswith(".md") else rel)
@@ -5963,6 +6155,7 @@ def _check_supersession_integrity(
         # tinguishable from the rot this check exists to find.
         prefixed = target if target.startswith(kb_prefix()) else f"{kb_prefix()}{target}"
         for candidate in (target, f"{target}.md", prefixed, f"{prefixed}.md"):
+            request_budget.checkpoint()
             if candidate in known:
                 return candidate if candidate.endswith(".md") else f"{candidate}.md"
         # A bare name is a legitimate Obsidian spelling; resolve it only when it
@@ -5976,6 +6169,7 @@ def _check_supersession_integrity(
         # Last resort: the page may live outside the walked set (a curated tree),
         # so believe the filesystem before calling a pointer broken.
         for candidate in (target, f"{target}.md", prefixed, f"{prefixed}.md"):
+            request_budget.checkpoint()
             if (vault_root / candidate).exists():
                 return candidate if candidate.endswith(".md") else f"{candidate}.md"
         return None
@@ -5985,13 +6179,16 @@ def _check_supersession_integrity(
     resolved_edges: list[tuple[str, str]] = []  # (older, newer)
 
     for page in pages:
+        request_budget.checkpoint()
         if page.path.name in ("index.md", "log.md"):
             continue
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         in_scope.append(page)
         for pointer in _SUPERSESSION_POINTERS:
+            request_budget.checkpoint()
             for raw in getattr(page, pointer):
+                request_budget.checkpoint()
                 target = _resolve(raw)
                 if target is None:
                     partition = content_hash(
@@ -6338,6 +6535,7 @@ def _check_stale_review(
 
     rows: list[tuple[float, int, AuditFinding]] = []
     for page in pages:
+        request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.stale_reviewed):
             continue
         if page.path.name in ("index.md", "log.md"):
@@ -6846,6 +7044,7 @@ def _check_scope_divergence_semantic(
     )
     findings: list[AuditFinding] = []
     for rel_path in sorted(eligible):
+        request_budget.checkpoint()
         rows = grouped.get(rel_path)
         if not rows:
             continue  # no stored geometry -> not judged, never advised about

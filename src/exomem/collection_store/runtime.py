@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-from .. import call_spans, foreground_priority, state_paths
+from .. import call_spans, foreground_priority, request_budget, state_paths
 from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -1131,6 +1131,7 @@ class _Call:
         self.work = work
         self.wake_maintenance = wake_maintenance
         self.read_only = read_only
+        self.checkpoint = request_budget.current_checkpoint() if read_only else None
         self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
         self.taken = False
         self.done = threading.Event()
@@ -1231,15 +1232,28 @@ class StoreServer:
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
 
+        checkpoint = request_budget.current_checkpoint() if read_only else None
+        if checkpoint is not None:
+            checkpoint()
         entry = time.monotonic()
-        completion_deadline = acknowledgement_budget_deadline(entry)
+        # The explicit read allowance already reserves delivery; mutation acknowledgements reserve it separately.
+        completion_deadline = (
+            entry + checkpoint.remaining() if checkpoint is not None else acknowledgement_budget_deadline(entry)
+        )
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
         # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
         # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
         # The wait ends at the acceptance deadline, which the queue wait below shares.
         with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
                 call_spans.span("store.admission_wait"):
-            self.manager.await_store_admission(deadline)
+            try:
+                self.manager.await_store_admission(deadline)
+            except Exception:
+                if checkpoint is not None:
+                    checkpoint()
+                raise
+        if checkpoint is not None:
+            checkpoint()
         def refuse(error):
             if on_refusal is not None:
                 on_refusal(error, time.monotonic() - entry)
@@ -1278,12 +1292,21 @@ class StoreServer:
                     break
                 self._condition.wait(remaining)
         if refusal is not None:
+            if checkpoint is not None:
+                checkpoint()
             raise refuse(refusal)
         # The worker owns accepted work's priority; a waiting caller must not park its bulk dependencies.
         waiting = (foreground_priority.awaiting_bulk if foreground_priority._holds_a_boundary()
                    else foreground_priority.outside_foreground)
         with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+        if not completed and checkpoint is not None:
+            # Accepted audited reads stop at their next unit; retain ownership until they unwind.
+            with waiting():
+                request.done.wait()
+            if request.error is not None:
+                raise request.error
+            checkpoint()
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
             raise self._busy_refusal(
@@ -1488,6 +1511,7 @@ class StoreServer:
 
         def bound():
             with ExitStack() as scope:
+                scope.enter_context(request_budget.checking(None))
                 if request.read_only:
                     # Opened here, inside the work, so each view lives exactly as long as the work
                     # does: a caller that gets MUTATION_ACKNOWLEDGEMENT_PENDING returns while this
@@ -1507,7 +1531,14 @@ class StoreServer:
                     scope.enter_context(ownership.read_scope(self.root, initial=request.initial))
                 self._scope = scope
                 try:
-                    return request.work()
+                    # Checkout and cleanup may maintain canonical state; only the accepted read is cancellable.
+                    with request_budget.checking(request.checkpoint):
+                        if request.checkpoint is not None:
+                            request.checkpoint()
+                        result = request.work()
+                        if request.checkpoint is not None:
+                            request.checkpoint()
+                        return result
                 finally:
                     self._scope = None
 

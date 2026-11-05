@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from . import activation, find_corpus, lifecycle_statuses, note_types
+from . import activation, find_corpus, lifecycle_statuses, note_types, request_budget
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
 
@@ -143,8 +143,7 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
 
 
 def _checkpoint(index: Mapping[str, Any]) -> None:
-    from . import request_budget
-
+    request_budget.checkpoint()
     deadline = index.get("_deadline")
     if deadline is not None and (
         time.monotonic() >= deadline or not request_budget.can_afford(0.05)
@@ -402,13 +401,16 @@ def build(root: Path, parsed_pages: list[Any]) -> dict[str, Any]:
         "dependencies": {},
     }
     for parsed in parsed_pages:
+        request_budget.checkpoint()
         state = _state(root, parsed)
         page = describe(root, state)
         index["pages"][state.path] = page
         _register(index, page)
     for path in index["pages"]:
+        request_budget.checkpoint()
         _edges(index, path)
     for path, page in index["pages"].items():
+        request_budget.checkpoint()
         if page["type"] == "experiment":
             try:
                 index["origins"][path] = _origin(index, path)

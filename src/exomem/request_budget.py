@@ -283,3 +283,67 @@ def leaving(reserve: float) -> Iterator[None]:
             parent.note_skipped(stage)
         for stage in child.truncated:
             parent.note_truncated(stage)
+
+
+class ReadBudgetExhausted(BaseException):
+    """Stop owned read work without converting interruption into a fallback scan."""
+
+
+_READ_CHECKPOINT: ContextVar[ReadCheckpoint | None] = ContextVar(
+    "exomem_read_checkpoint", default=None
+)
+
+
+class ReadCheckpoint:
+    """The same allowance on the caller and its accepted read batches."""
+
+    def __init__(self, budget: RequestBudget) -> None:
+        self.budget = budget
+
+    def remaining(self) -> float:
+        return self.budget.remaining()
+
+    def __call__(self) -> None:
+        if self.remaining() <= 0:
+            raise ReadBudgetExhausted()
+
+
+def current_checkpoint() -> ReadCheckpoint | None:
+    return _READ_CHECKPOINT.get()
+
+
+def checkpoint() -> None:
+    check = current_checkpoint()
+    if check is not None:
+        check()
+
+
+@contextmanager
+def checking(check: ReadCheckpoint | None) -> Iterator[None]:
+    token = _READ_CHECKPOINT.set(check)
+    try:
+        yield
+    finally:
+        _READ_CHECKPOINT.reset(token)
+
+
+@contextmanager
+def locked(lock) -> Iterator[None]:
+    """Bound audited lock acquisition without cancelling a foreign owner."""
+    check = current_checkpoint()
+    if check is None:
+        with lock:
+            yield
+        return
+    check()
+    from . import foreground_priority
+
+    with foreground_priority.awaiting_bulk():
+        acquired = lock.acquire(timeout=check.remaining())
+    if not acquired:
+        raise ReadBudgetExhausted()
+    try:
+        check()
+        yield
+    finally:
+        lock.release()
