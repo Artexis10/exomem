@@ -4486,6 +4486,9 @@ def _receipt_tag(key: str) -> str:
 
 
 def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
+    if command.name == "adoption_studio" and kwargs.get("action") != "status":
+        # These status-only protocol fields must not change an existing mutation's pre-upgrade identity.
+        kwargs = {key: value for key, value in kwargs.items() if key not in ("view", "offset", "limit", "revision")}
     return hashlib.sha256(
         json.dumps(
             {"command": command.name, "kwargs": kwargs},

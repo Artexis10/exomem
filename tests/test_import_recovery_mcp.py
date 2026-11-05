@@ -581,6 +581,16 @@ def test_crashed_apply_resumes_same_mcp_identity_without_duplicate_sources(vault
                 if checkpoint_format.startswith("legacy"):
                     # Publish the pre-repair format: no invocation/chunk checkpoints or new log provenance.
                     patch.setattr(writer_lease, "active_mutation_recovery_identity", lambda: None)
+                    # Freeze the old producer recipe independently of the current digest helper.
+                    def legacy_digest(command, kwargs):
+                        arguments = {key: value for key, value in kwargs.items()
+                                     if key not in ("view", "offset", "limit", "revision")}
+                        return hashlib.sha256(json.dumps(
+                            {"command": command.name, "kwargs": arguments}, sort_keys=True,
+                            separators=(",", ":"), default=str,
+                        ).encode("utf-8")).hexdigest()
+
+                    patch.setattr(writer_lease, "_command_digest", legacy_digest)
                 first = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
             landed = adoption_run.AdoptionRunStore(vault).load(run["run_id"])
             assert len(landed["outcomes"]) == 2
