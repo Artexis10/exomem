@@ -22,7 +22,12 @@
 
 ## 4. Delivery and verification
 
-- [ ] 4.1 Obtain one independent adversarial review of the integrated batch and recheck corrections; record the exact revision and C4/C6 verdict.
+- [x] 4.1 Obtain one independent adversarial review of the integrated batch and recheck corrections; record the exact revision and C4/C6 verdict.
+
+Source review: PR #2424, comment 6653336259, approved head `e939d30f8679f5f0541e802d8a24e83ff542f47c` against base `aacf82f85b93d8439f29bf3c92350228ad46a5ce`.
+Patch `9766fdf8e8706802011c94407cb0762f37c13a35` received APPROVE with no blocking findings; the reviewer called ship, C4 absent and C6 sound.
+Merge `c8a718a7fd4c3b59ad68b81198bef268571f9f25` retains the approved tree. Publication and released-byte acceptance remain open below.
+
 - [ ] 4.2 Run required completion checks, synchronize and archive this change, then deliver one ready PR through coordinated review and CI.
 - [ ] 4.3 Merge under standing authority and coordinate the containing release with its existing owner; verify published artifact identity.
 - [ ] 4.4 Run the isolated crash and large-status outcome check on released bytes, preserve durable evidence and remove owned scratch resources.
