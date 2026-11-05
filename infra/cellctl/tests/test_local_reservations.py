@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 
-from cellctl import db, reconcile
+from cellctl import alerts, db, reconcile
 from cellctl.capacity import (
     GIB,
     LocalCapacityObservation,
@@ -60,6 +60,35 @@ def test_an_orphan_stays_charged_and_a_counted_volume_is_credited_once():
     assert capacity["agent"].limit_known
     changed = dataclasses.replace(observed, cell_allocations={"a": ("lv-a", "recreated", "agent")})
     assert compute_local_capacity(changed, local=LOCAL, cell_sizes={"a": 8})["agent"].cell_slots == 10
+
+
+def test_a_guarded_backup_frame_does_not_charge_its_snapshot_and_clone_twice():
+    from cellctl.capacity import LogicalVolumeRecord
+
+    allocations = [
+        {"name": "lv-a", "physical_uuid": "physical-a", "reserved_bytes": 4 * GIB},
+        {"name": "lv-b", "physical_uuid": "physical-b", "reserved_bytes": 4 * GIB},
+    ]
+    budget = parse_budget_frame(frame(ordinary_bytes=12 * GIB,
+        effective_backup_reserve_bytes=16 * GIB, largest_size_bytes=4 * GIB,
+        allocations=allocations), node_uid="node-uid", now=NOW)
+    sources = tuple(LogicalVolumeRecord("agent", 4 * GIB, LOCAL.device_class, True, False)
+                    for _ in allocations)
+    idle = LocalCapacityObservation(budgets={"agent": budget}, volumes=sources,
+        cell_nodes={"a": "agent", "b": "agent"},
+        cell_allocations={"a": ("lv-a", "physical-a", "agent"),
+                          "b": ("lv-b", "physical-b", "agent")})
+    # The provider excludes family children from ordinary bytes: their room is already reserved.
+    backing_up = dataclasses.replace(idle, volumes=(*sources,
+        LogicalVolumeRecord("agent", 4 * GIB, LOCAL.device_class, True, False),
+        LogicalVolumeRecord("agent", 4 * GIB, LOCAL.device_class, True, False),
+        LogicalVolumeRecord("agent", 4 * GIB, LOCAL.device_class, False, False)))
+
+    for observation in (idle, backing_up):
+        published = compute_local_capacity(observation, local=LOCAL, cell_sizes={"a": 4, "b": 4})
+        # Keep the 4 GiB orphan charge, credit the two serving sources, and retain the 16 GiB reserve.
+        assert published["agent"].cell_slots == (100 - 16 - 4) // 4
+        assert published["agent"].limit_known
 
 
 @pytest.mark.parametrize("fields", [
@@ -122,9 +151,15 @@ def source(cell_id):
                        "backupFamily": {"state": "closed", "closedEpoch": 0}}}
 
 
-async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin(cell_db: CellDatabase):
+async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin(
+    cell_db: CellDatabase, monkeypatch: pytest.MonkeyPatch,
+):
     cells = ("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
     cluster = ReservedGateway()
+    delivered = []
+    monkeypatch.setattr(alerts, "deliver",
+        lambda url, *, alert, active, observed_at: delivered.append((alert, active)))
+    cluster.read_secret_value = lambda *args: "https://receiver.example/alerts/token"
     for index, cell_id in enumerate(cells):
         await _seed_cell(cell_db, cell_id, "tenant-" + str(index))
         cluster.volumes["lv-" + cell_id] = source(cell_id)
@@ -135,7 +170,8 @@ async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_be
             pvc_capacity_bytes=10 * GIB, statefulset_exists=True, statefulset_image=IMAGE,
             statefulset_replicas=1, pod_ready=True, ready_pod_image=IMAGE)
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    config = ClusterConfig(object_storage_bucket="test", storage=STORAGE)
+    config = ClusterConfig(object_storage_bucket="test", storage=STORAGE,
+        alert_delivery_secret=("exomem-platform", "exomem-hosted-alert-delivery", "url"))
     memory = reconcile.LoopMemory()
 
     async def run(minute):
@@ -201,6 +237,8 @@ async def test_two_cells_keep_their_requests_across_restart_and_cancel_before_be
         await run(6.5)  # The generation-only apply has now been observed; NoRoom keeps the ready runtime.
         blocked = next(row for row in await db.select_all_rows(connection) if row.cell_id == cells[0])
         assert blocked.ready and blocked.observed_state == "running"
+        assert blocked.grown_storage_gib is None
+        assert [active for alert, active in delivered if alert == alerts.GROWTH_ALERT][-1:] == [True]
         clone = next(job for job in cluster.jobs if job["kind"] == "PersistentVolumeClaim")
         assert clone["spec"]["resources"]["requests"]["storage"] == str(10 * GIB)
         observe(cells[0], snapshot_exists=True, snapshot_ready=True)

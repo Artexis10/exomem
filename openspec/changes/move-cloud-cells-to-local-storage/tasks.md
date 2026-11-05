@@ -16,7 +16,7 @@
 ## 2. cellctl and runtime (red-first)
 
 - [x] 2.1 Make the storage classes, driver and topology key configuration rather than constants. Accept a cell PV on any configured cell class in the identity check, and match PVs to nodes for local volumes. Evidence: unit tests, including an unmigrated cell on the old class while the local class is configured.
-- [ ] 2.2 Requalify the storage-capacity term under D12:
+- [x] 2.2 Requalify the storage-capacity term under D12:
   - physical pool size minus the effective D12 reserve and ordinary physical charges not already represented by counted cell commitments, over the default size;
   - pool size and reserved bytes from physical provider inventory, including unclaimed volumes and partial operations;
   - larger cells charge more;
@@ -25,7 +25,8 @@
   - Evidence: unit tests on recorded observations, including a pass during a backup.
   - Audit after #2145: `test_local_reservations.py` covers physical orphan charges, incarnation matching, larger commitments and missing frames.
     Drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645) records a guarded frame and recomputes five slots from it.
-    Still open: the unit test for unchanged slots during a backup uses unguarded observations; it does not qualify the D12 frame path.
+    `test_a_guarded_backup_frame_does_not_charge_its_snapshot_and_clone_twice` parses the provider frame and keeps 20 slots before and during a backup.
+    The check retains an orphan charge and credits the serving sources; snapshot, clone and pending volumes consume no second reserve.
 - [x] 2.3 Render the hourly online backup as a non-stopping hold:
   - snapshot, read-only clone, restic on the clone, cleanup whatever the outcome;
   - one hold per cell at a time;
@@ -60,15 +61,15 @@
   - Evidence: unit tests on a recorded mismatch, and a rehearsal etcd restore from an older snapshot.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). The server was reset from an older local etcd snapshot; `cellctl.readopt` reported the newer cell for re-adoption, the runbook steps re-adopted its volume, and it served with its data and a matching identity. Not exercised: the escrowed-key S3 snapshot listing.
 
-- [ ] 2.10 Requalify local online growth under D10 and D12:
+- [x] 2.10 Requalify local online growth under D10 and D12:
   - the hourly backup Job reports the filesystem's used and total bytes in its termination message, and cellctl records them;
   - past 80% use, cellctl grows the claim by one default cell size, up to the configured cap, at most once per backup;
   - only through the provider transaction that retains the prospective reserve; otherwise an alert and a retained target;
   - the grown size is recorded in a cellctl-owned row column (Substrate migration) and the claim renders at the larger of it and `storage_gib`.
   - Evidence: unit tests for growth, the cap, the pool refusal with its alert, and a rehearsal growth of a serving cell.
   - D12 audit: drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645), check 6, proves guarded growth and the cap.
-    `test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin` proves retained growth after provider refusal.
-    Still open: a provider-refusal test that also observes the growth alert; the existing alert test uses unguarded capacity.
+    `test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin` proves retained growth after provider refusal and observes the firing growth alert.
+    The serving cell stays ready, its desired increase remains recorded, and its published size stays unchanged until the provider accepts it.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). At 85% use a serving cell grew from 4 to 8 GiB online: same pod, 0 restarts, filesystem 4143677440 to 8369172480 bytes, quota applied at 16Gi with no refusal, row `grown_storage_gib` 8, next clone 8Gi, published slots matching D6. At the cap the verdict was `at-cap` and cellctl raised `storage-growth-blocked` (no receiver in the rehearsal).
 
 ## 3. Chart, admission, policy
