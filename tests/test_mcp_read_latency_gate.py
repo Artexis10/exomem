@@ -27,7 +27,7 @@ if str(SCRIPTS) not in sys.path:
 
 import mcp_read_latency_gate as gate  # noqa: E402, I001
 from release_arm import MeasurementRefused  # noqa: E402, I001
-from synth_vault import gen_collection_fixture  # noqa: E402, I001
+from synth_vault import gen_collection_fixture, gen_reference_vault  # noqa: E402, I001
 
 CONTRACT_SHA = "c" * 64
 PROFILE_SHA = "9" * 64
@@ -429,6 +429,22 @@ def test_a_summary_and_its_fragment_validate_against_the_stored_schema() -> None
 
 
 # --- Fixture -------------------------------------------------------------------
+
+
+def test_an_arm_can_overlay_a_governed_fixture_without_changing_its_notes(tmp_path: Path) -> None:
+    from exomem.governance.principal import library_scope
+
+    arm = gate.Arm("overlay", sys.executable, tmp_path / "arm", tmp_path.parent, worker_settings={})
+    profile = {**json.loads((ROOT / "benchmarks/recall-latency/profile.json").read_text()),
+               "pages": 2, "links_min": 1, "links_max": 1}
+    with library_scope():
+        rels = gen_reference_vault(arm.vault, profile, ["testdata"])
+    notes = {rel: (arm.vault / rel).read_bytes() for rel in rels}
+
+    arm.init_vault(overlay=True)
+
+    assert (arm.vault / "Knowledge Base/index.md").is_file()
+    assert {rel: (arm.vault / rel).read_bytes() for rel in rels} == notes
 
 
 def test_every_planning_item_is_valid_and_sits_under_a_parent_the_registry_allows() -> None:
