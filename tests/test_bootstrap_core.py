@@ -169,7 +169,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "miss-means-not-found-in-scope": (
         prominence.CANON,
-        lambda core: "not found in that query/scope" in core["workflow"]["miss_rule"],
+        lambda core: "next_action" in core["workflow"]["next_action"],
     ),
     "delegation-ceiling": (
         prominence.CANON,

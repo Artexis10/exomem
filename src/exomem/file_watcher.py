@@ -2394,6 +2394,12 @@ class FileWatcher:
                 self._seed_complete.set()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
+            try:
+                from . import served_context
+
+                served_context.sweep(self._vault_root)
+            except Exception:  # noqa: BLE001 - private-record retention never stops watcher convergence
+                log.debug("served context retention unavailable")
 
     def wait_until_seeded(self, timeout: float | None = None) -> bool:
         """Wait for the startup seed's terminal result.

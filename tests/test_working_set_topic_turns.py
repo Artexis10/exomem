@@ -221,7 +221,7 @@ def test_a_topic_turn_in_ordinary_words_lists_the_page_its_title_names(
         for anchor in packet["anchors"]
     ] == [(CLEANING, "retrieval_named", ["lexical_overlap", "retrieval"], ["cycling"])]
     assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
-    assert packet["budget"]["used_chars"] == 0
+    assert packet["budget"]["used_chars"] == len(packet["next_action"]["say"])
     assert CLEANING not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
 
     picked = _activate(workshop_vault, turn, anchor=CLEANING)
@@ -286,8 +286,10 @@ def test_title_listing_preserves_the_budget_of_existing_recent_context(workshop_
     assert any(item["path"] == CLEANING for item in packet["anchors"])
     assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
     assert any(item["path"] == TRUING for item in packet["recent_context"])
-    assert packet["budget"]["used_chars"] == sum(
-        len(item["title"]) for item in packet["recent_context"]
+    assert packet["next_action"]["state"] == "ambiguous"
+    assert packet["budget"]["used_chars"] == (
+        sum(len(item["title"]) for item in packet["recent_context"])
+        + len(packet["next_action"]["say"])
     )
     assert CLEANING not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
 

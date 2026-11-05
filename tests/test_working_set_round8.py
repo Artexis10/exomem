@@ -7,9 +7,10 @@ import time
 from pathlib import Path
 
 import pytest
-from test_working_set_conversation_carry import THREAD, cvault as cvault
-from test_working_set_egress import _release
 from test_governance_egress import OPEN_PATH, RESTRICTED_PATH, _external, write_rule, write_scope
+from test_working_set_conversation_carry import THREAD
+from test_working_set_conversation_carry import cvault as cvault
+from test_working_set_egress import _release
 
 from exomem import (
     commands,
@@ -21,7 +22,6 @@ from exomem import (
 )
 from exomem.governance import egress, policy
 from exomem.governance.principal import request_scope
-
 
 LOCAL_TURNS = (
     "i have a new plan; can you review it",
@@ -335,7 +335,8 @@ def _assert_ledger(packet: dict) -> None:
         for item in packet["recent_context"]
     )
     assert subject <= packet["budget"]["limit_chars"] // 3
-    assert packet["budget"]["used_chars"] == recent + subject
+    action = len((packet.get("next_action") or {}).get("say", ""))
+    assert packet["budget"]["used_chars"] == recent + subject + action
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
 

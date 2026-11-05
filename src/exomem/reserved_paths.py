@@ -424,6 +424,10 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 
 _REGISTRY = (
     InternalStateDescriptor(
+        "served-context", "served_context", StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".served-context.sqlite"),
+    ),
+    InternalStateDescriptor(
         "source-corrections", "source_corrections", StatePlacement.VAULT_CANONICAL,
         trees=("_sources/corrections",),
     ),

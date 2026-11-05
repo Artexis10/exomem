@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: afddd6fe49ee1e0d686a561660b15b87fa7672ad015925652d4607acefa53158
+  skill_contract: bdfd3643ca20182824eaea536d0068671f220fe2cf1054b404e26898d13a0235
   version: "0.1.0"
 ---
 
@@ -46,6 +46,19 @@ Bootstrap's `store` names the Exomem this connector reaches. When the user asks 
 different Exomem, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
+
+Maps activation also returns `task_context`: source-bound leads and reusable methods.
+Read a lead before treating it as a fact or an ongoing commitment.
+Methods are live governed knowledge. Read each `read_ref` when applicability is
+`read_required`, including the source's scope and exclusions, before applying it.
+A current user instruction can override a method for this task within existing authority.
+This local adaptation does not revise the reusable method or authorize external actions.
+Use the ordinary guarded writer for an authorized reusable revision.
+Carry the activation `continuity` token on later activations. If `methods.reset` is
+true, discard held method projections before using this response.
+Without method continuity, freshly read a method before reusing it.
+An unchanged map does not certify method freshness. Refresh when the task, evidence
+or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Durable personal baselines
 A stable preference, recurring routine, historical baseline, or durable affiliation
@@ -166,7 +179,7 @@ transient participant stays in source/note context. Do not create a parallel
 page when an existing active note or entity should be edited, linked, or
 superseded.
 
-<!-- exomem-semantic-authoring:v10 sha256:8329b80b17d7dbdbc975c0921795e0f5a3265d93bcdc23f3963ea57842a7ba95 -->
+<!-- exomem-semantic-authoring:v10 sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -187,7 +200,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Compact context: one optional authored qualifier for the observation. Write `(<context>)`. Use one balanced, unescaped parenthesized suffix preceded by whitespace.
 - Compact anchor: one optional stable authored unit identifier. Write `^anchor`. Use 1-64 ASCII letters, digits, or hyphens and begin and end alphanumeric. Place it at the end of the line.
 - Compact exclusions: observation-shaped rows inside fenced code blocks; task labels `[ ]`, `[x]`, `[X]`, and `[-]`; reserved or punctuation-bearing bracket labels outside category grammar. Compact units do not carry typed unit relations; use a canonical note-level relation or the rich form.
-- Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict and check_by; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
+- Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`, `- as_of: <ISO start date>`, `- until: <ISO last valid date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_memory(include_history=true), optionally for unit_ref, using history_limit and history_continuation. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
 - Exact applicability: obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'authoring'})` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`. More may be registered; `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `read_schema(operation={'kind': 'inspect', 'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
