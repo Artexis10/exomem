@@ -10973,6 +10973,10 @@ def op_adoption_studio(
     next_window_bytes: int | None = None,
     import_id: str | None = None,
     paths: list[str] | None = None,
+    view: adoption_run_module.StatusView = "summary",
+    offset: Annotated[int, Field(ge=0)] = 0,
+    limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
+    revision: str | None = None,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -11021,6 +11025,11 @@ def op_adoption_studio(
         paths: For `acknowledge`: only paths the person confirmed they need no
             longer keep. Ends their keep-source warning; no tool undoes it. A call
             with none is refused.
+        view: For run `status`, summary by default; inventory, selection, plan,
+            outcomes or stale pages. Full is the explicit browser compatibility view.
+        offset: For status pages, a zero-based row offset.
+        limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
+        revision: For status pages, the preceding summary's revision; restart paging if it changed.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -11038,7 +11047,8 @@ def op_adoption_studio(
             if run_id and (after is not None or series_id is not None or next_window_bytes is not None):
                 raise adoption_run_module.AdoptionRunError(
                     "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
-            listing = adoption_run_module.status(vault_root, run_id=run_id, path=path)
+            listing = adoption_run_module.status(
+                vault_root, run_id=run_id, path=path, view=view, offset=offset, limit=limit, revision=revision)
             if run_id:
                 return listing
             return {**listing, **import_windows_module.report(

@@ -108,9 +108,9 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
 
         with monkeypatch.context() as read_patch:
             read_patch.setattr(writer_lease.LeaseManager, "ensure_writer", ensure_writer)
-            status = await _call(client, "read_import", {"operation": {"kind": "status", "run_id": run_id}})
+            status = await _call(client, "read_import", {"operation": {"kind": "status", "run_id": run_id, "view": "outcomes"}})
         assert status["verified_unchanged"] == status["verified_total"] == len(originals)
-        for item in status["outcomes"].values():
+        for item in status["items"]:
             frontmatter, _, _ = parse_frontmatter((vault / item["target_path"]).read_text())
             assert (frontmatter["source_type"], frontmatter["domain"]) == ("book", "media")
         finished = await change("finish", run_id=run_id, write_manifest=False)

@@ -61,7 +61,7 @@ const adoptionApi = {
   // No dedicated discovery action in the engine contract; resume rides a run id
   // already present in the URL. Returns null until such an action exists.
   latest: async () => null,
-  status: (runId) => command("adoption_studio", {action: "status", run_id: runId}),
+  status: (runId) => command("adoption_studio", {action: "status", run_id: runId, view: "full"}),
   select: (runId, payload) =>
     adoptionMutation({action: "select", run_id: runId, ...payload}),
   plan: (runId, onProgress) => boundedMutation({action: "plan", run_id: runId}, onProgress),
