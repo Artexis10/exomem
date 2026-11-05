@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import os
 import sys
 import time
 from collections.abc import Callable, Iterable
@@ -310,9 +311,77 @@ def references_dependency(root: Path, snapshot, resolved) -> None:
             unsupported()
 
 
+class _DirectoryFacts:
+    """Admitted names for one validation phase; never retain guards or caller state."""
+
+    __slots__ = ("directories", "retained_bytes")
+
+    def __init__(self):
+        self.directories = {}
+        self.retained_bytes = (sys.getsizeof(self) + sys.getsizeof(self.directories)
+                               + sys.getsizeof(0) + sys.getsizeof(None))
+
+    def clear(self):
+        self.directories.clear()
+        self.retained_bytes = (sys.getsizeof(self) + sys.getsizeof(self.directories)
+                               + sys.getsizeof(0) + sys.getsizeof(None))
+
+    def match(self, root, relative, name, *, memory):
+        from .egress import _physical_directory_match
+
+        entry = names = folded = None
+        try:
+            entry = self.directories.get(relative)
+            if entry is None:
+                memory(extra=256)
+                names = {}
+                name_bytes = 0
+                with os.scandir(root / relative) as scanned:
+                    for child in scanned:
+                        # scandir owns the bounded entry; admit its name before retaining it.
+                        memory(extra=4 * sys.getsizeof(names) + name_bytes
+                               + sys.getsizeof(child.name) + 256)
+                        if child.name not in names:
+                            names[child.name] = child.name
+                            name_bytes += sys.getsizeof(child.name)
+                before = sys.getsizeof(self.directories)
+                memory(extra=sys.getsizeof(names) + name_bytes + 3 * before
+                       + sys.getsizeof(relative) + 256)
+                entry = names, None
+                self.directories[relative] = entry
+                self.retained_bytes += (sys.getsizeof(self.directories) - before + sys.getsizeof(relative)
+                                        + sys.getsizeof(entry) + sys.getsizeof(names) + name_bytes)
+                memory()
+            names, folded = entry
+            if name not in names and folded is None:
+                memory(extra=256)
+                folded = {}
+                key_bytes = 0
+                for original in names:
+                    folded_length = sum(len(scalar.casefold()) for scalar in original)
+                    memory(extra=4 * sys.getsizeof(folded) + key_bytes
+                           + 16 * len(original) + 4 * folded_length + 256)
+                    key = original.casefold()
+                    if key not in folded:
+                        folded[key] = original
+                        # An exact name can already own this same string object.
+                        key_bytes += sys.getsizeof(key) if key is not names.get(key) else 0
+                memory(extra=sys.getsizeof(folded) + key_bytes + 256)
+                self.directories[relative] = names, folded
+                self.retained_bytes += sys.getsizeof(folded) + key_bytes
+                memory()
+            if name not in names:
+                folded_length = sum(len(scalar.casefold()) for scalar in name)
+                memory(extra=16 * len(name) + 4 * folded_length + 256)
+            return _physical_directory_match(names, name, folded)
+        finally:
+            entry = names = folded = None
+
+
 def validate_source_release_proofs(
     root: Path, basis: SourceReleaseBasis, proofs: Iterable[SourceReleaseProof], *, memo: dict | None = None,
     check_paths: bool = True, preparation_owner=None, memory=None,
+    directory_facts: _DirectoryFacts | None = None,
 ) -> tuple[bool, ...]:
     """Validate owner facts under the incoming request's freshly verified authority."""
     from .. import semantic_contract, working_set_index
@@ -321,7 +390,7 @@ def validate_source_release_proofs(
 
     memo = memo if memo is not None else {}
     results = []
-    if memory is not None:
+    if memory is not None and directory_facts is None:
         memory(extra=512)
     for proof in proofs:
         if type(proof) is not SourceReleaseProof:
@@ -329,7 +398,16 @@ def validate_source_release_proofs(
             continue
         local_facts = (sum(len(guard.ancestors) + 1 for guard in proof.paths)
                        + len(proof.directories) + len(proof.names) + len(proof.registries) + len(proof.references))
-        if memory is not None:
+        def admit_phase(extra=0, local_bytes=512 + 256 * local_facts):
+            amount = directory_facts.retained_bytes + local_bytes + extra
+            if memory is not None:
+                memory(extra=amount)
+            elif preparation_owner is not None:
+                preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + amount)
+
+        if directory_facts is not None:
+            admit_phase()
+        elif memory is not None:
             memory(extra=256 * local_facts)
         elif preparation_owner is not None:
             preparation_owner.reserve(preparation_owner.floor_bytes + 65536 + 256 * local_facts)
@@ -351,14 +429,19 @@ def validate_source_release_proofs(
                         else:
                             guard.recheck(root, memo.setdefault("ancestors", set()))
                         memo[key] = True
+                    except TimeoutError:
+                        raise
                     except (ValueError, OSError):
                         memo[key] = False
                 valid = valid and memo[key]
             for relative, name, resolved in proof.directories if valid else ():
+                if directory_facts is not None:
+                    valid = valid and directory_facts.match(
+                        root, relative, name, memory=admit_phase,
+                    ) == resolved
+                    continue
                 key = "directory", relative
                 if key not in memo:
-                    import os
-
                     names = {}
                     name_bytes = 0
                     with os.scandir(root / relative) as scanned:
@@ -401,9 +484,14 @@ def validate_source_release_proofs(
                 if "pending" not in memo:
                     memo["pending"] = _pending_identity(memory_refs._pending_reference_projection(root))
                 valid = memo["pending"] == proof.pending
+        except (TimeoutError, runtime_resources.PreparationBudgetExceeded,
+                runtime_resources.PreparationCapacityBusy):
+            raise
         except Exception:  # noqa: BLE001 - unsupported or unknown owner proof requires canonical preparation
             valid = False
-        if memory is not None:
+        if directory_facts is not None:
+            admit_phase()
+        elif memory is not None:
             memory()
         results.append(valid)
     return tuple(results)

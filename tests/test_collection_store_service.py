@@ -1989,13 +1989,13 @@ def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counte
         if server is not None and not holding.is_set():
             holder.start()
             assert holding.wait(5)
+            short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
         return server
 
     monkeypatch.setattr(runtime, "route", route_then_hold)
     busy_before = busy_total()
     try:
         with monkeypatch.context() as short, pytest.raises(OpError) as refused:
-            short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
             call(service.root, "record_memory", action="append", collection=CID, item={"title": "Held out"},
                  item_key=LATER, why="held boundary", idempotency_key="held-out")
     finally:

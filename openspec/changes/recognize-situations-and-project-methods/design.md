@@ -84,6 +84,8 @@ Count shared immutable rows once within an accounting epoch, using compact ident
 End the epoch before removing a registered object, and rebuild accounting after the invalidation batch.
 Register the final installed row; a failed measurement must not leave identities for discarded temporary objects.
 Measure mutable containers, request memos and capture state separately, including their resize overlap and visitor workspace.
+Retain directory lookup facts only within an admitted validation phase, separate from row captures.
+Clear them before preparation; use fresh facts for terminal validation and recheck freshness before publication.
 Keep one row reservation through canonical projection, proof completion, packing and transfer to resident state.
 After canonical projection returns, replace completed parser claims with measured live output and capture state before proof completion.
 Measure the whole source projection, capture and memo; include the completed proof before packing.

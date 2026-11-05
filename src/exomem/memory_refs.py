@@ -994,7 +994,8 @@ def reference_owner_lookup(
     def owners_of(identity: str) -> tuple[str, ...] | None:
         from .governance import source_release
 
-        source_release.unsupported()  # A borrowed bare owner map carries no exact identity-snapshot proof.
+        # A borrowed bare owner map carries no exact identity-snapshot proof.
+        source_release.unsupported()
         if not read:
             try:
                 read.append((True, _settled_projection(root, _admitted_projection(

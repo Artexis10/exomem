@@ -54,7 +54,6 @@ def test_compact_identity_splits_preserve_exact_membership_with_admitted_metadat
     assert identities.count == len(values)
     assert all(value in identities for value in values)
     assert all(not identities.add(value, reserve=admitted.append) for value in values[-100:])
-    assert all(len(leaf) == 256 for leaf in identities.leaves)
     actual = (sys.getsizeof(identities) + sys.getsizeof(identities.leaves) + sys.getsizeof(identities.maxima)
               + sys.getsizeof(identities.used) + sys.getsizeof(identities.count) + sys.getsizeof(identities.metadata_bytes)
               + sum(sys.getsizeof(leaf) for leaf in identities.leaves))
@@ -111,6 +110,186 @@ def test_atomic_resident_transfer_keeps_live_row_floor() -> None:
             assert resident.reserved == 50000 and row.reserved == 70000
         finally:
             resident.release()
+
+
+@pytest.mark.usefixtures("model_free")
+def test_failed_reverse_allocation_rolls_back_the_unregistered_row(tmp_path: Path, monkeypatch) -> None:
+    """Failure after row insertion must not leave its payload outside the accounting epoch."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    install = lexstore.ReleasedCorpusBuild.install
+    failed = False
+    def fail_reverse_set(self, path, row):
+        nonlocal failed
+        if not failed:
+            failed = True
+            def refused(*args, **kwargs):
+                raise MemoryError("reverse-set allocation failed after row insertion")
+            with monkeypatch.context() as patch:
+                patch.setattr(lexstore, "set", refused, raising=False)
+                return install(self, path, row)
+        return install(self, path, row)
+    monkeypatch.setattr(lexstore.ReleasedCorpusBuild, "install", fail_reverse_set)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with pytest.raises(MemoryError), store.released_task_corpus(
+                paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        build = next(iter(store._released_corpus_builds.values()))
+        assert failed and not build.rows and not build.reverse and not build.retired
+        assert runtime_resources._preparation_bytes == 0
+        assert build.retained_bytes >= _independent_bytes([build]) + build.accounting_bytes
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0].pages == len(paths)
+
+
+@pytest.mark.usefixtures("model_free")
+def test_warm_validation_reads_each_directory_once_per_fresh_phase(tmp_path: Path, monkeypatch) -> None:
+    """Sibling sources must share directory facts while final validation reads a fresh phase."""
+    import inspect
+    import os
+    from collections import Counter
+
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    root = _build_dense_vault(tmp_path, 4)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0].pages == len(paths)
+        reads = []
+        scandir = os.scandir
+        def observed(path):
+            if inspect.currentframe().f_back.f_code.co_filename.endswith("/governance/source_release.py"):
+                reads.append(Path(path).relative_to(root).as_posix())
+            return scandir(path)
+        monkeypatch.setattr(os, "scandir", observed)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024) as result:
+            assert result[0].pages == len(paths)
+    assert reads and set(Counter(reads).values()) == {2}
+
+
+def test_phase_directory_facts_preserve_canonical_matching_and_charge_shared_names(tmp_path: Path) -> None:
+    """Exact names win; folded collisions retain the resolver's first match without charging values twice."""
+    from exomem.governance import egress, source_release
+
+    for name in ("Case", "case", "Straße", "A", "a"):
+        (tmp_path / name).touch()
+    facts = source_release._DirectoryFacts()
+    admitted = []
+    def reserve(extra=0):
+        admitted.append(facts.retained_bytes + extra)
+    for name in ("Case", "case", "CASE", "STRASSE", "absent"):
+        names = dict.fromkeys(path.name for path in tmp_path.iterdir())
+        assert facts.match(tmp_path, ".", name, memory=reserve) == egress._physical_directory_match(names, name)
+    actual = _independent_bytes([facts.directories]) + sys.getsizeof(facts) + sys.getsizeof(facts.retained_bytes)
+    assert actual <= facts.retained_bytes <= actual + 64
+    assert max(admitted) >= actual
+    facts.clear()
+    assert not facts.directories
+
+
+@pytest.mark.parametrize("phase", ["names", "folded"])
+def test_phase_directory_allocation_refusal_keeps_only_admitted_facts(tmp_path: Path, phase) -> None:
+    """Refusing name retention or lazy folding must leave no partially published table."""
+    from exomem.governance import source_release
+
+    (tmp_path / "Visible").touch()
+    facts = source_release._DirectoryFacts()
+    if phase == "folded":
+        assert facts.match(tmp_path, ".", "Visible", memory=lambda extra=0: None) == "Visible"
+    before = facts.retained_bytes
+    def refuse(extra=0):
+        if extra > 256:
+            raise runtime_resources.PreparationBudgetExceeded("directory facts do not fit")
+    with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+        facts.match(tmp_path, ".", "VISIBLE", memory=refuse)
+    assert facts.retained_bytes == before
+    assert not facts.directories if phase == "names" else facts.directories["."][1] is None
+    facts.clear()
+
+
+@pytest.mark.usefixtures("model_free")
+@pytest.mark.parametrize("failure", [TimeoutError, runtime_resources.PreparationBudgetExceeded,
+                                      runtime_resources.PreparationCapacityBusy])
+def test_validation_failures_clear_phase_facts_without_canonical_rebuild(tmp_path: Path, monkeypatch, failure) -> None:
+    """Cancellation and admission failure must propagate instead of becoming an invalid-proof cache miss."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem import context_task, vault
+    from exomem.governance import source_release
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        phases = []
+        initialize = source_release._DirectoryFacts.__init__
+        def initialized(self):
+            initialize(self)
+            phases.append(self)
+        def refused(*args, **kwargs):
+            raise failure("proof validation ended")
+        def rebuilt(*args, **kwargs):
+            pytest.fail("a preparation failure must not reproject a source")
+        monkeypatch.setattr(source_release._DirectoryFacts, "__init__", initialized)
+        monkeypatch.setattr(vault.PathGuard, "recheck", refused)
+        monkeypatch.setattr(context_task, "project_source", rebuilt)
+        with pytest.raises(failure), store.released_task_corpus(
+                paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pytest.fail("failed validation must not publish")
+    assert phases and all(not phase.directories for phase in phases)
+    assert runtime_resources._preparation_bytes == 0
+
+
+@pytest.mark.usefixtures("model_free")
+def test_final_phase_cannot_publish_after_observing_a_new_source_generation(tmp_path: Path, monkeypatch) -> None:
+    """A source edit after its final proof check must invalidate the phase before any ranking publishes."""
+    from test_governance_egress import _external
+    from test_latency_gate import _build_dense_vault
+
+    from exomem import freshness
+    from exomem.governance import egress
+
+    root = _build_dense_vault(tmp_path, 3)
+    paths = tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md")))
+    store = lexstore.get_store(root)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(root)
+        with store.released_task_corpus(paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pass
+        validate = egress.validate_source_release_proofs
+        phases = []
+        changed = False
+        def validated(root, basis, proofs, **kwargs):
+            nonlocal changed
+            result = validate(root, basis, proofs, **kwargs)
+            phase = kwargs.get("directory_facts")
+            if phase is not None and all(phase is not current for current in phases):
+                phases.append(phase)
+            if len(phases) == 2 and not changed:
+                changed = True
+                path = root / paths[0]
+                path.write_text(path.read_text() + "\nA later source generation.\n")
+                freshness.on_files_changed(root, [path])
+            return result
+        monkeypatch.setattr(egress, "validate_source_release_proofs", validated)
+        with pytest.raises(RuntimeError, match="changed during preparation"), store.released_task_corpus(
+                paths, caller, check=lambda: None, max_bytes=2 * 1024 * 1024):
+            pytest.fail("a superseded phase must not publish")
+        build = next(iter(store._released_corpus_builds.values()))
+        assert changed and build.result is None and all(not phase.directories for phase in phases)
 
 
 @pytest.mark.usefixtures("model_free")

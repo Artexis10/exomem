@@ -3711,8 +3711,8 @@ def _prepare_released_row(root, build, path, caller, *, check, max_bytes, worksp
             before_shells = build.shell_bytes()
             retired = path in build.retired
             shared_dependency = any(guard.target in build.reverse for guard in proof.paths) if proof else False
-            row = build.install(path, row)
             installed = True
+            row = build.install(path, row)
             # An equivalent retired representation may replace the newly packed candidate.
             terms = counts = source = None
             if build.epoch is None:
@@ -5632,22 +5632,35 @@ class LexicalStore:
                     workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
                     build.validation = tuple(path for path in candidates if path in build.rows or path in build.omissions)
                     build.validation_cursor = 0
-                # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
-                for path in candidates:
-                    row = build.rows.get(path) or build.omissions.get(path)
-                    if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
-                            root, basis, (row.proof,), memo={}, check_paths=False, preparation_owner=workspace)[0]:
-                        build.discard(path)
-                row = None
-                while build.validation_cursor < len(build.validation):
-                    check()
-                    path = build.validation[build.validation_cursor]
-                    row = build.rows.get(path) or build.omissions.get(path)
-                    if row is not None and (row.proof is None or not egress.validate_source_release_proofs(
-                            root, basis, (row.proof,), memo={}, preparation_owner=workspace)[0]):
-                        build.discard(path)
-                    build.validation_cursor += 1
-                row = None
+                from .governance.source_release import _DirectoryFacts
+
+                def validation_memory(extra=0):
+                    workspace.reserve(workspace.floor_bytes + extra + 65536)
+
+                directory_facts = _DirectoryFacts()
+                try:
+                    # Complete history carries the validated path prefix. Current global owner fences still apply on every call.
+                    for path in candidates:
+                        row = build.rows.get(path) or build.omissions.get(path)
+                        if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
+                                root, basis, (row.proof,), memo={}, check_paths=False, preparation_owner=workspace,
+                                memory=validation_memory, directory_facts=directory_facts)[0]:
+                            build.discard(path)
+                    row = None
+                    while build.validation_cursor < len(build.validation):
+                        check()
+                        path = build.validation[build.validation_cursor]
+                        row = build.rows.get(path) or build.omissions.get(path)
+                        if row is not None and (row.proof is None or not egress.validate_source_release_proofs(
+                                root, basis, (row.proof,), memo={}, preparation_owner=workspace,
+                                memory=validation_memory, directory_facts=directory_facts)[0]):
+                            build.discard(path)
+                        build.validation_cursor += 1
+                    row = None
+                finally:
+                    directory_facts.clear()
+                    directory_facts = None
+                workspace.replace_phase(workspace.floor_bytes, workspace=65536)
                 workspace.reserve(workspace.floor_bytes + 65536 + 16 * len(candidates))
                 build.preparation = tuple(path for path in candidates if path not in build.rows and path not in build.omissions)
                 build.preparation_cursor = 0
@@ -5681,18 +5694,31 @@ class LexicalStore:
                         or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
                     build.result = None
                     raise RuntimeError("released task corpus changed during preparation")
-                invalid_proof = False
-                for path in candidates:
-                    row = build.rows.get(path) or build.omissions.get(path)
-                    if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
-                            root, basis, (row.proof,), preparation_owner=workspace)[0]:
-                        build.discard(path)
-                        invalid_proof = True
-                row = None
+                directory_facts = _DirectoryFacts()
+                try:
+                    invalid_proof = False
+                    for path in candidates:
+                        row = build.rows.get(path) or build.omissions.get(path)
+                        if row is not None and row.proof is not None and not egress.validate_source_release_proofs(
+                                root, basis, (row.proof,), preparation_owner=workspace,
+                                memory=validation_memory, directory_facts=directory_facts)[0]:
+                            build.discard(path)
+                            invalid_proof = True
+                    row = None
+                finally:
+                    directory_facts.clear()
+                    directory_facts = None
+                workspace.replace_phase(workspace.floor_bytes, workspace=65536)
                 if invalid_proof:
                     build.result = None
                     raise RuntimeError("released task corpus proof changed during preparation")
                 check()
+                if (freshness.consumer_checkpoint(root, "vault") != build.checkpoint
+                        or freshness.external_pending(root)
+                        or build.pending or build.invalidated
+                        or egress.current_source_release_basis(root, purpose=caller.purpose) != basis):
+                    build.result = None
+                    raise RuntimeError("released task corpus changed during preparation")
                 build.result = build.aggregation.result
                 if memory_changed:
                     digest = hashlib.sha256()

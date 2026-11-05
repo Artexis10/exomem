@@ -103,6 +103,10 @@ Selected sources and held methods SHALL still receive current canonical projecti
 
 Retained and transient state SHALL fit existing resource bounds, including overlapping publication generations.
 Accounting SHALL include its own metadata, request memos, capture state, visitor workspace and resize overlap.
+Validation MAY share directory lookup facts within one request phase.
+These facts SHALL retain no caller or source body and SHALL consume the existing allowance.
+The final validation phase SHALL use fresh facts and recheck current fences before publication.
+Timeouts and admission failures SHALL remain preparation failures.
 Shared immutable objects SHALL be charged once per live accounting epoch, which ends before registered objects can be removed.
 Each row's reservation SHALL cover projection through resident transfer, including simultaneous nested claims and retained transient output.
 Phase changes MAY release dead parser buffers only after canonical projection returns, while the row reservation continues to cover all retained output.
