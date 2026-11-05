@@ -46,7 +46,7 @@ from exomem import (
     working_set_runtime,
     writer_lease,
 )
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import library_scope, owner_principal, request_scope
 from exomem.vault import content_hash
 from exomem.vocabulary_fold import fold_term
 
@@ -857,14 +857,16 @@ def test_japanese_activation_stays_inside_the_latency_budget(ja_vault: Path) -> 
         "茶道教室で抹茶を用意するのは誰ですか",
         "来月の合宿、山小屋をまた借りられるか確認して、駅前の自転車店でパンク修理も頼んでおいてくれる？",
     ]
-    for turn in turns:
-        _activate(ja_vault, turn)
-    working_set_runtime.reset_caches_for_tests()
-    worst = 0.0
-    for turn in turns:
-        started = time.perf_counter()
-        _activate(ja_vault, turn)
-        worst = max(worst, time.perf_counter() - started)
+    # This benchmark measures the owner's local vault under its maintained caller binding.
+    with library_scope():
+        for turn in turns:
+            _activate(ja_vault, turn)
+        working_set_runtime.reset_caches_for_tests()
+        worst = 0.0
+        for turn in turns:
+            started = time.perf_counter()
+            _activate(ja_vault, turn)
+            worst = max(worst, time.perf_counter() - started)
     assert worst < 1.0, worst
 
 
