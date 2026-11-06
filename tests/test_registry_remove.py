@@ -151,7 +151,7 @@ def test_a_used_key_is_deprecated_and_its_pages_are_listed(
 
 
 def _author_edge(vault: Path, subject: str, bullet: str) -> None:
-    from exomem.vault import parse_frontmatter
+    from exomem.vault import content_hash, parse_frontmatter
 
     _meta, body, _text = parse_frontmatter((vault / subject).read_text(encoding="utf-8"))
     commands.op_edit_memory(
@@ -161,6 +161,7 @@ def _author_edge(vault: Path, subject: str, bullet: str) -> None:
         operation={
             "kind": "replace_body",
             "new_body": f"{body.rstrip()}\n\n## Relations\n{bullet}\n",
+            "expected_hash": content_hash((vault / subject).read_text(encoding="utf-8")),
         },
     )
 

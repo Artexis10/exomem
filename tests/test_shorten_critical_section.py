@@ -410,6 +410,7 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
     errors: list[BaseException] = []
 
     def edit(rel: str, new_body: str) -> None:
+        expected_hash = content_hash((vault / rel).read_text(encoding="utf-8"))
         try:
             results.append(
                 _invoke_edit_memory(
@@ -418,6 +419,7 @@ def test_two_concurrent_edit_memory_writers_on_different_pages_both_succeed(
                     path=rel,
                     why="narrow-boundary interleaving check",
                     new_body=new_body,
+                    expected_hash=expected_hash,
                 )
             )
         except BaseException as error:  # noqa: BLE001 - inspect thread outcome
@@ -506,7 +508,12 @@ def test_a_write_whose_navigation_changed_while_it_waited_commits_once_without_a
         marker = "Navigation draft"
     else:
         _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000d1")
-        kwargs = {"path": rel, "why": "navigation race marker", "new_body": "After."}
+        kwargs = {
+            "path": rel,
+            "why": "navigation race marker",
+            "new_body": "After.",
+            "expected_hash": content_hash((vault / rel).read_text(encoding="utf-8")),
+        }
         run = lambda: manager.invoke(  # noqa: E731
             _edit_memory_command(), (vault,), kwargs, idempotency_key="navigation-race-key"
         )
@@ -549,7 +556,12 @@ def test_an_external_edit_of_the_page_while_the_write_waited_is_stale_not_busy(
     manager = _standalone_manager(vault.parent / "state")
     rel = "Knowledge Base/Notes/Insights/basis-race.md"
     page = _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000e1")
-    kwargs = {"path": rel, "why": "basis race marker", "new_body": "Mine."}
+    kwargs = {
+        "path": rel,
+        "why": "basis race marker",
+        "new_body": "Mine.",
+        "expected_hash": content_hash(page.read_text(encoding="utf-8")),
+    }
     planned, resume, attempts = _pause_first_attempt_after_planning(monkeypatch)
     thread, outcome, errors = _run_in_thread(
         lambda: manager.invoke(
@@ -597,7 +609,12 @@ def test_a_refusal_with_no_moved_guard_is_not_absorbed_as_busy(
             manager.invoke(
                 _edit_memory_command(),
                 (vault,),
-                {"path": rel, "why": "unwritable folder", "new_body": "After."},
+                {
+                    "path": rel,
+                    "why": "unwritable folder",
+                    "new_body": "After.",
+                    "expected_hash": content_hash((vault / rel).read_text(encoding="utf-8")),
+                },
                 idempotency_key="unwritable-key",
             )
     finally:
@@ -776,7 +793,11 @@ def test_curation_proposal_preparation_leaves_the_boundary_free_and_the_seal_rec
             manager,
             path=rel_edited,
             why="Write while a proposal is being prepared.",
-            operation={"kind": "replace_body", "new_body": "Written during preparation."},
+            operation={
+                "kind": "replace_body",
+                "new_body": "Written during preparation.",
+                "expected_hash": content_hash((vault / rel_edited).read_text(encoding="utf-8")),
+            },
         )
         assert "Written during preparation." in (vault / rel_edited).read_text(encoding="utf-8")
     finally:

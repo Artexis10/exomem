@@ -26,6 +26,7 @@ from exomem import commands, edit as edit_module, move_file as move_module
 from exomem import replace as replace_module, server
 from exomem.governance import egress, policy
 from exomem.governance.principal import RequestPrincipal, request_scope
+from exomem.vault import content_hash
 
 TODAY = dt.date(2026, 5, 24)
 
@@ -183,6 +184,9 @@ def test_nfd_named_page_edit_via_rest_is_refused_without_renaming(
             "path": rel,
             "why": "REST NFD edit probe",
             "new_body": _page_text("rest edited").split("---\n\n", 1)[1],
+            "expected_hash": content_hash(
+                (vault.joinpath(*_DIRECTORY) / _DECOMPOSED_NAME).read_text(encoding="utf-8")
+            ),
         },
         headers={"Authorization": "Bearer sekret"},
     )

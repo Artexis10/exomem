@@ -20,7 +20,7 @@ from exomem.edit_operations import EDIT_OPERATION_ADAPTER
 
 # Every guarded edit kind that can provoke a relation-disposition finding.
 GUARDED_KINDS = [
-    {"kind": "replace_body", "new_body": "body"},
+    {"kind": "replace_body", "new_body": "body", "expected_hash": "a" * 64},
     {"kind": "replace_tags", "tags": ["a"]},
     {"kind": "replace_string", "old_string": "a", "new_string": "b"},
     {"kind": "batch_replace", "edits": [{"old_string": "a", "new_string": "b"}]},
