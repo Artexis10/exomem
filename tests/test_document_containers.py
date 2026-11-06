@@ -962,7 +962,7 @@ def test_bytes_remembered_as_unclaimed_are_not_reused_for_a_rewritten_claim(vaul
         data = page.read_bytes()
         return egress.container_parent_allows(
             vault, note, policy=compiled, principal=owner_principal(), purpose=None,
-            content=data, content_sha256=hashlib.sha256(data).hexdigest(),
+            content=data,
         )
 
     plain = page.read_bytes()

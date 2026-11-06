@@ -408,14 +408,8 @@ def _remembered_unclaimed_bytes(root: Path, path: str, content_sha256: str) -> b
     return True
 
 
-def parent_binding_for_path(
-    root: Path, path: str, *, content: bytes | None = None, content_sha256: str | None = None,
-    artifact_copy: reserved_paths.GenericFileCopy | None = None,
-) -> originals.BinaryBinding | None:
-    """Resolve direct pages, binary originals and extraction parts through one binding validator.
-
-    `content_sha256` is the SHA-256 of `content` and lets the caller's bytes be remembered as claim-free.
-    """
+def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
+    """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
     root = state_paths.resolved_vault_path(root, expanduser=False)
@@ -425,9 +419,15 @@ def parent_binding_for_path(
     # safety. Supplied or staged bytes decide instead.
     if content is None and not _OVERLAY.get() and _remembered_unclaimed(root, path):
         return None
-    # Supplied bytes decide the answer, never the disk, so the same path with the same bytes always answers
-    # the same and no file version or racy window is involved. A changed note has a new hash and misses.
-    if content is not None and content_sha256 is not None and not _OVERLAY.get() and _remembered_unclaimed_bytes(root, path, content_sha256):
+    # Supplied bytes for a page spelling are the bytes parsed below, never the disk, so the same path with
+    # the same bytes always answers the same and no file version or racy window is involved. The digest is
+    # taken here, from the bytes themselves, so no caller can vouch for bytes it did not pass.
+    supplied_digest = (
+        hashlib.sha256(content).hexdigest()
+        if content is not None and path.lower().endswith(".md") and not _OVERLAY.get()
+        else None
+    )
+    if supplied_digest is not None and _remembered_unclaimed_bytes(root, path, supplied_digest):
         return None
     spelling = path
     page_path = path if path.lower().endswith(".md") else path + ".md"
@@ -487,9 +487,8 @@ def parent_binding_for_path(
         if "container_member" not in fm:
             if remembered_read is not None:
                 _remember_unclaimed(root, spelling, str(root / page_path), *remembered_read)
-            elif (content_sha256 is not None and raw is content and not _OVERLAY.get()
-                    and classified.disposition is reserved_paths.PathDisposition.ORDINARY):
-                _store_unclaimed((root, spelling, content_sha256), None)
+            elif supplied_digest is not None and classified.disposition is reserved_paths.PathDisposition.ORDINARY:
+                _store_unclaimed((root, spelling, supplied_digest), None)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:
