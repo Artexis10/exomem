@@ -451,6 +451,69 @@ def test_collectionless_inspect_authorizes_candidates_before_parsing_or_projecti
     assert "Secret tracker title" not in serialized
 
 
+def test_inventory_inspects_a_non_item_page_beside_a_collections_items_for_legacy_trackers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import structured_collections as collections
+    from exomem.commands import op_record_memory
+
+    _empty_vault(tmp_path)
+    example = op_record_memory(tmp_path, action="describe")["examples"]["minimal"]
+    op_record_memory(
+        tmp_path,
+        action="create",
+        manifest_path=example["manifest_path"],
+        manifest_text=example["manifest_text"],
+        scaffold=True,
+        why="create the event collection",
+    )
+    for number in (1, 2):
+        inspected = op_record_memory(tmp_path, action="inspect", collection=example["manifest_path"])
+        op_record_memory(
+            tmp_path,
+            action="append",
+            collection=example["manifest_path"],
+            item={**example["append_item"], "label": f"Event {number}"},
+            item_key=str(number) * 8 + "-1111-4111-8111-111111111111",
+            expected_container_hash=inspected["snapshot"],
+            why="record an event",
+        )
+    index = tmp_path / "Knowledge Base/Records/Examples/Events/Events/Index.md"
+    index.write_text("---\ntype: record-index\n---\n# Events\n", encoding="utf-8")
+    opened: list[str] = []
+    inspect = collections.inspect_legacy_tracker
+
+    def counted(root: Path, path: Path, **kwargs):
+        opened.append(path.relative_to(root).as_posix())
+        return inspect(root, path, **kwargs)
+
+    monkeypatch.setattr(collections, "inspect_legacy_tracker", counted)
+
+    inventory = op_record_memory(tmp_path, action="inspect")
+
+    index_path = index.relative_to(tmp_path).as_posix()
+    assert inventory["collections"][0]["committed"] == 2
+    assert [row["path"] for row in inventory["legacy_trackers"]] == [index_path]
+    # The two items were read by the collection's adapter; the sweep must not open them again.
+    assert opened == [index_path]
+
+
+def test_inventory_still_lists_a_tracker_typed_log_source_as_a_legacy_tracker(tmp_path: Path) -> None:
+    from record_fixtures import copy_x3_fixture
+
+    from exomem.commands import op_record_memory
+
+    _empty_vault(tmp_path)
+    log_collection = copy_x3_fixture(tmp_path)
+    source = (log_collection / "Training Log.md").relative_to(tmp_path).as_posix()
+
+    inventory = op_record_memory(tmp_path, action="inspect")
+
+    # Only markdown-items item files are skipped; a log's source file stays a legacy tracker.
+    row = next(r for r in inventory["collections"] if r["storage_strategy"] == "markdown-log")
+    assert row["committed"]
+    assert source in [tracker["path"] for tracker in inventory["legacy_trackers"]]
+
 def test_denied_manifests_do_not_trip_authorized_discovery_limit(tmp_path: Path) -> None:
     from exomem.structured_collections import discover_collections
 

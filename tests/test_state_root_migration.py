@@ -1259,6 +1259,30 @@ def test_complete_manifest_descriptor_upgrade_migrates_new_family_first(
     assert not legacy.exists()
 
 
+def test_the_migration_descriptor_set_changes_only_with_a_state_migration() -> None:
+    """A changed migration set makes every upgrade a state migration and blocks rollback.
+
+    The managed upgrade compares this set with the one the vault's manifest records, so a changed
+    set forces the migrator on upgrade, and a release with the earlier set refuses the migrated
+    state. Only a family that once lived inside the vault has legacy state to move.
+    """
+    from exomem import state_migration
+
+    released = {
+        "authorization-projections", "claims-store", "clip-store", "deferred-index-store", "due-state",
+        "embeddings-store", "freshness-store", "governance-store", "graph-coordination", "graph-handoff",
+        "graph-rebuild", "graph-receipts", "graph-reset", "graph-store", "idempotency-store",
+        "lexical-quarantine", "lexical-rebuild", "lexical-store", "media-jobs-store", "references-store",
+        "refs-store", "review-state", "voice-profile-store",
+    }
+    declared = set(state_migration.declared_descriptor_ids())
+    assert declared == released, (
+        f"added {sorted(declared - released)}, removed {sorted(released - declared)}: this forces a "
+        "state migration. Set migrates_from_vault=False on a family born under the state root, or "
+        "change this set only together with a migration that moves vault state"
+    )
+
+
 def test_collection_compatibility_enrollment_requires_live_authority_and_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

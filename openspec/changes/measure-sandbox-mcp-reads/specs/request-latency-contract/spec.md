@@ -178,7 +178,7 @@ The existing internal late-projection path and its cold-index policy SHALL remai
 
 The packaged latency contract SHALL declare the paired MCP read measurement as the reference `mcp-read-paired` and as one pending bar on the boundary `mcp-worker-socket-v1` that covers `read_records`, `read_plans`, `read_memory`, `search_memory` and `recall_context`. The reference SHALL carry the fixture profile digest (null until a profile fixes it), the repeat count, the minimum case count, the confidence, the multiplicity policy, the gating groups with their allowance in milliseconds, and the non-gating groups. An allowance SHALL be null until paired runs of identical code establish it. The number of gating groups SHALL come from this configuration, never from the groups that ran.
 
-The reference SHALL set a p95 target of 100 ms for the six collection-store groups: records list, query and read, and planning list, query and read. That target SHALL be the private-sandbox acceptance bar and SHALL NOT gate any shared runner. The pending bar SHALL NOT observe live traffic, and the earlier bars and references SHALL stay byte-identical under the new revision.
+The reference SHALL set a p95 target of 100 ms for records query and read and planning query and read. It SHALL set a p95 target of 300 ms for records list and 150 ms for planning list, because one list call authorizes and counts every collection, legacy tracker and misplaced declaration. Each target SHALL be the private-sandbox acceptance bar and SHALL NOT gate any shared runner. The pending bar SHALL NOT observe live traffic, and the earlier bars and references SHALL stay byte-identical under the new revision.
 
 #### Scenario: The pending bar cannot relabel live traffic
 
