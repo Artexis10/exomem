@@ -317,6 +317,7 @@ def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
     assert "audience" in rejected_status.get("error", "").lower()
 
 
+@pytest.mark.timeout(180)
 def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k3s: str) -> None:
     """A deploy cannot inject a command; offline Job admission trusts only its cell StatefulSet."""
     import copy
