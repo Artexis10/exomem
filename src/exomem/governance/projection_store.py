@@ -20,7 +20,9 @@ from pathlib import Path
 from .. import held_fs, reserved_paths, state_paths
 from . import projections, schema_v4
 
-SCHEMA_USER_VERSION = 2
+# 3 adds `projection_variant_parts`; a store at 2 is read as one whose variants hold no parts.
+SCHEMA_USER_VERSION = 3
+_PARTLESS_SCHEMA_USER_VERSION = 2
 _DESCRIPTOR_ID = "authorization-projections"
 _OWNER = "governance.projections"
 _STORE_FILENAME = "rows.sqlite"
@@ -34,12 +36,23 @@ _EVIDENCE_SCHEMA_V2 = "exomem.authorization-projection-namespace-evidence/v2"
 _MEASUREMENT_FAMILY_DOMAIN = b"exomem.authorization-projection-measurement-family.v1"
 _MEASUREMENT_LANES = frozenset({"vector", "clip", "graph"})
 _HEX = frozenset("0123456789abcdef")
-_TABLES = frozenset({"namespace_meta", "projection_items", "projection_variants"})
-_TRIGGERS = frozenset(
-    f"{table}_no_{operation}"
-    for table in _TABLES
-    for operation in ("insert", "update", "delete")
-)
+_PARTLESS_TABLES = frozenset({"namespace_meta", "projection_items", "projection_variants"})
+_TABLES = _PARTLESS_TABLES | {"projection_variant_parts"}
+
+
+def _triggers(tables: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        f"{table}_no_{operation}"
+        for table in tables
+        for operation in ("insert", "update", "delete")
+    )
+
+
+#: The table and trigger set of each store version a reader accepts.
+_SCHEMAS = {
+    SCHEMA_USER_VERSION: (_TABLES, _triggers(_TABLES)),
+    _PARTLESS_SCHEMA_USER_VERSION: (_PARTLESS_TABLES, _triggers(_PARTLESS_TABLES)),
+}
 
 
 class ProjectionStoreError(RuntimeError):
@@ -364,16 +377,16 @@ def variant_store_path(
 
 def _row_material(variant: projections.ProjectionVariant) -> _VariantRow:
     search_fields_jcs = projections.canonical_jcs(dict(variant.search_fields))
-    row_digest = _framed_digest(
-        _ROW_DOMAIN,
-        (
-            variant.projection_variant_id.encode("ascii"),
-            variant.value_jcs,
-            search_fields_jcs,
-            str(variant.decision_level).encode("ascii"),
-        ),
-    )
-    return _VariantRow(variant, search_fields_jcs, row_digest)
+    fields = [
+        variant.projection_variant_id.encode("ascii"),
+        variant.value_jcs,
+        search_fields_jcs,
+        str(variant.decision_level).encode("ascii"),
+    ]
+    if variant.parts:
+        # A row without parts keeps the digest it had before parts existed.
+        fields.append(projections.canonical_jcs([part.value() for part in variant.parts]))
+    return _VariantRow(variant, search_fields_jcs, _framed_digest(_ROW_DOMAIN, fields))
 
 
 def _materialize(
@@ -385,6 +398,7 @@ def _materialize(
             "projection namespace key is invalid"
         )
     by_identity: dict[str, ProjectionItemVariants] = {}
+    documents = 0
     for item in items:
         if not isinstance(item, ProjectionItemVariants):
             raise projections.ProjectionCanonicalizationError(
@@ -395,7 +409,8 @@ def _materialize(
                 "projection catalog contains a duplicate item identity"
             )
         by_identity[item.item_identity] = item
-        projections.require_supported_capacity(catalog_items=len(by_identity))
+        documents += 1 + projections.part_count(item.variants)
+        projections.require_supported_capacity(catalog_items=documents)
     material: list[_ItemMaterial] = []
     for identity in sorted(by_identity, key=lambda value: value.encode("utf-16-be")):
         item = by_identity[identity]
@@ -812,6 +827,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "CHECK(length(row_digest)=64), PRIMARY KEY(item_identity, projection_variant_id), "
         "FOREIGN KEY(item_identity) REFERENCES projection_items(item_identity))"
     )
+    connection.execute(
+        "CREATE TABLE projection_variant_parts ("
+        "item_identity TEXT NOT NULL, projection_variant_id TEXT NOT NULL, "
+        "part_number INTEGER NOT NULL CHECK(part_number>=2), text TEXT NOT NULL, "
+        "start INTEGER CHECK(start IS NULL OR start>=0), carrier_spans_jcs BLOB NOT NULL, "
+        "PRIMARY KEY(item_identity, projection_variant_id, part_number), "
+        "FOREIGN KEY(item_identity, projection_variant_id) "
+        "REFERENCES projection_variants(item_identity, projection_variant_id))"
+    )
     connection.execute(f"PRAGMA user_version={SCHEMA_USER_VERSION}")
 
 
@@ -875,17 +899,36 @@ def _insert_material(
                 for row in item.rows
             ),
         )
+        connection.executemany(
+            "INSERT INTO projection_variant_parts "
+            "(item_identity, projection_variant_id, part_number, text, start, "
+            "carrier_spans_jcs) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                (
+                    item.item.item_identity,
+                    row.variant.projection_variant_id,
+                    part.number,
+                    part.text,
+                    part.start,
+                    projections.canonical_jcs([list(span) for span in part.carrier_spans]),
+                )
+                for row in item.rows
+                for part in row.variant.parts
+            ),
+        )
 
 
 def _metadata_manifest(
     connection: sqlite3.Connection,
     key: projections.ProjectionNamespaceKey,
 ) -> VariantStoreManifest:
-    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_USER_VERSION:
+    schema = _SCHEMAS.get(int(connection.execute("PRAGMA user_version").fetchone()[0]))
+    if schema is None:
         raise ProjectionStoreMismatch("projection store schema does not verify")
-    if _schema_names(connection, "table") != _TABLES:
+    tables, triggers = schema
+    if _schema_names(connection, "table") != tables:
         raise ProjectionStoreMismatch("projection store table set does not verify")
-    if _schema_names(connection, "trigger") != _TRIGGERS:
+    if _schema_names(connection, "trigger") != triggers:
         raise ProjectionStoreMismatch("projection store immutable trigger set does not verify")
     rows = connection.execute("SELECT * FROM namespace_meta").fetchall()
     if len(rows) != 1:
@@ -909,10 +952,55 @@ def _metadata_manifest(
     )
 
 
+def _holds_parts(connection: sqlite3.Connection) -> bool:
+    """Whether the store has a parts table: a store at the version before parts has none."""
+    return "projection_variant_parts" in _schema_names(connection, "table")
+
+
+def _stored_parts(
+    connection: sqlite3.Connection,
+    item_identity: str,
+    projection_variant_id: str | None = None,
+) -> dict[str, tuple[projections.ProjectionPart, ...]]:
+    """The parts each variant of one item holds, by variant id."""
+    query = (
+        "SELECT projection_variant_id, part_number, text, start, carrier_spans_jcs "
+        "FROM projection_variant_parts WHERE item_identity=?"
+    )
+    arguments: tuple[str, ...] = (item_identity,)
+    if projection_variant_id is not None:
+        query += " AND projection_variant_id=?"
+        arguments += (projection_variant_id,)
+    parts: dict[str, list[projections.ProjectionPart]] = {}
+    try:
+        for row in connection.execute(query + " ORDER BY projection_variant_id, part_number", arguments):
+            spans = json.loads(bytes(row[4]))
+            if not isinstance(spans, list) or projections.canonical_jcs(spans) != bytes(row[4]):
+                raise ProjectionStoreMismatch("projection part does not verify")
+            parts.setdefault(str(row[0]), []).append(
+                projections.ProjectionPart(
+                    number=row[1],
+                    text=row[2],
+                    start=row[3],
+                    carrier_spans=tuple(tuple(span) if isinstance(span, list) else span for span in spans),
+                )
+            )
+    except (
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        projections.ProjectionError,
+    ) as error:
+        raise ProjectionStoreMismatch("projection part does not verify") from error
+    return {variant_id: tuple(held) for variant_id, held in parts.items()}
+
+
 def _verified_variant(
     row: tuple[object, ...],
     *,
     content_hash: str,
+    parts: tuple[projections.ProjectionPart, ...] = (),
 ) -> projections.ProjectionVariant:
     try:
         search_fields = json.loads(bytes(row[4]))
@@ -923,6 +1011,7 @@ def _verified_variant(
             decision_level=int(row[2]),
             value_jcs=bytes(row[3]),
             search_fields=search_fields,
+            parts=parts,
         )
     except (
         TypeError,
@@ -942,6 +1031,7 @@ def _verified_bundles(
     connection: sqlite3.Connection,
 ) -> tuple[ProjectionItemVariants, ...]:
     bundles: list[ProjectionItemVariants] = []
+    holds_parts = _holds_parts(connection)
     item_rows = connection.execute(
         "SELECT item_identity, content_hash, scope_ids_jcs, variant_count, item_digest "
         "FROM projection_items ORDER BY item_identity"
@@ -969,10 +1059,17 @@ def _verified_bundles(
             "WHERE item_identity=? ORDER BY projection_variant_id",
             (item_identity,),
         ).fetchall()
+        parts = _stored_parts(connection, item_identity) if holds_parts else {}
         variants = tuple(
-            _verified_variant(tuple(row), content_hash=content_hash)
+            _verified_variant(
+                tuple(row),
+                content_hash=content_hash,
+                parts=parts.pop(str(row[1]), ()),
+            )
             for row in variant_rows
         )
+        if parts:
+            raise ProjectionStoreMismatch("projection part names no stored row")
         bundle = ProjectionItemVariants(
             item_identity,
             content_hash,
@@ -1302,7 +1399,15 @@ def load_projection_variant(
                     ).fetchone()
                     if row is None:
                         raise ProjectionStoreMismatch("projection row is unavailable")
-                    return _verified_variant(tuple(row), content_hash=content_hash)
+                    return _verified_variant(
+                        tuple(row),
+                        content_hash=content_hash,
+                        parts=(
+                            _stored_parts(connection, identity, variant_id).get(variant_id, ())
+                            if _holds_parts(connection)
+                            else ()
+                        ),
+                    )
                 except sqlite3.Error as error:
                     raise ProjectionStoreMismatch(
                         "projection row read does not verify"

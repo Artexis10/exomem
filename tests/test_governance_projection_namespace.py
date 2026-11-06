@@ -352,7 +352,7 @@ def test_l6_projection_withholds_a_carrier_that_an_unclosed_fence_made_code() ->
 
 
 def test_origin_prose_projector_version_invalidates_derived_identities() -> None:
-    assert projections.PROJECTOR_SCHEMA_VERSION == 2
+    assert projections.PROJECTOR_SCHEMA_VERSION == 3
     fields = {"body": "Public prose."}
     arguments = {
         "item_identity": "Knowledge Base/Notes/projected.md",

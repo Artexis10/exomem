@@ -296,54 +296,27 @@ def _catalog_items(
         try:
             relative = path.relative_to(vault_root).as_posix()
             snapshot = reserved_paths.read_generic_bytes(vault_root, relative)
-            parsed = find_corpus.parse_page(
-                path,
-                snapshot.mtime,
-                vault_root,
-                content=snapshot.data,
-                resolved_relative=relative,
-            )
-            if parsed is None:
-                raise ForwardMigrationUnavailable
-            content_hash = hashlib.sha256(snapshot.data).hexdigest()
-            scope_ids = tuple(
-                sorted(
-                    membership.evaluate_snapshot(
-                        parsed,
-                        compiled,
-                        content_hash=content_hash,
-                    )
+            items.append(
+                catalog_publication.catalog_item(
+                    vault_root=vault_root,
+                    path=relative,
+                    source=snapshot.data.decode("utf-8"),
+                    policy=compiled,
+                    target_key=key,
                 )
             )
-            variants = projections.enumerate_projection_variants(
-                item_identity=relative,
-                content_hash=content_hash,
-                scope_ids=scope_ids,
-                policy=compiled,
-                projector_schema_version=key.projector_schema_version,
-                full_search_fields=catalog_publication.search_fields(parsed),
-            )
-        except ForwardMigrationUnavailable:
-            raise
         except (
             OSError,
             RuntimeError,
             UnicodeError,
             ValueError,
+            catalog_publication.CatalogPublicationError,
             membership.MembershipUnresolved,
             projections.ProjectionError,
             reserved_paths.ReservedPathLeafError,
         ) as error:
             raise ForwardMigrationUnavailable from error
-        items.append(
-            projection_store.ProjectionItemVariants(
-                item_identity=relative,
-                content_hash=content_hash,
-                scope_ids=scope_ids,
-                variants=variants,
-            )
-        )
-    return tuple(items)
+    return catalog_publication.fit_parts(tuple(items))[0]
 
 
 def _policy_seed(
