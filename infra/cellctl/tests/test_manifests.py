@@ -267,6 +267,15 @@ def test_secret_omits_previous_bearer_outside_a_rotation() -> None:
     assert "cell-token-previous" not in secret["data"]
 
 
+def test_a_per_cell_key_secret_refuses_an_empty_volume_passphrase() -> None:
+    # The pinned hcloud CSI driver formats a blank volume as plain ext4 when the
+    # node-publish passphrase is empty, so an empty one must never be rendered.
+    with pytest.raises(ValueError, match="volume passphrase"):
+        render_secret(_spec(storage_class="exomem-cloud-cell-key", volume_passphrase=""))
+    secret = render_secret(_spec(storage_class="exomem-cloud-cell-key", volume_passphrase="derived"))
+    assert base64.b64decode(secret["data"]["encryption-passphrase"]).decode() == "derived"
+
+
 def test_read_only_sets_the_env_var_and_running_does_not() -> None:
     read_only_sts = render_statefulset(_spec(read_only=True))
     running_sts = render_statefulset(_spec(read_only=False))

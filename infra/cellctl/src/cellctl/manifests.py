@@ -621,6 +621,11 @@ def _media_store_config(spec: CellManifestSpec) -> str:
 
 
 def render_secret(spec: CellManifestSpec) -> dict:
+    # D1: every class except the shared legacy one and local storage reads this Secret's
+    # passphrase at node publish, and the pinned hcloud CSI driver formats a blank volume
+    # as plain ext4 when it is empty. Fail closed, so an unknown class is covered too.
+    if not spec.volume_passphrase and spec.storage_class != LEGACY_CLASS and not spec.local_volume:
+        raise ValueError(f"refusing an empty volume passphrase for storage class {spec.storage_class!r}")
     data = {
         "cell-token": _b64(spec.bearer_current),
         "backup-password": _b64(spec.backup_password),
