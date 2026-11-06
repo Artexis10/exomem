@@ -58,7 +58,6 @@ def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
         "open_authorization_session_connection",
         lambda _root: type("_Connection", (), {"close": lambda self: None})(),
     )
-    monkeypatch.setattr(store, "open_active_governance_read_connection", lambda _root: sqlite3.connect(":memory:"))
     monkeypatch.setattr(
         authorization_session_authority,
         "active_session_purpose",
@@ -69,6 +68,9 @@ def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _unit_session_status_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     install_unit_session_boundary(monkeypatch)
+    # Preparation opens the session read-only; the boundary above stubs the check it serves.
+    # Local to this module: other importers of the helper publish through the real store.
+    monkeypatch.setattr(store, "open_active_governance_read_connection", lambda _root: sqlite3.connect(":memory:"))
 
 
 @dataclass(frozen=True)

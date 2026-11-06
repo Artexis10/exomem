@@ -130,13 +130,14 @@ class _Session:
     def state(self) -> dict[str, Any]:
         return self.current["state"]
 
-    def transition(self, action: str, **args: Any) -> dict[str, Any]:
+    def transition(self, action: str, *, commit_point: bool = True, **args: Any) -> dict[str, Any]:
         self.current = self.store.transition(
             self.identity,
             expected_revision=self.current["revision"],
             expected_digest=self.current["journal_digest"],
             action=action,
             args=args,
+            commit_point=commit_point,
         )
         return self.current
 

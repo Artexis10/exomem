@@ -69,6 +69,7 @@ RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
 # These are closed native operation tokens, never business vocabulary.
 PRESERVATION_STEP_KINDS: Final[frozenset[str]] = frozenset({"capture-source", "preserve-evidence"})
+# nosemgrep: ep-word-set -- the closed curation step kinds of the Planning leaves.
 PLANNING_STEP_KINDS: Final[frozenset[str]] = frozenset({"add-plan", "update-plan", "triage-plan"})
 COLLECTION_STEP_KINDS = RECORDS_STEP_KINDS | PLANNING_STEP_KINDS
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
@@ -3486,7 +3487,8 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
     if leaf["effect_digest"] != metadata["effect_digest"] or leaf["binding"] is None or (
         leaf["binding"]["run_id"], leaf["binding"]["operation_id"]
     ) != (run, operation):
-        raise _error("CURATION_OUTCOME_UNCERTAIN", "episode invocation differs from its immutable binding")
+        # Checked before any write: this run is not the episode's bound invocation, so nothing ran.
+        raise _error("CURATION_BINDING_STALE", "the episode binds this leaf to another run or effect")
     episode_model._binding({**leaf["binding"], "sealed_plan": plan}, leaf)  # noqa: SLF001
     active = _ACTIVE_EPISODE_INVOCATION.get()
     if active is not None and active[:3] == (Path(vault_root).resolve(), run, operation):
@@ -3494,12 +3496,14 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
         if active[3] is None or leaf.get("invocation_id") != active[3]["invocation_id"] or leaf["outcome"] != "uncertain":
             raise _error("CURATION_OUTCOME_UNCERTAIN", "active episode invocation changed")
         return active[3]
+    # Pre-dispatch journal bookkeeping, like this store's plan and state files, is not the
+    # command's commit: a writer refusal after it must answer uncommitted with its own code.
     if leaf["outcome"] == "uncertain":
-        session.transition("reconcile_curation_leaf", candidate=candidate, leaf=leaf_id)
+        session.transition("reconcile_curation_leaf", commit_point=False, candidate=candidate, leaf=leaf_id)
         leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
         if leaf["outcome"] != "proven_uncommitted":
             raise _error("CURATION_OUTCOME_UNCERTAIN", "episode invocation requires native recovery")
-    session.transition("mark_curation_invocation", candidate=candidate, leaf=leaf_id)
+    session.transition("mark_curation_invocation", commit_point=False, candidate=candidate, leaf=leaf_id)
     leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
     return {"invocation_id": leaf["invocation_id"], "episode_attempt": leaf["attempts"]}
 

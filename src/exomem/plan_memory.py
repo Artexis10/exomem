@@ -101,6 +101,7 @@ def plan_memory(
     values.pop("action")
     _validate_arguments(action, values)
     try:
+        # nosemgrep: ep-word-membership -- plan_memory's closed write actions (see ACTIONS).
         if action in {"add", "update", "triage"}:
             return _write(vault_root, action, values)
         if action == "inspect" and collection is None:

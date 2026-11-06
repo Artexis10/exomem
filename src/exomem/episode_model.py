@@ -33,6 +33,7 @@ _ROUTES = {
 _ADAPTER_PENDING_ROUTES = {"experiment"}
 _NO_EFFECT_ROUTES = _ADAPTER_PENDING_ROUTES | {"no_capture"}
 #: Integrated routes retain their historical leafless declarations as pending.
+# nosemgrep: ep-word-set -- closed episode proposal route tokens, as in _ROUTE_KINDS.
 _OPTIONAL_LEAF_ROUTES = {"records", "source", "evidence", "planning"}
 #: The curation step kinds each effect route owns. No route owns a move,
 #: delete or recover step.

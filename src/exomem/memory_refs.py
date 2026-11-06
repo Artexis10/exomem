@@ -52,9 +52,9 @@ class ReferenceError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
-_ID_ALLOCATION: contextvars.ContextVar[tuple[list[str], tuple[str, ...] | None] | None] = contextvars.ContextVar(
-    "memory_id_allocation", default=None
-)
+_ID_ALLOCATION: contextvars.ContextVar[
+    tuple[list[str], tuple[str, ...] | None] | None
+] = contextvars.ContextVar("memory_id_allocation", default=None)
 
 
 @contextlib.contextmanager

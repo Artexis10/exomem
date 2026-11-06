@@ -274,16 +274,11 @@ def test_a_run_approved_before_the_migration_resumes_and_commits_once(env, capsy
     run, operation = leaf["run_id"], leaf["operation_id"]
     plan_id, fingerprint = curation.CurationStore(root).identities(run)
 
-    def stopped(name):
-        if name == "after-prepared-state":
-            raise curation.CurationFault(name)
-
-    # The owner approves the run, and the process stops before its leaf runs.
-    with monkeypatch.context() as crash, request_scope(OWNER):
-        crash.setattr(curation, "_fault_barrier", stopped)
-        with pytest.raises(curation.CurationFault):
-            curation.apply(root, run_id=run, plan_id=plan_id, expected_plan_fingerprint=fingerprint,
-                           why="Approve the sealed work item.")
+    # The owner approves the run, and the process stops before execution joins its episode leaf.
+    # (A stop after that join is a tracked attempt, which stays uncertain by contract.)
+    with request_scope(OWNER):
+        curation.CurationStore(root).create_approval(run, plan_id=plan_id, fingerprint=fingerprint,
+                                                     why="Approve the sealed work item.")
     stop_writer()
     migrated(root, capsys).stop()
     # With no service the dispatcher refuses the resume and records no receipt, so the run stays resumable.
@@ -500,14 +495,6 @@ def view_state(root, view):
     return None if found is None else found[0]
 
 
-def process_cut_at(name):
-    """A fault barrier that kills the process at the named point of a curation step."""
-    def barrier(reached):
-        if reached == name:
-            raise ProcessCut
-    return barrier
-
-
 def withhold_from_external(root, paths):
     """Withhold the named knowledge-base paths from EXTERNAL only."""
     write_scope(root, paths=paths)
@@ -716,15 +703,16 @@ def test_a_second_run_of_the_same_sealed_plan_does_not_take_the_first_runs_commi
         record_an_episode(root)
         first, operation, plan_id, fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
         sealed = curation.CurationStore(root).load_plan(first)
-        base = {name: value for name, value in sealed.items() if name not in {"binding_manifest", "registry_ids"}}
+        base = {name: value for name, value in sealed.items()
+                if name not in {"binding_manifest", "registry_ids", "episode_invocation_version"}}
         second = curation.CurationStore(root).create_forward(
             base, binding_manifest=sealed["binding_manifest"], registry_ids=sealed["registry_ids"],
             today=dt.date.today() + dt.timedelta(days=1), allow_records=True)["run_id"]
         assert second != first and curation.CurationStore(root).identities(second) == (plan_id, fingerprint)
-        with monkeypatch.context() as crash:
-            crash.setattr(curation, "_fault_barrier", process_cut_at("after-prepared-state"))
-            with pytest.raises(ProcessCut):
-                apply_run(root, second, plan_id, fingerprint, key="apply-the-second-run")
+        # The episode binds its leaf to the first run, so the second refuses before it writes anything.
+        assert refusal(lambda: apply_run(root, second, plan_id, fingerprint, key="apply-the-second-run"))[0] == (
+            "CURATION_BINDING_STALE")
+        assert receipts(root, second) == [] and transactions(root, second, operation) == []
         apply_run(root, first, plan_id, fingerprint)
         head = store_head(root)
         assert refusal(lambda: resume_run(root, second, plan_id))[0] == "CURATION_BINDING_STALE"
