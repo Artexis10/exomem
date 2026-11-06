@@ -1484,11 +1484,71 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     assert result["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
     assert result["error"]["message"] == refusal.reason
     remediation = result["error"]["remediation"]
-    assert 'maintain_memory(mode="backfill-ids")' in remediation
+    assert "maintain_memory(mode='backfill-ids')" in remediation
     assert "confirmation" in remediation
     assert "plan_id" in remediation
     assert remediation.index("identity issues") < remediation.index("confirmation")
     assert "re-read and validate" in remediation
+
+
+def test_typed_mcp_remediations_name_tools_the_client_lists(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import Client
+
+    from exomem.semantic_writes import SemanticWriteError
+
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    server = server_module.build_server(require_auth=False)
+
+    async def scenario(client):
+        listed = {tool.name for tool in await client.list_tools()}
+        missing = await client.call_tool(
+            "read_memory",
+            {"operation": {"kind": "page", "path": "Knowledge Base/Notes/absent.md"}},
+            raise_on_error=False,
+        )
+        monkeypatch.setattr(
+            "exomem.writer_lease.invoke_command",
+            lambda *args, **kwargs: (_ for _ in ()).throw(SemanticWriteError(
+                "RELATION_REVIEW_STABLE_ID_REQUIRED",
+                "lifecycle reviewed-none requires one unique stable page identity",
+            )),
+        )
+        legacy = await client.call_tool(
+            "edit_note",
+            {"path": "Knowledge Base/Notes/legacy.md", "why": "test",
+             "operation": {"kind": "replace_tags", "tags": ["a"]}},
+            raise_on_error=False,
+        )
+        return listed, missing.structured_content, legacy.structured_content
+
+    async def run():
+        async with Client(server) as client:
+            return await scenario(client)
+
+    try:
+        listed, missing, legacy = asyncio.run(run())
+    finally:
+        writer_lease.reset_managers_for_tests()
+
+    assert {"search_memory", "check_memory", "repair_memory"} <= listed
+    assert {"ask_memory", "maintain_memory"}.isdisjoint(listed)
+    assert missing["error"]["code"] == "NOT_FOUND"
+    assert "`search_memory`" in missing["error"]["remediation"]
+    remediation = legacy["error"]["remediation"]
+    assert legacy["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
+    assert "check_memory(operation={'kind': 'backfill-ids'})" in remediation
+    assert "run repair_memory with dry_run=false, its plan_id" in remediation
+    assert "maintain_memory" not in remediation
+    # The semantic finding prefixes this text and shares a 224-byte budget; the typed
+    # spelling is the longer one.
+    assert len(f"Add a qualifying typed relation. {remediation}".encode()) <= 224
 
 
 def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
