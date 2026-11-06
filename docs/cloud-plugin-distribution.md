@@ -22,12 +22,19 @@ uv run --frozen python scripts/validate-public-artifacts.py --repository
 
 Output is `plugins/cloud/generated/`: Claude's fixed HTTP `.mcp.json` and
 `.claude-plugin/plugin.json`, OpenAI's portable Agent Plugins 1.0 `plugin.json`
-and `mcp.json`, complete canonical skills, public assets, two deterministic ZIPs,
-and `release.json`. Check regenerates into temporary storage and rejects drift,
+and `mcp.json`, complete canonical skills, public assets, one deterministic ZIP
+per edition, and `release.json`. Check regenerates into temporary storage and rejects drift,
 missing/extra files and symlinks. A valid bundle is not proof of native behaviour.
 
-Claude's bundle also registers the release-owned retrieval, capture and
-continuation hooks through `hooks/hooks.json`. The adapter copies canonical
+Claude has two editions. The directory edition, `generated/claude`, contains
+skills, the remote MCP connection, the icon, README and LICENSE. The Claude
+directory refuses command hooks and non-text files from publishers that are not
+Verified organizations, so the build fails if a hook or another file type enters
+this edition. Its README names the install command for the hooked edition.
+
+The hooked edition, `generated/claude-hooks`, is listed in the repository
+marketplace as `exomem-cloud`. It registers the release-owned retrieval, capture
+and continuation hooks through `hooks/hooks.json`. The adapter copies canonical
 scripts byte-for-byte, passes `--client claude` and a writable plugin-local
 state home, and uses `--activation-mode mcp` for retrieval/capture. The hooks
 delegate to the client's admitted MCP connection; they do not read local
@@ -173,6 +180,7 @@ Provider previews remain the final check for provider-specific rasterisation.
 
 ### Claude credential-flow findings
 
+These findings apply to the hooked edition; the directory edition has no hooks.
 The registered Cloud hooks use the admitted MCP connection.
 The retrieve and capture registrations fix `--activation-mode mcp` before ambient transport settings are read.
 The retrieve hook emits native activation guidance without selecting its REST or CLI transport ladder.
@@ -215,7 +223,7 @@ After operator approval, use the existing Claude listing:
 
 1. Confirm the tracked repository, branch and plugin folder; the existing submission remains identified.
 2. Release the reviewed change through that tracked branch; the portal observes the intended new version.
-3. Inspect its validation, security findings and icon previews; the retained hooks and credential-flow evidence match the package.
+3. Inspect its validation, security findings and icon previews; the package contains no hooks or scripts.
 4. If the listing still shows an older icon, change the listing icon in the portal where it allows that; the package icon cannot change it.
 5. Update the connector tagline where supported; the connector keeps its existing MCP resource and OAuth configuration.
 6. Select the approved review or publication action; the portal records the actual outcome without an automatic withdrawal.
