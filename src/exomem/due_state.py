@@ -113,9 +113,12 @@ log = logging.getLogger(__name__)
 
 # 3 adds `SOURCE_BACKLOG`: a stored projection without it would read as "no Source is
 # outstanding" until the next reconcile, so the version change forces the rebuild.
-# 4 moves `SIDE_FAMILY` to its own file; a v3 file holds it inline, and reading
-# that as "no candidates" would silence them until the next reconcile.
+# 4 moves `SIDE_FAMILY` to its own file. v3 code would read a v4 main file as
+# "no candidates", so the bump makes a rolled-back runtime rebuild instead.
 SCHEMA_VERSION = 4
+#: A v3 file holds `SIDE_FAMILY` inline, which `load` still reads, so an upgrade
+#: does not pay a full rebuild; the next save writes it in the v4 layout.
+_READABLE_VERSIONS = frozenset({3, SCHEMA_VERSION})
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -302,17 +305,20 @@ def load(vault_root: Path) -> dict[str, Any] | None:
         return None
     try:
         payload = _read_json(path)
-        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
+        if not isinstance(payload, dict) or payload.get("version") not in _READABLE_VERSIONS:
             return None
         categories = payload.get("categories")
         if not isinstance(categories, dict):
             return None
         if SIDE_FAMILY in (payload.pop(_SIDE_KEY, None) or ()):
             side = _read_json(side_path(vault_root))
-            if not isinstance(side, dict) or side.get("version") != SCHEMA_VERSION:
+            if (
+                not isinstance(side, dict)
+                or side.get("version") != SCHEMA_VERSION
+                or not isinstance(side.get("entries"), dict)
+            ):
                 return None
-            if isinstance(side.get("entries"), dict):
-                categories[SIDE_FAMILY] = side["entries"]
+            categories[SIDE_FAMILY] = side["entries"]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         log.debug("due-state projection unreadable at %s; recomputing", path)
         return None
@@ -416,8 +422,11 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     branch the shared entry already holds for that file: a write delta copies
     `categories` shallowly and carries the branch by reference, so the identity
     check is exact. A reader in another process may pair a new side file with
-    the old main file for one rename; the families are independent, so that is
-    the staleness the module already accepts.
+    the old main file for one rename. Two writers can also leave a torn pair: a
+    delta's whole save landing between `reconcile`'s side and main writes keeps
+    the old candidates beside the new main file until the next reconcile, since
+    `reconcile` does not hold `_LOCK`. Each half is the last-replace-wins lost
+    update the projection already accepts, and the families are independent.
     """
     call_spans.measure(call_spans.PROJECTION_SAVE_ATTEMPTS)
     path = state_path(vault_root)
@@ -3805,7 +3814,7 @@ def _content_token(
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 #: Served-content identity per projection or review file version.
-_CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
+_CONTENT_TOKENS: dict[tuple[str, Any], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
@@ -4215,7 +4224,7 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
 
 
 #: `ref -> (fingerprint, category, path)` per vault, valid for one projection file identity.
-_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, tuple[str, str, str]]]] = {}
+_FINGERPRINTS: dict[str, tuple[Any, dict[str, tuple[str, str, str]]]] = {}
 _FINGERPRINTS_LOCK = threading.Lock()
 _FINGERPRINTS_CAP = 8
 
