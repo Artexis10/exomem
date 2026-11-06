@@ -3,12 +3,15 @@
 # Exomem Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
-that key. `cellctl` holds no credential that creates or deletes keys, and no bucket-wide credential in the founder account.
+that key. `cellctl` holds no credential that creates or deletes keys. In the founder account it holds no credential that
+reads, writes or deletes files; its one key there can only list the media bucket.
 It still holds the stored per-cell key of each cell created before the switch, limited to that cell's prefix, until the cell migrates.
 
 ## Credentials
 
-Terraform creates the first three credentials. Their source is `infra/terraform/cell-data/keys.tf`.
+Terraform creates the credentials above except the per-cell keys and the operator key. The cell-data keys come from
+`infra/terraform/cell-data/keys.tf`. The two media keys come from `infra/terraform/durability/media.tf`.
+No media key can delete a file version, so a captured media key cannot destroy a stored original.
 Each credential has one holder.
 
 | Credential | Account | Restricted to | Capabilities | Held by |
@@ -16,6 +19,8 @@ Each credential has one holder.
 | `exomem-cell-data-key-custodian` | cell-data | None. B2 allows key creation only on an account-level key. | `listKeys`, `writeKeys`, `deleteKeys` | The key custodian, in Secret `exomem-key-custodian-b2` |
 | `exomem-cell-data-cellctl-staging` | cell-data | The staging bucket | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | `cellctl`, for exports, imports and the staging sweep of a deletion |
 | `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log |
+| `<prefix>-media-edge` | founder | The media bucket | `readFiles`, `writeFiles` | The media edge, in Secret `exomem-media-edge-b2` |
+| `<prefix>-cellctl-media-list` | founder | The media bucket | `listBuckets`, `listFiles` | `cellctl`, to meter each cell's stored bytes. Source: `infra/terraform/durability/media.tf` |
 | One key per cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | The cell's backup and restore Jobs, in Secret `cell-object-store-key` |
 | Operator key | One account per key | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles`; for founder also `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the clean-up script only |
 

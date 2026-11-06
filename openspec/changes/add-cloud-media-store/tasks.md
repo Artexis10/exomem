@@ -33,7 +33,8 @@
 
 ## 4. Platform (D4–D7, D9, D10)
 
-- [ ] 4.1 Add the media bucket in the durability Terraform. It needs versioning, a lifecycle that only cancels unfinished multipart uploads, no object lock, and an edge key without version deletion. Verify: the plan adds only the bucket and the key, and the provider's key listing shows the capabilities.
+- [ ] 4.1 Add the media bucket in the durability Terraform. It needs versioning, a lifecycle that only cancels unfinished multipart uploads, no object lock, and an edge key without version deletion. A second key, `cellctl_media_list`, holds `listBuckets` and `listFiles` for the bucket only (D7, decision 2026-11-06). No media key holds `deleteFiles`. Verify: the plan adds only the bucket and the two keys, and the provider's key listing shows the capabilities.
+  - The operator adds both key IDs and the bucket's settings to the founder entry of the key watcher's pinned set, as a read-modify-write of the live value. This is data, with no watcher code change.
   - The bucket and bucket-restricted read/write key are implemented, disabled by default. All five mocked durability plans pass, including two media cases. The provider plan and live key listing remain unverified; no provider resources were created.
 - [x] 4.2 In cellctl, mint the media bundle, wrap it under the cell root, and sign the per-cell edge credential. Render the standard-mode bundle and edge credential into selected cells' Secrets. Tenant-lock enablement stays with `cloud-cell-key-custody`; this task adds no unlock channel. Verify: tests show the cell-root wrap and additional data, standard-mode re-rendering, and an edge render that holds neither key.
 - [x] 4.3 In the chart, add the edge Deployment and Service (literal ClusterIP, Recreate rollout), the canary list, the fleet switch, and the network and admission rules for selected runtimes. Verify: chart tests show an unchanged default render, only the edge peer added for a selected cell, and nothing added for an unselected cell.
@@ -45,25 +46,26 @@
   - no hide, list or delete operation exists.
   - a restart retains uncertain write intent, and missing HEAD does not produce a drained-generation acknowledgement;
   - a lost successful upload reply recovers its exact version, while unrelated cells continue to work.
-  - Multipart initiation recovery and retained edge-state drain evidence remain incomplete. Complete them before enabling media cleanup.
+  - a lost reply to the start call of a large upload returns 503, writes no intent, lets the settled generation advance, and leaves no version after a restart;
+  - an upload cut after its parts never calls the provider's finish operation for that file ID;
+  - `/v1/generation` reports the settled and loaded generations, the SHA-256 of the loaded validated bytes and the bucket. cellctl confirms a revocation only on an exact match (D6): a higher generation with another digest, and a matching digest on another bucket, do not confirm;
+  - an unreadable published ConfigMap with a clock below the edge's loaded generation neither confirms falsely nor stalls once the edge is readable.
+  - Multipart initiation recovery and retained edge-state continuity need no further work (D6, decision 2026-11-06).
 - [ ] 4.5 Meter media storage in the cell from referenced versions, meter physical bytes in cellctl, and refuse uploads above the allowance with `MEDIA_ALLOWANCE_EXCEEDED`. Verify: tests show refusal before any byte, status for an original left local, and no charge for versions kept only for backups.
+  - The physical meter lists each cell's prefix with the list-only key once per backup hold (D10). Verify with the storage fake: per-prefix sums of upload versions, a count of unfinished large files, a failed page gives unknown and leaves the owner figure unchanged, a hide entry alerts, and bytes above the allowance times the headroom factor alert. Publication to Home needs Substrate columns and stays open.
 - [ ] 4.5.1 Add a complete owner reference census inside the maintained filesystem boundary and give custody readers a frontmatter mode that refuses unreadable headers while ordinary strict reads keep their meaning. Verify: private state stays excluded; ordinary aliases, read failures and malformed potential companions produce unknown usage; valid plain notes do not.
 - [ ] 4.5.2 Preserve canonical references and durable placement metadata through Trash deletion and recovery. Verify: binary, companion and directory paths retain charges until their last reference is removed; interrupted handoff and rollback keep recoverable bytes and known custody.
 - [ ] 4.5.3 Configure the allowance once and enforce it before offload encryption or provider upload. Verify: plaintext version deduplication, backup-only exclusion, refusal with local bytes retained, recovery after freed space or changed limits, and publication-time reference changes.
 - [ ] 4.5.4 Before allowance enforcement is enabled for a cell, show the vault owner the path and reason of each note that makes media usage unknown. One unreadable note makes the whole allowance unknown and defers every offload, so the owner needs the cause to repair it. Verify: an unknown allowance names the offending path and reason in status and in the refusal.
   - These cell-side steps are partial implementation of 4.5. Physical metering and complete ingress admission remain required; 4.5 and 4.9 stay unchecked until their full contracts are proved.
-- [ ] 4.6 Write a reference manifest from each backup's clone. Add cellctl's version destruction in the backup hold after prune, under the three conditions. Verify these with tests using the fake provider:
-  - a version stays while a months-old retained snapshot names it;
-  - a sidecar deleted between clone and backup keeps its version;
-  - an upload whose ledger commit is newer than the clone's recovered state, but whose protection record was fully synced first, survives;
-  - a reuse whose source sidecar is deleted before capture survives;
-  - a same-cell restore of the oldest backup reads every pinned version;
-  - a missing manifest blocks all destruction for the cell.
-- [ ] 4.7 Extend cell deletion. Retire media content keys under `cloud-cell-key-custody` independently of provider cleanup. Keep edge revocation and generation observation before upload aborts and prefix deletion. Verify these with cellctl deletion tests using the fake provider and a fake edge:
-  - `deleted` is reported only after the versions and bundle are absent and the existing cell deletion proof holds;
-  - the cell stays `deleting` after a failed listing or an unobserved generation;
+- [ ] 4.6 Moved to a follow-on change for version destruction (decision 2026-11-06). That change writes the reference manifest and destroys versions after prune. Its checks include the six scenarios of the retention requirement: a months-old snapshot, a sidecar deleted between clone and backup, a newer ledger commit with a synced protection record, a reuse whose source sidecar is deleted, a same-cell restore of the oldest backup, and a missing manifest. This change ships no manifest and destroys no version. Under the key custody of `contain-cloud-controller-compromise` D9, cellctl cannot read or delete manifests and holds no `deleteFiles`. The operator chose on 2026-11-06 to build the follow-on next, with only the canary cell using the media store before it ships (task 6.3).
+- [ ] 4.7 Extend cell deletion (D9, decision 2026-11-06). cellctl retires media content keys under `cloud-cell-key-custody` before any provider work, revokes the cell at the edge, and reports `deleted` only after exact-set evidence that the edge's set omits the cell. The operator's cleanup script deletes the versions. Verify these with cellctl deletion tests using a fake edge and the fake provider, and with the script's tests:
+  - the cell stays `deleting` while the edge is unreadable, behind, or holds a different set, and becomes `deleted` on an exact match, with the existing cleanup alert;
+  - the recorded `revoked_generation`, `set_sha256` and `observed_at` survive a restart;
+  - a cell that no set ever listed does not wait;
+  - content-key retirement is not postponed by an edge or provider outage, and no destruction claim is made;
+  - the script's media mode deletes nothing before the 7-day grace from the operator's first dry run, then deletes every version under `cells/<cell>/` and cancels unfinished large files, and a final dry run shows zero;
   - no upload lands after revocation.
-  - a provider outage does not postpone content-key retirement or produce an unsupported destruction claim.
 - [ ] 4.8 Update the Cloud privacy copy to name the media store and its enforced custody mode. Verify: the copy review in `cloud-operator-access` passes, with no tenant-held claim before `lock_complete_at`.
 - [ ] 4.9 Report vault storage (without cached originals) and media storage (against the allowance) in status and in the usage cellctl publishes for Home. Verify: tests show no double counting with cached originals, an unknown media figure when the cell cannot read its references, and an unchanged owner figure when only cellctl's physical listing fails.
 
@@ -237,4 +239,4 @@
 
 - [ ] 6.1 Rehearse on a rehearsal cell: capture, offload, evict, hydrate, play, download, export, turn off and drain, then delete the cell. Verify: the evidence is recorded in this change.
 - [ ] 6.2 Enable one canary cell, back-fill and evict to target. Collect hydration records for two to four weeks, then set the eviction target, margin and minimum idle age. Verify: the measurements and settings are recorded in design.md D3.
-- [ ] 6.3 After 5.5, turn on the fleet switch under an operator-approved live change, with the drain as its undo. Verify: every selected cell reports an empty offload backlog, and a rehearsal export delivers the largest selected cell's media.
+- [ ] 6.3 After 5.5 and the follow-on change for version destruction, turn on the fleet switch under an operator-approved live change, with the drain as its undo. The operator chose "Build it next; test cell now" on 2026-11-06: until the follow-on ships, only the canary cell uses the media store. Verify: every selected cell reports an empty offload backlog, and a rehearsal export delivers the largest selected cell's media.
