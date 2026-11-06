@@ -10,6 +10,7 @@ the typed candidate actions, pinned in `test_episode_workflow.py`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ from exomem import (
     episode_model,
     episode_recovery,
     memory_refs,
+    query_data,
     server,
     working_set,
 )
@@ -76,6 +78,133 @@ def _record(vault: Path, **overrides: object) -> dict:
 def _episodes(vault: Path) -> list[Path]:
     folder = vault / "Knowledge Base" / "Sources" / "Episodes"
     return sorted(folder.glob("*.md")) if folder.exists() else []
+
+
+def test_preserved_materials_survive_recaps_and_recover_independently(vault, monkeypatch) -> None:
+    from test_upload_endpoint import _client
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload")
+    image = (Path(__file__).parent / "fixtures/media-samples/ocr-eng.png").read_bytes()
+    originals = {
+        "display.png": (image, "image/png", "An authored first reading of the image."),
+        "samples.csv": (b"event,value\ntrial,24\ncontrol,20\n", "text/csv", "Two observed rows."),
+    }
+    saved = {}
+    for name, (raw, mime, text) in originals.items():
+        reply = client.post(
+            "/upload", files={"file": (name, raw, mime)},
+            data={"scope": "Synthetic", "category": "Inputs", "text": text},
+            headers={"authorization": "Bearer test-upload"},
+        )
+        assert reply.status_code == 201, reply.text
+        saved[name] = reply.json()
+    with request_scope(owner_principal(surface="mcp")):
+        _record(vault)
+        current = commands.op_episode_memory(vault, None, action="candidates", episode=KEY)
+        refs = {name: memory_refs.ref_from_markdown((vault / receipt["sidecar_path"]).read_text())
+                for name, receipt in saved.items()}
+        materials = {"version": 1, "items": [
+            {"key": "display", "original_reference": refs["display.png"],
+             "reading_reference": refs["display.png"], "producer": "Test reader", "producer_version": "1"},
+            {"key": "rows", "original_reference": refs["samples.csv"],
+             "locator": {"kind": "dataset_rows", "record_path": None, "row_indices": [1, 0]}},
+        ]}
+        canonical_before = {p: p.read_bytes() for p in (vault / "Knowledge Base").rglob("*.md")}
+        bound = commands.op_episode_memory(vault, None, action="input", episode=KEY,
+            input_revision=current["input_revision"], journal_digest=current["journal_digest"], materials=materials)
+        assert bound["input_revision"] == 2 and bound["unchanged"] is False
+        assert {p: p.read_bytes() for p in (vault / "Knowledge Base").rglob("*.md")} == canonical_before
+        image_read = commands.op_episode_memory(vault, None, action="material", episode=KEY,
+            input_revision=2, material_key="display")
+        assert image_read["original"]["status"] == image_read["reading"]["status"] == "available"
+        assert "An authored first reading of the image." in image_read["reading"]["body"]
+        assert image_read["attribution"]["basis"] == "caller_authored"
+        dataset = commands.op_episode_memory(vault, None, action="material", episode=KEY,
+            input_revision=2, material_key="rows")
+        assert dataset["original"]["locator"] == {
+            "kind": "dataset_rows", "record_kind": "csv_records", "record_path": None,
+            "row_indices": [0, 1], "sha256": hashlib.sha256(originals["samples.csv"][0]).hexdigest(),
+            "size": len(originals["samples.csv"][0]),
+        }
+        same = commands.op_episode_memory(vault, None, action="input", episode=KEY,
+            input_revision=2, journal_digest=bound["journal_digest"], materials={
+                "version": 1, "items": list(reversed(materials["items"])),
+            })
+        assert same["unchanged"] is True and same["revision"] == bound["revision"]
+        recap_retry = _record(vault)
+        assert recap_retry["idempotent"] is True and recap_retry["revision"] == 2
+        with pytest.raises(EpisodeError, match="EPISODE_REVISION_CONFLICT"):
+            commands.op_episode_memory(vault, None, action="input", episode=KEY,
+                input_revision=1, journal_digest=current["journal_digest"], materials={"invalid": True})
+        _record(vault, summary="Reviewed the observed sample rows.")
+        inspected = commands.op_episode_memory(vault, None, action="inspect", episode=KEY)
+        assert inspected["materials"] == bound["materials"]
+        later = commands.op_episode_memory(vault, None, action="candidates", episode=KEY)
+        assert later["input_revision"] == 3
+        for name, (raw, _, _) in originals.items():
+            assert (vault / saved[name]["path"]).read_bytes() == raw
+        page = vault / saved["display.png"]["sidecar_path"]
+        page.write_text(page.read_text().replace("first reading", "later reading"))
+        changed = commands.op_episode_memory(vault, None, action="material", episode=KEY,
+            input_revision=2, material_key="display")
+        assert changed["reading"] == {"status": "stale"}
+        assert changed["original"]["status"] == "available"
+        page.write_text(page.read_text().replace("later reading", "first reading"))
+        (vault / saved["display.png"]["path"]).unlink()
+        partial = commands.op_episode_memory(vault, None, action="material", episode=KEY,
+            input_revision=2, material_key="display")
+        assert partial["original"] == {"status": "unavailable"}
+        assert partial["reading"]["status"] == "available"
+        assert "attribution" not in partial
+        cleared = commands.op_episode_memory(vault, None, action="input", episode=KEY,
+            input_revision=3, journal_digest=later["journal_digest"], materials={"version": 1, "items": []})
+        assert cleared["materials"] == []
+        _record(vault, summary="The material bindings were explicitly cleared.")
+        assert commands.op_episode_memory(vault, None, action="inspect", episode=KEY)["materials"] == []
+
+
+@pytest.mark.parametrize("rows,indices", [
+    ("value\n1\n2\n", [2]),
+    ("value\n1\n2\n", [0, 0]),
+    ("value\n1\n2\n", [-1]),
+    ("value\n1\n2\n", list(range(33))),
+    ("value\n" + "1\n" * (query_data.MAX_PARSED_ROWS + 1), [0]),
+], ids=["outside-dataset", "duplicate-index", "negative-index", "too-many-indices", "parser-row-cap"])
+def test_dataset_locator_refusal_leaves_the_episode_unchanged(vault, rows, indices) -> None:
+    with request_scope(owner_principal(surface="mcp")):
+        original = commands.op_preserve_evidence(vault, scope="Synthetic", category="Inputs",
+            filename="rows.csv", content=rows, description="Dataset input.")
+        reference = memory_refs.ref_from_markdown((vault / original["sidecar_path"]).read_text())
+        _record(vault)
+        before = commands.op_episode_memory(vault, None, action="candidates", episode=KEY)
+        with pytest.raises(ValueError):
+            commands.op_episode_memory(vault, None, action="input", episode=KEY,
+                input_revision=1, journal_digest=before["journal_digest"], materials={"version": 1, "items": [{
+                    "key": "rows", "original_reference": reference,
+                    "locator": {"kind": "dataset_rows", "record_path": None, "row_indices": indices},
+                }]})
+        assert commands.op_episode_memory(vault, None, action="candidates", episode=KEY) == before
+
+
+def test_material_envelope_rejects_unknown_fields_duplicate_keys_and_excessive_size(vault) -> None:
+    reference = _write_note(vault, "material-reading", "11111111-1111-4111-8111-111111111111")
+    item = {"key": "reading", "reading_reference": reference}
+    invalid = [
+        {"version": 1, "items": [item], "extra": True},
+        {"version": 1, "items": [{**item, "authenticated_producer": "claimed"}]},
+        {"version": 1, "items": [item, item]},
+        {"version": 1, "items": [{**item, "key": str(index)} for index in range(9)]},
+        {"version": 1, "items": [{**item, "key": str(index), "reading_reference": reference + "#" + "x" * 1800, "producer": "界" * 256,
+            "producer_version": "界" * 160} for index in range(8)]},
+    ]
+    with request_scope(owner_principal(surface="mcp")):
+        _record(vault)
+        before = commands.op_episode_memory(vault, None, action="candidates", episode=KEY)
+        for envelope in invalid:
+            with pytest.raises(EpisodeError, match="EPISODE_MATERIAL_INVALID"):
+                commands.op_episode_memory(vault, None, action="input", episode=KEY,
+                    input_revision=1, journal_digest=before["journal_digest"], materials=envelope)
+            assert commands.op_episode_memory(vault, None, action="candidates", episode=KEY) == before
 
 
 def _frontmatter(path: Path) -> dict:
@@ -1371,6 +1500,54 @@ def _payload(key: str) -> dict:
         "summary": "Chose the brass lamp.",
         "worked_on": ["Compared two lamps"],
     }
+
+
+def test_material_binding_and_keyed_read_cross_the_three_public_doors(vault, monkeypatch, capsys) -> None:
+    from test_upload_endpoint import _ASGIClient
+
+    reference = _write_note(vault, "material-reading", "11111111-1111-4111-8111-111111111111")
+    with request_scope(owner_principal(surface="mcp")):
+        _record(vault)
+        current = commands.op_episode_memory(vault, None, action="candidates", episode=KEY)
+    mcp = _door_server(monkeypatch)
+    client = _ASGIClient(mcp.http_app())
+    bound = client.post("/api/episode_memory", json={
+        "action": "input", "episode": KEY, "input_revision": 1,
+        "journal_digest": current["journal_digest"], "materials": {"version": 1, "items": [
+            {"key": "reading", "reading_reference": reference},
+        ]},
+    }, headers={"Authorization": "Bearer sekret"})
+    assert bound.status_code == 200, bound.text
+    assert bound.json()["data"]["state"] == "committed", bound.json()
+    inspected = client.post("/api/episode_memory", json={"action": "candidates", "episode": KEY},
+        headers={"Authorization": "Bearer sekret"})
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()["data"]["input_revision"] == 2
+    assert inspected.json()["data"]["materials"] == [
+        {"input_revision": 2, "material_key": "reading", "recovery_current": "unchecked"},
+    ]
+    selected = {"kind": "material", "episode": KEY, "input_revision": 2, "material_key": "reading"}
+    with request_scope(owner_principal(surface="mcp")):
+        called = asyncio.run(mcp.call_tool("read_episode", {"operation": selected}, run_middleware=True))
+    native = called.structured_content
+    assert native["reading"]["status"] == "available"
+    try:
+        code = cli_main(["episode_memory", "--action", "material", "--episode", KEY,
+            "--input-revision", "2", "--material-key", "reading", "--json"])
+    except SystemExit as error:
+        code = error.code
+    output = capsys.readouterr().out
+    assert code == 0, output
+    cli = json.loads(output)["data"]
+    rest = client.post("/api/episode_memory", json={"action": "material", **{
+        key: value for key, value in selected.items() if key != "kind"
+    }},
+        headers={"Authorization": "Bearer sekret"})
+    assert rest.status_code == 200, rest.text
+    assert cli == rest.json()["data"] == native
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "episode_memory")
+    assert commands.invocation_is_read_only(command, {"action": "material"})
+    assert not commands.invocation_is_read_only(command, {"action": "input"})
 
 
 def test_three_doors_record_through_one_leaf(

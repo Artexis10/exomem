@@ -46,7 +46,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # read_memory adds 150 B for windows over long Source text. Keep both integration costs.
 # Bounded import status adds four view and paging fields. read_import measures 3,052 B;
 # its ceiling rounds to 3,100 B, and the total budget rises 550 B for those protocol inputs.
-TOTAL_BUDGET = 166_000
+# Material binding adds a closed envelope and keyed read: record_episode measures 5,402 B
+# and read_episode measures 1,994 B. Their ceilings round to 5,450 B and 2,000 B;
+# the complete local wire measures 167,706 B, so its budget rises to 168,000 B.
+TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -87,7 +90,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "query_dataset": 1550,
     "read_import": 3100,
     "read_connections": 3300,
-    "read_episode": 1500,
+    "read_episode": 2000,
     "read_governance": 2250,
     "read_media": 1250,
     "read_memory": 3450,
@@ -96,7 +99,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_review": 7550,
     "read_schema": 16700,
     "recall_context": 2950,
-    "record_episode": 4150,
+    "record_episode": 5450,
     "record_memory": 4600,
     "repair_memory": 6050,
     "review_item_context": 1300,
