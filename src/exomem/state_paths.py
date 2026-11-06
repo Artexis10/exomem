@@ -150,7 +150,9 @@ def outside_resolution_scope() -> Iterator[None]:
         _RESOLUTION_MEMO.reset(token)
 
 
-def _memoized(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -> _T:
+def _memoized(
+    name: str, parts: tuple[Any, ...], compute: Callable[[], _T], *, environment: bool = True,
+) -> _T:
     """`compute()`, once per key per scope — and every time without one.
 
     The key is assembled HERE, after the memo has been found, so a caller with
@@ -161,7 +163,7 @@ def _memoized(name: str, parts: tuple[Any, ...], compute: Callable[[], _T]) -> _
     memo = _RESOLUTION_MEMO.get()
     if memo is None:
         return compute()
-    key = (name, *parts, _placement_environment())
+    key = (name, *parts, _placement_environment() if environment else None)
     hit = memo.get(key, _MISSING)
     if hit is not _MISSING:
         return hit  # type: ignore[return-value]
@@ -185,8 +187,9 @@ def request_memo_scope() -> object | None:
 def _placement_environment() -> tuple[str, ...]:
     """The environment values that can change where state is placed.
 
-    Part of every memo key, so a scope that spans an environment change (a test
-    repointing `EXOMEM_STATE_ROOT`, a process re-reading its configuration) gets
+    Part of placement and home-dependent memo keys, so a scope that spans an
+    environment change (a test repointing `EXOMEM_STATE_ROOT`, a process
+    re-reading its configuration) gets
     the new answer rather than the one it happened to ask for first. Eight
     dictionary lookups and no syscalls, and only inside a scope — see
     `_memoized`.
@@ -218,14 +221,15 @@ def resolved_vault_path(vault_root: Path | str, *, expanduser: bool = True) -> P
     would change which directory a `~`-spelled path names.
     """
 
-    def compute() -> Path:
-        candidate = Path(vault_root)
-        if expanduser:
-            candidate = candidate.expanduser()
-        return candidate.resolve(strict=False)
+    candidate = Path(vault_root)
 
+    def compute() -> Path:
+        return (candidate.expanduser() if expanduser else candidate).resolve(strict=False)
+
+    # Only a leading tilde component reads home environment during path expansion.
+    home_dependent = expanduser and bool(candidate.parts) and candidate.parts[0].startswith("~")
     return _memoized(
-        "resolved_vault_path", (os.fspath(vault_root), expanduser), compute
+        "resolved_vault_path", (os.fspath(vault_root), expanduser), compute, environment=home_dependent,
     )
 
 

@@ -536,6 +536,32 @@ def test_resolution_scope_holds_no_cache_outside_itself(
     assert len(calls) == 1, "the scope outlived itself"
 
 
+def test_a_state_root_change_relocates_state_within_one_resolution_scope(tmp_path: Path, monkeypatch) -> None:
+    """Canonical vault paths can stay fixed while their actual state placement changes."""
+    vault_root = tmp_path / "vault"
+    first, second = tmp_path / "first-state", tmp_path / "second-state"
+    with state_paths.resolution_scope():
+        monkeypatch.setenv("EXOMEM_STATE_ROOT", str(first))
+        assert state_paths.vault_state_dir(vault_root).parent == first
+        monkeypatch.setenv("EXOMEM_STATE_ROOT", str(second))
+        assert state_paths.vault_state_dir(vault_root).parent == second
+
+
+def test_home_expansion_follows_environment_changes_but_literal_tildes_do_not(tmp_path: Path, monkeypatch) -> None:
+    """A parsed leading tilde depends on home; expanduser=False still names a literal directory."""
+    first, second = tmp_path / "first-home", tmp_path / "second-home"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(first))
+    monkeypatch.setenv("USERPROFILE", str(first))
+    with state_paths.resolution_scope():
+        assert state_paths.resolved_vault_path("./~/vault") == first / "vault"
+        assert state_paths.resolved_vault_path("./~/vault", expanduser=False) == tmp_path / "~" / "vault"
+        monkeypatch.setenv("HOME", str(second))
+        monkeypatch.setenv("USERPROFILE", str(second))
+        assert state_paths.resolved_vault_path("./~/vault") == second / "vault"
+        assert state_paths.resolved_vault_path("./~/vault", expanduser=False) == tmp_path / "~" / "vault"
+
+
 def test_resolution_scope_does_not_leak_into_another_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1177,7 +1203,7 @@ def test_a_caller_with_no_scope_pays_nothing_for_the_memo(
     assert built == [], "a caller with no memo built the memo key anyway"
 
     with state_paths.resolution_scope():
-        state_paths.resolved_vault_path(tmp_path)
+        state_paths.vault_state_dir(tmp_path)
 
     assert built, "inside a scope the key is what keeps the answer honest"
 
