@@ -264,16 +264,32 @@ def release_origin_response(vault_root: Path, value):
     """Project managed body carriers again at terminal release under current input permission."""
     from .governance import policy
 
+    def carried(item) -> str | None:
+        # Values are authored fields; native managed attribution lives in the row's body.
+        body = item.get("body")
+        path = item.get("path")
+        if isinstance(body, str) and not (isinstance(path, str) and source_closure._eligible_path(path)):  # noqa: SLF001
+            return body
+        return None
+
+    def has_carrier(item) -> bool:
+        if isinstance(item, list):
+            return any(has_carrier(child) for child in item)
+        if not isinstance(item, dict):
+            return False
+        body = carried(item)
+        return bool(body is not None and provenance.reserved_spans(body)) or any(
+            has_carrier(child) for key, child in item.items() if key != "values"
+        )
+
     def walk(item):
         if isinstance(item, list):
             return [walk(child) for child in item]
         if not isinstance(item, dict):
             return item
-        # Values are authored fields; native managed attribution lives in the row's body.
         out = {key: child if key == "values" else walk(child) for key, child in item.items()}
-        body = item.get("body")
-        path = item.get("path")
-        if isinstance(body, str) and not (isinstance(path, str) and source_closure._eligible_path(path)):  # noqa: SLF001
+        body = carried(item)
+        if body is not None:
             projected = project_origin_text(vault_root, body)
             if projected != body:
                 out["body"] = projected
@@ -281,6 +297,10 @@ def release_origin_response(vault_root: Path, value):
                 out.pop("evidence_version", None)
         return out
 
+    # Most responses carry no reserved span. Finding that is a text scan, while the live
+    # policy read below walks the vault, so it must not run once per postfiltered response.
+    if not has_carrier(value):
+        return value
     # A false refusal removes only the selected attribution, keeping the row's usable prose.
     # This final input proof must not reuse a request's earlier release snapshot.
     with policy.outside_request_policy_snapshot():
