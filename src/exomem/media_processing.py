@@ -179,6 +179,9 @@ _IDENTITY_FIELDS = (
 )
 # Cache hints only: filesystem timestamps move without the bytes changing.
 _TIMESTAMP_FIELDS = ("binary_mtime_ns", "binary_ctime_ns")
+_UNTIMED_PROVENANCE_FIELDS = tuple(
+    field for field in _PROVENANCE_FIELDS if field not in _TIMESTAMP_FIELDS
+)
 
 
 def classify_media(path: str | Path) -> str | None:
@@ -1091,7 +1094,8 @@ def _pending_sidecar_matches_current_provenance(
     ):
         return False
     values = _provenance_values(provenance, frontmatter=frontmatter)
-    return all(frontmatter.get(field) == values[field] for field in _PROVENANCE_FIELDS)
+    fields = _UNTIMED_PROVENANCE_FIELDS if _hints_unread(frontmatter) else _PROVENANCE_FIELDS
+    return all(frontmatter.get(field) == values[field] for field in fields)
 
 
 def _block_ambiguous_retry(
@@ -1636,13 +1640,21 @@ def _render_pending_sidecar(
         if isinstance(candidate_receipt, Mapping):
             adoption_receipt = candidate_receipt
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
-            rendered = original
-            pending_fields = _pending_fields(provenance, frontmatter=frontmatter)
-            if frontmatter.get("processing_state") == media_jobs.BLOCKED:
-                pending_fields = pending_fields[1:]
-            for field, value in pending_fields:
-                rendered = preserve._set_frontmatter_field(rendered, field, str(value))
-            return rendered
+
+            def render(facts: _BinaryProvenance) -> str:
+                fields = _pending_fields(facts, frontmatter=frontmatter)
+                if frontmatter.get("processing_state") == media_jobs.BLOCKED:
+                    fields = fields[1:]
+                return _set_fields(original, fields)
+
+            if _hints_unread(frontmatter):
+                # A page committed with its original (`render_pending_page`) is current as it
+                # is: its hints are not identity (`_TIMESTAMP_FIELDS`), and a second commit
+                # for them is what that page exists to avoid. Changed bytes are not current.
+                unread = render(replace(provenance, mtime_ns=0, ctime_ns=0))
+                if unread == original:
+                    return unread
+            return render(provenance)
         preserved_notes = _preservable_notes(
             body if raw_frontmatter is not None else original
         )
@@ -1666,8 +1678,7 @@ def _render_pending_sidecar(
         rendered = document_containers.annotate(rendered, "container_member", container_binding)
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
-    for field, value in _pending_fields(provenance):
-        rendered = preserve._set_frontmatter_field(rendered, field, str(value))
+    rendered = _set_fields(rendered, _pending_fields(provenance))
     if preserved_notes:
         rendered = (
             rendered.rstrip("\n")
@@ -1724,6 +1735,39 @@ def _original_filename(frontmatter: dict[str, object] | None, fallback: str) -> 
     # filename rule decides which recorded names are well formed.
     value = frontmatter.get("original_filename") if frontmatter is not None else None
     return value if isinstance(value, str) and value and _preserve_module()._sanitize_filename(value) == value else fallback
+
+
+def render_pending_page(
+    stub: str, *, relative_path: str, original_filename: str, sha256: str, size: int
+) -> str:
+    """`stub` as `reconcile_media` renders it once it has read the stored original.
+
+    For a caller that commits the original and its stub together and reconciles straight
+    after: that reconcile finds the page current and only queues the job, instead of
+    committing the page a second time. The original is not on disk yet, and renaming it into
+    place moves its ctime, so no timestamp read beforehand can be exact. Both hints are 0,
+    "not read yet" (`_hints_unread`), and reconciliation leaves them so.
+    """
+    # device and inode serve `_verify_binary_identity` only, which this page never reaches.
+    facts = _BinaryProvenance(
+        relative_path, original_filename, sha256, size, mtime_ns=0, ctime_ns=0, device=0, inode=0
+    )
+    return _set_fields(stub, _pending_fields(facts))
+
+
+def _set_fields(content: str, fields: tuple[tuple[str, object], ...]) -> str:
+    set_field = _preserve_module()._set_frontmatter_field
+    for field, value in fields:
+        content = set_field(content, field, str(value))
+    return content
+
+
+def _hints_unread(frontmatter: dict[str, object]) -> bool:
+    """Whether the page records 0 for both timestamp hints, as `render_pending_page` leaves them."""
+    return all(
+        _is_nonnegative_int(frontmatter.get(field)) and frontmatter[field] == 0
+        for field in _TIMESTAMP_FIELDS
+    )
 
 
 def _pending_fields(

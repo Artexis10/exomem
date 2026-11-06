@@ -1684,6 +1684,47 @@ def test_targeted_retry_allows_one_fresh_attempt_for_matching_pending_sidecar(
     assert reported["error"] is None
 
 
+def _store_with_pending_page(vault: Path, payload: bytes) -> Path:
+    """A media original stored the way `preserve_artifacts` does: its page already pending."""
+    import io
+
+    from exomem import preserve
+
+    return preserve.preserve_stream(
+        vault, scope="Audio", category="raw", filename="born.m4a",
+        stream=io.BytesIO(payload), media_pending=True,
+    )
+
+
+def test_reconciling_and_retrying_a_page_stored_pending_commits_no_second_page(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    born = sidecar.read_bytes()
+
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    retried = media_processing.retry_media(vault, binary)
+
+    assert reconciled.state == media_jobs.PENDING
+    assert retried.requeued == 1
+    assert sidecar.read_bytes() == born
+
+
+def test_a_page_stored_pending_follows_the_bytes_that_replace_its_original(vault: Path) -> None:
+    media_processing = _media_processing()
+    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    binary.write_bytes(b"\x00\x00\x00\x18ftypM4A replaced bytes")
+
+    media_processing.reconcile_media(vault, binary)
+
+    frontmatter, _body = _frontmatter_and_body(sidecar)
+    assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert frontmatter["binary_mtime_ns"] == _handle_stat(binary).st_mtime_ns
+
+
 def test_targeted_retry_blocks_when_binary_changes_after_initial_provenance(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
