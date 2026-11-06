@@ -76,6 +76,8 @@ def test_frontmatterless_body_operations_validate_and_commit_exact_bytes(
     relative = "Knowledge Base/Templates/ordinary-template.md"
     source = "# Template\n\nBefore marker\n\n## Notes\n\nBefore section\n"
     page = _write(tmp_path, relative, source)
+    if operation["kind"] == "replace_body":
+        operation = {**operation, "expected_hash": vault.content_hash(source)}
     ticks = iter(
         [
             dt.datetime(2026, 8, 10, 12, 0, 0, tzinfo=dt.UTC),
@@ -136,6 +138,8 @@ def test_frontmatter_operations_refuse_resolved_frontmatterless_paths(
     relative = "Knowledge Base/Templates/ordinary-template.md"
     source = "# Template\n"
     page = _write(tmp_path, relative, source)
+    if operation["kind"] == "replace_body":
+        operation = {**operation, "expected_hash": vault.content_hash(source)}
 
     with pytest.raises(ValueError) as exc:
         commands.op_edit_memory(
@@ -259,7 +263,10 @@ def test_every_edit_kind_commits_the_exact_validated_bytes_across_a_clock_tick(
     )
     monkeypatch.setattr(temporal, "now", lambda: next(ticks))
 
-    preview_operation = {**_operation(kind), "validate_only": True}
+    base_operation = _operation(kind)
+    if kind == "replace_body":
+        base_operation["expected_hash"] = vault.content_hash(source)
+    preview_operation = {**base_operation, "validate_only": True}
     preview = commands.op_edit_memory(
         tmp_path,
         path=PAGE,
@@ -270,7 +277,7 @@ def test_every_edit_kind_commits_the_exact_validated_bytes_across_a_clock_tick(
     assert semantic["contract_result"]["should_block"] is True
 
     commit_operation = {
-        **_operation(kind),
+        **base_operation,
         "transition_token": semantic["transition_token"],
         "relation_disposition": "reviewed_none",
         "relation_review_hash": semantic["transition_hash"],

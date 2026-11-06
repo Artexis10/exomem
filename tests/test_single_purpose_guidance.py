@@ -33,6 +33,7 @@ from exomem import (
 )
 from exomem import server as server_module
 from exomem._hooks import exomem_capture_nudge as capture_hook
+from exomem.vault import content_hash
 
 SHAPES = ("nested",)
 GROUPED_NAMES = frozenset({"record_memory", "plan_memory"})
@@ -190,7 +191,11 @@ def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, mon
                 "edit_note",
                 {
                     "path": str(item.relative_to(vault)),
-                    "operation": {"kind": "replace_body", "new_body": "Changed outside the owning product."},
+                    "operation": {
+                        "kind": "replace_body",
+                        "new_body": "Changed outside the owning product.",
+                        "expected_hash": content_hash(item.read_text(encoding="utf-8")),
+                    },
                     "why": "exercise the generic-write refusal",
                 },
                 raise_on_error=False,
