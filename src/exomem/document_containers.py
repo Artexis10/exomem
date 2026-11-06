@@ -337,6 +337,11 @@ _UNCLAIMED_LOCK = threading.Lock()
 _UNCLAIMED: OrderedDict[
     tuple[Path, str] | tuple[Path, str, str], tuple[str, tuple[int, int], tuple[int, int, int]] | None
 ] = OrderedDict()
+# `resolved_vault_path` returns a new `Path` on every call, so each key used to hold its own copy of the
+# vault root: about half of the memo's RAM at its bound. Keys share one equal root object instead. The map
+# only shares objects and decides nothing, so emptying it at any time is safe; it is bounded to a few roots.
+_UNCLAIMED_ROOTS: dict[Path, Path] = {}
+_UNCLAIMED_ROOTS_MAX = 64
 
 
 def clear_unclaimed_notes() -> int:
@@ -344,6 +349,7 @@ def clear_unclaimed_notes() -> int:
     with _UNCLAIMED_LOCK:
         dropped = len(_UNCLAIMED)
         _UNCLAIMED.clear()
+        _UNCLAIMED_ROOTS.clear()
     return dropped
 
 
@@ -393,6 +399,9 @@ def _remember_unclaimed(
 
 def _store_unclaimed(key: tuple[Path, str] | tuple[Path, str, str], entry: tuple[str, tuple[int, int], tuple[int, int, int]] | None) -> None:
     with _UNCLAIMED_LOCK:
+        if len(_UNCLAIMED_ROOTS) >= _UNCLAIMED_ROOTS_MAX and key[0] not in _UNCLAIMED_ROOTS:
+            _UNCLAIMED_ROOTS.clear()
+        key = (_UNCLAIMED_ROOTS.setdefault(key[0], key[0]), *key[1:])
         _UNCLAIMED[key] = entry
         _UNCLAIMED.move_to_end(key)
         while len(_UNCLAIMED) > _UNCLAIMED_MAX:
