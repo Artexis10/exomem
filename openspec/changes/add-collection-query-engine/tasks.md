@@ -70,7 +70,7 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   Preserve verified transfer principals only with the existing separated private signing root, never the remotely accepted bearer. Verify forged-principal claims and missing/equal-root refusal alongside legacy unmarked downloads and owner-local direct recovery; pathless preparation reports actual principal preservation without a new request selector or key store.
 
   Implementation closure 2026-11-06: released CI 41977209307 records 36 field-admission cases and 108 raw-boundary cases, all passing.
-  These cover inherited mapping, hidden-field twins, verified releases, revocation, raw originals, trusted principals and unsupported pre-RAW interpreters.
+  These cover inherited mapping, hidden-field twins, verified releases, revocation, raw originals and trusted principals.
   Installed CI 42146338718 also proves nonempty recipient metrics, field release, live revocation, continued metric pagination and continued protected-source refusal.
   S1.0 retains historical owner-route limitations; real-vault acceptance remains in S1.6–S1.8.
 
