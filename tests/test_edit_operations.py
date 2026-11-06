@@ -529,24 +529,32 @@ def test_python_runtime_accepts_nested_and_deprecated_flat_forms(monkeypatch) ->
 NOTE_PATH = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
 
 
-def test_nested_edit_memory_replace_body_without_expected_hash_writes_nothing(vault: Path) -> None:
+@pytest.mark.parametrize(
+    "hash_field",
+    [{}, {"expected_hash": None}],
+    ids=["omitted", "null-from-a-windowed-read"],
+)
+def test_nested_edit_memory_replace_body_without_expected_hash_writes_nothing(
+    vault: Path, hash_field: dict
+) -> None:
     from exomem import commands
 
     page = vault / NOTE_PATH
     before = page.read_bytes()
 
-    with pytest.raises(ValueError, match="expected_hash"):
+    with pytest.raises(ValueError, match="content_hash` from a whole-page read_memory"):
         commands.op_edit_memory(
             vault,
             path=NOTE_PATH,
             why="Whole-body write built from a partial read.",
-            operation={"kind": "replace_body", "new_body": "Only the part the caller saw.\n"},
+            operation={"kind": "replace_body", "new_body": "Only the part the caller saw.\n", **hash_field},
         )
 
     assert page.read_bytes() == before
 
 
 def test_flat_edit_new_body_needs_expected_hash_and_succeeds_with_the_current_one(vault: Path) -> None:
+    """The legacy `edit` alias and direct runtime callers reach `op_edit` without the operation schema."""
     from exomem import commands
     from exomem.vault import content_hash, parse_frontmatter
 
@@ -555,7 +563,7 @@ def test_flat_edit_new_body_needs_expected_hash_and_succeeds_with_the_current_on
     _meta, body, _text = parse_frontmatter(before.decode("utf-8"))
     arguments = {
         "path": NOTE_PATH,
-        "why": "Whole-body write through the CLI and REST edit.",
+        "why": "Whole-body write through the legacy edit alias.",
         # Keeps the page's own content and adds a relation so the semantic contract accepts it.
         "new_body": (
             f"{body.rstrip()}\n\n## Relations\n"

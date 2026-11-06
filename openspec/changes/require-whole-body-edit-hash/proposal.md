@@ -7,7 +7,7 @@ A `read_memory` window of a long Source returns no `content_hash`, because a win
 ## What Changes
 
 - The `replace_body` variant of `edit_memory` advertises `expected_hash` as a required field.
-- Every surface refuses a whole-body edit without `expected_hash` before mutation: the nested `edit_memory` operation, the flat compatibility form, and the CLI and REST `edit` command. A preview (`validate_only`) refuses the same way.
+- Every surface refuses a whole-body edit without `expected_hash` before mutation: `edit_memory` on MCP, REST and CLI, nested or flat, and the opt-in legacy `edit` alias. A null hash is refused the same way, and so is a preview (`validate_only`).
 - The refusal names the field and says where the hash comes from: the `content_hash` of a whole-page read.
 - Other edit kinds keep `expected_hash` optional.
 

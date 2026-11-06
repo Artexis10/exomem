@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -127,6 +127,11 @@ EditOperation = Annotated[
 ]
 
 EDIT_OPERATION_ADAPTER = TypeAdapter(EditOperation)
+#: Each operation model by its `kind`, read from the discriminated union itself.
+_OPERATION_MODELS: dict[object, type[BaseModel]] = {
+    get_args(model.model_fields["kind"].annotation)[0]: model
+    for model in get_args(get_args(EditOperation)[0])
+}
 
 LEGACY_EDIT_FIELDS = frozenset(
     {
@@ -201,16 +206,31 @@ def public_edit_operation_schema() -> dict[str, Any]:
     }
 
 
+def _required_field_rule(location: tuple[object, ...], item: dict[str, Any]) -> str | None:
+    """The description of a required field the caller left out or sent as null, if it has one.
+
+    A required field's description says what to send; that helps more than "missing".
+    """
+    if len(location) < 2 or not (item.get("type") == "missing" or item.get("input") is None):
+        return None
+    model = _OPERATION_MODELS.get(location[0])
+    field = model.model_fields.get(str(location[1])) if model is not None else None
+    if field is None or not field.is_required():
+        return None
+    return field.description
+
+
 def _invalid_from_validation(operation: object, error: ValidationError) -> ValueError:
     kind = operation.get("kind") if isinstance(operation, dict) else None
     selected = f" operation kind `{kind}`" if kind is not None else " operation"
     guidance: list[str] = []
     for item in error.errors(include_url=False):
-        location = ".".join(str(part) for part in item.get("loc", ())) or "operation"
-        if item.get("type") == "missing" and location.endswith(".expected_hash"):
-            # The required hash carries its own instruction; say what to send, not just "missing".
-            guidance.append(REPLACE_BODY_HASH_RULE)
+        loc = tuple(item.get("loc", ()))
+        rule = _required_field_rule(loc, item)
+        if rule is not None:
+            guidance.append(rule)
             continue
+        location = ".".join(str(part) for part in loc) or "operation"
         guidance.append(f"{location}: {item.get('msg', 'invalid value')}")
     return ValueError(f"INVALID_EDIT:{selected} is invalid: {'; '.join(guidance)}")
 
@@ -294,6 +314,7 @@ def _resolve_edit_operation(
         raise ValueError(
             "INVALID_EDIT: cannot combine nested `operation` with legacy flat fields: "
             + ", ".join(legacy_names)
+            + "; put them inside `operation`"
         )
 
     if has_operation:
