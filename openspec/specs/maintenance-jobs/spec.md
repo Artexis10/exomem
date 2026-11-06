@@ -1,7 +1,7 @@
 # maintenance-jobs Specification
 
 ## Purpose
-Run long vault maintenance as one durable background job per vault. The owner previews a change set, starts a job that applies only that previewed set in short guarded chunks, follows its progress, can cancel it, and reads a paged receipt. Foreground requests keep priority, and an interrupted job is never resumed unattended.
+Run long vault maintenance as one durable background job per vault. The owner previews a change set, starts a job that applies only that previewed set, in short guarded chunks where the mode commits pages, follows its progress, can cancel it, and reads a paged receipt. Foreground requests keep priority, and an interrupted job is never resumed unattended.
 
 ## Requirements
 
