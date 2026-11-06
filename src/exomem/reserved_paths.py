@@ -1471,6 +1471,10 @@ def _read_generic_bytes_held(
                                 version = after
                         except TimeoutError:
                             raise
+                        except ReservedPathLeafError as error:
+                            # Closing drift withdraws the witness; a current private refusal still applies.
+                            if error.code != "IDENTITY_CHANGED":
+                                raise
                         except (OSError, held_fs.HeldFsError, NotImplementedError):
                             pass  # Optional metadata cannot turn a successful canonical read into a refusal.
                     witness = GenericFileVersion(filesystem.root_identity, version)

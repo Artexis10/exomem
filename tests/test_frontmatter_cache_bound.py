@@ -405,6 +405,18 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
     snapshot = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
     assert snapshot.data == path.read_bytes() and snapshot.version_witness.version is None
     assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    identity = reserved_paths._lstat_identity(path)
+    close = reserved_paths._require_current_generic_version
+    def newly_private(*args, **kwargs):
+        with monkeypatch.context() as patch:
+            patch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root: reserved_paths.IdentityCatalogue(
+                {(identity.device, identity.inode, identity.kind): "embeddings-store"},
+            ))
+            return close(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(reserved_paths, "_require_current_generic_version", newly_private)
+        with pytest.raises(reserved_paths.ReservedPathLeafError, match="RESERVED_PATH"):
+            reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
     for failure in (runtime_resources.PreparationBudgetExceeded, TimeoutError):
         def exhausted(self, relative, *, failure=failure, **kwargs):
             if kwargs.get("access") == "identity":
@@ -415,3 +427,37 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
             reserved_paths.inspect_generic_version(tmp_path, path.name)
         with pytest.raises(failure):
             reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+
+
+def test_write_during_optional_witness_close_returns_consumed_bytes_without_a_version(tmp_path, monkeypatch):
+    """A changed closing version must not refuse bytes the canonical reader already consumed."""
+    from exomem import held_fs, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    path = tmp_path / "ordinary.md"
+    raw, changed = b"first image", b"concurrently changed image"
+    path.write_bytes(raw)
+    if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    read = filesystem_type.read
+    def changed_after_read(self, file, **kwargs):
+        result = read(self, file, **kwargs)
+        path.write_bytes(changed)
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(filesystem_type, "read", changed_after_read)
+        assert reserved_paths.read_generic_bytes(tmp_path, path.name).data == raw
+    path.write_bytes(raw)
+    healthy = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+    assert healthy.data == raw and healthy.version_witness.version is not None
+    close = reserved_paths._require_current_generic_version
+    def changed_before_close(*args, **kwargs):
+        path.write_bytes(changed)
+        return close(*args, **kwargs)
+    monkeypatch.setattr(reserved_paths, "_require_current_generic_version", changed_before_close)
+    snapshot = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+    assert path.read_bytes() == changed and snapshot.data == raw
+    assert snapshot.version_witness.version is None
