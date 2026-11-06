@@ -1433,6 +1433,15 @@ def plan_ref(collection_id: str, item_key: str) -> str:
     return _item_ref(PLAN_REF_PREFIX, collection_id, item_key)
 
 
+def _profile_item_ref(profile: str, collection_id: str, item_key: str) -> str:
+    # These two owner profiles are fixed native identity protocols, not business vocabulary.
+    if profile == "planning":
+        return plan_ref(collection_id, item_key)
+    if profile == "records":
+        return record_ref(collection_id, item_key)
+    raise ValueError("native row profile is invalid")
+
+
 def _item_ref(prefix: str, collection_id: str, item_key: str) -> str:
     normalized = memory_refs.normalize_id(collection_id)
     if normalized is None:

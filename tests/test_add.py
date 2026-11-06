@@ -835,3 +835,35 @@ def test_invalid_markdown_binding_never_proves_capture_absence(vault, source_sch
         op_capture_source(vault, source_schema, title="New capture", content="Text", source_kind="session",
                           source_identity={"system": "archive", "record_id": "new-record", "revision": "r1"})
     assert {p: p.read_bytes() for p in vault.rglob("*.md")} == before
+
+
+def test_prepared_captures_reuse_core_allocation_and_refresh_shared_bookkeeping(vault, source_schema):
+    """Two captures reviewed together must both survive the later shared log updates."""
+    from exomem import memory_refs, vocabulary_gate
+    from exomem import vault as vault_module
+
+    class Prepared(Exception):
+        def __init__(self, value):
+            self.value = value
+
+    def stop(value):
+        raise Prepared(value)
+
+    before = {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    prepared = []
+    for title in ("First transfer", "Second transfer"):
+        args = dict(content="A preserved account.", title=title, source_type="session", today=TODAY)
+        with memory_refs._allocated_ids() as identities, vocabulary_gate.preparation_context(vault):
+            with pytest.raises(Prepared) as stopped:
+                add_module.add(vault, source_schema, **args, _prepare=stop)
+        prepared.append((args, stopped.value.value, identities))
+    assert {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+
+    for args, sealed, identities in prepared:
+        with memory_refs._allocated_ids(identities):
+            result = add_module.add(vault, source_schema, **args, _allocation=sealed["allocation"])
+        assert result.ref == sealed["ref"]
+        assert result.path == sealed["allocation"]["destination"]
+        assert vault_module.content_hash((vault / result.path).read_text()) == vault_module.content_hash(sealed["writes"][0].content)
+    activity = (vault / "Knowledge Base/log.md").read_text()
+    assert "First transfer" in activity and "Second transfer" in activity

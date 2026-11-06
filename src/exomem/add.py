@@ -21,7 +21,7 @@ import logging
 import os
 import stat
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import IO
@@ -47,10 +47,12 @@ from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     CreateOnlyConflict,
+    DefiniteNoEffect,
     InvalidSlugError,
     PathGuardError,
     PlannedWrite,
     PreparedBinaryContent,
+    _NativePrepared,
     batch_atomic_write,
     content_hash,
     kb_root,
@@ -171,7 +173,7 @@ class SourceArtifact:
     instead of two that drift.
     """
 
-    staged_path: Path
+    staged_path: Path | IO[bytes]
     filename: str
     content_type: str | None = None
 
@@ -428,6 +430,9 @@ def add(
     capture_input_digest: str | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    _allocation: Mapping[str, str | None] | None = None,
+    _prepare: Callable[[dict], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -517,7 +522,7 @@ def add(
     contradiction_candidates: list[corpus_aware.DupCandidate] = []
     # A recap revision near-duplicates the revision it supersedes by
     # construction, so the embedding pass could only ever report that.
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None:
+    if _prepare is None and _allocation is None and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None:
         try:
             # One embedding pass: dups (vs other sources) + contradictions (vs
             # active compiled conclusions). Restricting contradiction candidates
@@ -540,6 +545,11 @@ def add(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
+    if _allocation is not None:
+        captured = temporal.parse(_allocation["captured"])
+        if captured is None:
+            raise ValueError("native capture timestamp is invalid")
+        date_iso, stamp_iso = captured.day.isoformat(), str(_allocation["captured"])
 
     # The location is a projection of the canonical semantic keys, not the
     # ontology. `folder_name` stays the *top-level* segment because that is what
@@ -606,6 +616,31 @@ def add(
             folder_path, stem, artifact_suffix, vault_root=vault_root, protected=raw_protection
         )
 
+    if _prepare is not None and artifact_digest is not None:
+        from . import artifact_recovery, preserve
+        from .governance.principal import effective_principal
+
+        nominal = preserve._sidecar_path(folder_path / f"{stem}{artifact_suffix}", protected=raw_protection)  # noqa: SLF001
+        who = replace(effective_principal(), administrative_ingress=False)
+        prior = False
+        try:
+            with artifact_recovery.stage(vault_root, nominal.relative_to(vault_root).as_posix(), who, expected_sha256=artifact_digest) as (held, _descriptor):
+                prior = held.size == artifact_size
+        except artifact_recovery.RecoveryUnavailable:
+            pass
+        if prior:
+            raise AddError("SOURCE_ALREADY_PRESERVED", [], "Original already preserved in this source destination")
+    if _allocation is not None:
+        source_path = vault_root / str(_allocation["destination"])
+        artifact_path = vault_root / str(_allocation["artifact"]) if _allocation.get("artifact") else None
+        if source_path.parent != folder_path or (artifact_path is not None and artifact_path.parent != folder_path):
+            raise ValueError("native capture destination changed")
+        if os.path.lexists(source_path) or artifact_path is not None and os.path.lexists(artifact_path):
+            raise DefiniteNoEffect.destination_exists(_allocation["destination"])
+    allocation = {
+        "captured": stamp_iso, "destination": source_path.relative_to(vault_root).as_posix(),
+        "artifact": artifact_path.relative_to(vault_root).as_posix() if artifact_path else None,
+    }
     adoption_receipt: dict[str, object] | None = None
     if adoption_seed is not None:
         if artifact is None or artifact_path is None or artifact_digest is None or artifact_size is None:
@@ -791,6 +826,7 @@ def add(
 
     container_stack = contextlib.ExitStack()
     container_metadata = None
+    core_paths = {source_path, artifact_path} - {None}
     try:
         if artifact_stream is not None and document_containers.is_container(artifact_path):
             container_plan = container_stack.enter_context(document_containers.plan(
@@ -801,13 +837,27 @@ def add(
             container_metadata = container_plan.metadata()
             writes[0].content = document_containers.annotate(source_md, "document_container", container_metadata)
             writes.extend(container_plan.writes)
+            core_paths.update(write.path for write in container_plan.writes)
         def validate_bindings() -> None:
+            if _validate_inputs is not None:
+                _validate_inputs()
             taxonomy_plan.recheck_bindings(vault_root)
             if source_identity is not None:
                 source_capture.require_authority(vault_root)
             if correction_plan is not None:
                 correction_plan.require_authority(vault_root)
 
+        def prepare_final(planned: list[PlannedWrite]) -> None:
+            _prepare({"allocation": allocation, "ref": memory_refs.memory_ref(exomem_id),
+                      "normalized_native_args": {"content": content, "title": title, "source_type": kind.key,
+                          "slug": filename_slug, "url": url, "tags": tags_clean, "why_captured": why_captured,
+                          "domain": domain_resolution.key if domain_resolution else None,
+                          "projects": project_keys_clean, "raw_protection": raw_protection},
+                      "writes": [write for write in planned if write.path in core_paths]})
+
+        from . import curation_witness
+
+        curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
             created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
@@ -818,10 +868,14 @@ def add(
                 post_commit_fanout=False,
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
+                _prepare=prepare_final if _prepare is not None else None,
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
-                               _validate_prepared_bindings=validate_bindings)
+                               _validate_prepared_bindings=validate_bindings,
+                               _prepare=prepare_final if _prepare is not None else None)
+    except _NativePrepared:
+        raise
     except source_capture.SourceCaptureError:
         raise
     except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError):

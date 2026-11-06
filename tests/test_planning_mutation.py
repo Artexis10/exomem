@@ -801,3 +801,26 @@ def test_planning_add_of_the_same_title_with_different_fields_refuses(tmp_path: 
             expected_container_hash=added["after_container_hash"],
             why="capture the same intent differently",
         )
+
+
+def test_native_preparation_reaches_history_and_preserves_planning_hierarchy(tmp_path, monkeypatch):
+    """Preparing a Planning correction must run history admission without replacing its hierarchy callback."""
+    from exomem import planning, record_history
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base/log.md").write_text("# Log\n")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    planning.create_collection(tmp_path, collection, _manifest(), why="Create the collection.")
+    current = planning.inspect(tmp_path, collection)
+    prepared = planning.prepare(tmp_path, "add", {"collection": collection, "plan_id": "991acdd4-16b9-4396-8220-2cb37b7e8516", "item": {"title": "Review the account"}, "why": "Retain intended work.", "expected_container_hash": current["snapshot"]})
+    assert not (tmp_path / prepared["path"]).exists()
+    added = planning.add(tmp_path, collection, plan_id="991acdd4-16b9-4396-8220-2cb37b7e8516", item={"title": "Review the account"}, why="Retain intended work.", expected_container_hash=current["snapshot"])
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    def history_refuses(*_args, **_kwargs):
+        raise CollectionError("HISTORY_UNAVAILABLE", "history cannot retain this correction")
+
+    monkeypatch.setattr(record_history, "plan_entry", history_refuses)
+    with pytest.raises(CollectionError, match="HISTORY_UNAVAILABLE"):
+        planning.prepare(tmp_path, "update", {"collection": collection, "plan_id": "991acdd4-16b9-4396-8220-2cb37b7e8516", "changes": {"title": "Review the corrected account"}, "why": "Correct intended work.", "expected_container_hash": added["after_container_hash"], "expected_item_version": added["after_item_hash"]})
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before

@@ -48,11 +48,13 @@ from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     DeferredGraphCompletion,
+    DefiniteNoEffect,
     FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
     _is_reparse,
+    _NativePrepared,
     batch_atomic_write,
     content_hash,
     document_newline,
@@ -568,6 +570,9 @@ def preserve(
     adoption_seed: Mapping[str, object] | None = None,
     text_origin: str = "upload",
     raw_protection: bool = False,
+    _allocation: Mapping[str, str | None] | None = None,
+    _prepare: Callable[[dict], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
 ) -> PreserveResult:
     """Capture an artifact to Evidence/<scope>/<category>/<filename>.
 
@@ -615,12 +620,21 @@ def preserve(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
+    if _allocation is not None:
+        captured = temporal.parse(_allocation["captured"])
+        if captured is None:
+            raise ValueError("native preservation timestamp is invalid")
+        date_iso, stamp_iso = captured.day.isoformat(), str(_allocation["captured"])
     kb = kb_root(vault_root)
     folder = evidence_folder(vault_root, scope_safe, category_safe)
     artifact_path = folder / filename_safe
     admit_destination(vault_root, artifact_path)
+    if _allocation is not None and _allocation["artifact"] != artifact_path.relative_to(vault_root).as_posix():
+        raise ValueError("native preservation destination changed")
 
     if artifact_path.exists():
+        if _allocation is not None:
+            raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
             "ARTIFACT_EXISTS",
             ["filename"],
@@ -858,6 +872,17 @@ def preserve(
                     ).writes
                 )
 
+        core_paths = {write.path for write in writes}
+        allocation = {"captured": stamp_iso, "artifact": rel_artifact, "destination": sidecar_rel}
+
+        def prepare_final(planned: list[PlannedWrite]) -> None:
+            _prepare({"allocation": allocation, "ref": sidecar_ref,
+                      "normalized_native_args": {"scope": scope_safe, "category": category_safe,
+                          "filename": filename_safe, "content_type": content_type_effective,
+                          "description": desc_clean, "text": text_clean, "text_origin": text_origin,
+                          "raw_protection": raw_protection},
+                      "writes": [write for write in planned if write.path in core_paths]})
+
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
         activity_summary = (
@@ -949,7 +974,12 @@ def preserve(
         # The held batch owns the artifact, companion, index, and log as one
         # caught-failure rollback set. The binary stage is copied without ever
         # materializing a large upload fully in memory.
-        batch_atomic_write(writes, vault_root=vault_root)
+        from . import curation_witness
+
+        curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
+        batch_atomic_write(writes, vault_root=vault_root,
+                           _prepare=prepare_final if _prepare is not None else None,
+                           _validate_prepared_bindings=_validate_inputs)
         written_artifact = True
         try:
             catalog_publication.publish_markdown_batch(prepared_catalog)
@@ -959,6 +989,8 @@ def preserve(
                 str(error),
             ) from error
 
+    except _NativePrepared:
+        raise
     except Exception as e:
         if privacy_log.content_private_logging_enabled():
             log.error(
