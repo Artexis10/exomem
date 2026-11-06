@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import stat
 import tempfile
+import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -16,7 +21,7 @@ from typing import BinaryIO
 
 import yaml
 
-from . import archive_members, originals, reserved_paths, state_paths
+from . import archive_members, originals, reserved_paths, state_paths, vault
 from .vault import (
     MISSING_CONTENT_HASH,
     FrontmatterError,
@@ -322,11 +327,64 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
     return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
 
 
+# Remembers ordinary notes that were read and carry no container claim, so a restricted path
+# decision need not re-read and re-parse the note each time. It stores no bytes, only the file
+# version it saw, and a hit re-checks that version with one lstat. Bounded; `clear_unclaimed_notes`
+# empties it.
+_UNCLAIMED_MAX = 65_536
+_UNCLAIMED_LOCK = threading.Lock()
+_UNCLAIMED: OrderedDict[tuple[Path, str], tuple[str, tuple[int, int], tuple[int, int, int]]] = OrderedDict()
+
+
+def clear_unclaimed_notes() -> None:
+    with _UNCLAIMED_LOCK:
+        _UNCLAIMED.clear()
+
+
+def _page_version(root: Path, page_path: str) -> tuple[tuple[int, int], tuple[int, int, int], os.stat_result] | None:
+    """Identity and stat generation of one regular, singly linked page, or None."""
+    try:
+        info = (root / page_path).lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return None
+    return (info.st_dev, info.st_ino), vault.stat_generation(info), info
+
+
+def _remembered_unclaimed(root: Path, path: str) -> bool:
+    with _UNCLAIMED_LOCK:
+        entry = _UNCLAIMED.get((root, path))
+        if entry is None:
+            return False
+        _UNCLAIMED.move_to_end((root, path))
+    version = _page_version(root, entry[0])
+    return version is not None and version[:2] == entry[1:]
+
+
+def _remember_unclaimed(root: Path, path: str, page_path: str, before: tuple | None) -> None:
+    # Only a version that stood still across the read and is older than the racy window is
+    # trusted: a same-tick rewrite would leave (size, mtime, ctime) unchanged. A claim, an
+    # in-tree path or a missing file is never remembered, so the memo can only skip a read
+    # that previously found no claim; it never feeds a byte observation.
+    after = _page_version(root, page_path)
+    if before is None or after is None or before[:2] != after[:2]:
+        return
+    if time.time_ns() - max(after[2].st_mtime_ns, after[2].st_ctime_ns) <= vault.GENERATION_RACY_WINDOW_NS:
+        return
+    with _UNCLAIMED_LOCK:
+        _UNCLAIMED[(root, path)] = (page_path, after[0], after[1])
+        _UNCLAIMED.move_to_end((root, path))
+        while len(_UNCLAIMED) > _UNCLAIMED_MAX:
+            _UNCLAIMED.popitem(last=False)
+
+
 def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
     root = state_paths.resolved_vault_path(root, expanduser=False)
+    spelling = path
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
     raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
@@ -341,11 +399,17 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if raw is None:
         raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
     in_subtree = in_payload_tree(path)
+    before = None
     if raw is None:
         if classified.disposition is not reserved_paths.PathDisposition.ORDINARY:
             if in_subtree:
                 raise ValueError("container member path is invalid")
             return None
+        # Reaching here means no supplied bytes and no staged overlay, so this is a disk read.
+        memoable = not in_subtree and vault.STAT_GENERATION_TRUSTED
+        if memoable and _remembered_unclaimed(root, spelling):
+            return None
+        before = _page_version(root, page_path) if memoable else None
         # A cold inventory cannot classify an absent ordinary companion.
         if not in_subtree and not reserved_paths.identity_catalogue_ready(root):
             try:
@@ -376,6 +440,7 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if not in_subtree:
         # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
         if "container_member" not in fm:
+            _remember_unclaimed(root, spelling, page_path, before)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:

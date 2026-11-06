@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from test_media_store import selected_store as selected_store
 
-from exomem import preserve
+from exomem import document_containers, preserve
 
 
 def container_bytes(entries: list[tuple[str | zipfile.ZipInfo, bytes]]) -> bytes:
@@ -855,3 +855,57 @@ def test_unrelated_malformed_frontmatter_keeps_path_only_reading(vault):
     compiled = policy.Policy(fingerprint='probe', scopes={'scope': policy.Scope(id='scope', source='probe', paths=(path,))})
     assert membership.evaluate_snapshot(page, compiled, content_hash=page.snapshot_hash) == frozenset({'scope'})
     assert commands.op_fetch(vault, id=path)['text']
+
+
+def _warm_unclaimed_note(vault, monkeypatch):
+    """An ordinary note decided once, with the racy window off so the decision is remembered."""
+    from exomem import vault as vault_module
+    from exomem.governance import policy
+    from exomem.governance.principal import RequestPrincipal
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    stored = _capture(vault, container_bytes([('one.pdf', b'pdf')]))
+    child = stored.document_container['payloads'][0]
+    rules = vault / 'Knowledge Base' / '_Governance'
+    (rules / 'scopes').mkdir(parents=True, exist_ok=True)
+    (rules / 'rules').mkdir(exist_ok=True)
+    sid = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    (rules / 'scopes' / 'container.yaml').write_text(f'governance_version: 1\nid: {sid}\npaths: ["{stored.path}"]\n')
+    (rules / 'rules' / 'external.yaml').write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["{sid}"]\naudience: external\nceiling: 0\n')
+    note = "Knowledge Base/plain-note.md"
+    (vault / note).write_text("---\ntitle: Plain note\ntype: note\n---\n" + "x" * 80 + "\n")
+    who = RequestPrincipal(audience_id='external')
+    compiled = policy.load(vault)
+    document_containers.clear_unclaimed_notes()
+    assert document_containers.parent_binding_for_path(vault, note) is None
+    assert document_containers._UNCLAIMED, "the unclaimed note was not remembered"
+    return child, note, who, compiled
+
+
+def _refused_everywhere(vault, note, who, compiled):
+    from exomem.governance import egress
+
+    spellings = (note, note.replace("plain", "ｐlain"), note.replace("/", "\\"), note.replace("/", "//", 1))
+    return all(
+        not egress.content_permits(vault, spelling, who)
+        and not egress.container_parent_allows(vault, spelling, policy=compiled, principal=who, purpose=None)
+        for spelling in spellings
+    )
+
+
+def test_remembered_unclaimed_note_is_rechecked_after_a_member_page_replaces_it(vault, monkeypatch):
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    # A rename gives the path a new inode, so a memo keyed on the path alone would miss this.
+    (vault / (child + ".md")).replace(vault / note)
+    assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_remembered_unclaimed_note_is_rechecked_after_a_same_size_claim_rewrite(vault, monkeypatch):
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    page = vault / note
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    original = page.read_bytes()
+    # Same size and same inode: only the change time tells the rewrite apart.
+    page.write_bytes(forged + b"x" * (len(original) - len(forged)))
+    assert b"container_member" in page.read_bytes() and page.stat().st_size == len(original)
+    assert _refused_everywhere(vault, note, who, compiled)
