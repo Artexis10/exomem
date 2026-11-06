@@ -214,7 +214,7 @@ def bound_references(
                     parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
                     path, store, metadata, vault, placements, placement_versions,
                 )
-            except ValueError as error:  # This note's header or binding; a tree, budget or I/O failure is not a ValueError.
+            except ValueError as error:  # This note's YAML or binding. The tree reports a header it cannot read; a walk or I/O failure is no ValueError.
                 if unreadable is None:
                     raise
                 unreadable(path, error)
