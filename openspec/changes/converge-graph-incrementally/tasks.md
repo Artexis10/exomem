@@ -278,11 +278,15 @@ The concurrent and settled-state reports below bind to its corrected candidate.
   Other acknowledgement readers retain their existing lineage contract.
   Observability documentation describes the added pending reason; no deploy manifest or plugin branches on it.
   The capabilities check passed on PR #2444; this response change adds no tool argument.
-  The acceptance script's graph vocabulary is now pinned by a CI test that drives the real
-  emitters, closing the gap that let a correct bounded write look like an acceptance
-  regression: a fourth outcome the server can emit but the validator rejects now fails in
-  CI rather than in an operator's hands. The live run itself still needs a deployed
-  endpoint and its deployment identity arguments, so it stays open here.
+  Emitter-driven tests cover the acceptance script's graph vocabulary.
+  The installed candidate journey proves transport, restart, relation readback and convergence.
+  The remaining check joins these contracts on an identified qualified release in disposable vault and runtime state.
+  A real MCP mutation must return a compact committed terminal with `pending` and its reason and checkpoint.
+  That unchanged terminal must pass the existing graph validator, then the expected relations must become available.
+  Inspection or retry must confirm a settled outcome without repeating the canonical mutation.
+  The report must bind the package digest, release source, interpreter, response, validation and convergence.
+  Full HTTPS/OAuth, client-selection and signed promotion evidence remains a separate Records promotion requirement.
+  Records promotion consumes graph proof; it does not gate this graph acceptance.
 
 ## 7. Phase 3 — availability fence, conditional on measurement
 
