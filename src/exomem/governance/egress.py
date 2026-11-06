@@ -5244,6 +5244,9 @@ def projects_origin_for_caller(
     """Whether this caller reads origin projected (`projects_origin`). A cache
     of anything `prose_for_caller` or `carrier_spans_for_caller` shaped keys on it."""
     who = principal if principal is not None else effective_principal()
+    if raw_protection.is_owner(who):
+        # Nothing is withheld from the owner (`projects_origin`), so skip the policy read.
+        return False
     return projects_origin(vault_root, policy_module.load(vault_root), who)
 
 
