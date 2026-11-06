@@ -253,7 +253,7 @@ time. Reachable today on every path that already rebuilds off the write path.
   post-commit fanout and seeds only at setup.
   Rechecked on 2026-11-06 with the same script: 1,200 pages, two writers, 30 seconds,
   and `--check --max-blocking 0`. The baseline at `cd05fb01e` completed 52 measured writes;
-  this change completed 58. Both runs had zero writes over five seconds.
+  the corrected candidate completed 60. Both runs had zero writes over five seconds.
   This change reported pending while receipts remained queued, then completed after quiescence.
   A fresh process confirmed the settled durable outcome with the same isolated state and lease roots.
   These runs establish convergence; they make no speed-gain claim. Delivery remains open.
@@ -264,6 +264,9 @@ time. Reachable today on every path that already rebuilds off the write path.
   The 2026-11-06 baseline and candidate checks both ended current, with zero queued graph paths and zero drift findings.
   Delivery remains open.
 - [ ] 6.3 Full suite green; latency gate still green.
+  The local `scripts/semantic_write_latency.py --check` passed canonical commit and public-write checks on `fc0d3d26` and `b5e6b2c9`.
+  Both failed the 8,000-page immediate keyword and hybrid read p95 limits.
+  These matching local failures do not establish a new regression; full release qualification remains open.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
   Consumer grep done for the seams 5.10 moved: no production code branches on
@@ -408,6 +411,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   The carry record is removed. Version 15 requires one full rebuild of older sidecars,
   because consumed carry can leave damage that source hashes cannot detect.
   A scoped drain cannot upgrade old rows. Cold adoption also detects a later deletion without a receipt.
+  A local resolver cannot cross a registry seed using an adopted foreign snapshot's history floor.
+  The promotion regression checks incoming links after a newer serving snapshot, ten writes, and a final drain.
   Independent review, delivery, and installed acceptance remain open.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)

@@ -1293,7 +1293,19 @@ def _recall_delta_since(
             complete = adopted or checkpoint == current
             return RecallDelta(checkpoint, current, complete, frozenset(), frozenset())
         history = _recall_history.get(key, [])
-        if not history or origin < history[0][0]:
+        if not history:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        # Zero-width floors prove adopted snapshots only, not local consumers
+        # whose cached corpus predates a seed's replacement of the registry.
+        history_origin = (
+            history[0][0]
+            if adopted
+            else next(
+                (before for before, after, _paths, _proof in history if before < after),
+                current.generation,
+            )
+        )
+        if origin < history_origin:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         changed: set[str] = set()
         deleted: set[str] = set()

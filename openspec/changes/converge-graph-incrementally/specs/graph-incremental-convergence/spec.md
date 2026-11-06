@@ -372,6 +372,7 @@ The rows and the resolver fingerprint SHALL commit atomically, including when pu
 A selected receipt limit SHALL NOT truncate required topology repair.
 If indexed roots cannot explain the resolver topology, the drain SHALL land no rows and record full-rebuild demand.
 Older sidecars that lack this invariant SHALL require a full rebuild before incremental repair or adoption.
+An adopted foreign snapshot's history floor SHALL NOT authorize a local resolver checkpoint from before a registry seed.
 
 #### Scenario: A scoped drain reaches an affected retitle
 
@@ -390,6 +391,12 @@ Older sidecars that lack this invariant SHALL require a full rebuild before incr
 - **WHEN** a scoped drain finds a sidecar written before the complete-topology invariant
 - **THEN** it preserves the receipts and records full-rebuild demand
 - **AND** it leaves the old schema version unchanged until a full rebuild replaces the sidecar
+
+#### Scenario: Promotion follows a newer serving snapshot
+
+- **WHEN** a standby re-proves a newer snapshot and the watcher seed admits a page absent from its old resolver
+- **THEN** the old local resolver checkpoint cannot use the adopted snapshot's history floor
+- **AND** later writes and drains preserve the new page's incoming links without a whole-vault rebuild
 
 ### Requirement: A queued repair is not rescheduled as a whole-vault rebuild
 

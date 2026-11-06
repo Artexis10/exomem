@@ -388,6 +388,11 @@ Schema version 15 therefore requires a full rebuild of older sidecars.
 A partial drain cannot relabel old rows with the new version.
 The rebuild costs one recovery pass; it prevents reuse of damage that source hashes alone cannot detect.
 
+A local resolver cannot borrow the history floor of an adopted foreign snapshot after a registry seed.
+Only real events establish the retained history boundary for local consumers; adoption floors authorize foreign snapshots alone.
+The existing resolver update then evicts an old cache instead of marking it current after skipping pages admitted by the seed.
+This costs one resolver rebuild when an old local cache survives a registry replacement and preserves incremental graph adoption.
+
 Steady-state convergence under writes, meaning catch-up publication of a pass whose
 movement was all recorded, is 7.2. It is not reopened here. It was built and measured on
 `fix/graph-convergence-contract` and parked by ruling on availability and latency
