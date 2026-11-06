@@ -1,27 +1,27 @@
 ## 1. Specification
 
-- [ ] 1.1 Write the proposal, the design and the four deltas, and correct the active baseline delta that named the capture reminder as a carrier. Validate strictly with the CI-pinned OpenSpec.
+- [x] 1.1 Write the proposal, the design and the four deltas, and correct the active baseline delta that named the capture reminder as a carrier. Validate strictly with the CI-pinned OpenSpec.
 
 ## 2. Doctrine constants
 
-- [ ] 2.1 Add the `proactive_capture` meaning map and extract the shared doctrine constants, with the bootstrap bytes unchanged.
+- [x] 2.1 Add the `proactive_capture` meaning map and extract the shared doctrine constants, with the bootstrap bytes unchanged.
 
 ## 3. Server carrier
 
-- [ ] 3.1 Build the carrier, attach it in `op_activate_context` outside the packet cache, and reserve its characters inside `limit_chars`.
+- [x] 3.1 Build the carrier, attach it in `op_activate_context` outside the packet cache, and reserve its characters inside `limit_chars`.
 
 ## 4. Hook
 
-- [ ] 4.1 Render a served block first in the retrieve hook; regenerate the plugin copies and the Cloud hook bundle.
+- [x] 4.1 Render a served block first in the retrieve hook; regenerate the plugin copies and the Cloud hook bundle.
 
 ## 5. Additive Entity fact
 
-- [ ] 5.1 Expose `create_missing` on `edit_section`, name the exact retry in both refusals, and update the scaffold route.
-- [ ] 5.2 Regenerate the tool schemas, tool-surface contract, ChatGPT pending digest, capabilities documentation and skill stamps; raise the tool-schema budget by the measured bytes.
+- [x] 5.1 Expose `create_missing` on `edit_section`, name the exact retry in both refusals, and update the scaffold route.
+- [x] 5.2 Regenerate the tool schemas, tool-surface contract, ChatGPT pending digest, capabilities documentation and skill stamps; raise the tool-schema budget by the measured bytes.
 
 ## 6. Guarding tests
 
-- [ ] 6.1 Add the tests for authority agreement, staleness, re-arm, budget, hook render, ceiling, and the edit and observe remediations. Watch each fail on the unfixed code.
+- [x] 6.1 Add the tests for authority agreement, staleness, re-arm, budget, hook render, ceiling, and the edit and observe remediations. Watch each fail on the unfixed code.
 
 ## 7. Round A on real models
 

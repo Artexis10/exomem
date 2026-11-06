@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import commands
 from exomem import edit as edit_module
 from exomem import find as find_module
 from exomem import temporal
@@ -97,6 +98,39 @@ def test_heading_not_found_raises(vault, monkeypatch: pytest.MonkeyPatch) -> Non
             heading="Nonexistent", section_position="append", new_string="y",
         )
     assert ei.value.code == "HEADING_NOT_FOUND"
+
+
+def _section_operation(**fields) -> dict:
+    return {
+        "kind": "edit_section", "heading": "Observations",
+        "new_string": "- [fact] Opens at nine. ^opens", **fields,
+    }
+
+
+def test_create_missing_adds_the_section_and_leaves_the_rest_of_the_body_untouched(vault) -> None:
+    p = _seed(vault)
+    before = _read(p).split("---\n", 2)[2]
+
+    commands.op_edit_memory(
+        vault, path=NOTE_REL, why="record a fact",
+        operation=_section_operation(create_missing=True),
+    )
+
+    after = _read(p).split("---\n", 2)[2]
+    assert after == before.rstrip("\n") + "\n\n## Observations\n\n- [fact] Opens at nine. ^opens\n"
+
+
+def test_a_missing_heading_refuses_and_names_the_flag_that_adds_it(vault) -> None:
+    p = _seed(vault)
+    before = p.read_bytes()
+
+    with pytest.raises(ValueError, match="HEADING_NOT_FOUND") as raised:
+        commands.op_edit_memory(
+            vault, path=NOTE_REL, why="record a fact", operation=_section_operation(),
+        )
+
+    assert "create_missing=true" in str(raised.value)
+    assert p.read_bytes() == before
 
 
 def test_heading_mutually_exclusive_with_new_body(vault, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -822,7 +822,9 @@ def apply_section_edit(
                 missing=["heading"],
                 reason=(
                     f"heading {heading!r} not found{where}. Match an existing `## Heading` "
-                    "(the `#` markers are optional in the arg); read the page first."
+                    "(the `#` markers are optional in the arg); read the page first. To add "
+                    "the section instead, send the same `edit_section` operation with "
+                    "`create_missing=true`."
                 ),
             )
         # Append a new level-2 section (the scaffold's convention) with `content`.

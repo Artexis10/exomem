@@ -39,6 +39,11 @@ schema from eligibility alone: concise observations and narrow additive facts ob
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
 confirmed `restructure_execution`.
 
+For a resolved Entity, add the facet as one compact unit line under `## Observations`
+with `edit_note` and `{"kind": "edit_section", "heading": "Observations", "create_missing": true,
+"new_string": "<unit line>", "expected_hash": "<content_hash>"}`; `observe_memory` does not
+write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
+
 ## Planning
 
 `read_plans` and `change_plans` are the public tools for human-owned intended future

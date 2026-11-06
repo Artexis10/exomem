@@ -4592,6 +4592,7 @@ def op_edit(
     replace_all: bool = False,
     heading: str | None = None,
     section_position: str = "append",
+    create_missing: bool = False,
     edits: list[multi_edit_module.EditItem] | None = None,
     row_key: str | None = None,
     take: str | None = None,
@@ -4685,6 +4686,8 @@ def op_edit(
             Raises HEADING_NOT_FOUND if absent.
         section_position: With `heading`, where to put `new_string`:
             "append" (default), "prepend", or "replace" the section body.
+        create_missing: With `heading`, add the section at the end of the page
+            when it is absent, instead of refusing HEADING_NOT_FOUND.
         edits: Batch-surgical mode — list of {old_string, new_string,
             replace_all?} applied sequentially in one atomic commit.
         row_key: Take-row mode — natural leading text of the row to fill
@@ -4822,6 +4825,7 @@ def op_edit(
                 replace_all=replace_all,
                 heading=heading,
                 section_position=section_position,
+                create_missing_section=create_missing,
                 expected_hash=expected_hash,
                 validate_only=validate_only,
                 semantic_transition_token=transition_token,
@@ -10816,8 +10820,8 @@ def op_connect_memory(
             """`edit_note` for the relation queue: identical to op_edit_memory,
             but creates the canonical `## Relations` section when a note has none
             (create_note() doesn't emit one), so accepting the first relation into a
-            note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
-            only — it is not exposed on the edit_note MCP tool."""
+            note doesn't fail HEADING_NOT_FOUND. The queue always opts in; an
+            `edit_section` caller opts in with the operation's own flag."""
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
