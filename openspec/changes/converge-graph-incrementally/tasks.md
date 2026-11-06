@@ -235,7 +235,12 @@ time. Reachable today on every path that already rebuilds off the write path.
 
 ## 6. Phase 2 verification
 
-- [ ] 6.1 The 1200-page-with-concurrent-writer lane reaches `completed`, not `pending`,
+Delivery evidence: [PR #2444](https://github.com/Artexis10/exomem/pull/2444) merged as `5546bdde4` after exact independent review.
+It covers the implementation in tasks 8.9, 8.10, 9.5 and 10.4.
+The PR had 48 successful checks and 15 skipped checks before merge.
+The concurrent and settled-state reports below bind to its corrected candidate.
+
+- [x] 6.1 The 1200-page-with-concurrent-writer lane reaches `completed`, not `pending`,
   with no write blocking. Record before and after.
   No harness existed for this, which is why the exit criterion had gone unmeasured:
   `scripts/graph_concurrent_convergence.py` now runs real batches through a live writer
@@ -256,24 +261,23 @@ time. Reachable today on every path that already rebuilds off the write path.
   the corrected candidate completed 60. Both runs had zero writes over five seconds.
   This change reported pending while receipts remained queued, then completed after quiescence.
   A fresh process confirmed the settled durable outcome with the same isolated state and lease roots.
-  These runs establish convergence; they make no speed-gain claim. Delivery remains open.
-- [ ] 6.2 Graph drift stays at zero across a sustained concurrent-write run.
+  These runs establish convergence; they make no speed-gain claim.
+- [x] 6.2 Graph drift stays at zero across a sustained concurrent-write run.
   Measured by `audit(categories=["graph_drift"])` after the writers stop and the queue
   quiesces, so drift is audited against the Markdown rather than asserted by construction
   from the same code path that produced it.
   The 2026-11-06 baseline and candidate checks both ended current, with zero queued graph paths and zero drift findings.
-  Delivery remains open.
 - [ ] 6.3 Full suite green; latency gate still green.
   The local `scripts/semantic_write_latency.py --check` passed canonical commit and public-write checks on `fc0d3d26` and `b5e6b2c9`.
   Both failed the 8,000-page immediate keyword and hybrid read p95 limits.
   These matching local failures do not establish a new regression; full release qualification remains open.
+  Its workflow skipped the full semantic-latency gate; those skips are not qualification evidence.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
-  Consumer grep done for the seams 5.10 moved: no production code branches on
-  `GRAPH_SYNC_REBUILD_IN_PROGRESS` (only the two tests asserting the rebuild path), no
-  doc, deploy manifest, or hosted plugin references the graph codes, and the generated
-  capabilities doc is current — this is a response contract, not a tool schema, so the
-  pinned surface digests do not move (confirmed, not assumed).
+  The repeated source inventory confirms that only the writer terminal opts into the availability check.
+  Other acknowledgement readers retain their existing lineage contract.
+  Observability documentation describes the added pending reason; no deploy manifest or plugin branches on it.
+  The capabilities check passed on PR #2444; this response change adds no tool argument.
   The acceptance script's graph vocabulary is now pinned by a CI test that drives the real
   emitters, closing the gap that let a correct bounded write look like an acceptance
   regression: a fourth outcome the server can emit but the validator rejects now fails in
@@ -399,12 +403,12 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   observed before it. Measure it on the same paired bar that parked 7.2 (longest
   unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
   before any decision to ship it.
-- [ ] 8.9 Repair an affected page's retitle before overwriting its stored title.
-  The prepared repair adds every unexplained indexed topology change to the drain's roots.
+- [x] 8.9 Repair an affected page's retitle before overwriting its stored title.
+  The repair adds every unexplained indexed topology change to the drain's roots.
   It widens changed roots through both title keys and incoming edges before deriving rows.
   The duplicate-title regression reproduced a missing edge on the prior implementation.
   Scoped drains, affected retitles, and late refreshes now compare against a fresh rebuild.
-  Body-only edits retain fragment-only widening. Independent review and delivery remain open.
+  Body-only edits retain fragment-only widening.
 - [ ] 8.10 Remove partial topology repair that adoption can mistake for complete repair.
   A temporary title reproduced extra edges and missing edges, including with real pending receipts.
   Each admitted drain now commits completely repaired rows and their resolver fingerprint together.
@@ -413,7 +417,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   A scoped drain cannot upgrade old rows. Cold adoption also detects a later deletion without a receipt.
   A local resolver cannot cross a registry seed using an adopted foreign snapshot's history floor.
   The promotion regression checks incoming links after a newer serving snapshot, ten writes, and a final drain.
-  Independent review, delivery, and installed acceptance remain open.
+  The reviewed repair is merged.
+  A qualified containing release and installed acceptance remain open.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)
 
@@ -469,13 +474,12 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   tests, red on 41a103bd and green after the fix; the three
   `test_semantic_unit_reconcile.py` failures and the three freshness tests pass again
   with their original setup.
-- [ ] 9.5 Report `pending` while graph receipts remain queued or availability is withdrawn,
+- [x] 9.5 Report `pending` while graph receipts remain queued or availability is withdrawn,
   even when the acknowledgement covers the committed checkpoint.
-  The prepared repair checks the queue and reads the acknowledgement, availability marker,
+  The repair checks the queue and reads the acknowledgement, availability marker,
   barrier, and schema version in one bounded metadata snapshot.
   It neither waits for a publication hold nor runs the cold source proof.
   Real writer terminals cover settled, queued, and withdrawn states; the two pending cases failed before the repair.
-  Independent review and delivery remain open.
 
 ## 10. A drain derives only bytes its resolver has seen
 
@@ -505,12 +509,11 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   Scoped suites (graph, standby, drain, index_sync, file watcher, media, episode,
   semantic-unit and records-recall modules): 62 modules, 1925 passed, 26 skipped,
   0 failed.
-- [ ] 10.4 Complete scoped topology repair under the registry proof from 10.2.
+- [x] 10.4 Complete scoped topology repair under the registry proof from 10.2.
   Tasks 8.9 and 8.10 now repair a retitled affected page before its old entry disappears,
   including when a selected receipt limit omits that page.
   A late refresh must preserve that repair without a whole-vault pass.
   The existing registry-race guards still reject bytes that the resolver has not seen.
-  Independent review and delivery remain open.
 - [x] 10.5 Review corrections. The acknowledged no-op also requires the stored resolver
   topology to equal the resident resolver's at the live checkpoint. A stale topology
   falls back with `stored_topology_fingerprint_mismatch` (whole-vault), and no resident
