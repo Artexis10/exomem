@@ -158,16 +158,22 @@ Every entry to an episode-sealed plan, including ordinary curation apply/resume 
 episode attempt, SHALL join the same journal-tracked invocation. Dispatch and terminal persistence
 SHALL serialize under the existing writer lease. Invocation correlation SHALL NOT replace stable mutation identity.
 
-Only native typed DefiniteNoEffect SHALL authenticate no authoritative publication or positively
-verified complete rollback. Curation SHALL persist a closed distinguishable terminal in its existing receipt
-path, binding invocation, plan, operation, prepared effect digest and native reason/evidence.
-Generic failures, absent witnesses, matching bytes and mutable progress SHALL NOT prove no effect.
+Only a typed no-effect proof SHALL authenticate no authoritative publication: a native DefiniteNoEffect
+or a curation recovery proof for a stopped attempt. Curation SHALL persist either as a closed distinguishable
+terminal in its existing receipt path, binding invocation, plan, operation, prepared effect digest and closed reason/evidence.
+Curation SHALL write a recovery proof only while it holds the vault mutation boundary and a current write fence.
+A recovery proof SHALL cover only the latest attempt of a bound uncertain leaf with an invocation identity.
+Every same-operation receipt SHALL be an earlier attempt's no-effect terminal. No same-operation file witness SHALL exist.
+A store-sealed Records or Planning step SHALL also be read through the serving store, which SHALL hold no transaction for its request id.
+A native preservation step SHALL also have every sealed core path absent, and its batch SHALL publish a core path first.
+Other steps SHALL NOT receive a recovery proof.
+Generic failures, absent receipts or file witnesses alone, matching bytes and mutable progress SHALL NOT prove no effect.
 Reconciliation SHALL validate exact original plan/approval and invocation, exclude conflicting
 unresolved invocation or commitment, then use the typed proven_uncommitted transition.
 A verified same-operation commitment SHALL take precedence over earlier no-effect evidence.
 Before retry, execution SHALL check commitment again and retain allocation, operation and current guards.
 The no-effect terminal SHALL NOT inherit a nonretryable failed_step dead end.
-A crash without terminal proof SHALL remain uncertain.
+A stopped attempt without a native terminal or recovery proof SHALL remain uncertain.
 
 Recovery SHALL inspect same-operation commitment and repair missing terminal receipts through
 curation before reacquiring original custody. Historical commitment SHALL survive missing input. For an episode leaf with a terminal receipt, and for native preservation and Planning kinds also before receipt repair, it SHALL survive changed or missing output.
@@ -203,6 +209,18 @@ Recovery SHALL NOT reseal historical plans. Rollback SHALL require a release tha
 - **WHEN** a native effect commits atomically, its acknowledgement is lost and original input later disappears
 - **THEN** curation recovers historical commitment before custody checks without executing another effect
 - **AND** missing or changed output keeps current coverage unavailable independently
+
+#### Scenario: A stopped store step retries its same request
+
+- **WHEN** an episode Records or Planning attempt stops with no receipt and the serving store holds no transaction for its request id
+- **THEN** curation records a recovery proof and the next attempt commits once with the same operation and request id
+- **AND** a transaction found for that request id repairs the committed receipt instead of recording a proof
+
+#### Scenario: Partial native publication stays uncertain
+
+- **WHEN** a native preservation attempt stops after it installed a core path and before its witness
+- **THEN** curation records no recovery proof and the leaf stays uncertain
+- **AND** an attempt that stopped before any core path was installed retries with its sealed allocation
 
 ### Requirement: Leaf support preserves immutable original and reading provenance
 
