@@ -18,8 +18,8 @@
 
 ## 3. Verify and deliver the integrated repair
 
-- [ ] 3.1 Run scoped audit, budget and egress suites, then required completion checks; compare failures with the unchanged baseline.
-- [ ] 3.2 Complete independent adversarial review of the exact batch; record C4, C6, product/proof weight and the ship decision.
+- [x] 3.1 Run scoped audit, budget and egress suites, then required completion checks; compare failures with the unchanged baseline.
+- [x] 3.2 Complete independent adversarial review of the exact batch; record C4, C6, product/proof weight and the ship decision.
 - [x] 3.3 Run a bounded connector workflow in isolated state; verify incomplete coverage and authorization errors remain explicit to the calling agent.
 - [ ] 3.4 Merge the reviewed green batch and publish its ordinary release; verify the release contains the reviewed commit.
 - [ ] 3.5 Within an approved personal maintenance window, promote the containing release and run one real audit; verify its client terminal and server budget evidence.
