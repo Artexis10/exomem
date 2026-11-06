@@ -300,6 +300,12 @@ def compile_context(
         return block
     if working_set.budget_exhausted("working_set.task_context"):
         return empty("unavailable", reset=bool(held))
+    from . import working_set_runtime
+
+    if not working_set_runtime.activation_released_corpus_tasks() and not full_source_access(root, caller):
+        # Without the raw fast path, discovery would prepare the whole released corpus on this request. It reports
+        # the state that a released corpus over its preparation allowance already reports.
+        return empty("unavailable", reset=bool(held))
     try:
         with find_types.timing_span(timings, "working_set.task_context"):
             discovered, missing = working_set.task_candidates(

@@ -1430,6 +1430,27 @@ runs before task selection and does not depend on map freshness. A true
 new projections. Missing and withheld sources produce the same generic reset.
 A client that omits method continuity must read a source again before reuse.
 
+Task discovery has a fast path only when the caller has unrestricted content
+access and the vault has no file release policy, bound writer or enrolled
+collection store. Otherwise discovery must prepare the caller's complete released
+corpus on every request, and that preparation does not yet meet the activation
+latency ceiling at scale. This applies to a restricted caller, such as a shared
+or delegated audience. It also applies to the owner of a vault whose structured
+collections live in the collection store. By default such a request gets
+`task_context.state` of `unavailable`. Carried methods are still revalidated.
+
+To serve that discovery anyway, add this line to the service environment and
+restart the service as described for the turn slice:
+
+```bash
+EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS=on
+```
+
+Then call `recall_context` once with a turn that names a known page:
+`task_context.state` is `ready` or `partial`, not `unavailable`. Expect that call
+to take longer on a large vault. A value other than `on` or `off` logs one
+warning, `invalid EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS; using off`.
+
 ### Optional context-fit interpretation
 
 Interpretation is disabled unless the process environment names an operator-owned

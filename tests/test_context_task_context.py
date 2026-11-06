@@ -257,6 +257,7 @@ def test_current_methods_follow_admitted_unit_currency_before_reuse(vault: Path,
 
 def test_withheld_unit_cannot_retire_an_admitted_method(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A caller must receive method currency computed after its unit release decisions."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "private-reference", body="Restricted inspection reference.\n")
     path = _page(vault, "alignment-methods", body=(
@@ -296,8 +297,34 @@ def test_unavailable_method_currency_preserves_admitted_read_routes(vault: Path,
 
 
 @pytest.mark.parametrize("caller", [_external(), principal.owner_principal(surface="library")], ids=["external", "owner"])
+def test_released_corpus_discovery_is_unavailable_by_default(vault: Path, monkeypatch: pytest.MonkeyPatch, caller) -> None:
+    """Without the raw fast path, a request gets an unavailable task context and an unchanged map by default."""
+    monkeypatch.delenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", raising=False)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    path = _page(vault, "alignment-reference", body="- [technique] Inspect optical alignment against a reference target ^target\n")
+    # A file release policy removes the raw fast path for every caller, the owner included.
+    _withhold(vault, _page(vault, "restricted-target", body="Confidential reference material.\n"), ceiling=0)
+    write_rule(vault, ceiling=0, audience=caller.audience_id)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    packet = _activate(vault, caller, turn="Inspect optical alignment", max_chars=8000)
+    task = packet["task_context"]
+    assert packet["abstained"] is False and packet["map"]["items"]
+    assert task["state"] == "unavailable"
+    assert task["candidates"] == [] and task["methods"]["items"] == []
+    assert path not in str(task)
+
+    # The service restarts to apply the setting; drop the packet cache that a restart would drop.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+    working_set_runtime.reset_caches_for_tests(packets_only=True)
+    served = _activate(vault, caller, turn="Inspect optical alignment", max_chars=8000)
+    assert path in {item["source_ref"] for item in served["task_context"]["candidates"]}
+
+
+@pytest.mark.parametrize("caller", [_external(), principal.owner_principal(surface="library")], ids=["external", "owner"])
 def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkeypatch: pytest.MonkeyPatch, caller) -> None:
     """A mixed page stays discoverable for its visible unit without matching its withheld unit."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
     visible = "- [technique] Inspect optical alignment against a reference target ^visible\n"
@@ -320,6 +347,7 @@ def test_withheld_units_cannot_create_restricted_task_routes(vault: Path, monkey
 
 def test_restricted_task_admission_precedes_candidate_limits(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Withheld matches must not consume a raw top-k window ahead of a permitted source."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
     for index in range(13):
@@ -367,6 +395,7 @@ def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path,
 
 def test_restricted_method_version_covers_visible_exclusions_outside_the_unit(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A released-source version must retain operative prose outside the selected method unit."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
     path = _page(vault, "alignment-method", body="- [technique] Inspect optical alignment ^visible\n\nExclude handheld field checks.\n")
@@ -388,6 +417,7 @@ def test_restricted_method_version_covers_visible_exclusions_outside_the_unit(va
 
 def test_restricted_graph_omission_keeps_visible_recall_without_origin_leaks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A withheld unit's graph edge cannot admit a source that the released text did not match."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
     neighbour = _page(vault, "secondary-reference", body="A separate measurement note.\n")
@@ -408,6 +438,7 @@ def test_restricted_graph_omission_keeps_visible_recall_without_origin_leaks(vau
 
 def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A preparation deadline must preserve the map without ranking a biased source prefix."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     import contextlib
     import time
 
@@ -445,6 +476,7 @@ def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path
 
 def test_restricted_corpus_capacity_cannot_rank_a_prepared_prefix(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Aggregate capacity exhaustion must not turn the first prepared matching source into an answer."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     from exomem import context_task, working_set
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
