@@ -1,15 +1,24 @@
 ## 1. Measure
 
-- [ ] 1.1 Profile each phase of a cold and a warm reconcile on a disposable copy of a real-sized vault.
-- [ ] 1.2 From the profile, group the phases into holds under design D1, or stop and report.
+- [x] 1.1 Profile each phase of a cold and a warm reconcile on a disposable copy of a real-sized vault.
+  - Evidence: a CLI reconcile on a 13,665-page copy, models disabled, on a contended machine, so the absolute numbers are high. Source: the `mutation_lock_released` events and phase checkpoints of each run.
+  - Warm: total 4,163 s; one whole-run hold, `command maintain_memory`, of 2,898.7 s. Per phase, in seconds: start 1,491 (mostly before the hold), purging 3.7, units 328, lifecycle 18.9, indexes 2.7, embeddings 0, lexical 806.8, graph 0.1, orphans 16.8, references 48.2, derived receipts 0, drift 49.4, rebaseline 6.1, receipts 0.4, projections 1,390.7.
+  - Cold: total 2,791 s; one whole-run hold of 2,249.1 s. The largest phases: projections 780, lexical 738, drift 101, orphans 73, references 37.
+- [x] 1.2 From the profile, group the phases into holds under design D1, or stop and report.
+  - Evidence: the phases that must hold the boundary take about 90 s of the 2,899 s warm hold, so D1 passes. Design D1 lists the grouping. The units phase took 328 s warm and 0.16 s cold. The profile does not split its audit, which holds nothing, from its repair, which holds the boundary; task 3.3 shows the units hold.
 
 ## 2. Implement
 
-- [ ] 2.1 Add a reconcile narrowing row in `writer_lease`, honouring `EXOMEM_WIDE_MUTATION_BOUNDARY`.
-- [ ] 2.2 Remove reconcile from `WHOLE_RUN_MODES` and keep the graph join outside every hold.
-- [ ] 2.3 Give each group from 1.2 its own hold, with a bounded busy wait and stop checks.
-- [ ] 2.4 Re-read each phase's inputs inside its hold under design D2.
-- [ ] 2.5 Apply only the purge entries that the plan and the fresh read share, and report the rest.
+- [x] 2.1 Add a reconcile narrowing row in `writer_lease`, honouring `EXOMEM_WIDE_MUTATION_BOUNDARY`.
+  - Evidence: `narrow_reconcile` in `LeaseManager.invoke` covers the `reconcile` command and `maintain_memory` mode `reconcile`.
+- [x] 2.2 Remove reconcile from `WHOLE_RUN_MODES` and keep the graph join outside every hold.
+  - Evidence: `WHOLE_RUN_MODES`, `narrows_boundary` and the dispatch retry are deleted. `tests/test_graph_rebuild_availability.py::test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild` passes.
+- [x] 2.3 Give each group from 1.2 its own hold, with a bounded busy wait and stop checks.
+  - Evidence: `reconcile._phase_hold` wraps each phase's writes in `maintenance_jobs.chunk_hold`. The receipts phase holds the boundary too, because it closes intents and tombstones from the vault as it reads it.
+- [x] 2.4 Re-read each phase's inputs inside its hold under design D2.
+  - Evidence: design D2 lists each phase's re-read and each run-long value.
+- [x] 2.5 Apply only the purge entries that the plan and the fresh read share, and report the rest.
+  - Evidence: `semantic_isolation_changed` in the report and the job receipt; the repair is marked `changed_since_plan`, so the isolation cursors stay put.
 
 ## 3. Verify
 

@@ -3,23 +3,33 @@
 `reconcile.reconcile` runs these phases in order: planning (the census, only for
 a preview or a planned write), purging, units, lifecycle, indexes, embeddings,
 lexical, graph, orphans, references, derived receipts, drift, rebaseline and
-receipts. Each phase calls `maintenance_jobs.checkpoint`.
+receipts. `commands.op_reconcile` then runs a projections phase: the due-state
+projection, the review-state compaction and the vocabulary review projection.
+Each phase calls `maintenance_jobs.checkpoint`.
 
 The CLI and a remote job both reach the leaf through
-`writer_lease.invoke_command`. It takes the wide mutation guard for the whole
-leaf, because reconcile has no narrowing row and is in `WHOLE_RUN_MODES`. A
-remote job releases that guard before the graph join that follows the leaf.
+`writer_lease.invoke_command`. Before this change, it took the wide mutation
+guard for the whole leaf, because reconcile had no narrowing row and was in
+`WHOLE_RUN_MODES`. A remote job released that guard before the graph join that
+follows the leaf.
 
-Facts the design relies on:
+Facts the design relies on, each checked in the code:
 
-- The lexical store serializes its publication with a cross-process lock.
-- The graph has no coordinator of its own. It builds privately and takes short
-  canonical holds to publish. The graph phase also isolates lineage, recovers a
-  checkpoint and sweeps temporaries, which move durable state.
+- The lexical store serializes its publication with a cross-process lock
+  (`lexstore._publication_lock`).
+- The graph has its own coordinator for publication (`holder_kind` "graph" in
+  `epistemic_graph`). It builds in a registered flight and publishes under that
+  coordinator. The graph phase also isolates lineage, recovers a checkpoint and
+  sweeps temporaries, which move durable state.
 - The reference rebuild scans the corpus, then replaces its table, under an
   in-process lock only. It therefore stays inside a hold.
-- The receipts phase repairs the receipt chain after the derived phases, under
-  its own lock, and depends on running last.
+- The receipts phase closes open intents and commits or aborts tombstones from
+  the vault as it reads it. A governed write holds the boundary from its intent
+  to its terminal, so the receipts phase must hold the boundary too. It runs
+  last.
+- The projections phase needs no hold. The due-state rebuild is a projection
+  that ordinary writes also schedule outside the boundary. The review-state
+  compaction and the vocabulary projection take the review-state coordinator.
 
 ## Goals / Non-Goals
 
@@ -39,23 +49,49 @@ Facts the design relies on:
 ### D1. Profile before grouping
 
 A disposable copy of a real-sized vault gives each phase's wall time, cold and
-warm. The profile decides which phases share a hold. A phase leaves the
-boundary only when a coordinator already serializes it against ordinary writes.
-If most of the time sits in phases that must stay inside a hold, this change
-stops at the profile and reports that.
+warm. The profile decides which phases hold the boundary. A phase leaves the
+boundary only when it is read-only, or when a coordinator already serializes it
+against ordinary writes.
+
+The profile (13,665 pages, models disabled, tasks 1.1) puts most of the old
+hold in phases that need no boundary: lexical, projections, drift and the units
+audit. The phases that must hold it take about 90 s of the 2,899 s warm hold.
+The grouping is:
+
+- No hold: the planning census, the posthoc evaluation, the units audit, the
+  lifecycle inspection, the lexical refresh, the drift audit and the projections.
+- One short hold each: the activation manifest, the purge, the units repair,
+  the lifecycle cleanup, the indexes, the embeddings refresh, the graph phase,
+  the orphans repair, the reference rebuild, the derived receipts, the
+  rebaseline and the receipts.
+
+The grouping is code structure: each phase wraps its writes in `_phase_hold`.
 
 ### D2. Re-read inside the hold, then apply what is current
 
-Most phases already read their inputs and apply them in one pass, so they
-re-read inside their own hold. The purge is the exception: it applies the
-planned isolation census. Inside its hold, it reads the census again and
-applies only the entries present in both. It reports the other entries and
-marks the repair incomplete, so the isolation cursors do not advance.
+Each phase reads again inside its hold what it applies, or checks that what it
+read before the hold has not moved:
 
-Run-long values cross phases and go stale once the boundary is released between
-them: `semantic_states`, `suppressed_paths`, the unit inclusion sets and
-`initial_graph_drift`. Each phase that reads one of them re-reads it inside its
-own hold.
+- The purge reads the isolation census again inside its hold. A planned write
+  applies only the entries that the plan and the fresh read share. It reports
+  the other entries (`semantic_isolation_changed`) and marks the repair
+  incomplete, so the isolation cursors do not advance.
+- The units repair and the lifecycle cleanup compare each page with the bytes
+  that the corpus read. A page whose bytes moved belongs to the write that moved
+  it: the units repair leaves it and reports it
+  (`semantic_unit_parents_moved`), and the lifecycle cleanup reports it as
+  `LIFECYCLE_PRIMARY_RACE`.
+- The indexes are counted inside their hold. The embeddings refresh and the
+  orphans repair check each found file again inside their hold.
+
+Run-long values that a later phase reads go stale once the boundary is released
+between phases. `semantic_states` is used only for parents whose bytes did not
+move, so it still describes them. `suppressed_paths` and `missing_paths` come
+from the census read inside the purge hold. `missing_clip_orphans` is checked
+again against the disk inside the orphans hold. The unit inclusion sets only
+scope what the units audit compares, and `initial_graph_drift` only decides
+whether the graph phase looks again: that phase reads the drift again inside its
+hold before it repairs.
 
 Alternative: skip a whole phase when any input moved. Rejected, because a busy
 vault would never converge, and a job needs a new preview to run again.
@@ -63,16 +99,18 @@ vault would never converge, and a job needs a new preview to run again.
 ### D3. One narrowing rule for the CLI and the job
 
 Reconcile gets a narrowing row in `writer_lease`, as a chunked job has. The
-`EXOMEM_WIDE_MUTATION_BOUNDARY` switch widens it again. Both the CLI and the job
-then run the leaf without a whole-run hold, and reconcile leaves
-`WHOLE_RUN_MODES`. The graph join and handoff composition in `invoke_command`
-must still find no hold held at the join.
+`EXOMEM_WIDE_MUTATION_BOUNDARY` switch widens it again, and each phase hold then
+re-enters the whole-run hold. Both the CLI and the job run the leaf without a
+whole-run hold. `WHOLE_RUN_MODES` and its dispatch retry are gone. The graph
+join and handoff composition in `invoke_command` still find no hold held at the
+join.
 
 ### D4. Bounded waits inside the run
 
 Each hold waits out a busy boundary for a bounded time and checks for a stop
-between attempts, as `chunk_hold` does. A busy boundary in the middle of a run
-no longer fails a half-finished job.
+between attempts, through `maintenance_jobs.chunk_hold`. A busy boundary in the
+middle of a run no longer fails a half-finished job. A stop lands between holds,
+never inside a hold's write.
 
 ## Risks / Trade-offs
 
@@ -80,3 +118,7 @@ no longer fails a half-finished job.
   re-reads inside each hold.
 - More holds cost more total wall time. → The reconcile pays it, not
   foreground writers. The profile records the before and after.
+- A phase that repairs many pages holds the boundary for that whole repair: the
+  units repair, the embeddings refresh and the orphans repair, which can rebuild
+  extraction parts. → The profile puts each well under the old hold. Chunking
+  them is follow-up work.
