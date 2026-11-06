@@ -174,7 +174,7 @@ Source and disposable rehearsals can finish before purchase. Production installa
 
 ## 10. Authoritative reservations before local import growth
 
-Tasks 10.2–10.5 record the delivered source and its historical proof. The drill qualifies only its recorded inputs. Task 10.6 retains qualification of the images after the snapshot Secret fix; production tasks retain their existing authority boundaries.
+Tasks 10.2–10.5 record the delivered source and its historical proof. The drill qualifies only its recorded inputs. Task 10.6 records the qualification of the provider after the snapshot Secret fix; production tasks retain their existing authority boundaries.
 
 - [x] 10.1 Recheck the D12 contract independently, including cancellation before Begin, source incarnation and concurrency reduction.
 - [x] 10.2 Add provider transactions, physical full-size accounting and atomic bounded family metadata to the pinned source overlay. Verify competing allocations and recovery of every partial command boundary.
@@ -205,6 +205,7 @@ Tasks 10.2–10.5 record the delivered source and its historical proof. The dril
   - The release publishes no provider image; the rehearsal builds it from `infra/topolvm`.
     [Drill 42258342785](https://github.com/Artexis10/exomem/actions/runs/42258342785) passed all eight checks and the native LVM host proof at `a3fd80194`, which contains #2185.
     Its provider image is `rehearsal.local/topolvm-reservations@sha256:0271446344c1635025b46df889a65fafcfc165c5dda59c25a6b1f509ced97055`.
-    The `infra/topolvm` tree (`46c594a7d`) and the platform chart tree (`44e574e6d`) at that commit equal those of release v0.161.1, so the result qualifies the released provider source.
-  - The first dispatch at v0.161.1 ([run 42229539815](https://github.com/Artexis10/exomem/actions/runs/42229539815)) failed on two drill harness gaps, not on the provider: the drill did not deploy the key custodian, and its control database missed the operation-grant fixtures. This change fixes both.
+    The `infra/topolvm` tree (`46c594a7d`) and the platform chart tree (`44e574e6d`) at that commit equal those of release v0.161.1, so the result qualifies the released provider source. The report's provider source tree is `1d7e6a126e`.
+  - The first dispatch at v0.161.1 ([run 42229539815](https://github.com/Artexis10/exomem/actions/runs/42229539815)) failed at check 1 because the drill did not deploy the key custodian.
+    With that fixed, [run 42250212120](https://github.com/Artexis10/exomem/actions/runs/42250212120) passed checks 1–7 and failed check 8 because the drill's control database missed the operation-grant fixtures. Neither gap was in the provider; this change fixes both.
     Local cutover, production activation and the Home rollout remain separate.
