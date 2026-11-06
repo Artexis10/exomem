@@ -404,6 +404,7 @@ def test_a_credential_in_an_argument_never_reaches_the_ledger(ledger_dir: Path) 
             "operation": {
                 "kind": "replace_body",
                 "new_body": f"export EXOMEM_REST_API_KEY={secret}",
+                "expected_hash": "a" * 64,
             },
         },
         _ok,

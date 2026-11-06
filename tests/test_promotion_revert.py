@@ -52,13 +52,17 @@ def _create_entity(vault: Path, name: str, *, ref: str | None = None, **extra) -
 
 
 def _append_relation(vault: Path, path: str, bullet: str) -> None:
-    from exomem.vault import parse_frontmatter
+    from exomem.vault import content_hash, parse_frontmatter
 
     _meta, body, _text = parse_frontmatter((vault / path).read_text(encoding="utf-8"))
     section = "" if "## Relations" in body else "\n## Relations\n"
     commands.op_edit_memory(
         vault, path, "Author a synthetic relation.",
-        operation={"kind": "replace_body", "new_body": f"{body.rstrip()}\n{section}{bullet}\n"},
+        operation={
+            "kind": "replace_body",
+            "new_body": f"{body.rstrip()}\n{section}{bullet}\n",
+            "expected_hash": content_hash((vault / path).read_text(encoding="utf-8")),
+        },
     )
 
 
@@ -194,7 +198,7 @@ def test_the_leaf_keeps_an_unrelated_edit_made_after_the_plan_was_read(
 
 def _link_from(vault: Path, note: str, entity: str) -> None:
     """Make an ordinary note link to an entity, as a later write would."""
-    from exomem.vault import parse_frontmatter
+    from exomem.vault import content_hash, parse_frontmatter
 
     _meta, body, _text = parse_frontmatter((vault / note).read_text(encoding="utf-8"))
     commands.op_edit_memory(
@@ -202,6 +206,7 @@ def _link_from(vault: Path, note: str, entity: str) -> None:
         operation={
             "kind": "replace_body",
             "new_body": f"{body.rstrip()}\n\nSee also [[{entity.removesuffix('.md')}]].\n",
+            "expected_hash": content_hash((vault / note).read_text(encoding="utf-8")),
         },
     )
 

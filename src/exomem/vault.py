@@ -5367,6 +5367,7 @@ def batch_atomic_write(
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
+                _before_first_install=curation_witness.publication_hook(curation_witness_state),
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -5392,6 +5393,7 @@ def _batch_atomic_write_locked(
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _before_first_install: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5931,6 +5933,9 @@ def _batch_atomic_write_locked(
             if index == 0 and _prepare is not None:
                 _prepare(caller_writes)
                 raise ValueError("native preparation must stop before publication")
+            if index == 0 and _before_first_install is not None:
+                # The owner's own durable write, never in `replaced`: a rollback does not revert it.
+                _before_first_install()
             replacement_intents: tuple[Any, ...] = ()
             if publication_intents_enabled:
                 from . import file_watcher

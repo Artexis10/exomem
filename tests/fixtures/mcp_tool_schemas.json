@@ -3748,6 +3748,7 @@
                   "type": "string"
                 },
                 "expected_hash": {
+                  "description": "`content_hash` of a whole-page read; a read with `offset` has none",
                   "type": "string"
                 },
                 "kind": {
@@ -3765,6 +3766,7 @@
                 }
               },
               "required": [
+                "expected_hash",
                 "kind",
                 "new_body"
               ],

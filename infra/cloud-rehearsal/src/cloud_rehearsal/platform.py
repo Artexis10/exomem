@@ -188,21 +188,32 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
              or (doc["kind"] == "ClusterRoleBinding" and doc["metadata"]["name"] == "exomem-break-glass"))
     ]
     hetzner = next(doc for source, doc in rendered if source == "templates/cloud-storage-class.yaml")
-    # The custodian template refuses to render unless every private range is excepted from egress, which
-    # would hide the S3 double above. It needs no S3 route (its double reads no bucket), so it renders from
-    # its own call, with the chart's default exceptions and its API-server egress aimed at this K3s.
+    documents += custodian_documents(stack, values, cells={"backupWindow": config.backup_window})
+    return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"], cell_class=hetzner["metadata"]["name"])
+
+
+def custodian_documents(
+    stack: Stack, values: dict[str, Any], *, cells: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """The rendered key custodian, which alone writes each new cell's object-store key Secret.
+
+    Every rehearsal that runs cell backups needs it. The custodian template refuses to render
+    unless every private range is excepted from egress, which would hide the S3 double from the
+    backup Jobs. It needs no S3 route (its double reads no bucket), so it renders from its own
+    call, with the chart's default exceptions and its API-server egress aimed at this K3s.
+    """
+
     custodian = render_chart(
         stack,
         {
             **{name: value for name, value in values.items() if name != "cells"},
-            "cells": {"backupWindow": config.backup_window},
+            **({"cells": cells} if cells is not None else {}),
             "keyCustodian": {"enabled": True},
             "edge": {"apiServerCidrs": [f"{stack.k3s.ip}/32"]},
         },
         show_only=("templates/key-custodian.yaml",),
     )
-    documents += [doc for source, doc in custodian if source == "templates/key-custodian.yaml"]
-    return Platform(rendered=documents, hetzner_class=hetzner["metadata"]["name"], cell_class=hetzner["metadata"]["name"])
+    return [doc for source, doc in custodian if source == "templates/key-custodian.yaml"]
 
 
 def render_chart(
