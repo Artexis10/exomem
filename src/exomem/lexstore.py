@@ -11376,32 +11376,29 @@ class LexicalStore:
                         # snapshot: a request reads both, and `ORDER BY path` walked the path index
                         # and fetched rows in random order, seconds on a cold page cache. Sorting in
                         # Python gives the same order, because `path` uses the BINARY collation.
-                        selected = {"in_vault": ([], {}, [], []), "in_kb": ([], {}, [], [])}
-                        for path, title, parent, in_vault, in_kb, not_raw in conn.execute(
+                        fetched = sorted(conn.execute(
                             "SELECT p.path, p.title, p.emitted_parent_path, p.in_vault, p.in_kb, "
                             f"(1{raw_clause}) FROM pages p", raw_params,
-                        ):
-                            path = str(path)
-                            for column, in_scope in (("in_vault", in_vault), ("in_kb", in_kb)):
-                                entries, parents, candidates, outside = selected[column]
-                                if in_scope == 1:
-                                    entries.append((path, title))
-                                    parents[path] = parent
-                                (candidates if in_scope == 1 and not_raw else outside).append(path)
+                        ).fetchall(), key=lambda row: row[0])
                         filled = {}
-                        for column, (entries, parents, candidates, outside) in selected.items():
-                            entries.sort(key=lambda entry: entry[0])
-                            filled[column] = _AdmittedRecallRows(
+                        # Columns 3 and 4 are `in_vault` and `in_kb`; column 5 is "not raw material".
+                        for name, flag in (("vault", 3), ("kb", 4)):
+                            entries, parents, candidates, outside = [], {}, [], []
+                            for row in fetched:
+                                path, in_scope = str(row[0]), row[flag]
+                                if in_scope == 1:
+                                    entries.append((path, row[1]))
+                                    parents[path] = row[2]
+                                (candidates if in_scope == 1 and row[5] else outside).append(path)
+                            filled[name] = _AdmittedRecallRows(
                                 tuple(entries), frozenset(path for path, _title in entries),
-                                MappingProxyType(parents), tuple(sorted(candidates)), tuple(sorted(outside)),
+                                MappingProxyType(parents), tuple(candidates), tuple(outside),
                             )
-                        rows = filled["in_vault" if scope == "vault" else "in_kb"]
+                        rows = filled["vault" if scope == "vault" else "kb"]
                         measured["rows"] = len(rows.entries)
                     with self._term_frequency_cache_lock:
                         self._admitted_recall_rows[key] = rows
-                        self._admitted_recall_rows.setdefault(
-                            (other, *snapshot), filled["in_vault" if other == "vault" else "in_kb"]
-                        )
+                        self._admitted_recall_rows.setdefault((other, *snapshot), filled[other])
                         while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
                             self._admitted_recall_rows.popitem(last=False)
                 return rows
