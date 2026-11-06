@@ -314,26 +314,6 @@ Bootstrap SHALL expose the six finite Planning actions, the four Planning kinds,
 - **WHEN** an agent has the generic Exomem skill or bootstrap contract
 - **THEN** ordinary Planning capture, triage, and query are fully routable without installing a separate skill that only repeats `plan_memory` arguments
 
-### Requirement: The agent contract teaches structural-promotion presentation
-
-Bootstrap and the canonical write loop SHALL teach agents that a compiled write may return one advisory `structure_suggestion`, and SHALL state how to act on it.
-
-The guidance SHALL direct agents to normally surface a `strong` suggestion, to describe it in the user's own domain language rather than in Exomem's internal terms, to ask before reorganising unless the user has explicitly delegated curation, to prefer an existing suitable destination over creating a new one, to avoid repeating the same recommendation within one interaction, and to exercise judgement on a `moderate` suggestion where mentioning it would be bureaucracy rather than help.
-
-The guidance SHALL state that the suggestion is advisory and that the runtime never reorganises knowledge on its own.
-
-#### Scenario: Bootstrap names the signal and the expected behaviour
-
-- **WHEN** a generic client reads the bootstrap post-write guidance
-- **THEN** it learns that a durable write may return a structural suggestion and where to find it
-- **AND** it learns to surface a strong suggestion, to ask before restructuring, and to prefer an existing destination
-
-#### Scenario: Guidance is presentational, not executable
-
-- **WHEN** bootstrap describes structural suggestions
-- **THEN** reading bootstrap creates, moves, or reorganises nothing
-- **AND** no new tool or parameter is required to receive the suggestion
-
 ### Requirement: Post-write guidance names only fields the response carries
 
 The write-loop guidance SHALL describe the fields a successful mutation actually returns at its default response detail, and SHALL identify the response detail required for any field it names that is not returned by default.
@@ -1107,3 +1087,21 @@ The compact core's due-state summary SHALL report the per-category visible and o
 
 - **WHEN** a compact bootstrap runs on a vault with outstanding `unprocessed_source` items as its largest visible category
 - **THEN** the due-state summary carries the per-category counts and a `next` route naming `unprocessed_source`
+
+### Requirement: The agent contract teaches the note-cohesion question
+
+Bootstrap and the canonical write loop SHALL teach agents that a compiled write may return one `structure_suggestion` with `kind` `note_cohesion`, and SHALL state how to answer it.
+
+The guidance SHALL direct the agent to read the whole page and name the independent questions it answers. It SHALL keep a page that answers one question whole, however long, by dismissing the item through `triage_memory` with an `intentional:` reason. It SHALL propose a split only when several questions each have their own material, and only through the curation lane with the user's exact plan confirmation. It SHALL add a breadth tag through a governed edit when the page is a hub by design. The guidance SHALL state that the question asserts nothing about the page and that the runtime never reorganises knowledge on its own.
+
+#### Scenario: Bootstrap names the question and the three answers
+
+- **WHEN** a generic client reads the bootstrap post-write guidance
+- **THEN** it learns that a compiled write may carry a note-cohesion question and where to find it
+- **AND** it learns to keep a coherent page whole by dismissal, to split only through the curation lane, and to mark a hub with a breadth tag
+
+#### Scenario: Guidance is presentational, not executable
+
+- **WHEN** bootstrap describes the note-cohesion question
+- **THEN** reading bootstrap creates, moves, or reorganises nothing
+- **AND** no new tool or parameter is required to receive or answer the question
