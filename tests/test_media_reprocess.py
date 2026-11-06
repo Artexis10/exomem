@@ -521,26 +521,39 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
     assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 1
 
 
-def test_a_blocked_reprocess_after_the_extraction_pause_says_to_reprocess_not_to_retry(
+def test_a_reprocess_a_paused_start_blocked_runs_with_its_language_after_a_start_with_extraction(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _Engine(monkeypatch)
-    binary, _sidecar, _worker = _completed(vault, "rec.mp3")
+    from exomem import server_runtime
+
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
     media_processing.reprocess_media(vault, binary, language="et")
+    # The supervisor would start a media child; the test runs the child itself.
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    started = None
     try:
-        media_processing.mark_processing_unavailable(
-            vault,
-            reason="MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set",
-            next_action="enable media extraction, restart the service, then retry",
-        )
-        media_jobs.MediaJobStore(vault).set_worker(os.getpid())  # a worker runs again: the pause ended
-        (job,) = media_jobs.status(vault)["jobs"]
+        monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+        assert server_runtime._start_media_worker(vault) is None
+        (paused,) = media_jobs.status(vault)["jobs"]
+
+        monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+        started = server_runtime._start_media_worker(vault)
+        assert started is not None
+        (resumed,) = media_jobs.status(vault)["jobs"]
     finally:
+        if started is not None:
+            started.stop()
         media_processing.set_media_runtime_available(vault)
 
-    assert job["state"] == media_jobs.BLOCKED and job["retryable"] is False
-    assert "reprocess the file again" in job["next_action"]
-    assert "retry" not in job["next_action"]
+    # A retry leaves a reprocess alone, so the paused request says to reprocess, not to retry.
+    assert paused["state"] == media_jobs.BLOCKED and paused["retryable"] is False
+    assert paused["next_action"].endswith("restart the service, then reprocess the file again")
+    assert "retry" not in paused["next_action"]
+    assert resumed["state"] == media_jobs.PENDING
+    _run_to_idle(vault, worker)
+    assert engine.languages == [None, "et"]
+    assert RIGHT in sidecar.read_text(encoding="utf-8")
 
 
 def test_a_failed_reprocess_does_not_starve_the_retry_pass(

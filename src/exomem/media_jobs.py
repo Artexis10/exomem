@@ -117,6 +117,11 @@ _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 _SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REASONS, OVER_BUDGET}))
 OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
 OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
+#: The error codes a service start without a media runtime blocks queued work with
+#: (`server_runtime._start_media_worker`). They judge that start, not the file, so the
+#: next start with a runtime requeues the work (`MediaJobStore.requeue_runtime_blocks`).
+EXTRACTION_DISABLED_CODE = "MediaExtractionDisabled"
+RUNTIME_UNAVAILABLE_CODE = "MediaRuntimeUnavailable"
 WAIT_ACTION = "wait for media processing"
 #: Both ways out of a multilingual request that the configured speech engine cannot run.
 MULTILINGUAL_UNSUPPORTED_ACTION = (
@@ -2429,6 +2434,29 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def requeue_runtime_blocks(self) -> int:
+        """Return to pending the work that a service start without a media runtime blocked.
+
+        That start blocks queued rows only because nothing could run them, so a start with a
+        runtime undoes the block. A reprocess row keeps its request: the block deferred it.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                return int(
+                    conn.execute(
+                        "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
+                        "WHERE state = 'blocked' "
+                        # The error code is the part of `last_error` before its first colon.
+                        "AND substr(last_error, 1, instr(last_error, ':') - 1) IN (?, ?) "
+                        "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                        "WHERE media_job_results.job_id = jobs.id)",
+                        (time.time(), EXTRACTION_DISABLED_CODE, RUNTIME_UNAVAILABLE_CODE),
+                    ).rowcount
+                )
+        finally:
+            conn.close()
+
     def retryable_jobs(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJob]:
         """Return the first bounded eligible retry set without ambiguous starvation."""
         if isinstance(limit, bool) or limit <= 0:
@@ -3016,7 +3044,7 @@ def status(
             "gpu_preflight": facts["preflight"],
             "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
             "child_crashes": facts["child_crashes"],
-            "jobs": [_status_job(row, worker_active=active) for row in jobs],
+            "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
             "hydration_policy_problem": empty["hydration_policy_problem"],
         }
@@ -3106,7 +3134,7 @@ def _hydration_too_large_action() -> str:
     return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
 
 
-def _status_job(row: Any, *, worker_active: bool) -> dict[str, Any]:
+def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None
     from . import media_engines
@@ -3119,12 +3147,12 @@ def _status_job(row: Any, *, worker_active: bool) -> dict[str, Any]:
     }
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
-    if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
+    if state == BLOCKED and error and error.startswith(f"{EXTRACTION_DISABLED_CODE}:"):
         actions[BLOCKED] = (
             "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
             "restart the service, then retry"
         )
-    if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
+    if state == BLOCKED and error and error.startswith(f"{RUNTIME_UNAVAILABLE_CODE}:"):
         actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
     if state == BLOCKED and error and error.startswith("AMBIGUOUS_SIDECAR_BOUNDARY:"):
         actions[BLOCKED] = "review the sidecar's preserved-notes boundary, then retry"
@@ -3167,12 +3195,6 @@ def _status_job(row: Any, *, worker_active: bool) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     if reprocess_stopped and state == BLOCKED:
         actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
-    if state == BLOCKED and worker_active and error and error.startswith("MediaExtractionDisabled:"):
-        # A media worker is built only while the flag is unset, so a live one means the pause ended
-        # and the row only keeps the error it was blocked with.
-        actions[BLOCKED] = "media extraction is enabled again, so " + (
-            "reprocess the file again" if reprocess_stopped else "retry"
-        )
     multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
     unsupported_language = multilingual_unsupported or (
         state == FAILED and (error or "").startswith("UnsupportedLanguage:")

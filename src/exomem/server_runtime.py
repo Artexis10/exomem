@@ -22,6 +22,7 @@ import anyio
 
 from . import (
     env_compat,
+    media_jobs,
     media_processing,
     metrics,
     privacy_log,
@@ -981,14 +982,14 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     if worker is None:
         if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
             unavailable_reason = (
-                "MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+                f"{media_jobs.EXTRACTION_DISABLED_CODE}: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
             )
             unavailable_action = (
                 "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
                 "restart the service, then retry"
             )
         else:
-            unavailable_reason = "MediaRuntimeUnavailable: media worker construction failed"
+            unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: media worker construction failed"
             unavailable_action = (
                 "fix the media runtime configuration, restart the service, then retry"
             )
@@ -1002,7 +1003,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 pass
             log.warning("media runtime unavailable; core service continuing: %s", exc)
             worker = None
-            unavailable_reason = f"MediaRuntimeUnavailable: {type(exc).__name__}: {exc}"
+            unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: {type(exc).__name__}: {exc}"
             unavailable_action = (
                 "fix the media runtime configuration, restart the service, then retry"
             )
@@ -1055,6 +1056,15 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         log.warning("media worker startup discovery failed: %s", exc)
     if worker is None:
         return None
+    try:
+        # This start has a runtime, so the work a start without one blocked is owed again. It
+        # runs after the reconcile above, which shows the sidecars it examined as pending again.
+        if media_jobs.job_store_path(vault_root).exists():
+            requeued = media_jobs.MediaJobStore(vault_root, create=False).requeue_runtime_blocks()
+            if requeued:
+                log.info("media worker: requeued %d job(s) a start without a media runtime blocked", requeued)
+    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media worker startup requeue failed: %s", exc)
     try:
         worker.scan_pending()
     except Exception as exc:  # noqa: BLE001 - startup scan is best-effort
