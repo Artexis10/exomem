@@ -33,6 +33,11 @@ from .held_fs import (
     write_parts,
 )
 
+try:
+    from . import _held_fs_linux_native as _NATIVE
+except ImportError:
+    _NATIVE = None
+
 # Bind the substrate's native operations once.  A number of higher-level tests
 # (and downstream embedders) patch ``module.os.open``/``replace`` to exercise a
 # pathname implementation.  ``os`` is a process-wide module object, so those
@@ -379,6 +384,10 @@ class PosixVersionProbe(HeldVersionProbe):
     parent_descriptor: int | None
     closed: bool = False
 
+    @property
+    def root_identity(self) -> StableIdentity:
+        return self.filesystem.root_identity
+
     def close(self) -> None:
         if not self.closed:
             self.closed = True
@@ -419,6 +428,60 @@ class PosixVersionProbe(HeldVersionProbe):
             finally:
                 if parent_descriptor is not None:
                     _close(parent_descriptor)
+
+
+@dataclass(slots=True)
+class NativeVersionProbe(HeldVersionProbe):
+    capsule: object | None
+    root_identity: StableIdentity
+    parent_identity: StableIdentity
+    version: FileVersion
+    check: Callable[[], None] | None
+
+    def close(self) -> None:
+        capsule, self.capsule = self.capsule, None
+        try:
+            if capsule is not None:
+                _NATIVE.close(capsule)
+        finally:
+            self.check = None
+            capsule = None
+
+    def require_current(self, *, admit_identity: Callable[[StableIdentity], None]) -> None:
+        if self.capsule is None:
+            raise HeldFsError("IDENTITY_CHANGED", "held version probe is closed")
+        try:
+            _NATIVE.require_current(self.capsule, lambda facts: admit_identity(StableIdentity(*facts)), self.check)
+        except TimeoutError:
+            raise
+        except OSError as error:
+            raise _error(error) from error
+
+
+def native_read_version_probe(
+    root: Path, parent_path: str, leaf: str, *, admit_identity: Callable[[StableIdentity], None], check: Callable[[], None],
+) -> HeldResult[HeldVersionProbe]:
+    capsule = None
+    try:
+        capsule, root_facts, parent_facts, version = _NATIVE.open_version(
+            os.fsencode(root), os.fsencode(parent_path), os.fsencode(leaf),
+            lambda facts: admit_identity(StableIdentity(*facts)), check,
+        )
+        return HeldResult(value=NativeVersionProbe(
+            capsule, StableIdentity(*root_facts), StableIdentity(*parent_facts),
+            FileVersion(StableIdentity(*version[0]), *version[1:]), check,
+        ))
+    except TimeoutError:
+        raise
+    except OSError as error:
+        return HeldResult(error=_error(error))
+    except BaseException:
+        if capsule is not None:
+            try:
+                _NATIVE.close(capsule)
+            finally:
+                capsule = None
+        raise
 
 
 class PosixHeldFilesystem(HeldFilesystem):

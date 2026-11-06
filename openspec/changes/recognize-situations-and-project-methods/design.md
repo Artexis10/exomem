@@ -141,10 +141,13 @@ Preserve opening parent admission before opening the leaf for reading.
 Acquire the current closing catalogue and admit closing identities before comparing them with the opening observations.
 Retain no handles or admission verdicts between rows, and preserve cancellation and cleanup on every refusal.
 
-Publish root-independent immutable identity lookup maps when an owner publication changes.
-Each reader must acquire the current representation and bind it to that acquisition's root spelling.
-Keep every candidate owner and logical name, current reachability checks and collision handling.
-Account for replacement overlap and native workspace within existing limits.
+Keep the existing private publication representation and fresh reader acquisitions in this prototype.
+Preserve every candidate owner and logical name, current reachability checks and collision handling.
+Defer retained lookup maps until the publication owner accounts for their lifetime and replacement overlap.
+Account for bounded native workspace within existing limits.
+Charge it to the active caller preparation, or the existing standalone reservation when no preparation scope exists.
+Keep ambient preparation references non-owning and validate scope lifetime before and during native work.
+Scope exit ends admission even when the owner retains completed data.
 Map and task phases still perform their separate current admissions.
 
 The native candidate must not replace a fresh CONTENT hash with a cached digest and matching metadata.

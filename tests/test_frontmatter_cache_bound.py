@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,7 @@ def test_container_fact_cannot_hide_same_size_claim_edits_with_restored_mtime(tm
         if os.name == "posix":
             from exomem import _held_fs_posix
 
+            monkeypatch.setattr(_held_fs_posix, "_NATIVE", None)
             monkeypatch.setattr(_held_fs_posix, "_version_witness_supported", lambda _descriptor: False)
         assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
     elif reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
@@ -330,6 +332,8 @@ def test_container_metadata_fact_cannot_bypass_a_current_read_open_refusal(tmp_p
     from exomem import _held_fs_posix, document_containers, reserved_paths
     from exomem import vault as vault_module
 
+    # This sandbox hook covers the Python backend; native read admission uses real permissions in its boundary tests.
+    monkeypatch.setattr(_held_fs_posix, "_NATIVE", None)
     monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
     monkeypatch.setattr(find_corpus, "CACHE", find_corpus.FrontmatterCache())
     (tmp_path / "notes").mkdir()
@@ -372,15 +376,13 @@ def test_container_metadata_hit_cannot_follow_an_exchanged_parent(tmp_path, monk
         if during_probe:
             from exomem import held_fs
 
-            with held_fs.acquire(tmp_path).require() as filesystem:
-                filesystem_type = type(filesystem)
-            acquire = filesystem_type.read_version_probe
-            def exchange_after_acquisition(self, *args, **kwargs):
-                result = acquire(self, *args, **kwargs)
-                if result.ok:
+            acquire = held_fs.read_version_probe
+            @contextmanager
+            def exchange_after_acquisition(*args, **kwargs):
+                with acquire(*args, **kwargs) as probe:
                     exchange()
-                return result
-            patch.setattr(filesystem_type, "read_version_probe", exchange_after_acquisition)
+                    yield probe
+            patch.setattr(held_fs, "read_version_probe", exchange_after_acquisition)
         else:
             exchange()
         assert reserved_paths.inspect_generic_version(tmp_path, "notes/ordinary.md") is None
@@ -422,6 +424,8 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
         pytest.skip("requires a descriptor-qualified native ext filesystem")
     from exomem import _held_fs_posix, held_fs
 
+    # The injected O_PATH refusal belongs to the Python backend's optional-close fallback.
+    monkeypatch.setattr(_held_fs_posix, "_NATIVE", None)
     opened = _held_fs_posix._open_relative
     with held_fs.acquire(tmp_path).require() as filesystem:
         filesystem_type = type(filesystem)
@@ -508,17 +512,16 @@ def test_metadata_closing_rechecks_a_new_private_publication(tmp_path, monkeypat
     _page(path, "Ordinary")
     if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
         pytest.skip("requires a descriptor-qualified native ext filesystem")
-    with held_fs.acquire(tmp_path).require() as filesystem:
-        filesystem_type = type(filesystem)
-    acquire = filesystem_type.read_version_probe
-    def publish_after_acquisition(self, *args, **kwargs):
-        result = acquire(self, *args, **kwargs)
-        identity = result.require().version.identity
-        monkeypatch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root, **_kwargs: reserved_paths.IdentityCatalogue(
-            {(identity.device, identity.inode, identity.kind): "embeddings-store"},
-        ))
-        return result
-    monkeypatch.setattr(filesystem_type, "read_version_probe", publish_after_acquisition)
+    acquire = held_fs.read_version_probe
+    @contextmanager
+    def publish_after_acquisition(*args, **kwargs):
+        with acquire(*args, **kwargs) as probe:
+            identity = probe.version.identity
+            monkeypatch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root, **_kwargs: reserved_paths.IdentityCatalogue(
+                {(identity.device, identity.inode, identity.kind): "embeddings-store"},
+            ))
+            yield probe
+    monkeypatch.setattr(held_fs, "read_version_probe", publish_after_acquisition)
     assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
 
 

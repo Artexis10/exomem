@@ -14,6 +14,7 @@ import sys
 import threading
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -195,6 +196,7 @@ class HeldVersionProbe:
     """One ordinary read admission held through a fresh closing version check."""
 
     __slots__ = ()
+    root_identity: StableIdentity
     parent_identity: StableIdentity
     version: FileVersion
 
@@ -426,6 +428,46 @@ def acquire(root: Path) -> HeldResult[HeldFilesystem]:
     """Acquire a root anchor or return a content-free capability/IO refusal."""
     root = Path(root)
     return _backend().acquire(root, capability=probe(root))
+
+
+@contextmanager
+def read_version_probe(root: Path, parent_path: str, leaf: str, *, admit_identity: Callable[[StableIdentity], None]):
+    """Hold one complete ordinary observation, with optional native acquisition."""
+    backend = _backend()
+    native = getattr(backend, "_NATIVE", None)
+    if native is None:
+        with acquire(root).require() as filesystem:
+            with filesystem.read_version_probe(parent_path, leaf, admit_identity=admit_identity).require() as observed:
+                yield observed
+        return
+    capability = probe(root)
+    if not (capability.relative_operations and capability.no_follow and capability.stable_identity):
+        raise HeldFsError("CAPABILITY_UNAVAILABLE", "read version probe is unavailable")
+    from . import request_budget, runtime_resources
+
+    parent = runtime_resources.current_preparation()
+    preparation = None
+
+    def check() -> None:
+        nonlocal parent
+        if parent is not None and not parent._scope_active:
+            parent = None
+            raise runtime_resources.PreparationBudgetExceeded("semantic preparation scope is closed")
+        if parent is not None and parent.check is not None:
+            parent.check()
+        request_budget.checkpoint()
+
+    try:
+        with runtime_resources.parser_preparation(0, owner=parent, check=check) as preparation:
+            # UTF-8 encodings and native facts coexist until the bounded operation closes.
+            preparation.reserve(native.WORKSPACE_BYTES + 8 * (len(str(root)) + len(parent_path) + len(leaf)) + 1024)
+            with backend.native_read_version_probe(root, parent_path, leaf, admit_identity=admit_identity, check=check).require() as observed:
+                yield observed
+    finally:
+        if preparation is not None:
+            preparation.check = None
+            preparation.owner = None
+        parent = None
 
 
 def flush_directory_path(path: Path) -> HeldResult[None]:

@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -39,6 +40,9 @@ _MEMINFO = Path("/proc/meminfo")
 _PROC_STATUS = Path("/proc/self/status")
 _MODEL_WORK: ContextVar[tuple[str, threading.Event | None]] = ContextVar(
     "exomem_model_work", default=("foreground", None)
+)
+_ACTIVE_PREPARATION: ContextVar[weakref.ReferenceType[SemanticPreparation] | None] = ContextVar(
+    "exomem_active_preparation", default=None,
 )
 SEMANTIC_PREPARATION_BYTES = 64 * 1024 * 1024
 SEMANTIC_SMALL_RESERVE_BYTES = 4 * 1024 * 1024
@@ -477,6 +481,7 @@ class SemanticPreparation:
         check: Callable[[], None] | None = None, owner: SemanticPreparation | None = None,
     ) -> None:
         self.owner = owner
+        self._scope_active = False
         self._child_bytes = 0
         self._completed = []
         self.floor_bytes = 0
@@ -607,6 +612,7 @@ class SemanticPreparation:
 
     def release(self) -> None:
         global _preparation_bytes
+        self._scope_active = False
         for child in self._completed:
             child.release()
         self._completed.clear()
@@ -669,6 +675,18 @@ class ReleasedCorpusMemory:
             self.reserved = 0
 
 
+def current_preparation() -> SemanticPreparation | None:
+    """Borrow the active scope without extending its lifetime in copied contexts."""
+    reference = _ACTIVE_PREPARATION.get()
+    if reference is None:
+        return None
+    preparation = reference()
+    if preparation is None or not preparation._scope_active:
+        preparation = None
+        raise PreparationBudgetExceeded("semantic preparation scope is closed")
+    return preparation
+
+
 @contextlib.contextmanager
 def parser_preparation(
     source_bytes: int, *, limit_bytes: int | None = None,
@@ -682,13 +700,21 @@ def parser_preparation(
     if bulk is None:
         bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
     preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check, owner=owner)
+    token = None
     try:
+        token = _ACTIVE_PREPARATION.set(weakref.ref(preparation))
+        preparation._scope_active = True
         yield preparation
     finally:
-        if keep_open and owner is not None:
-            owner._completed.append(preparation)
-        else:
-            preparation.release()
+        preparation._scope_active = False
+        try:
+            if token is not None:
+                _ACTIVE_PREPARATION.reset(token)
+        finally:
+            if keep_open and owner is not None:
+                owner._completed.append(preparation)
+            else:
+                preparation.release()
 
 
 @contextlib.contextmanager

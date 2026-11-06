@@ -145,6 +145,8 @@ _TEXT_SUFFIXES = frozenset(
     {
         ".b64",
         ".bat",
+        # C sources use the same UTF-8 privacy scan as other source formats.
+        ".c",
         ".cfg",
         ".cjs",
         ".cmd",
