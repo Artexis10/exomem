@@ -918,3 +918,33 @@ def test_remembered_unclaimed_note_is_rechecked_after_a_same_size_claim_rewrite(
     os.utime(page, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert b"container_member" in page.read_bytes() and page.stat().st_size == len(original)
     assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_a_claim_written_during_a_slow_read_is_never_remembered_as_unclaimed(vault, monkeypatch):
+    from exomem import reserved_paths
+
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    document_containers.clear_unclaimed_notes()
+    page = vault / note
+    original = page.read_bytes()
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    real_read = reserved_paths.read_generic_bytes
+
+    def read_then_claim(root, value, **kwargs):
+        result = real_read(root, value, **kwargs)
+        if value != note:
+            return result
+        # A claim lands after the bytes were read, inside the read, and the read outlasts the racy window.
+        # The handle then reports the claimed version's generation next to the unclaimed bytes.
+        page.write_bytes(forged + b"x" * (len(original) - len(forged)))
+        time.sleep(0.12)
+        info = page.stat()
+        return reserved_paths.GenericFileSnapshot(
+            result.data, result.identity, info.st_mtime, (info.st_size, info.st_mtime_ns, info.st_ctime_ns),
+        )
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", read_then_claim)
+    assert document_containers.parent_binding_for_path(vault, note) is None, "the read returned the unclaimed bytes"
+    assert not document_containers._UNCLAIMED, "the unclaimed bytes were bound to the claimed version"
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", real_read)
+    assert _refused_everywhere(vault, note, who, compiled)

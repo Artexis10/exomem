@@ -372,15 +372,18 @@ def _remembered_unclaimed(root: Path, path: str) -> bool:
     return True
 
 
-def _remember_unclaimed(root: Path, path: str, page: str, read: reserved_paths.GenericFileSnapshot) -> None:
-    # The read's generation comes from its own held handle after the bytes were read, so a write during the
-    # read shows as a recent timestamp. Only a version settled past the racy window binds the bytes read: a
-    # same-tick rewrite keeps (size, mtime, ctime). Recording costs no stat; the next hit's lstat proves the
-    # path still names this inode and version. A claim, an in-tree path or a missing file is never
-    # remembered, so the memo can only skip a read that found no claim; it never feeds a byte observation.
+def _remember_unclaimed(
+    root: Path, path: str, page: str, read: reserved_paths.GenericFileSnapshot, started_ns: int,
+) -> None:
+    # The read's generation comes from its own held handle after the bytes were read. It binds those bytes
+    # only when both timestamps were already older than the racy window when the read started: a write during
+    # the read, however long the read takes, carries a later timestamp, and a same-tick rewrite keeps
+    # (size, mtime, ctime). Recording costs no stat; the next hit's lstat proves the path still names this
+    # inode and version. A claim, an in-tree path or a missing file is never remembered, so the memo can only
+    # skip a read that found no claim; it never feeds a byte observation.
     if read.generation is None or read.identity.kind != "file" or read.identity.link_count != 1:
         return
-    if time.time_ns() - max(read.generation[1], read.generation[2]) <= vault.GENERATION_RACY_WINDOW_NS:
+    if started_ns - max(read.generation[1], read.generation[2]) <= vault.GENERATION_RACY_WINDOW_NS:
         return
     with _UNCLAIMED_LOCK:
         _UNCLAIMED[(root, path)] = (page, (read.identity.device, read.identity.inode), read.generation)
@@ -430,9 +433,10 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
             except FileNotFoundError:
                 return None
         try:
+            started_ns = time.time_ns()
             read = reserved_paths.read_generic_bytes(root, page_path)
             raw = read.data
-            remembered_read = read if memoable else None
+            remembered_read = (read, started_ns) if memoable else None
         except (reserved_paths.ReservedPathLeafError, RuntimeError):
             # Inventory loss can precede a typed read error; only physical absence clears an ordinary claim.
             if not in_subtree:
@@ -456,7 +460,7 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
         # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
         if "container_member" not in fm:
             if remembered_read is not None:
-                _remember_unclaimed(root, spelling, str(root / page_path), remembered_read)
+                _remember_unclaimed(root, spelling, str(root / page_path), *remembered_read)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:
