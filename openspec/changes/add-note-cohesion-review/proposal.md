@@ -2,7 +2,7 @@
 
 Compiled notes grow until one page answers several independent questions. A user then has to notice the overload and ask an agent to split the note. Exomem ships two detectors that are meant to catch this, and neither works:
 
-- The write-time lexical `scope_divergence` suggestion compares unit tags with the page's declared identity. On a labelled set of 40 large notes it flagged 8 of 16 overloaded notes and 7 of 22 coherent long notes. Every note it flagged had 13 or more units, so in practice it tracks size. It missed compact mixed notes such as a grill note that mixed gear, method, place and event plans.
+- The write-time lexical `scope_divergence` suggestion compares unit tags with the page's declared identity. On a labelled set of 40 large notes it flagged 8 of 16 overloaded notes and 7 of 22 coherent long notes. Every note it flagged had 13 or more units, so in practice it tracks size. It missed compact mixed notes, for example a short note that held an inventory, a how-to and a dated plan.
 - The opt-in audit category `scope_divergence_semantic` clusters stored unit vectors. With every unit of the same 40 notes embedded and routing switched off, it flagged 0 of 40.
 
 The judgement is about meaning: which independent questions does this page answer? The connected agent is a frontier model that reads the page and answers that question well whenever a user asks it. Generic destination guidance in tool descriptions did not change agent behaviour. A specific question at the right moment does.

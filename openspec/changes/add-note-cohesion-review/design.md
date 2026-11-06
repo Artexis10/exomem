@@ -1,8 +1,8 @@
 ## Context
 
-Two shipped detectors try to find compiled pages that have outgrown one subject. The lexical write-time detector (`structure_promotion.py`) reads unit tags against the page's declared identity. The audit detector (`structure_promotion_semantic.py`) clusters stored unit vectors. Both were measured on 40 large compiled notes from one personal vault. Model judges labelled the notes: 16 overloaded, 22 coherent long and 2 hubs. The owner later approved splitting 13 of the 16. The lexical detector flagged 8 overloaded and 7 coherent notes, and every note it flagged had 13 or more units. The semantic detector flagged none, with every unit embedded and routing switched off.
+Two shipped detectors try to find compiled pages that have outgrown one subject. The lexical write-time detector (`structure_promotion.py`) reads unit tags against the page's declared identity. The audit detector (`structure_promotion_semantic.py`) clusters stored unit vectors. Both were measured on 40 large compiled notes from one real vault. Model judges labelled the notes: 16 overloaded, 22 coherent long and 2 hubs. The owner later approved splitting 13 of the 16. The lexical detector flagged 8 overloaded and 7 coherent notes, and every note it flagged had 13 or more units. The semantic detector flagged none, with every unit embedded and routing switched off.
 
-When a user asks a connected agent whether a note is overloaded, the agent reads the note and answers correctly. Exomem has no write-time model call, and the local sensors are pairwise NLI instruments. No local instruct model has yet passed the sensors programme's own questions.
+When a user asks a connected agent whether a note is overloaded, the agent reads the note and answers correctly. Exomem has no write-time model call, and the local sensors are pairwise NLI instruments. No local instruct model has yet passed the sensor evaluation's own questions.
 
 ## Goals / Non-Goals
 
@@ -24,7 +24,7 @@ When a user asks a connected agent whether a note is overloaded, the agent reads
 
 ### D1. The connected agent is the judge
 
-The agent already holds the page and the user's context, and it runs on a frontier model. The runtime measures size and asks; the agent decides. A local model is not an option today: the sensors programme's local candidates failed its simpler questions, and Cloud cells run no sensors.
+The agent already holds the page and the user's context, and it runs on a frontier model. The runtime measures size and asks; the agent decides. A local model is not an option today: the local sensor candidates failed simpler questions, and Cloud cells run no sensors.
 
 ### D2. A size step schedules the question; it asserts nothing
 
@@ -64,7 +64,7 @@ After a split, a remainder or a new child that still reaches a step gets its own
 
 ### D7. The sensor slot is a reserved contract field
 
-A future sensor reading can attach to an item as `evidence_refs`, a list of `{reading_id, content_hash}`. A reading whose content hash no longer matches the page is ignored. The item is complete without any reading, and this change adds no producer or reader. The sensors owner agreed to this shape. Selecting a server-side model belongs to that programme and to the owner.
+A future sensor reading can attach to an item as `evidence_refs`, a list of `{reading_id, content_hash}`. A reading whose content hash no longer matches the page is ignored. The item is complete without any reading, and this change adds no producer or reader. Selecting a server-side model for such a sensor is a separate decision.
 
 ### D8. Removals
 
