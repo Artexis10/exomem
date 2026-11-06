@@ -1546,6 +1546,9 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     assert "check_memory(operation={'kind': 'backfill-ids'})" in remediation
     assert "run repair_memory with dry_run=false, its plan_id" in remediation
     assert "maintain_memory" not in remediation
+    # The semantic finding prefixes this text and shares a 224-byte budget; the typed
+    # spelling is the longer one.
+    assert len(f"Add a qualifying typed relation. {remediation}".encode()) <= 224
 
 
 def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
