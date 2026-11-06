@@ -311,7 +311,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   62 whole-vault publications, seven Class C exhaustions, every one inside committed
   governed writes. 7.2 and 7.4 responded to that and are parked (below); 7.3, 7.6 and 7.7
   landed.
-- [ ] 7.2 **Parked.** Publish a whole-vault pass at the checkpoint it sampled when every
+- [ ] 7.2 **Parked.** Tracked in #2469. Publish a whole-vault pass at the checkpoint it sampled when every
   movement across it is recorded (catch-up publication), with the availability marker
   withheld while graph work is queued. Built and pinned on
   `fix/graph-convergence-contract` (`fbd16eea`), then parked by ruling because the
@@ -330,7 +330,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   with the lag on `graph_context`'s refusal, the doctor's warning on covered lag and on
   quarantined paths, and the lag on the drain's settled line
   (`tests/test_graph_lag_reporting.py`). The read fence stays fail-closed.
-- [ ] 7.4 **Parked.** Reduce the stabilization, publication, and supersession retry
+- [ ] 7.4 **Parked.** Tracked in #2469. Reduce the stabilization, publication, and supersession retry
   budgets, and retire the drain's whole-vault quiet window. Both depended on 7.2: without
   catch-up a recorded write still defeats a pass, so the #576 re-target and the quiet
   window stay. If revisited, publication attempts stay at four: an attempt that finds
@@ -400,7 +400,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   the earlier drain gate used queued pages and a carry record to explain topology.
   Tasks 8.9 and 8.10 replace that gate because it could preserve stale edges.
   The residue tests compare every edge with a fresh rebuild.
-- [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
+- [ ] 8.8 **Open, not built.** Tracked in #2469. Evaluate a cheaper route to steady-state convergence than
   7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
   recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
   or publication) and, when it adopts, queue the residue and retire the full marker
