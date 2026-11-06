@@ -28,6 +28,7 @@ from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, MEDIA_STORE_CONFIG_KEY, n
 from cellctl.state import CellRow, ClusterObservation, MediaCensus
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
+from . import test_reconcile
 from .test_reconcile import (
     IMAGE_A,
     FakeClusterGateway,
@@ -45,6 +46,9 @@ BUCKET = "media-bucket"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 NOW_MS = int(NOW.timestamp() * 1000)
 ROOT = b"r" * 32
+
+# Fixtures of the reconcile tests: the staging bucket as an empty fake, and the cleanup alerts sent.
+delivered, staging = test_reconcile.delivered, test_reconcile.staging
 
 
 def _signing_key() -> Ed25519PrivateKey:
@@ -829,6 +833,130 @@ async def test_a_deleted_cell_leaves_the_set_and_retires_its_keys_without_a_repo
         assert namespace_name(CANARY) in fleet.cluster.deleted_namespaces
     finally:
         await app.close()
+        await fleet.close()
+
+
+async def _delete(fleet: Fleet, cell_id: str, at: datetime) -> None:
+    """The operator deletes the cell; the pass removes its namespace and the next finds the cluster empty."""
+    app = await asyncpg.connect(fleet.cell_db.dsn(role="substrate_app"))
+    try:
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", cell_id)
+    finally:
+        await app.close()
+    fleet.cluster.observations[cell_id] = ClusterObservation(namespace_exists=True, namespace_cell_label=cell_id)
+    await fleet.run(at)
+    assert namespace_name(cell_id) in fleet.cluster.deleted_namespaces
+    fleet.cluster.observations[cell_id] = ClusterObservation()
+
+
+def _alerting(fleet: Fleet) -> None:
+    fleet.config = dataclasses.replace(fleet.config, alert_delivery_secret=("ns", "alerts", "url"))
+
+
+async def _media_store_of(fleet: Fleet, cell_id: str) -> dict:
+    return json.loads((await fleet.rows())[cell_id].custody_observation)[reconcile.MEDIA_STORE_RECORD]
+
+
+@pytest.mark.parametrize("edge_says", ["unreadable", "still the set that lists the cell"])
+async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without_it(
+    cell_db, delivered: list[tuple[str, bool]], staging, edge_says: str,
+) -> None:
+    # The operator's media clean-up may start once the alert fires, so no upload may land after it.
+    fleet = await _fleet(cell_db, CANARY)
+    _alerting(fleet)
+    try:
+        await fleet.run()
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=1))
+        listing_the_cell = fleet.cluster.reported
+        await _delete(fleet, CANARY, NOW + timedelta(minutes=5))
+        revoked = fleet.cluster.published()
+        assert CANARY not in revoked["cells"]
+
+        fleet.cluster.reported = listing_the_cell if edge_says != "unreadable" else RuntimeError("the edge is away")
+        for minute in (6, 7, 8):
+            await fleet.run(NOW + timedelta(minutes=minute))
+        waiting = (await fleet.rows())[CANARY]
+        assert (waiting.observed_state, delivered) == ("deleting", [])
+
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=9))
+        await fleet.run(NOW + timedelta(minutes=10))
+        done = (await fleet.rows())[CANARY]
+        assert done.observed_state == "deleted"
+        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
+        # The proof stays with the row: the generation and set the edge was seen to serve without the cell.
+        assert await _media_store_of(fleet, CANARY) == {
+            "revoke_requested_at": (NOW + timedelta(minutes=5)).isoformat(),
+            "revoked_generation": revoked["generation"],
+            "set_sha256": hashlib.sha256(fleet.cluster.active_set[media_edge.ACTIVE_SET_KEY].encode()).hexdigest(),
+            "observed_at": (NOW + timedelta(minutes=9)).isoformat()}
+    finally:
+        await fleet.close()
+
+
+async def test_a_restarted_cellctl_keeps_a_deleted_cell_waiting_for_the_edge(
+    cell_db, delivered: list[tuple[str, bool]], staging,
+) -> None:
+    # After the first pass the published set no longer names the cell; only the row still says it was admitted.
+    fleet = await _fleet(cell_db, CANARY)
+    _alerting(fleet)
+    try:
+        await fleet.run()
+        await _delete(fleet, CANARY, NOW + timedelta(minutes=5))
+        assert CANARY not in fleet.cluster.published()["cells"]
+
+        fleet.memory = reconcile.LoopMemory()
+        for minute in (6, 7):
+            await fleet.run(NOW + timedelta(minutes=minute))
+        assert ((await fleet.rows())[CANARY].observed_state, delivered) == ("deleting", [])
+
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=8))
+        await fleet.run(NOW + timedelta(minutes=9))
+        assert (await fleet.rows())[CANARY].observed_state == "deleted"
+        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
+    finally:
+        await fleet.close()
+
+
+async def test_a_deleted_cell_waits_when_the_published_set_that_may_have_listed_it_is_lost(
+    cell_db, delivered: list[tuple[str, bool]], staging,
+) -> None:
+    # An unreadable set does not show the cell was absent from it.
+    fleet = await _fleet(cell_db, CANARY)
+    _alerting(fleet)
+    try:
+        await fleet.run()
+        fleet.cluster.active_set = None
+        await _delete(fleet, CANARY, NOW + timedelta(minutes=5))
+        await fleet.run(NOW + timedelta(minutes=6))
+        assert ((await fleet.rows())[CANARY].observed_state, delivered) == ("deleting", [])
+
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=7))
+        await fleet.run(NOW + timedelta(minutes=8))
+        assert (await fleet.rows())[CANARY].observed_state == "deleted"
+    finally:
+        await fleet.close()
+
+
+async def test_a_deleted_cell_the_edge_never_admitted_does_not_wait_for_the_edge(
+    cell_db, delivered: list[tuple[str, bool]], staging,
+) -> None:
+    # A cell outside the selection has no media object, and an edge that is away must not hold its deletion.
+    fleet = await _fleet(cell_db, CANARY, OTHER)
+    _alerting(fleet)
+    try:
+        await fleet.run()
+        assert OTHER not in fleet.cluster.published()["cells"]
+        fleet.cluster.reported = RuntimeError("the edge is away")
+        await _delete(fleet, OTHER, NOW + timedelta(minutes=5))
+        await fleet.run(NOW + timedelta(minutes=6))
+
+        assert (await fleet.rows())[OTHER].observed_state == "deleted"
+        assert delivered == [(f"cell-storage-cleanup-pending-{OTHER}", True)]
+    finally:
         await fleet.close()
 
 

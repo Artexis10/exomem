@@ -1256,6 +1256,35 @@ def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: Med
             "captured_at": census.captured_at.isoformat()}
 
 
+def _media_revocation(
+    cluster_config: ClusterConfig, row: CellRow, previous: ActiveSet | None, active: ActiveSet | None,
+    memory: LoopMemory, now: datetime,
+) -> tuple[bool, dict | None]:
+    """D9: whether a deleted cell still waits for the edge to show a set without it, and the `media_store`
+    record to write. cellctl deletes nothing in the media bucket; the operator's clean-up does, after its grace.
+
+    A cell waits when the edge may have admitted it: the set published before this pass listed it, it has a
+    `media_store` record, or that set cannot be read (generation 0). The wait ends when the edge is confirmed to
+    serve the exact published set and that set omits the cell; the record keeps what was observed. Once the
+    first pass has dropped the cell from the published set, only `revoke_requested_at` in the record still
+    tells a later pass or a restarted cellctl that it must wait."""
+    if cluster_config.media_edge is None:
+        return False, None
+    stored = _media_store_of(row)
+    record = dict(stored) if isinstance(stored, dict) else {}
+    if "revoked_generation" in record:
+        return False, None
+    if not (bool(record) or previous is None or previous.generation == 0 or row.cell_id in previous.cells):
+        return False, None
+    if (active is not None and row.cell_id not in active.cells
+            and memory.media_edge_confirmed == (active.generation, active.sha256())):
+        return False, {**record, "revoked_generation": active.generation, "set_sha256": active.sha256(),
+                       "observed_at": now.isoformat()}
+    if "revoke_requested_at" in record:
+        return True, None
+    return True, {**record, "revoke_requested_at": now.isoformat()}
+
+
 def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
     """The credential version the edge admits for this cell; None when the cell holds no credential."""
     if active is None or _media_mode(cluster_config, row) not in MEDIA_KEYED:
@@ -1265,12 +1294,12 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
 
 def _publish_media_edge_set(
     cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory
-) -> ActiveSet | None:
+) -> tuple[ActiveSet, ActiveSet] | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is
-    to load, or None when the cluster would not say, in which case no keyed cell renders this pass.
-    An unchanged set writes nothing."""
+    `cells` maps each served or draining cell to its credential epoch. Returns the set that was published
+    before this pass and the set the edge is to load, or None when the cluster would not say, in which
+    case no keyed cell renders this pass. An unchanged set writes nothing."""
     try:
         current = cluster.read_media_edge_active_set()
         published = read_active_set(current)
@@ -1287,7 +1316,7 @@ def _publish_media_edge_set(
             cluster.apply_media_edge_active_set(manifest)
             logger.info("cellctl: media edge active set published at generation %d for %d cell(s)",
                         planned.generation, len(planned.cells))
-        return planned
+        return published, planned
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
         return None
@@ -1404,12 +1433,14 @@ async def reconcile_once(
     # D6: the media edge's set comes from every committed live cell, observed or not. A cell this
     # pass could not observe must not drop out of the set and lose its credential.
     media_active: ActiveSet | None = None
+    media_previous: ActiveSet | None = None
     media_unsettled = False
     if cluster_config.media_edge is not None:
         # D12: a draining cell keeps its entry although the edge no longer selects it.
-        media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
+        published = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
             if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory)
+        media_previous, media_active = published if published is not None else (None, None)
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -1551,6 +1582,7 @@ async def reconcile_once(
                 memory=memory,
                 storage_room=storage_room,
                 media_active=media_active,
+                media_previous=media_previous,
                 local_capacity=local_capacity,
                 backup_listing=backup_listing,
             )
@@ -2131,6 +2163,7 @@ async def _reconcile_row(
     start_relocation: bool = False,
     storage_room: StorageRoom | None = None,
     media_active: ActiveSet | None = None,
+    media_previous: ActiveSet | None = None,
     local_capacity: LocalCapacityObservation | None = None,
     backup_listing=None,
 ) -> bool:
@@ -2308,6 +2341,16 @@ async def _reconcile_row(
             observation, row, cluster, volume_provider, now, memory, storage=cluster_config.storage,
             backup_listing=backup_listing, staging=lambda: _staged_objects(cluster_config, secrets_config),
         )
+        revocation_pending, revocation = _media_revocation(
+            cluster_config, row, media_previous, media_active, memory, now)
+        if revocation is not None and revocation != _media_store_of(row):
+            custody = json.loads(row.custody_observation or "{}")
+            custody = custody if isinstance(custody, dict) else {}
+            custody[MEDIA_STORE_RECORD] = revocation
+            recorded = {"custody_observation": json.dumps(custody, sort_keys=True)}
+            await db.write_observed(connection, row.cell_id, recorded)
+            row = dataclass_replace(row, **recorded)
+        observation = dataclass_replace(observation, media_revocation_pending=revocation_pending)
         # Namespace, volume and staging absence bound every live content copy before expiry starts. A
         # cell's backup files are ciphertext that cellctl does not prove absent: a new cell's sit under a lock
         # nothing deletes, and the operator's clean-up empties an old cell's prefix. The object-version window

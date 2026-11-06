@@ -508,9 +508,9 @@ When a cell row is set to `deleted`, cellctl SHALL retire its media content keys
 Live-copy absence and retention evidence SHALL continue to govern the key-destruction claim.
 Cleanup MAY retain only the non-content credentials it needs.
 
-cellctl SHALL keep a deleted cell's observed state at `deleting` while the previously published active set lists the cell, or the cell has a `media_store` record in its custody observation, until the edge's exact-set evidence shows a set that omits the cell.
-cellctl SHALL persist the revoked generation, the set digest and the observation time in that `media_store` record, and the record SHALL survive a restart.
-A cell that no active set ever listed SHALL NOT wait.
+cellctl SHALL keep a deleted cell's observed state at `deleting` while the previously published active set lists the cell, or the cell has a `media_store` record in its custody observation, or cellctl cannot read the previously published active set, until the edge's exact-set evidence shows a set that omits the cell.
+cellctl SHALL record the time of the first wait in that `media_store` record, because the next pass publishes a set that no longer lists the cell. When the evidence matches, cellctl SHALL persist the revoked generation, the set digest and the observation time in the same record. The record SHALL survive a restart.
+A cell that a readable active set never listed SHALL NOT wait.
 Then cellctl SHALL report the cell `deleted` and the existing cleanup alert SHALL fire.
 cellctl SHALL hold no `deleteFiles` on the media bucket and SHALL NOT delete media objects.
 An unreadable, older or different edge set MUST NOT count as observed.
