@@ -1,8 +1,16 @@
-## ADDED Requirements
+# video-frames Specification
+
+## Purpose
+Let a connected MCP client see what a vault video contains. The client reads sampled,
+deduplicated keyframes inline, then narrows to a time window around a search hit,
+without downloading the video.
+
+## Requirements
 
 ### Requirement: Inline Video Keyframe Retrieval
 
-The system SHALL provide a read-only MCP tool `get_video_frames` that, given a
+The system SHALL provide a read-only MCP tool `read_media` (legacy alias
+`get_video_frames`) whose video read, given a
 vault-relative video path, returns sampled keyframes INLINE in the tool result as MCP
 image content blocks (JPEG), preceded by one structured metadata block reporting the
 resolved path, the video duration when known, and each returned frame's index and
@@ -13,7 +21,7 @@ order.
 
 #### Scenario: Client analyzes a video without downloading it
 
-- **WHEN** a connected MCP client calls `get_video_frames` with a vault-relative path to
+- **WHEN** a connected MCP client calls `read_media` for video with a vault-relative path to
   an indexed or unindexed video file
 - **THEN** the tool result contains a metadata block plus one image content block per
   sampled frame, each with a timestamp, and the client needs no `/download` round-trip
@@ -53,10 +61,10 @@ duration is unknown, an unwindowed call SHALL fall back to sequential first-fram
 sampling, and a windowed call SHALL fail structurally with a hint to retry without a
 window.
 
-#### Scenario: Drill-down around a find hit
+#### Scenario: Drill-down around a search hit
 
 - **WHEN** a client re-calls the tool with `start_sec`/`end_sec` bracketing a timestamp
-  surfaced by `find`
+  surfaced by `search_memory` (`scene_match_at` or `clip_match_at`)
 - **THEN** all returned frames' timestamps lie within that window
 
 #### Scenario: Window past the end of the video
@@ -101,7 +109,7 @@ ingestion-time frame persistence).
 
 - **WHEN** `EXOMEM_DISABLE_MEDIA_EXTRACTION` is set and `EXOMEM_VIDEO_SCENE_FRAMES` is
   unset
-- **THEN** `get_video_frames` still decodes and returns frames normally
+- **THEN** the video read still decodes and returns frames normally
 
 ### Requirement: MCP-Only Surface
 
@@ -113,5 +121,5 @@ registry-generated (docstring-as-description, signature-as-schema) like other co
 #### Scenario: REST and CLI surfaces are unchanged
 
 - **WHEN** the REST facade's OpenAPI document and the CLI's subcommand list are generated
-- **THEN** neither contains `get_video_frames`, and all previously existing entries are
+- **THEN** neither contains `read_media` or `get_video_frames`, and all previously existing entries are
   unchanged
