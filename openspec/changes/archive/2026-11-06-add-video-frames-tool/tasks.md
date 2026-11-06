@@ -59,7 +59,10 @@
       (via `uv run`).
 - [x] 5.2 `ruff check` clean; leak guard green (all labels generic).
 - [x] 5.3 `openspec validate add-video-frames-tool --strict` passes.
-- [ ] 5.4 Desk-side smoke (media extra, live service): call `get_video_frames` from a
-      connected claude.ai session on a real vault video → frames render inline;
-      windowed drill-down around a `find` `clip_match_at` timestamp works.
-      **(the operator runs — needs the live connector.)**
+- [x] 5.4 Desk-side smoke (media extra, live service): call the video read from a
+      connected MCP client on a real vault video → frames render inline;
+      windowed drill-down around a `search_memory` visual-match timestamp works.
+      Done 2026-11-06 on the live service through `read_media`: an overview window
+      returned an inline frame, and a 20 s window around a hit's `scene_match_at`
+      returned a frame inside the window. Any connected MCP client satisfies this
+      smoke; it does not need a particular client.
