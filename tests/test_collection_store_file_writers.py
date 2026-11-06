@@ -13,6 +13,7 @@ from contextlib import closing
 
 import pytest
 from test_collection_store_migration import (
+    PLANNING,
     WORK,
     X3,
     legacy_vault,
@@ -24,7 +25,7 @@ from test_collection_store_migration import (
 )
 from test_collection_store_migration import env as env
 from test_collection_store_service import OWNER, call
-from test_collection_store_writer import CID, KEY
+from test_collection_store_writer import CID, KEY, OTHER
 from test_governance_egress import EXTERNAL, write_rule, write_scope
 
 from exomem import commands, curation, episode_workflow, records, writer_lease
@@ -349,6 +350,37 @@ def test_an_update_record_leaf_applies_a_correction_through_the_store(env, capsy
         assert apply_run(root, run, plan_id, fingerprint)["phase"] == "completed"
         assert rows(root, CID)[KEY]["title"] == "Corrected"
         assert transactions(root, run, operation) == [("update", CID)]
+    finally:
+        service.stop()
+
+
+def test_an_episode_planning_leaf_prepares_and_commits_through_the_store(env, capsys, monkeypatch):
+    """Defect: an episode `prepare` of a Planning leaf on a store collection runs off the store
+    thread, so the file writer refuses it and the agent cannot record the intended work."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        snapshot = call(root, "plan_memory", action="query", collection=PLANNING)["snapshot"]
+        prepared = episode(root, action="prepare", candidate="work", proposal={
+            "route": "planning", "alternatives": [], "evidence": "complete", "title": "Planned work",
+            "reason": "Intended work the episode observed.",
+            "leaves": [{"leaf_key": "add", "effect_revision": 1, "kind": "add-plan",
+                        "args": {"collection": PLANNING, "item": {"title": "From an episode"},
+                                 "why": "The episode expressed intended work.",
+                                 "expected_container_hash": snapshot}}]})
+        leaf = prepared["candidates"][0]["leaves"][0]
+        sealed = curation.CurationStore(root).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+        assert sealed["store"]["collection_id"] == OTHER
+
+        episode(root, action="disposition", candidate="work", disposition="routed", reason="Observed.")
+        reviewed = episode(root, action="candidates")
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+        assert [item["outcome"] for item in resumed["executed"]] == ["committed"], resumed
+        assert transactions(root, leaf["run_id"], leaf["operation_id"]) == [("append", OTHER)]
+        assert "From an episode" in [row["title"] for row in rows(root, PLANNING).values()]
     finally:
         service.stop()
 
