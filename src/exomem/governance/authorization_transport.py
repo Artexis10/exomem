@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import jsonrpc_message_adapter
 
 from .. import auth_sessions
+from ..command_surface import mcp_request_correlation
+from ..log_events import log_event
 from . import authorization_sessions, connector_boundary
 from . import principal as principal_module
 from .authorization_request import (
@@ -48,6 +51,7 @@ _REQUEST_CARRIER: ContextVar[CredentialCarrier | None] = ContextVar(
 ASGIMessage = dict[str, Any]
 Receive = Callable[[], Awaitable[ASGIMessage]]
 Send = Callable[[ASGIMessage], Awaitable[None]]
+_call_log = logging.getLogger("exomem.calls")
 
 
 class AtomicMcpBatchRefusal(RuntimeError):
@@ -708,61 +712,88 @@ class AuthorizationSessionMiddleware(Middleware):
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next,
     ):
-        arguments = dict(context.message.arguments or {})
-        request_context = context.fastmcp_context.request_context
-        protected_carrier = None
-        if request_context is not None:
-            request = request_context.request
-            candidate = getattr(request, "authorization_carrier", None)
-            if isinstance(candidate, CredentialCarrier):
-                protected_carrier = candidate
-        if MCP_CREDENTIAL_PARAMETER in arguments:
-            carrier = CredentialCarrier.from_value(
-                arguments.pop(MCP_CREDENTIAL_PARAMETER)
-            )
-        elif protected_carrier is not None:
-            carrier = protected_carrier
-        else:
-            carrier = current_request_authorization_carrier() or CredentialCarrier.absent()
-        try:
-            principal = principal_module.resolve_mcp_principal()
-            admission = await anyio.to_thread.run_sync(
-                partial(
-                    verify_authorization_context,
-                    self.vault_root,
-                    principal=principal,
-                    credential=carrier.consume(),
-                    now=int(time.time()),
-                )
-            )
-            rule = credential_rule(context.message.name, arguments)
-            bound = enforce_credential_rule(admission, rule)
-            if not await auth_sessions.origin_session_active(bound):
-                raise AuthorizationContextUnavailable
-            boundary_revision = connector_boundary.cache_identity(self.vault_root, bound)
-            unrestricted = connector_boundary.unrestricted(self.vault_root, bound)
-        except AuthorizationContextUnavailable as error:
-            raise ToolError(str(error)) from None
-        except AuthorizationRouteUnclassified as error:
-            raise ToolError(str(error)) from None
-        except connector_boundary.BoundaryUnavailable:
-            raise ToolError("connector content boundary is unavailable") from None
+        entry_started = time.perf_counter()
+        entry_ms = None
+        post_started = None
+        # These phases name fixed middleware stages, not authorization policy states.
+        phase = "entry"
+        with mcp_request_correlation() as request_id:
+            try:
+                arguments = dict(context.message.arguments or {})
+                request_context = context.fastmcp_context.request_context
+                protected_carrier = None
+                if request_context is not None:
+                    request = request_context.request
+                    candidate = getattr(request, "authorization_carrier", None)
+                    if isinstance(candidate, CredentialCarrier):
+                        protected_carrier = candidate
+                if MCP_CREDENTIAL_PARAMETER in arguments:
+                    carrier = CredentialCarrier.from_value(
+                        arguments.pop(MCP_CREDENTIAL_PARAMETER)
+                    )
+                elif protected_carrier is not None:
+                    carrier = protected_carrier
+                else:
+                    carrier = current_request_authorization_carrier() or CredentialCarrier.absent()
+                try:
+                    principal = principal_module.resolve_mcp_principal()
+                    admission = await anyio.to_thread.run_sync(
+                        partial(
+                            verify_authorization_context,
+                            self.vault_root,
+                            principal=principal,
+                            credential=carrier.consume(),
+                            now=int(time.time()),
+                        )
+                    )
+                    rule = credential_rule(context.message.name, arguments)
+                    bound = enforce_credential_rule(admission, rule)
+                    if not await auth_sessions.origin_session_active(bound):
+                        raise AuthorizationContextUnavailable
+                    boundary_revision = connector_boundary.cache_identity(self.vault_root, bound)
+                    unrestricted = connector_boundary.unrestricted(self.vault_root, bound)
+                except AuthorizationContextUnavailable as error:
+                    raise ToolError(str(error)) from None
+                except AuthorizationRouteUnclassified as error:
+                    raise ToolError(str(error)) from None
+                except connector_boundary.BoundaryUnavailable:
+                    raise ToolError("connector content boundary is unavailable") from None
 
-        sanitized_message = context.message.model_copy(
-            update={"arguments": arguments}
-        )
-        with principal_module.request_scope(bound):
-            result = await call_next(context.copy(message=sanitized_message))
-        try:
-            # A result computed under changed admission cannot expose its old
-            # contributors. The caller retries under the current host revision.
-            changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
-            limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
-            if not await auth_sessions.origin_session_active(bound) or changed and limited:
-                raise AuthorizationContextUnavailable
-        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
-            raise ToolError("request authority changed before result consumption") from None
-        return result
+                sanitized_message = context.message.model_copy(
+                    update={"arguments": arguments}
+                )
+                entry_ms = (time.perf_counter() - entry_started) * 1000
+                phase = "downstream"
+                with principal_module.request_scope(bound):
+                    result = await call_next(context.copy(message=sanitized_message))
+                post_started = time.perf_counter()
+                phase = "post"
+                try:
+                    # A result computed under changed admission cannot expose its old
+                    # contributors. The caller retries under the current host revision.
+                    changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
+                    limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
+                    if not await auth_sessions.origin_session_active(bound) or changed and limited:
+                        raise AuthorizationContextUnavailable
+                except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
+                    raise ToolError("request authority changed before result consumption") from None
+                phase = "complete"
+                return result
+            finally:
+                # CallTrace starts inside this middleware; exclude its entire downstream call.
+                finished = time.perf_counter()
+                if entry_ms is None:
+                    entry_ms = (finished - entry_started) * 1000
+                post_ms = (finished - post_started) * 1000 if post_started is not None else None
+                try:
+                    log_event(_call_log, logging.INFO, "authorization_observation", fields={
+                        "request_id": request_id,
+                        "phase": phase,
+                        "entry_ms": round(entry_ms, 2),
+                        "post_ms": round(post_ms, 2) if post_ms is not None else None,
+                    })
+                except Exception:  # noqa: BLE001 - observation must not change the call outcome
+                    pass
 
     async def _read_content(self, context, call_next, error_type):
         who = principal_module.resolve_mcp_principal()

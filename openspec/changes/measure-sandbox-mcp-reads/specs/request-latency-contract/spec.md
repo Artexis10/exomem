@@ -137,6 +137,43 @@ Each case SHALL report its selected `bar_id`, observed terminal count, and descr
 
 ## ADDED Requirements
 
+### Requirement: A store projection repair preserves eager query behavior
+
+Eligible staged store queries SHALL preserve eager results, first-500 governed column order, totals, continuations, response bounds, source versions, and disclosure outcomes.
+The repair SHALL retain current authorization for every governed value and SHALL NOT add a public request parameter or a positive authorization cache.
+It SHALL reuse the current query evaluator, projector, snapshot, and response cap.
+Only the canonical governance projector SHALL enable staging; arbitrary projection callbacks SHALL retain eager execution.
+
+Staging SHALL apply only after saved-view expansion and normal field validation.
+Selection roots SHALL be schema-proven scalars without links, or existing system fields.
+Queries with aggregates, child expansion, `record_presentation`, or schema collisions with system fields SHALL retain eager projection.
+File adapters SHALL retain eager projection.
+Unsupported or malformed eligibility inputs SHALL use the existing validation path without a new public refusal.
+The existing internal late-projection path and its cold-index policy SHALL remain unchanged.
+
+#### Scenario: An excluded row establishes a column
+
+- **WHEN** an excluded row supplies the first governed occurrence of a field within the first 500 rows
+- **THEN** the staged result retains that column in the same row-major position as eager evaluation
+- **AND** an occurrence beyond that window does not expand the inferred columns
+
+#### Scenario: Governed output reaches the response cap
+
+- **WHEN** a query selects explicit columns or governance removes links from large raw rows
+- **THEN** the existing response cap receives the same governed rows as eager evaluation
+- **AND** returned rows, truncation, continuations, and source versions remain equivalent
+
+#### Scenario: A query needs projected values for selection
+
+- **WHEN** a filter, sort, or effective date root can change under projection
+- **THEN** the query keeps eager projection and its existing public outcome
+
+#### Scenario: Optional schema fields collide with system metadata
+
+- **WHEN** the store schema declares a field that the query synthesizes as system metadata
+- **THEN** the query keeps eager projection without adding a schema refusal
+- **AND** projection cannot remove or change the synthesized metadata
+
 ### Requirement: Paired MCP reads have a configured reference and a pending bar
 
 The packaged latency contract SHALL declare the paired MCP read measurement as the reference `mcp-read-paired` and as one pending bar on the boundary `mcp-worker-socket-v1` that covers `read_records`, `read_plans`, `read_memory`, `search_memory` and `recall_context`. The reference SHALL carry the fixture profile digest (null until a profile fixes it), the repeat count, the minimum case count, the confidence, the multiplicity policy, the gating groups with their allowance in milliseconds, and the non-gating groups. An allowance SHALL be null until paired runs of identical code establish it. The number of gating groups SHALL come from this configuration, never from the groups that ran.

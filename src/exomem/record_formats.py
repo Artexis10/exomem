@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import memory_refs, query_data, record_item_cache, vault
+from . import call_spans, memory_refs, query_data, record_item_cache, vault
 from . import structured_collections as collections
 from .collection_profiles import profile_for
 
@@ -2349,6 +2349,51 @@ def _field_is_link(spec: collections.FieldSpec) -> bool:
     return spec.type == "array" and spec.items is not None and spec.items.type == "link"
 
 
+def _staged_store_projection_safe(
+    manifest: collections.CollectionManifest,
+    *,
+    filters: list[dict] | None,
+    sort_by: str | None,
+    date_column: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    aggregate: str | None,
+    expand_children: bool,
+    expand_child: str | None,
+) -> bool:
+    """Select an optimization only; existing validation owns every public refusal."""
+    system = _profile_system_fields(manifest)
+    fields = manifest.schema.fields
+    if (aggregate is not None or expand_children or expand_child is not None
+            or manifest.record_presentation is not None or set(fields) & system):
+        return False
+    roots: set[str] = set()
+    for column in (sort_by, date_column):
+        if column is not None:
+            if type(column) is not str or not column:
+                return False
+            roots.add(column.split(".", 1)[0])
+    if (date_from or date_to) and date_column is None:
+        roots.add("date")
+    if filters is not None:
+        if not isinstance(filters, list):
+            return False
+        for predicate in filters:
+            if not isinstance(predicate, dict):
+                return False
+            column = predicate.get("column")
+            if type(column) is not str or not column:
+                return False
+            op = predicate.get("op", query_data.DEFAULT_OP)
+            if type(op) is not str or op not in query_data._OPS:
+                return False
+            roots.add(column.split(".", 1)[0])
+    # Reuse the field schema's closed scalar types; arrays, objects and links can change selection.
+    scalars = collections._PRESENTATION_SCALAR_TYPES - {"link"}
+    return all(name in system or (name in fields and fields[name].type in scalars)
+               for name in roots)
+
+
 def _late_link_projection_safe(
     manifest: collections.CollectionManifest,
     *,
@@ -2510,6 +2555,7 @@ def query_collection(
     project_values: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
     late_link_projection: bool = False,
+    stage_store_projection: bool = False,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
 
@@ -2522,6 +2568,9 @@ def query_collection(
     governance at parse time) and link governance instead runs once, after
     filtering/sorting/limiting, over only the rows the query actually
     returns -- see `_late_projected_result`.
+
+    `stage_store_projection` is supplied only by canonical store governance. Its projector
+    supports partial maps; arbitrary callbacks retain eager execution by default.
     """
     view_provenance: dict[str, Any] | None = None
     if view is not None:
@@ -2581,11 +2630,19 @@ def query_collection(
         expand_children=expand_children,
         expand_child=expand_child,
     )
+    use_staged_projection = (
+        stage_store_projection and not late_link_projection and project_values is not None
+        and _staged_store_projection_safe(
+            manifest, filters=filters, sort_by=sort_by, date_column=date_column,
+            date_from=date_from, date_to=date_to, aggregate=aggregate,
+            expand_children=expand_children, expand_child=expand_child,
+        )
+    )
     adapter = load_adapter(
         vault_root,
         manifest,
         authorize_path=authorize_path,
-        project_values=None if use_late_projection else project_values,
+        project_values=None if use_late_projection or use_staged_projection else project_values,
     )
     parsed = adapter.read()
     _enforce_selected_child_cap(parsed.records, selected_child, manifest)
@@ -2661,6 +2718,9 @@ def query_collection(
             string_columns=string_columns,
         )
     else:
+        # Staged projection runs in the evaluator, outside raw materialization.
+        staged_projector = (call_spans.timed("store.stage_project_values")(project_values)
+                            if use_staged_projection else None)
         result = query_data.evaluate_rows(
             rows,
             path=manifest.storage.source,
@@ -2676,6 +2736,7 @@ def query_collection(
             date_to=date_to,
             date_column=date_column,
             string_columns=string_columns,
+            project_values=staged_projector,
         )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(

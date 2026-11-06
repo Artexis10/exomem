@@ -17,12 +17,15 @@ from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
-from . import item_keys, memory_refs, query_compat, reserved_paths, vault
+from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
+
+if TYPE_CHECKING:
+    from .governance.artifact_census import VaultListing
 
 COLLECTION_VERSION = 1
 #: The file that defines a Records collection: structure, not a saved record.
@@ -1172,6 +1175,7 @@ def discover_collections_with_errors(
     reject_duplicates: bool = True,
     ownership_proof=None,
     semantic_profile: str | None = None,
+    listing: VaultListing | None = None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1217,9 +1221,12 @@ def discover_collections_with_errors(
     if proof is None:
         proof = ownership.current(root, conn=None if writer is None else writer.connection,
                                   private=writer is not None and not production_bound(root))
-    stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
-        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
-        semantic_profile=semantic_profile)
+    stored, store_errors = (), ()
+    if writer is not None:
+        with call_spans.span("records.inventory_store_discovery"):
+            stored, store_errors = writer.discover_collections(
+                authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
+                semantic_profile=semantic_profile)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
@@ -1245,7 +1252,8 @@ def discover_collections_with_errors(
     candidates = []
     # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
     # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
-    proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
+    listing = artifact_census.vault_listing(root) if listing is None else listing
+    proposed = sorted(root / rel for rel in listing.files_named(MANIFEST_FILENAME))
     for candidate in proposed:
         rel = _declared_candidate_rel(root, candidate)
         # Recoverable trash retains bytes but declares no live collection ownership.
@@ -1291,6 +1299,7 @@ def discover_legacy_trackers(
     authorize_path: Callable[[str], bool] | None = None,
     max_raw_candidates: int = 4_096,
     owned_views: Container[str] = frozenset(),
+    listing: VaultListing | None = None,
 ) -> tuple[tuple[LegacyCollection, ...], bool]:
     """Discover bounded exact-Records-layer tracker manifests without parsing items.
 
@@ -1312,8 +1321,9 @@ def discover_legacy_trackers(
     candidates = []
     # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
     records_rel = records_root.relative_to(root).as_posix()
+    listing = artifact_census.vault_listing(root, records_rel) if listing is None else listing
     proposed = sorted(
-        root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
+        root / rel for rel in listing.files_under(records_rel)
         # Like `rglob("*.md")`: the extension compares by the platform's case rule.
         if os.path.normcase(rel).endswith(".md") and rel not in owned_views
     )
@@ -1329,12 +1339,10 @@ def discover_legacy_trackers(
     for candidate in candidates[:max_raw_candidates]:
         if candidate.name == "_collection.md":
             continue
-        safe = _safe_candidate_rel(root, candidate)
-        if safe is None:
-            continue
-        _safe_path, relative = safe
+        # Inspection rechecks the path after authorization, then guards the byte read.
         try:
-            tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
+            with call_spans.span("records.inventory_legacy_inspect"):
+                tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
         except CollectionError:
             continue
         trackers.append(tracker)
@@ -1706,7 +1714,9 @@ def inspect_legacy_tracker(
     key = _reference_key(root, raw)
     if key is None:
         raise _spelling_reference_error(raw)
-    if not authorize(key):
+    with call_spans.span("records.inventory_legacy_authorize"):
+        allowed = authorize(key)
+    if not allowed:
         # A tracker is not a manifest, so "pass the `_collection.md` path" would
         # be wrong advice here; "no such tracker" is the honest refusal, and it
         # is what an absent one answers below.
@@ -1717,7 +1727,9 @@ def inspect_legacy_tracker(
         if _absent_leaf(root, key):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
         raise
-    if not authorize(rel):
+    with call_spans.span("records.inventory_legacy_authorize"):
+        allowed = authorize(rel)
+    if not allowed:
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
         data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)

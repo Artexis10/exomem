@@ -12,9 +12,12 @@
 
 ## 2. Frozen sandbox and source truth
 
-- [ ] 2.1 Freeze isolated sandbox data and runtime identities; verify copied files and stored rows with counts and source spot checks.
-- [ ] 2.2 Author independent source truth for all nine operation families; verify identities and material without using measured outputs as keys.
-- [ ] 2.3 Prove sandbox isolation and blocked external effects; retain reproducible setup and cleanup evidence outside the repository.
+- [x] 2.1 Freeze isolated sandbox data and runtime identities; verify copied files and stored rows with counts and source spot checks.
+- [x] 2.2 Author independent source truth for all nine operation families; verify identities and material without using measured outputs as keys.
+- [x] 2.3 Prove sandbox isolation and blocked external effects; retain reproducible setup and cleanup evidence outside the repository.
+
+Independent audits verify the retained material, source keys, runtime identity, active watcher, protocol-scoped isolation, and process cleanup.
+The evidence stays outside the repository. It proves the trusted reader protocol; it does not claim OS confinement or full latency acceptance.
 
 ## 3. Matched measurement and diagnosis
 
@@ -22,6 +25,8 @@
 - [ ] 3.2 Attribute transport, authentication, governance, egress, rendering, store, and serialization costs; report unavailable layers explicitly.
 - [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 target of 100 ms for the six collection-store groups.
 - [ ] 3.4 Repair the largest measured costs without weakening governance; verify each correction through the same instrument and boundary.
+- [ ] 3.5 Stage projection for eligible store queries through the existing evaluator; prove eager parity for metadata, selection, response bounds, source versions, continuations, and disclosure outcomes.
+- [ ] 3.6 Verify eager fallbacks for unsupported shaping, schema collisions, malformed inputs, and file adapters; measure the candidate through unchanged source cases before claiming a gain.
 
 ## 4. CI and delivery
 
