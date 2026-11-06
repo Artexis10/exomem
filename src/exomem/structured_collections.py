@@ -1336,10 +1336,7 @@ def discover_legacy_trackers(
     for candidate in candidates[:max_raw_candidates]:
         if candidate.name == "_collection.md":
             continue
-        safe = _safe_candidate_rel(root, candidate)
-        if safe is None:
-            continue
-        _safe_path, relative = safe
+        # Inspection rechecks the path after authorization, then guards the byte read.
         try:
             with call_spans.span("records.inventory_legacy_inspect"):
                 tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)

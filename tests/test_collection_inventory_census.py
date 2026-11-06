@@ -7,6 +7,8 @@ inventory, and it would hide it without an error.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -19,8 +21,11 @@ from test_collection_inventory_errors import (
     _seed_records_collection,
     _write_manifest,
 )
+from test_governance_egress import _receipt_records, write_scope
 
+from exomem import record_governance
 from exomem.governance import artifact_census
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.record_memory import record_memory
 
 _TRACKER = "Knowledge Base/Records/Legacy/Log.md"
@@ -123,3 +128,47 @@ def test_a_listed_file_replaced_with_a_symlink_is_not_released(tmp_path, monkeyp
     assert [row["manifest_path"] for row in inventory["collections"]] == [released]
     assert inventory["unreadable_manifests"] == []
     assert inventory["legacy_trackers"] == []
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "hardlink", "missing"])
+def test_a_tracker_replaced_after_admission_releases_no_replacement(
+    tmp_path, monkeypatch, replacement
+):
+    released = _seed_records_collection(tmp_path)
+    candidate = tmp_path / _write_manifest(tmp_path, _TRACKER, _TRACKER_BYTES)
+    target = tmp_path / "Attachments" / "replacement.md"
+    target.parent.mkdir()
+    content = (_TRACKER_BYTES + "replacement-content-canary\n").encode()
+    target.write_bytes(content)
+    write_scope(tmp_path, paths="Records/**", name="Records")
+    before = len(_receipt_records(tmp_path))
+    authorize = record_governance._authorize
+    replaced = False
+
+    def authorize_then_replace(root, relative, **kwargs):
+        nonlocal replaced
+        allowed = authorize(root, relative, **kwargs)
+        if relative == _TRACKER and allowed and not replaced:
+            candidate.unlink()
+            try:
+                if replacement == "symlink":
+                    candidate.symlink_to(target)
+                elif replacement == "hardlink":
+                    candidate.hardlink_to(target)
+            except OSError:
+                pytest.skip(f"{replacement} unavailable")
+            replaced = True
+        return allowed
+
+    monkeypatch.setattr(record_governance, "_authorize", authorize_then_replace)
+    with request_scope(owner_principal(surface="library")):
+        inventory = record_memory(tmp_path, "inspect")
+    events = _receipt_records(tmp_path)[before:]
+
+    assert replaced, inventory
+    assert events
+    assert [row["manifest_path"] for row in inventory["collections"]] == [released]
+    assert inventory["legacy_trackers"] == []
+    assert _TRACKER not in json.dumps(inventory)
+    assert "replacement-content-canary" not in json.dumps(inventory)
+    assert hashlib.sha256(content).hexdigest() not in json.dumps(events)
