@@ -169,6 +169,11 @@ After a hold's backup and prune both succeed, the backup Job SHALL read the mani
 - **WHEN** an owner deletes one recording and a hold hides its name
 - **THEN** `cellctl` lists the hidden name for the cell and the watcher raises no alert
 
+#### Scenario: A rescued name that a sidecar still references
+
+- **WHEN** a compromised edge hides a name that a live sidecar references, and the operator deletes its hide marker within the grace
+- **THEN** the version is current again and the next hold does not hide the name, because a referenced name is never a candidate
+
 ### Requirement: The meter counts names with more than one upload version
 
 The `cellctl` media meter SHALL count, for each cell, the names in its prefix that hold more than one upload version. It SHALL report the count. A name from before unique names can hold such versions, and the lifecycle rule would delete the older one.

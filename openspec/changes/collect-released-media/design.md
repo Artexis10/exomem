@@ -73,7 +73,7 @@ Every owner deletion now ends in a hide. A single hide is therefore normal, and 
 - **cellctl** reports the hidden names of each cell, from its list-only view. It raises no alert for a single hide.
 - **The out-of-cluster key watcher** gets a list-only key limited to the media bucket. It counts the hide markers that appeared since its last run, and it alerts when the count exceeds a pinned budget. Its output is value-free: it carries a count and a reason token, never a name.
 - **Grace.** The grace period N must exceed the watcher's interval plus the operator's response time. An alert then arrives before the first deletion of a burst.
-- **Rescue.** The operator removes the cell's collector entry from the active set, so the next hold does not hide the name again. The operator then deletes the hide marker with the out-of-cluster cleanup key. The version is current again, with its content unchanged.
+- **Rescue.** The operator deletes the hide marker with the out-of-cluster cleanup key. The version is current again, with its content unchanged. A rescue is for a name that a sidecar or a protection record still holds, such as a hide by a compromised edge. A hold never condemns such a name, because candidates are only released names that no manifest references or protects (D5). So the next hold does not hide it again. A released name that nothing references is a correct candidate, and a later hold hides it again.
 
 Honest cost: from this change on, any hide leads to a deletion after N days unless someone rescues it. Before it, nothing in the cluster could destroy a version. A compromised edge can now hide any name, because its key holds `writeFiles`. A compromised backup Job can hide names under its own cell's prefix. The budget alert and the grace period bound that exposure. They do not remove it.
 
@@ -113,7 +113,7 @@ The operator carries these steps:
 6. Deploy the cell image, the edge, `cellctl` and the chart as one release, because the manifest, the credential and the operation depend on each other.
 7. Confirm that the out-of-cluster cleanup key has `deleteFiles` on the media bucket, for rescue.
 
-The undo is the grace period (D4) and the removal of a cell's collector entry.
+The undo is the grace period (D4). Removing a cell's collector entry stops all collection for that cell.
 
 ## Residuals
 
@@ -139,4 +139,4 @@ The undo is the grace period (D4) and the removal of a cell's collector entry.
 - **Grace period N and hide budget.** The operator chooses them. The grace period must exceed the watcher interval plus the operator's response time.
 - **Provider behaviour.** Task 1 confirms every point marked †, and also whether a hide of an already hidden name is an error or a no-op.
 - **The name key.** Whether the per-cell name key can be retired once no cell holds a keyed name. Settled after the canary's names are re-offloaded or confirmed single-version.
-- **Rescue and the next hold.** Rescue works only if the next hold does not hide the name again. D4 removes the collector entry first. Whether a per-name exclusion list is worth its cost is settled by the first rescue.
+- **Rescue of a released name.** D4 rescues names that something still references. A name that the cell released by mistake is hidden again at the next hold. Whether such a mistake needs a per-name exclusion list is settled by the first rescue.
