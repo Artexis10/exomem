@@ -330,6 +330,8 @@ spec:
               value: {{ printf "/run/cellctl/media-edge/%s" .Values.mediaEdge.signingKeySecretKey | quote }}
             - name: CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES
               value: {{ int64 .Values.mediaEdge.maxObjectBytes | quote }}
+            - name: CELLCTL_MEDIA_EDGE_BUCKET
+              value: {{ .Values.mediaEdge.bucket | quote }}
             - name: CELLCTL_MEDIA_EDGE_CELL_IDS
               value: {{ .Values.mediaEdge.cellIds | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS

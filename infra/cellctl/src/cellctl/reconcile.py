@@ -96,6 +96,7 @@ from .manifests import (
 )
 from .media_edge import (
     ActiveSet,
+    EdgeEvidence,
     MediaEdgeConfig,
     mint_bundle,
     open_bundle,
@@ -281,9 +282,12 @@ class LoopMemory:
     # A volume confirmed absent stays absent: its id is never reused.
     volumes_absent: set[str] = field(default_factory=set)
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
-    # add-cloud-media-store D6: the newest active set generation the edge reported as loaded and
-    # drained. A restart forgets it and asks the edge again; it is never assumed.
-    media_edge_confirmed_generation: int = 0
+    # add-cloud-media-store D6: the generation and digest of the active set the edge reported as
+    # loaded and drained, exactly. A restart forgets it and asks the edge again; it is never assumed.
+    media_edge_confirmed: tuple[int, str] | None = None
+    # The generation of a set the edge loaded that cellctl did not publish. The edge refuses a
+    # generation at or below its own, so the next plan rises past it.
+    media_edge_foreign: int = 0
     # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
     # process fills it from every deleted row, so a restart never loses the alert; the receiver
     # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
@@ -638,7 +642,7 @@ class ClusterGateway:
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
-    def media_edge_generation(self, url: str) -> int: ...  # pragma: no cover
+    def media_edge_evidence(self, url: str) -> EdgeEvidence: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -1259,7 +1263,9 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
     return active.cells.get(row.cell_id)
 
 
-def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], now: datetime) -> ActiveSet | None:
+def _publish_media_edge_set(
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory
+) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
     `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is
@@ -1268,7 +1274,14 @@ def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], n
     try:
         current = cluster.read_media_edge_active_set()
         published = read_active_set(current)
-        planned = plan_active_set(published, cells, int(now.timestamp() * 1000))
+        if published.generation == 0:
+            # No readable published set: whatever the edge loaded is not ours, and a clock that went
+            # back would plan a generation the edge refuses. An unreadable edge leaves the clock to plan.
+            try:
+                memory.media_edge_foreign = max(memory.media_edge_foreign, cluster.media_edge_evidence(edge.url).loaded)
+            except Exception as error:  # noqa: BLE001 - the edge may be away; the settled check learns it later
+                logger.warning("cellctl could not seed the media edge generation: %s", _describe_error(error))
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign)
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
@@ -1303,23 +1316,27 @@ def _label_media_edge_namespaces(
 def _media_edge_settled(
     cluster: ClusterGateway, edge: MediaEdgeConfig, active: ActiveSet | None, memory: LoopMemory
 ) -> bool:
-    """Whether the edge has loaded the published set and drained every request of the one before.
+    """Whether the edge serves exactly the published set and has drained every request of the one before.
 
-    A revocation is done only when the edge says so. An edge that is down, behind or unreadable is
-    unsettled, and no failure counts as confirmation."""
+    A revocation is done only when the edge says so, and only about this set: a higher generation, another
+    digest or another bucket confirms nothing. An edge that is down, behind or unreadable is unsettled,
+    and no failure counts as confirmation."""
     if active is None:
         return False
-    if active.generation <= memory.media_edge_confirmed_generation:
+    if memory.media_edge_confirmed == (active.generation, active.sha256()):
         return True
     try:
-        reported = cluster.media_edge_generation(edge.url)
+        evidence = cluster.media_edge_evidence(edge.url)
     except Exception as error:  # noqa: BLE001 - unreadable is unsettled, not confirmed
         logger.error("cellctl could not read the media edge generation: %s", _describe_error(error))
         return False
-    if reported < active.generation:
-        return False
-    memory.media_edge_confirmed_generation = active.generation
-    return True
+    if evidence.matches(active, edge.bucket):
+        memory.media_edge_confirmed = (active.generation, active.sha256())
+        return True
+    if evidence.loaded >= active.generation and (evidence.loaded, evidence.set_sha256) != (active.generation, active.sha256()):
+        # The edge holds a set cellctl did not publish and will not take ours at this generation.
+        memory.media_edge_foreign = max(memory.media_edge_foreign, evidence.loaded)
+    return False
 
 
 async def reconcile_once(
@@ -1390,9 +1407,9 @@ async def reconcile_once(
     media_unsettled = False
     if cluster_config.media_edge is not None:
         # D12: a draining cell keeps its entry although the edge no longer selects it.
-        media_active = _publish_media_edge_set(cluster, {
+        media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
-            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now)
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory)
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.

@@ -201,6 +201,9 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
 
     assert env["CELLCTL_MEDIA_EDGE_URL"] == "http://10.43.0.30:8769"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS"]) == {CANARY: 2}
+    # cellctl confirms a revocation only for the bucket the edge writes to, so one value feeds both.
+    edge = _find(documents, "Deployment", "exomem-media-edge")["spec"]["template"]["spec"]["containers"][0]
+    assert env["CELLCTL_MEDIA_EDGE_BUCKET"] == {e["name"]: e.get("value") for e in edge["env"]}["EXOMEM_MEDIA_EDGE_BUCKET"]
     default_policy = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())["mediaEdge"]["storePolicy"]
     assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {
         **default_policy, "evict_after_days": 30, "max_temporary_bytes": 5637144576, "max_hydrations": 1}

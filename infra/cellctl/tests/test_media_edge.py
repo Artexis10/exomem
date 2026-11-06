@@ -6,6 +6,7 @@ import asyncio
 import base64
 import copy
 import dataclasses
+import hashlib
 import json
 import math
 import shutil
@@ -40,6 +41,7 @@ from .test_reconcile import (
 CANARY = "aaaaaaaaaaaaaaaa"
 OTHER = "bbbbbbbbbbbbbbbb"
 URL = "http://10.43.0.30:8769"
+BUCKET = "media-bucket"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 NOW_MS = int(NOW.timestamp() * 1000)
 ROOT = b"r" * 32
@@ -51,7 +53,7 @@ def _signing_key() -> Ed25519PrivateKey:
 
 def _edge(**overrides: object) -> media_edge.MediaEdgeConfig:
     settings: dict[str, object] = dict(
-        url=URL, max_object_bytes=1 << 30, signing_key=_signing_key(), cell_ids=(CANARY,)
+        url=URL, max_object_bytes=1 << 30, signing_key=_signing_key(), bucket=BUCKET, cell_ids=(CANARY,)
     )
     settings.update(overrides)
     return media_edge.MediaEdgeConfig(**settings)
@@ -179,13 +181,14 @@ def test_the_edge_settings_load_from_the_chart_environment_and_default_to_none(m
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_URL", URL)
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_SIGNING_KEY_FILE", str(path))
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES", "1073741824")
+    monkeypatch.setenv("CELLCTL_MEDIA_EDGE_BUCKET", BUCKET)
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CELL_IDS", json.dumps([CANARY]))
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", json.dumps({CANARY: 3}))
 
     config = main.build_media_edge_config()
 
     assert config.selects(CANARY) and not config.selects(OTHER) and config.epoch(CANARY) == 3
-    assert config.max_object_bytes == 1 << 30
+    assert config.max_object_bytes == 1 << 30 and config.bucket == BUCKET
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_ALL_CELLS", '"yes"')
     with pytest.raises(ValueError, match="all-cells switch"):
         main.build_media_edge_config()
@@ -263,7 +266,8 @@ class EdgeCluster(FakeClusterGateway):
         super().__init__()
         self.active_set: dict[str, str] | None = None
         self.publishes: list[dict] = []
-        self.reported: int | Exception = 0
+        # An edge that has loaded nothing. `serving` gives what a healthy edge says of the published set.
+        self.reported: media_edge.EdgeEvidence | Exception = media_edge.EdgeEvidence(0, 0, "0" * 64, BUCKET)
         self.fail_publish = False
 
     def read_media_edge_active_set(self) -> dict[str, str] | None:
@@ -275,10 +279,17 @@ class EdgeCluster(FakeClusterGateway):
         self.publishes.append(manifest)
         self.active_set = manifest["data"]
 
-    def media_edge_generation(self, url: str) -> int:
+    def media_edge_evidence(self, url: str) -> media_edge.EdgeEvidence:
         if isinstance(self.reported, Exception):
             raise self.reported
         return self.reported
+
+    def serving(self, **overrides: object) -> media_edge.EdgeEvidence:
+        """What the edge reports once it has loaded the ConfigMap: the digest of the bytes it read."""
+        generation = self.published()["generation"]
+        digest = hashlib.sha256(self.active_set[media_edge.ACTIVE_SET_KEY].encode()).hexdigest()
+        report = dict(settled=generation, loaded=generation, set_sha256=digest, bucket=BUCKET)
+        return media_edge.EdgeEvidence(**{**report, **overrides})
 
     def published(self) -> dict:
         return json.loads(self.active_set[media_edge.ACTIVE_SET_KEY])
@@ -442,19 +453,90 @@ async def test_a_revocation_is_not_settled_until_the_edge_reports_its_generation
     try:
         assert await fleet.run() is True
         generation = fleet.cluster.published()["generation"]
-        assert fleet.memory.media_edge_confirmed_generation == 0
+        assert fleet.memory.media_edge_confirmed is None
 
-        fleet.cluster.reported = generation - 1  # still draining the earlier set
+        fleet.cluster.reported = fleet.cluster.serving(settled=generation - 1)  # still draining the earlier set
         await fleet.run(NOW + timedelta(minutes=1))
-        assert fleet.memory.media_edge_confirmed_generation == 0
+        assert fleet.memory.media_edge_confirmed is None
 
         fleet.cluster.reported = RuntimeError("the edge is away")
         await fleet.run(NOW + timedelta(minutes=2))
-        assert fleet.memory.media_edge_confirmed_generation == 0
+        assert fleet.memory.media_edge_confirmed is None
 
-        fleet.cluster.reported = generation
+        fleet.cluster.reported = fleet.cluster.serving()
         await fleet.run(NOW + timedelta(minutes=3))
-        assert fleet.memory.media_edge_confirmed_generation == generation
+        digest = hashlib.sha256(fleet.cluster.active_set[media_edge.ACTIVE_SET_KEY].encode()).hexdigest()
+        assert fleet.memory.media_edge_confirmed == (generation, digest)
+    finally:
+        await fleet.close()
+
+
+async def test_a_newer_generation_with_another_set_does_not_confirm_and_the_next_plan_rises_past_it(cell_db) -> None:
+    ahead = NOW_MS + 10**9  # past anything the clock plans
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+
+        fleet.cluster.reported = fleet.cluster.serving(settled=ahead, loaded=ahead, set_sha256="a" * 64)
+        await fleet.run(NOW + timedelta(minutes=1))
+        assert fleet.memory.media_edge_confirmed is None
+
+        await fleet.run(NOW + timedelta(minutes=2))
+        assert fleet.cluster.published()["generation"] == ahead + 1  # the edge would refuse anything lower
+    finally:
+        await fleet.close()
+
+
+async def test_the_published_digest_on_another_bucket_does_not_confirm(cell_db) -> None:
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        await fleet.run()
+        fleet.cluster.reported = fleet.cluster.serving(bucket="another-bucket")
+        await fleet.run(NOW + timedelta(minutes=1))
+
+        assert fleet.memory.media_edge_confirmed is None
+        assert len(fleet.cluster.publishes) == 1  # a wrong bucket is not cured by a new generation
+    finally:
+        await fleet.close()
+
+
+async def test_an_unreadable_published_set_is_replanned_above_the_generation_the_edge_loaded(cell_db) -> None:
+    # The cluster clock is behind the edge's generation, as after a rollback.
+    ahead = NOW_MS + 10**9
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        fleet.cluster.active_set = {media_edge.ACTIVE_SET_KEY: "{not json"}
+        fleet.cluster.reported = media_edge.EdgeEvidence(ahead, ahead, "b" * 64, BUCKET)
+        await fleet.run()
+        assert fleet.cluster.published()["generation"] == ahead + 1
+        assert fleet.memory.media_edge_confirmed is None
+
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=1))
+        assert fleet.memory.media_edge_confirmed is not None
+        assert fleet.memory.media_edge_confirmed[0] == ahead + 1
+    finally:
+        await fleet.close()
+
+
+async def test_a_set_planned_while_the_edge_was_unreadable_does_not_stall_once_the_edge_answers(cell_db) -> None:
+    ahead = NOW_MS + 10**9
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        fleet.cluster.active_set = {media_edge.ACTIVE_SET_KEY: "{not json"}
+        fleet.cluster.reported = RuntimeError("the edge is away")
+        await fleet.run()
+        assert fleet.cluster.published()["generation"] < ahead  # the clock planned it, and the edge will refuse it
+
+        fleet.cluster.reported = media_edge.EdgeEvidence(ahead, ahead, "b" * 64, BUCKET)
+        await fleet.run(NOW + timedelta(minutes=1))
+        assert fleet.memory.media_edge_confirmed is None
+        await fleet.run(NOW + timedelta(minutes=2))
+        assert fleet.cluster.published()["generation"] == ahead + 1
+
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=3))
+        assert fleet.memory.media_edge_confirmed is not None
     finally:
         await fleet.close()
 

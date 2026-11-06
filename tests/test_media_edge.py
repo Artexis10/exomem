@@ -255,6 +255,54 @@ def test_a_lost_upload_reply_recovers_the_exact_version(tmp_path: Path, size: in
     assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": 0}
 
 
+def test_the_generation_report_names_the_loaded_set_by_its_digest_and_bucket(harness: Harness):
+    harness.publish(2, {CELL_A: 1})
+    report = asyncio.run(harness._plain(GENERATION_PATH, harness.edge)).json()
+    assert report == {"generation": 2, "loaded": 2, "bucket": harness.fake.bucket,
+                      "set_sha256": hashlib.sha256(harness.active_set_file.read_bytes()).hexdigest()}
+
+
+def test_a_rejected_set_file_does_not_change_the_reported_digest(harness: Harness):
+    loaded_bytes = harness.active_set_file.read_bytes()
+    # The same generation with other cells is refused, so the edge still serves the first set.
+    harness.publish(1, {CELL_A: 1})
+    report = asyncio.run(harness._plain(GENERATION_PATH, harness.edge)).json()
+    assert report["loaded"] == 1
+    assert report["set_sha256"] == hashlib.sha256(loaded_bytes).hexdigest()
+    assert harness.put(b"still served", cell=CELL_B).status_code == 201
+
+
+def test_a_lost_reply_to_the_start_of_a_large_file_leaves_no_intent_and_no_version(tmp_path: Path):
+    harness = Harness(tmp_path, max_object_bytes=10_000, part_bytes=1000)
+    harness.fake.lose("b2_start_large_file", "reply")
+    assert harness.put(b"z" * 2500).status_code == 503
+    assert asyncio.run(harness._plain(PENDING_PATH, harness.edge)).json() == {"pending": 0}
+    harness.publish(2, {CELL_A: 1, CELL_B: 1})
+    assert harness.generation() == 2  # no unnamed file holds the drain open
+
+    restarted = harness.build()
+    asyncio.run(restarted.recover_pending())
+    assert harness.generation(restarted) == 2
+    assert harness.fake.names() == []
+    assert [item["action"] for item in harness.fake.files.values()] == ["start"]  # bounded by the lifecycle rule
+    assert "b2_finish_large_file" not in harness.fake.calls
+
+
+def test_a_large_upload_whose_intent_was_not_persisted_is_never_finished(tmp_path: Path, monkeypatch):
+    harness = Harness(tmp_path, max_object_bytes=10_000, part_bytes=1000)
+
+    async def disk_full(intent):
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(harness.edge, "_persist", disk_full)
+    assert harness.put(b"z" * 2500).status_code == 503
+
+    assert harness.fake.calls.count("upload_part") == 3  # the parts were all sent
+    assert "b2_finish_large_file" not in harness.fake.calls
+    assert harness.fake.files == {}  # and the unfinished file was cancelled
+    assert harness.fake.names() == []
+
+
 def test_the_chart_bound_admits_a_5_gib_original_in_8_mib_parts_within_the_part_limit(tmp_path: Path):
     # A 5 GiB original's age ciphertext adds 16 bytes per 64 KiB chunk. A bound below it refuses the file;
     # a part plan past 10,000 parts fails at B2 after hours of upload. Only the first part is sent here.

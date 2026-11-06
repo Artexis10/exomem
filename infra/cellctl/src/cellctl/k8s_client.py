@@ -64,7 +64,7 @@ from .manifests import (
     namespace_name,
     snapshot_backup_name,
 )
-from .media_edge import ACTIVE_SET_NAME, read_generation
+from .media_edge import ACTIVE_SET_NAME, EdgeEvidence, read_edge_evidence
 from .state import (
     INIT_REFUSAL_CODES,
     SNAPSHOT_BACKUP,
@@ -298,8 +298,8 @@ class ClusterClient:
             raise ValueError("cellctl publishes only the media edge active set")
         self.apply(manifest)
 
-    def media_edge_generation(self, url: str) -> int:
-        return read_generation(url)
+    def media_edge_evidence(self, url: str) -> EdgeEvidence:
+        return read_edge_evidence(url)
 
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]:
         """Tasks 5.5 and 5.6: the `/metrics` text of each node's pod that

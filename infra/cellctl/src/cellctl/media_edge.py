@@ -9,8 +9,10 @@ database and the cluster.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -32,6 +34,7 @@ ACTIVE_SET_NAME = "exomem-media-edge-active-set"
 ACTIVE_SET_KEY = "active-set.json"
 EPOCHS_KEY = "credential-epochs.json"
 MAX_SELECTED_CELLS = 1024
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 # -- the media key bundle: an age X25519 identity and the object name key --
@@ -151,6 +154,10 @@ class ActiveSet:
     def active_set_json(self) -> str:
         return _compact_json({"generation": self.generation, "cells": dict(self.cells)}).decode("ascii")
 
+    def sha256(self) -> str:
+        """The digest of the bytes the edge loads from the ConfigMap, which it reports back."""
+        return hashlib.sha256(self.active_set_json().encode("ascii")).hexdigest()
+
     def epochs_json(self) -> str:
         return _compact_json(dict(self.epochs)).decode("ascii")
 
@@ -182,19 +189,22 @@ def read_active_set(data: Mapping[str, str] | None) -> ActiveSet:
         return ActiveSet()
 
 
-def plan_active_set(published: ActiveSet, selected: Mapping[str, int], now_ms: int) -> ActiveSet:
+def plan_active_set(published: ActiveSet, selected: Mapping[str, int], now_ms: int, *, above: int = 0) -> ActiveSet:
     """The set to publish for the selected cells, each with its credential epoch.
 
     A cell keeps its version while its epoch is unchanged. A new cell, and a cell whose epoch changed,
     takes the new generation as its version, which no earlier credential carries. A cell that leaves the set
     loses its version, and a later return starts afresh, so a revoked credential stays revoked.
+
+    `above` is the generation of a set the edge loaded that cellctl did not publish, for example after a
+    clock that went back. The edge refuses a generation at or below the one it loaded, so the plan rises past it.
     """
     # Zero is unpublished state; an empty revocation must still advance the generation.
-    if published.generation > 0 and published.cells.keys() == selected.keys() and all(
+    if published.generation > max(above, 0) and published.cells.keys() == selected.keys() and all(
         published.epochs.get(cell, 0) == epoch for cell, epoch in selected.items()
     ):
         return published
-    generation = max(published.generation + 1, now_ms)
+    generation = max(published.generation + 1, now_ms, above + 1)
     cells = {
         cell: published.cells[cell] if cell in published.cells and published.epochs.get(cell, 0) == epoch else generation
         for cell, epoch in selected.items()
@@ -215,15 +225,46 @@ def render_active_set(active: ActiveSet, namespace: str) -> dict:
     }
 
 
-def read_generation(url: str, *, timeout: float = 3.0) -> int:
-    """The generation the edge reports: the newest set it has loaded and drained every earlier request of."""
+@dataclass(frozen=True)
+class EdgeEvidence:
+    """What the edge reports about the set it serves (add-cloud-media-store D6, exact-set evidence).
+
+    `settled` is the newest generation whose earlier requests and writes have finished. `loaded` is the
+    generation of the set in force, `set_sha256` the digest of that set's bytes, and `bucket` the bucket
+    the edge writes to. A generation alone cannot say which set it was.
+    """
+
+    settled: int
+    loaded: int
+    set_sha256: str
+    bucket: str
+
+    def matches(self, active: ActiveSet, bucket: str) -> bool:
+        """Whether the edge serves exactly the set cellctl published, on the bucket cellctl expects."""
+        return (
+            self.loaded == active.generation
+            and self.set_sha256 == active.sha256()
+            and self.bucket == bucket
+            and self.settled >= active.generation
+        )
+
+
+def read_edge_evidence(url: str, *, timeout: float = 3.0) -> EdgeEvidence:
+    """The edge's report of the set it serves. Anything it does not say in full is an error, not a guess."""
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         response = client.get(f"{url.rstrip('/')}/v1/generation")
     response.raise_for_status()
-    generation = response.json().get("generation")
-    if type(generation) is not int or generation < 0:
-        raise ValueError("the media edge reported no generation")
-    return generation
+    report = response.json()
+    settled, loaded, digest, bucket = (report.get(name) for name in ("generation", "loaded", "set_sha256", "bucket"))
+    if (
+        any(type(number) is not int or number < 0 for number in (settled, loaded))
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None  # a hex digest's shape, fixed by SHA-256
+        or not isinstance(bucket, str)
+        or not bucket
+    ):
+        raise ValueError("the media edge reported no complete generation")
+    return EdgeEvidence(settled, loaded, digest, bucket)
 
 
 # -- cellctl's settings for the edge --
@@ -236,6 +277,8 @@ class MediaEdgeConfig:
     url: str
     max_object_bytes: int
     signing_key: Ed25519PrivateKey = field(repr=False)
+    # The bucket the edge must report. An edge on another bucket proves nothing about this one.
+    bucket: str
     cell_ids: tuple[str, ...] = ()
     # The fleet switch: every cell, including each created later. The list stays as the canary.
     all_cells: bool = False
@@ -250,6 +293,8 @@ class MediaEdgeConfig:
         check_media_edge_url(self.url)
         if not isinstance(self.signing_key, Ed25519PrivateKey):
             raise ValueError("the media edge credential signing key must be an Ed25519 private key")
+        if not isinstance(self.bucket, str) or not self.bucket:
+            raise ValueError("the media edge needs the name of its bucket")
         if type(self.max_object_bytes) is not int or self.max_object_bytes <= 0:
             raise ValueError("the media edge object bound must be a positive whole number of bytes")
         if (

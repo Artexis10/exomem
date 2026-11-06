@@ -55,8 +55,9 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 7. Check that the canary's namespace carries the label that opens the network to the edge:
    `kubectl get namespace exo-cell-<canary> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
    Expect `true`.
-8. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
-   The edge reports a generation only after it drains the requests of the earlier set.
+8. Read `/v1/generation` on the edge. `loaded` must equal the generation in the ConfigMap, and `set_sha256` must equal
+   the SHA-256 of the ConfigMap's `active-set.json` value. `bucket` must equal `mediaEdge.bucket`.
+   The edge reports `generation` only after it drains the requests of the earlier set.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
@@ -67,8 +68,9 @@ the canary reads and writes media through the edge.
 2. Deploy the chart.
 3. Check that the ConfigMap lists the cell with a higher version and that the generation rose.
 
-The old credential stops working when the edge reports the new generation. Treat a
-revocation as finished only when `/v1/generation` reports that number.
+The old credential stops working when the edge loads the new set. Treat a revocation as
+finished only when `/v1/generation` reports that generation as `loaded` and as `generation`,
+with the digest of the published set. A higher generation with another digest is not the published set.
 
 ## Undo
 
@@ -113,7 +115,7 @@ counts its evicted originals.
     `kubectl get namespace exo-cell-<cell> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
     Expect no output.
 11. Check that the ConfigMap no longer lists the cell and that `/v1/generation` reports
-    the new number.
+    the new number and the digest of the published set.
 
 Expected result: the cell serves its local files and keeps its store identity alone, so
 it reads no original as deleted. It has no key, credential or edge access.

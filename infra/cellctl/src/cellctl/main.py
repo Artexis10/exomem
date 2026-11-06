@@ -202,6 +202,7 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
         url=url,
         max_object_bytes=int(os.environ["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"]),
         signing_key=signing_key,
+        bucket=os.environ["CELLCTL_MEDIA_EDGE_BUCKET"],
         cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_CELL_IDS", "[]", list, "media edge cell IDs")),
         all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
         credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
