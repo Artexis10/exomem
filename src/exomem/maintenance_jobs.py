@@ -1,14 +1,14 @@
 """Governed maintenance jobs: a remote maintenance write that outlives its request.
 
-A remote ``backfill-ids`` or ``fix`` write (later ``reconcile``) is admitted by
+A remote ``backfill-ids``, ``fix`` or ``reconcile`` write is admitted by
 ``writer_lease.invoke_command`` with a ``plan_id`` and a ``why``. The request
 thread claims one job row, starts a daemon thread and returns a handle at once.
 The thread dispatches the real leaf through ``invoke_command`` as the starting
 principal on the internal ``maintenance-job`` surface, so every ordinary check
-still applies. The leaf commits its pages in chunks (``commit_pages``), each
-under its own short mutation boundary hold, and reports through ``checkpoint``,
-``note`` and ``record_paths``. A request thread never holds the boundary for a
-job's work.
+still applies. The leaf holds the mutation boundary only in short holds of its
+own (``chunk_hold``): ``commit_pages`` holds it per chunk of pages, and
+``reconcile`` per phase. It reports through ``checkpoint``, ``note`` and
+``record_paths``. A request thread never holds the boundary for a job's work.
 
 State lives in ``.maintenance-jobs.sqlite`` in the vault's state directory. A
 job belongs to the process that runs it (the idempotency owner identity). A row
@@ -73,10 +73,6 @@ JOB_MODES = frozenset(JOB_FLAGS)
 #: Marks a preview in a row's flags. It is a flag, not a column, because the dedupe key already includes
 #: the flags (an identical running preview joins, a write never does) and the store needs no migration.
 _PREVIEW_FLAG = "preview"
-#: Job kinds whose leaf is not chunked. Their job dispatch keeps the wide mutation boundary for the whole run,
-#: as the CLI does, and a stop lands between phases. A reconcile phase writes derived state that other
-#: phases read, and the CLI's whole-run hold is the measured behaviour to keep; narrowing it is separate work.
-WHOLE_RUN_MODES = frozenset({"reconcile"})  # nosemgrep: ep-word-set -- closed maintain_memory mode literal
 MODE_STATUS = "maintenance-job"
 MODE_CANCEL = "maintenance-job-cancel"
 
@@ -128,8 +124,6 @@ class _Live:
     reason: str | None = None
     thread: threading.Thread | None = None
     chunks: int = 0
-    #: Checkpoints the leaf has passed; a dispatch that passed none has written nothing.
-    checkpoints: int = 0
     committed_paths: list[str] = field(default_factory=list)
     #: Entries a preview's leaf reported as (kind, path, value), kept until the preview ends well (see ``record_planned``).
     planned: list[tuple[str, str, str | None]] = field(default_factory=list)
@@ -366,19 +360,6 @@ def is_job_preview(kwargs: Mapping[str, Any]) -> bool:
     where the leaf refuses it as it always has.
     """
     return kwargs.get("mode") in JOB_MODES and kwargs.get("plan_id") is None and kwargs.get("why") is None
-
-
-def narrows_boundary(kwargs: Mapping[str, Any], surface: str | None) -> bool:
-    """Whether this maintain_memory call holds the narrow boundary in the writer manager.
-
-    A job start only claims a row and launches a thread, and a cancel only flags one; neither touches
-    the vault. A chunked job's own dispatch holds the boundary per chunk in its leaf. A whole-run job's
-    dispatch is the one that keeps the wide boundary.
-    """
-    mode = kwargs.get("mode")
-    if not is_job_write(kwargs):
-        return False
-    return not (surface == SURFACE and mode in WHOLE_RUN_MODES)
 
 
 # --------------------------------------------------------------------------- views
@@ -755,7 +736,7 @@ def _run(
     principal: Any,
     admitted_surface: Any,
 ) -> None:
-    from . import capabilities, foreground_priority
+    from . import capabilities, foreground_priority, writer_lease
     from .governance import principal as principal_module
 
     descriptor = (
@@ -773,7 +754,7 @@ def _run(
             foreground_priority.bulk(stop=live.stop),
         ):
             _JOB.set(live)
-            result = _dispatch(live, command, injected, kwargs)
+            result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
             if isinstance(result, Mapping) and "graph_sync" in result:
                 # The dispatcher joined the graph after the leaf, so its outcome replaces the leaf's "pending".
                 note(graph=result["graph_sync"])
@@ -792,34 +773,6 @@ def _run(
         state, error_code, outcome = FAILED, _error_code(error), {"error": _error_record(error)}
     finally:
         _finish(live, state, error_code, outcome)
-
-
-def _dispatch(live: _Live, command: Any, injected: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-    """Run the job's leaf, retrying a whole-run dispatch that met another writer's turn.
-
-    A whole-run mode takes the manager's own wide guard, as the CLI does, so the guard releases
-    before the graph join that follows the leaf. That guard gives up after seconds and refuses
-    before anything commits, so the job tries again until ``BUSY_BUDGET_SECONDS`` and ends at
-    once on a stop. A chunked job holds the boundary per chunk, through ``chunk_hold``.
-    """
-    from . import writer_lease
-
-    deadline = time.monotonic() + BUSY_BUDGET_SECONDS
-    while True:
-        raise_if_stopped()
-        passed = live.checkpoints
-        try:
-            return writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
-        except OpError as error:
-            if (
-                kwargs.get("mode") not in WHOLE_RUN_MODES
-                or error.code != "MUTATION_BUSY"
-                or error.details.get("committed") is not False
-                # A leaf that reached a checkpoint may have purged derived rows; a retry would misreport it.
-                or live.checkpoints != passed
-                or time.monotonic() >= deadline
-            ):
-                raise
 
 
 def _error_code(error: BaseException) -> str:
@@ -895,6 +848,11 @@ def current_run_id() -> str | None:
     return live.run_id if live is not None else None
 
 
+def holder_kind() -> str:
+    """How a boundary hold names its holder to a blocked writer: a job's run or a command."""
+    return "maintenance-job" if current_run_id() else "command"
+
+
 def committed_paths() -> list[str]:
     """Paths the current job's chunks committed, for a leaf that settles derived state after a stop."""
     live = _JOB.get()
@@ -918,7 +876,6 @@ def checkpoint(phase: str, done: int | None = None, total: int | None = None) ->
     live = _JOB.get()
     if live is None:
         return
-    live.checkpoints += 1
     raise_if_stopped()
     with _write(live.vault_root) as conn:
         row = conn.execute("SELECT cancel_requested FROM jobs WHERE run_id = ?", (live.run_id,)).fetchone()
@@ -1018,7 +975,7 @@ def _settle(
 
 @contextmanager
 def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> Iterator[Any]:
-    """Hold the mutation boundary for one chunk, waiting out a busy boundary for a bounded time.
+    """Hold the mutation boundary for one chunk or one reconcile phase, waiting out a busy boundary for a bounded time.
 
     A busy boundary is another writer's turn, not a failure: the job checks for
     a stop between attempts and gives up only after ``BUSY_BUDGET_SECONDS``.
@@ -1039,7 +996,7 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
                         vault_root,
                         request_id=current_run_id() or writer_lease.active_mutation_request_id(),
                         operation=operation,
-                        holder_kind="maintenance-job",
+                        holder_kind=holder_kind(),
                     )
                 )
                 break

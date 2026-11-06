@@ -22,6 +22,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client
@@ -33,6 +34,7 @@ from exomem import (
     embeddings,
     maintenance_jobs,
     memory_refs,
+    mutation_lock,
     query_data,
     writer_lease,
 )
@@ -870,26 +872,153 @@ def test_a_page_body_edit_after_the_reconcile_preview_does_not_stale_the_plan(se
     assert not (vault / _ORPHAN_FRAMES).exists()
 
 
-def test_a_reconcile_job_waits_for_a_busy_boundary_instead_of_failing(server, vault, monkeypatch) -> None:
-    # Short enough for several of the manager's waits inside the hold below; long enough for the job
+def test_a_reconcile_job_waits_out_a_busy_boundary_in_mid_run_instead_of_failing(
+    server, vault, monkeypatch
+) -> None:
+    # Short enough for the job's hold to meet the busy boundary at once; long enough for the job
     # store's brief reserved-identity contention, which shares this timeout.
     monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
     writer_lease.reset_managers_for_tests()
     _seed_reconcile(vault)
+    armed, refused = threading.Event(), threading.Event()
+    other_writers: list[threading.Thread] = []
+    real_refused = mutation_lock.VaultMutationCoordinator._refused
+
+    def noted_refusal(coordinator, wait_start):
+        if coordinator.kind == mutation_lock.COORDINATOR_VAULT_BOUNDARY and maintenance_jobs.current_run_id():
+            refused.set()
+        return real_refused(coordinator, wait_start)
+
+    real_checkpoint = maintenance_jobs.checkpoint
+
+    def busy_before_the_orphans_hold(phase, *args, **kwargs):
+        # The indexes phase has committed: another writer takes the boundary and keeps it until
+        # the job's next hold has met it busy at least once.
+        if phase == "orphans" and armed.is_set() and maintenance_jobs.current_run_id():
+            holding = threading.Event()
+
+            def hold() -> None:
+                with writer_lease.get_manager().mutation_guard(
+                    vault, request_id="other-writer", operation="semantic edit"
+                ):
+                    holding.set()
+                    refused.wait(_DEADLINE_SECONDS)
+
+            other_writers.append(threading.Thread(target=hold))
+            other_writers[-1].start()
+            assert holding.wait(_DEADLINE_SECONDS)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(mutation_lock.VaultMutationCoordinator, "_refused", noted_refusal)
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", busy_before_the_orphans_hold)
 
     async def scenario(client):
         preview = await _reconcile_preview(client)
-        with _boundary_held(vault):
-            handle = await _reconcile_start(client, preview["plan_id"])
-            # Several of the manager's own waits pass while the other writer holds the boundary.
-            await asyncio.sleep(3.0)
-            waiting = await _status(client, handle["run_id"])
-        return waiting, await _until_terminal(client, handle["run_id"])
+        armed.set()
+        handle = await _reconcile_start(client, preview["plan_id"])
+        return await _until_terminal(client, handle["run_id"])
 
-    waiting, final = _session(server, scenario)
+    try:
+        final = _session(server, scenario)
+    finally:
+        refused.set()
+        for thread in other_writers:
+            thread.join(_DEADLINE_SECONDS)
 
-    assert waiting["state"] == "running"
-    assert final["state"] == "completed"
+    assert len(other_writers) == 1
+    assert refused.is_set()
+    assert (final["state"], final["error_code"]) == ("completed", None)
+    assert _COUNT_ROW in (vault / "Knowledge Base" / "index.md").read_text(encoding="utf-8")
+    assert not (vault / _ORPHAN_FRAMES).exists()
+
+
+def _paused_reconcile_job(server, vault, monkeypatch, write) -> tuple[dict, tuple[bool, bool], object]:
+    """Run a reconcile job that pauses in its lexical refresh while `write()` runs in another thread.
+
+    The lexical refresh holds no boundary of its own: the indexes phase before it has committed,
+    and the orphans phase after it has not run. Returns the job's final status, what the vault
+    showed at the pause (index healed, orphan still there), and what `write()` returned or raised.
+    """
+    _seed_reconcile(vault)
+    armed, reached, proceed = threading.Event(), threading.Event(), threading.Event()
+    real_checkpoint = maintenance_jobs.checkpoint
+
+    def pausing_checkpoint(phase, *args, **kwargs):
+        if phase == "lexical" and armed.is_set() and maintenance_jobs.current_run_id():
+            reached.set()
+            assert proceed.wait(_DEADLINE_SECONDS)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", pausing_checkpoint)
+
+    def outcome() -> object:
+        try:
+            return write()
+        except OpError as error:
+            return error
+
+    async def scenario(client):
+        preview = await _reconcile_preview(client)
+        armed.set()
+        handle = await _reconcile_start(client, preview["plan_id"])
+        assert await asyncio.to_thread(reached.wait, _DEADLINE_SECONDS)
+        seen = (
+            _COUNT_ROW in (vault / "Knowledge Base" / "index.md").read_text(encoding="utf-8"),
+            (vault / _ORPHAN_FRAMES).is_dir(),
+        )
+        written = await asyncio.to_thread(outcome)
+        proceed.set()
+        return await _until_terminal(client, handle["run_id"]), seen, written
+
+    try:
+        return _session(server, scenario)
+    finally:
+        proceed.set()
+
+
+def _ordinary_write(vault: Path, rel: str):
+    """A foreground write through the manager, as any write command makes it."""
+
+    def leaf(vault_root: Path) -> dict[str, str]:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(vault_root / rel, "# Written during a reconcile job\n")],
+            vault_root=vault_root,
+            post_commit_fanout=False,
+        )
+        return {"status": "committed"}
+
+    command = SimpleNamespace(name="canonical_mutation", read_only=False, leaf=leaf)
+    return lambda: writer_lease.get_manager().invoke(command, (vault,), {})
+
+
+def test_an_ordinary_write_commits_between_two_holds_of_a_reconcile_job(server, vault, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
+    writer_lease.reset_managers_for_tests()
+    rel = "Knowledge Base/Records/written-during-reconcile.md"
+
+    final, seen, written = _paused_reconcile_job(server, vault, monkeypatch, _ordinary_write(vault, rel))
+
+    assert written == {"status": "committed"}
+    assert (vault / rel).is_file()
+    assert seen == (True, True)
+    assert (final["state"], final["error_code"]) == ("completed", None)
+    assert not (vault / _ORPHAN_FRAMES).exists()
+
+
+def test_the_wide_boundary_switch_makes_a_reconcile_job_hold_the_boundary_for_its_run(
+    server, vault, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
+    writer_lease.reset_managers_for_tests()
+    rel = "Knowledge Base/Records/written-during-reconcile.md"
+
+    final, seen, written = _paused_reconcile_job(server, vault, monkeypatch, _ordinary_write(vault, rel))
+
+    assert isinstance(written, OpError) and written.code == "MUTATION_BUSY"
+    assert not (vault / rel).exists()
+    assert seen == (True, True)
+    assert (final["state"], final["error_code"]) == ("completed", None)
     assert not (vault / _ORPHAN_FRAMES).exists()
 
 
