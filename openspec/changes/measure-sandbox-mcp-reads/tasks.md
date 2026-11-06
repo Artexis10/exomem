@@ -38,10 +38,27 @@ Tasks 3.5 and 3.6 evidence: PR #2441 ships the staged store projection. `tests/t
 - [ ] 4.4 Synchronize the existing latency capability and this delta when their tasks are shipped; validate and archive without losing later requirements.
 - [x] 4.5 Load the generated collection fixture through both arms' own tools and complete one reduced paired smoke on the managed workers; verify the summary against `summary.schema.json` with the profile and case digests.
 - [x] 4.6 Fill the contract's `fixture_profile_sha256` from the loaded profile.
-- [ ] 4.7 Dispatch the CI jobs once and record the A/A intervals that set the first allowances.
+- [x] 4.7 Dispatch the CI jobs once and record the A/A intervals that set the first allowances.
 - [x] 4.8 Run the MCP read latency jobs in their own nightly and on-demand workflow (`.github/workflows/mcp-read-latency.yml`), outside the Full CI gate and release evidence. Remove their `continue-on-error` once a nightly or dispatched run of that workflow completes every shard inside the 40-minute compare step; verify the run's per-step progress lines and its summary. Gating pull requests or releases on these jobs is a later decision with its own time budget.
 
 Task 4.8 evidence: consecutive nightlies [41438992219](https://github.com/Artexis10/exomem/actions/runs/41438992219) and [41627143694](https://github.com/Artexis10/exomem/actions/runs/41627143694) each completed all eight compare steps within 40 minutes.
 Per-step progress accounts for preparation, startup, fixture loading and quiescence, timeability checks, cases, and cleanup.
 Each run completes 174 cases and 1,044 samples; both summaries report no failures and `state: passed`.
-Regression allowances remain unset.
+Regression allowances were still unset then; task 4.7 sets them.
+
+Task 4.7 evidence: run [42300881194](https://github.com/Artexis10/exomem/actions/runs/42300881194) dispatched the workflow on `v0.162.0`, so head and base were the same commit.
+It reported no failures and `state: passed`, with 24 cases per gating group.
+Each interval contains zero, as identical code should.
+
+| Group | A/A interval (ms) | `allowance_ms` |
+|---|---|---:|
+| records-query | -3.8 to 6.7 | 10 |
+| records-read | -3.5 to 5.9 | 10 |
+| planning-query | -5.4 to 0.0 | 10 |
+| planning-read | -3.8 to 6.5 | 10 |
+| note-read | -8.1 to 17.4 | 20 |
+| search | -136.7 to 208.7 | 210 |
+| recall | -286.5 to 170.5 | 290 |
+
+Each allowance is the smallest 5 ms step at or above the larger absolute bound of its interval.
+A later A/A run can revise them in the same way.
