@@ -37,7 +37,7 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   Later source-bound imports and the installed journey prove preview, resume and owner re-import usability.
   Native re-import execution at the initial custody checkpoint remains unverified; this task requires the handle before create, not a duplicate import.
   Released CI 41977209307 and installed CI 42146338718 provide separately scoped raw-boundary and owner-route proof.
-  Private originals and operational receipts remain outside the repository; personal deployment acceptance remains in S1.6–S1.8.
+  Private originals and operational receipts remain outside the repository; S1.6–S1.8 record deployment acceptance separately below.
 - [x] S1.1 Red: add NEW built-in Records summary create/describe, 100,001st summary row versus items 100,000 cap, no per-row files, bounded page/manifest/held publication and summary read-only edit-back tests; populated items→summary and summary→items refusal through revise/manifest edit/migration, including offline edit/pending publication/held correction, lifecycle history, row-tool guard and over-capacity cases. Assert unchanged authority/mapping/manifest/files/guards/cursor basis after refusal and intact original data/history on a separate NEW target-copy success/failure; include external placement/default items and denied store reads before governance.
   Audit 2026-10-10: `tests/test_collection_store_summary.py`, `test_collection_store_placement.py` and `test_collection_store_projection_access.py` pass and prove every clause except restore. `test_summary_past_the_items_cap_refuses_items_before_reading_a_row` proves the over-capacity case with the items cap scaled to 1,000, because seeding 100,001 rows took about 13 s; "describe" is proven through `inspect`.
   Restore moved to P4.2 (`move-structured-collections-to-sqlite`): no store entry point restores a manifest or declaration until P4.2's `schema_memory(subject="collection-types", operation="restore")` exists, so the refusal is specified and tested with that route. No red-before-green record was kept for these merged tests.
@@ -70,7 +70,7 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   Implementation closure 2026-11-06: installed CI 42146338718 passed the S1 journey in 167.2 seconds on CPython 3.13.14.
   It verifies built-in lifecycle routes, all query planning modes, exact paginated rows, daily count/sum/avg, restart/resume and discovery.
   Its report binds 39 tools to schema, core, chapter and fingerprint observations.
-  This closes implementation; S1.6–S1.8 remain open.
+  S1.6–S1.8 record deployment acceptance separately below.
 
 - [x] S1.5 Red: add first-slice preserved-source create/import/status/resume/query/answer journey with independent expected row/count/value/local-day results, interrupted/uncertain batches, revocation/expiry/full-state loss, wrong principal and host takeover, unknown totals/partial states, snapshot restore and older-reader refusal. Verify no ambient service authority or fabricated complete/zero response can pass.
   Proof closure 2026-11-06 combines the installed journey in CI 42146338718 with the maintained importer and S1 gate suites.
@@ -78,14 +78,14 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   These broader importer cases are not included in the previously reported 237 selected S1 cases or 108 raw-boundary cases.
   `tests/test_collection_store_import_exports.py` covers member-boundary crash/replay; the installed journey adds real service restart/resume and stopped-copy recovery.
   The S1 gate suite supplies snapshot restore and actual older-reader refusal. No general red-before-green record was retained.
-  These are maintained implementation proofs; S1.6–S1.8 still own personal deployment acceptance.
+  These are maintained implementation proofs; S1.6–S1.8 record deployment acceptance separately below.
 - [x] S1.5a Red: with no configured policy, add nested GPS route/place mapping and inherited-classification/unknown-residual/alias tests; trusted surface/principal release versus forged owner flags, default omission with independently expected nonempty metrics, withheld/absent-field select/filter/sort/group/HAVING/count/aggregate/link/text/preview/explain/view/rollup refusals, summary/read/download/receipt/provenance leakage checks, raw-source release independent from metric/field release, location-only update/removal held-publication cache/cursor/availability twins and positive released-location/refreshed-query/revocation controls. Assert exact metric-only counts/order/daily results, successful second metric page and raw owner re-import; blanket denial/zero is not acceptance.
   Proof closure 2026-11-06 adds two missing supported-boundary controls to `tests/test_collection_field_admission.py`.
   Hidden location update/removal preserves exact nonempty daily count/sum/avg, preview availability and metric continuation before and after publication.
   The owner release control now checks an exact location-dependent group/count, followed by refusal after revocation and valid metric continuation.
   Local field-admission and rollup suites pass 58 cases; the existing released and installed proofs cover the remaining supported field/raw routes.
   These tests pass on the existing implementation; no product defect or retrospective red-before-green result is claimed.
-  Unsupported structured text, rich views and Q3 capabilities remain outside this slice. Personal deployment acceptance remains separate.
+  Unsupported structured text, rich views and Q3 capabilities remain outside this slice. S1.6–S1.8 record deployment acceptance separately below.
 - [x] S1.5b Implement declared classification: location and complete owner-reviewed source-path mapping, inherited field admission before AST evaluation, durable owner field/subtree release bound to trusted surface/audience/purpose, default-deny location and separate owner-only immutable raw-artifact release metadata. Apply to every existing query/preview/summary/rollup/view/receipt/egress route with released-field cache/cursor/provenance basis; preserve canonical full-state guards/history. Install raw protection before S1.0 capture and field protection before first external read; verify S1.5a without a new policy selector language or location-derived time offsets.
   S1.5b's raw-first implementation uses the design's explicit protected path/companion binding, protection-first preservation, shared intrinsic admission, distinct whole-artifact grants and independent RAW reader compatibility. Red controls must include a no-policy non-owner control plus remote-owner parity, orphan/stripped companion, protected deduplication/relocation, receipt/extraction leakage, exact text-only original and local recovery, no parent-grant widening to mutable derivatives, recipient release/revocation, held-snapshot swap and an actual unsupported interpreter through the supported launcher. The original raw-first tranche left field admission, store compatibility and real-vault capture/migration acceptance to later work.
   Keep new private vocabulary/project registrations out of shared registries while retaining supplied metadata in the protected companion. Verify content-schema/audit/confirmed relation-producer aggregates against absent-capture twins and positive local-owner/unmarked controls; preserve operator resource/health accounting without new scans or caches.
@@ -94,12 +94,31 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   Implementation closure 2026-11-06: released CI 41977209307 records 36 field-admission cases and 108 raw-boundary cases, all passing.
   These cover inherited mapping, hidden-field twins, verified releases, revocation, raw originals and trusted principals.
   Installed CI 42146338718 also proves nonempty recipient metrics, field release, live revocation, continued metric pagination and continued protected-source refusal.
-  S1.0 records the historical native-execution limitation; real-vault acceptance remains in S1.6–S1.8.
+  S1.0 records the historical native-execution limitation; S1.6–S1.8 record deployment acceptance separately below.
 
 - [ ] S1.5c Bind the plain Cloud cell's concrete verified C4 token to its configured immutable cell ID and owner audience. Keep the issuer family `cloud-cell:<cell-id>` distinct from desktop owner bindings. Recheck enabled matching Cloud configuration for persisted collection import grants, without promoting legacy non-owner jobs. Protected large imports use C5 and immutable controller Jobs; they do not use Hosted tenant scope or upload-session grants. Complete the independent owner/source-grant controls and real-K3s rehearsal before enabling this Cloud path.
-- [ ] S1.6 Run the real-vault journey after preserve/preview and all required row governance, using a NEW built-in Records summary collection; verify S1.2a/b, S1.5/S1.5a/b plus Q7.3–6 authority/crash/rollup tests, exact metric/window/source and historical re-import disclosure evidence. Keep raw private export bytes out of public artifacts.
-- [ ] S1.7 **S1 gate:** independently verify installed MCP owner journey, actual-shape expected rows/daily results, lossless encoding/history/source/authority/placement/portability, measured storage/import RSS/throughput/batch/view costs and named failure diffs; run affected tests during development and full repository correctness/privacy/wheel/schema gates at this completion boundary. Compare provisional targets honestly; no unrelated joins/FTS/ontology/graph/activation or generic authoring prerequisite.
-- [ ] S1.8 Enable only capability-versioned records-summary-v1 for the new owner collection through the release process after S1.7, retain historical pre-GA re-import disclosure evidence and verify existing-Records non-migration, and recheck guarded query/daily rollup. Rollback pauses jobs, disables this slice's reads and retains canonical rows/history/preserved source; resume requires explicit live authority. Leave full Q6 and sibling graph release tasks pending.
+- [x] S1.6 Run the real-vault journey after preserve/preview and all required row governance, using a NEW built-in Records summary collection; verify S1.2a/b, S1.5/S1.5a/b plus Q7.3–6 authority/crash/rollup tests, exact metric/window/source and historical re-import disclosure evidence. Keep raw private export bytes out of public artifacts.
+  Acceptance reconciliation 2026-11-06 combines the complete real source/storage comparison on 0.153.1 with selected installed-owner checks on 0.161.1.
+  The current checks compare exact rows, numeric analytics and source-local daily rollups against retained independent source references.
+  The protected acceptance record binds each runtime, source, query window and comparison; these are separate observations, not one new import run.
+  Derived built-in summaries satisfy C; their canonical authority is the manifest, import log and preserved source, without per-row derived history.
+  The installed and maintained safety proofs above cover the supported field/raw, authority, crash and recovery boundaries.
+  The historical disclosure chain records its addition in #1814 and deliberate retirement in #1943; no specific old native answer is newly claimed.
+- [x] S1.7 **S1 gate:** independently verify installed MCP owner journey, actual-shape expected rows/daily results, lossless encoding/history/source/authority/placement/portability, measured storage/import RSS/throughput/batch/view costs and named failure diffs; run affected tests during development and full repository correctness/privacy/wheel/schema gates at this completion boundary. Compare provisional targets honestly; no unrelated joins/FTS/ontology/graph/activation or generic authoring prerequisite.
+  Independent acceptance reconciliation 2026-11-06 recomputes the retained real-data comparisons and reuses the applicable installed safety and portability proofs.
+  Two complete invented imports with the actual nested shape measure 4.80 and 10.51 MiB additional warm RSS, below 64 MiB.
+  Historical batch costs, current complete-window throughput, storage accounting and bounded deferred publication remain separately labelled observations.
+  Throughput remains below the provisional 10,000 rows/s target; full Q7 capacity and performance tasks remain open.
+  The current interactive timeout remains a failure. Successful explicit analytics does not establish a latency gain or validate unreferenced streams.
+  [PR #2445](https://github.com/Artexis10/exomem/pull/2445) supplies the final exact review and completion-boundary CI for this proof batch.
+  Broader governed QA and the full 100 ms acceptance remain separate programme obligations; this closure does not claim either outcome.
+- [x] S1.8 Enable only capability-versioned records-summary-v1 for the new owner collection through the release process after S1.7, retain historical pre-GA re-import disclosure evidence and verify existing-Records non-migration, and recheck guarded query/daily rollup. Rollback pauses jobs, disables this slice's reads and retains canonical rows/history/preserved source; resume requires explicit live authority. Leave full Q6 and sibling graph release tasks pending.
+  Release reconciliation 2026-11-06 records the already shipped `records-summary-v1` fence from #1818 (`e28abd4a4`) and current 0.161.1 installed acceptance.
+  The original owner-approved activation followed the historical real-vault checkpoint; this audit does not move that event after the present evidence reconciliation.
+  Historical A/B/C proof preserves the first slice's existing-Records non-migration boundary; later parent-authorized migration is a separate event.
+  Current source-backed owner queries and daily rollups supply the guarded recheck within their recorded windows.
+  The maintained slice rollback and installed capability-narrowing proofs retain C authority/data/source and keep A/B usable.
+  A compatible-application downgrade was not supplied to the candidate journey and remains unverified; no new enable toggle or live rollback occurred.
   Parent P3.6 records the removal of `capability.PRE_GA_REIMPORT` and its import answer in PR #1943 (`714568d8d`, released in 0.140.0). Keep the historical disclosure evidence; do not require the removed warning for current S1 acceptance. This correction leaves S1.6–S1.8 and their other acceptance requirements open.
   Real-vault verification 2026-10-17, read-only, through the installed owner MCP path of a desktop-only candidate build (v0.121.0 with this capability on):
   - Exact results: the selected week's per-day counts of every sample stream equal an independently sealed reference built from the raw export, with zero difference on every stream-day. The day and session context values match too. The daily rollup serves count, sum and average, and sum divided by the non-null count equals the average on every day.
@@ -108,7 +127,7 @@ This is the first runnable delivery boundary, before unrelated capabilities. Reu
   - Under host load, interactive calls timed out. A laptop profile then found about 38 ms of fixed setup per call and no work that scales with rows. The loaded runs coincided with high host load and the service's CPU-quota throttling, and the quiet rerun showed none; host CPU contention as the sole cause is unverified.
   - The re-import disclosure was missing from import answers and was added (#1814).
   - Owner decision at that checkpoint: enable the capability in the next release.
-    The proof closures above leave S1.5c and S1.6–S1.8 open.
+    The first-slice closures above leave S1.5c and the full-capability tasks open.
     At that checkpoint, the remaining gaps were:
     - import peak RSS was never measured;
     - import throughput (about 2,500 rows/s for derived replay) is below the provisional 10,000 rows/s;

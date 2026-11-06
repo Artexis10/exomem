@@ -180,8 +180,10 @@ def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
     assert query(store, {**raw, "page": {"limit": 1, "after": first["next_cursor"]}})["rows"] == [{"count": 2}]
 
 
-@pytest.mark.parametrize("place", ["corrected", None], ids=["update", "removal"])
-def test_hidden_location_change_preserves_daily_rollups_before_and_after_publication(store, place):
+@pytest.mark.parametrize("mutation", [
+    {"changes": {"place": "corrected"}}, {"changes": {}, "delete_fields": ["place"]},
+], ids=["update", "removal"])
+def test_hidden_location_change_preserves_daily_rollups_before_and_after_publication(store, mutation):
     """A private location edit that changes daily metrics or invalidates their preview or continuation."""
     from test_collection_rollups import THIRD
     from test_collection_rollups import manifest as rollup_manifest
@@ -204,8 +206,8 @@ def test_hidden_location_change_preserves_daily_rollups_before_and_after_publica
     assert first["plan"]["strategy"] == "rollup"
     assert first["groups"] == [{"day": "2026-03-01", "count": 2, "sum": 3, "avg": 1.5}]
     assert first["next_cursor"]
-    changed = store.update_record(CID, item_key=OTHER, changes={"place": place}, why="correct private location",
-        expected_item_version=item_version, expected_container_hash=receipt["after_container_hash"])
+    changed = store.update_record(CID, item_key=OTHER, why="correct private location",
+        expected_item_version=item_version, expected_container_hash=receipt["after_container_hash"], **mutation)
     assert changed["outcome"] == "committed"
     for published in (False, True):
         if published:

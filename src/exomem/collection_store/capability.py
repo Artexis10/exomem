@@ -2,8 +2,8 @@
 
 ``records-summary-v1`` is the first slice: creating a NEW summary collection, every
 route on one, and preserved-source import. The S1.8 release enabled it through the release
-process by the owner's decision, after a real-vault verification; the S1.6 and S1.7 gates
-stay open (OpenSpec add-collection-query-engine, task S1.8). This is a repository-owned release fence,
+process by the owner's decision, after a real-vault verification. The S1.6–S1.8 task
+records retain its acceptance evidence and limits. This is a repository-owned release fence,
 as ``governance.projection_runtime`` keeps for projected serving: every host running
 one release answers the same, so a vault restored on another host behaves as it did.
 No environment variable, caller argument or vault state turns it on. Slice rollback
