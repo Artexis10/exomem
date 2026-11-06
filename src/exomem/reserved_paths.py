@@ -1515,18 +1515,19 @@ def inspect_generic_version(vault_root: Path, value: object) -> GenericFileVersi
         with _generic_identity_catalogue_scope(vault_root, value) as identities:
             parent_path, leaf = _leaf_spelling(value)
             with held_fs.acquire(Path(vault_root)).require() as filesystem:
-                with filesystem.parent(parent_path).require() as parent:
-                    _refuse_private_identity(parent.identity, identities)
-                    with filesystem.file(parent, leaf).require() as file:
-                        _require_current_generic_directory(filesystem, parent)
-                        _refuse_private_identity(file.identity, identities)
-                        started = time.time_ns()
-                        version = file.version()
-                        if file.identity.link_count != 1 or not file.version_witness_supported() or not _aged_generic_version(version, started):
-                            return None
-                        _require_current_generic_version(vault_root, value, filesystem, parent_path, leaf, parent, file, version)
-                        request_budget.checkpoint()
-                        return GenericFileVersion(filesystem.root_identity, version)
+                started = time.time_ns()
+                with filesystem.read_version_probe(
+                    parent_path, leaf, admit_identity=lambda identity: _refuse_private_identity(identity, identities),
+                ).require() as probe:
+                    version = probe.version
+                    if not _aged_generic_version(version, started):
+                        return None
+                    with _generic_identity_catalogue_scope(vault_root, value) as current:
+                        _refuse_private_identity(probe.parent_identity, current)
+                        _refuse_private_identity(version.identity, current)
+                        probe.require_current(admit_identity=lambda identity: _refuse_private_identity(identity, current))
+                    request_budget.checkpoint()
+                    return GenericFileVersion(filesystem.root_identity, version)
     except TimeoutError:
         raise
     except (OSError, held_fs.HeldFsError, ReservedPathLeafError, NotImplementedError):

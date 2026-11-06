@@ -303,6 +303,10 @@ def test_container_fact_cannot_hide_same_size_claim_edits_with_restored_mtime(tm
             file_type = type(file)
     if not trusted:
         monkeypatch.setattr(file_type, "version_witness_supported", lambda self: False)
+        if os.name == "posix":
+            from exomem import _held_fs_posix
+
+            monkeypatch.setattr(_held_fs_posix, "_version_witness_supported", lambda _descriptor: False)
         assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
     elif reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
         pytest.skip("requires a descriptor-qualified native ext filesystem")
@@ -320,30 +324,34 @@ def test_container_fact_cannot_hide_same_size_claim_edits_with_restored_mtime(tm
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux held read admission")
-def test_container_metadata_fact_cannot_bypass_a_current_read_open_refusal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("denied", ["leaf", "ancestor"])
+def test_container_metadata_fact_cannot_bypass_a_current_read_open_refusal(tmp_path, monkeypatch, denied):
     """A sandbox can admit O_PATH metadata while refusing the ordinary read open required by canonical classification."""
     from exomem import _held_fs_posix, document_containers, reserved_paths
     from exomem import vault as vault_module
 
     monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
     monkeypatch.setattr(find_corpus, "CACHE", find_corpus.FrontmatterCache())
-    path = tmp_path / "ordinary.md"
+    (tmp_path / "notes").mkdir()
+    path = tmp_path / "notes" / "ordinary.md"
+    relative = path.relative_to(tmp_path).as_posix()
     _page(path, "Ordinary")
-    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
-    if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+    assert document_containers.parent_binding_for_path(tmp_path, relative) is None
+    if reserved_paths.inspect_generic_version(tmp_path, relative) is None:
         pytest.skip("requires a descriptor-qualified native ext filesystem")
     opened = _held_fs_posix._open_relative
     def refused(parent, name, flags, *args):
-        if name == path.name and not flags & os.O_PATH:
+        if name == (path.name if denied == "leaf" else "notes") and not flags & os.O_PATH:
             raise PermissionError("current read opens are refused")
         return opened(parent, name, flags, *args)
     monkeypatch.setattr(_held_fs_posix, "_open_relative", refused)
-    assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
+    assert reserved_paths.inspect_generic_version(tmp_path, relative) is None
     with pytest.raises(reserved_paths.ReservedPathLeafError):
-        document_containers.parent_binding_for_path(tmp_path, path.name)
+        document_containers.parent_binding_for_path(tmp_path, relative)
 
 
-def test_container_metadata_hit_cannot_follow_an_exchanged_parent(tmp_path, monkeypatch):
+@pytest.mark.parametrize("during_probe", [False, True], ids=["before", "during"])
+def test_container_metadata_hit_cannot_follow_an_exchanged_parent(tmp_path, monkeypatch, during_probe):
     """The identical file behind a new parent symlink must not inherit the old generic admission."""
     from exomem import document_containers, reserved_paths
     from exomem import vault as vault_module
@@ -355,9 +363,27 @@ def test_container_metadata_hit_cannot_follow_an_exchanged_parent(tmp_path, monk
     path = parent / "ordinary.md"
     _page(path, "Ordinary")
     assert document_containers.parent_binding_for_path(tmp_path, "notes/ordinary.md") is None
-    parent.rename(tmp_path / "moved")
-    parent.symlink_to(tmp_path / "moved", target_is_directory=True)
-    assert reserved_paths.inspect_generic_version(tmp_path, "notes/ordinary.md") is None
+    if during_probe and reserved_paths.inspect_generic_version(tmp_path, "notes/ordinary.md") is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    def exchange():
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(tmp_path / "moved", target_is_directory=True)
+    with monkeypatch.context() as patch:
+        if during_probe:
+            from exomem import held_fs
+
+            with held_fs.acquire(tmp_path).require() as filesystem:
+                filesystem_type = type(filesystem)
+            acquire = filesystem_type.read_version_probe
+            def exchange_after_acquisition(self, *args, **kwargs):
+                result = acquire(self, *args, **kwargs)
+                if result.ok:
+                    exchange()
+                return result
+            patch.setattr(filesystem_type, "read_version_probe", exchange_after_acquisition)
+        else:
+            exchange()
+        assert reserved_paths.inspect_generic_version(tmp_path, "notes/ordinary.md") is None
     with pytest.raises(reserved_paths.ReservedPathLeafError):
         document_containers.parent_binding_for_path(tmp_path, "notes/ordinary.md")
 
@@ -385,7 +411,7 @@ def test_generic_read_witness_cannot_describe_a_write_after_the_consumed_image(t
 
 def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(tmp_path, monkeypatch):
     """A sandbox may allow the canonical reader while refusing the optional O_PATH closing probe."""
-    from exomem import document_containers, held_fs, reserved_paths, runtime_resources
+    from exomem import document_containers, reserved_paths, runtime_resources
     from exomem import vault as vault_module
 
     monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
@@ -394,14 +420,17 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
     _page(path, "Ordinary")
     if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
         pytest.skip("requires a descriptor-qualified native ext filesystem")
+    from exomem import _held_fs_posix, held_fs
+
+    opened = _held_fs_posix._open_relative
     with held_fs.acquire(tmp_path).require() as filesystem:
         filesystem_type = type(filesystem)
-    parent = filesystem_type.parent
-    def unavailable(self, relative, **kwargs):
-        if kwargs.get("access") == "identity":
-            return held_fs.HeldResult(error=held_fs.HeldFsError("CAPABILITY_UNAVAILABLE", "metadata closing is unavailable"))
-        return parent(self, relative, **kwargs)
-    monkeypatch.setattr(filesystem_type, "parent", unavailable)
+    parent_open = filesystem_type.parent
+    def unavailable(parent, name, flags, *args):
+        if flags & os.O_PATH:
+            raise PermissionError("metadata closing is unavailable")
+        return opened(parent, name, flags, *args)
+    monkeypatch.setattr(_held_fs_posix, "_open_relative", unavailable)
     snapshot = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
     assert snapshot.data == path.read_bytes() and snapshot.version_witness.version is None
     assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
@@ -418,15 +447,79 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
         with pytest.raises(reserved_paths.ReservedPathLeafError, match="RESERVED_PATH"):
             reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
     for failure in (runtime_resources.PreparationBudgetExceeded, TimeoutError):
-        def exhausted(self, relative, *, failure=failure, **kwargs):
+        def exhausted(parent, name, flags, *args, failure=failure):
+            if flags & os.O_PATH:
+                raise failure("the request ended during metadata validation")
+            return opened(parent, name, flags, *args)
+        monkeypatch.setattr(_held_fs_posix, "_open_relative", exhausted)
+        def exhausted_parent(self, relative, *, failure=failure, **kwargs):
             if kwargs.get("access") == "identity":
                 raise failure("the request ended during metadata validation")
-            return parent(self, relative, **kwargs)
-        monkeypatch.setattr(filesystem_type, "parent", exhausted)
+            return parent_open(self, relative, **kwargs)
+        monkeypatch.setattr(filesystem_type, "parent", exhausted_parent)
         with pytest.raises(failure):
             reserved_paths.inspect_generic_version(tmp_path, path.name)
         with pytest.raises(failure):
             reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+    for descriptor in Path("/proc/self/fd").iterdir():
+        try:
+            target = Path(os.readlink(descriptor))
+        except FileNotFoundError:
+            continue
+        assert not target.is_relative_to(tmp_path)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires POSIX record locks and Linux metadata admission")
+def test_a_private_metadata_parent_cannot_release_its_childs_record_lock(tmp_path, monkeypatch):
+    """Opening a child before admitting its private parent can drop an existing SQLite owner's POSIX locks."""
+    import fcntl
+    import subprocess
+
+    from exomem import reserved_paths
+
+    parent = tmp_path / "notes"
+    parent.mkdir()
+    path = parent / "record.bin"
+    path.write_bytes(b"ordinary")
+    identity = reserved_paths._lstat_identity(parent)
+    monkeypatch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root, **_kwargs: reserved_paths.IdentityCatalogue(
+        {(identity.device, identity.inode, identity.kind): "embeddings-store"},
+    ))
+    with path.open("r+b") as owner:
+        fcntl.lockf(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert reserved_paths.inspect_generic_version(tmp_path, "notes/record.bin") is None
+        competing = subprocess.run([
+            sys.executable, "-c",
+            "import fcntl, sys\nwith open(sys.argv[1], 'r+b') as file:\n"
+            "    try: fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "    except BlockingIOError: sys.exit(0)\n"
+            "    sys.exit(1)\n", str(path),
+        ], capture_output=True, timeout=5, check=False)
+    assert competing.returncode == 0, competing.stderr.decode()
+
+
+def test_metadata_closing_rechecks_a_new_private_publication(tmp_path, monkeypatch):
+    """A leaf admitted at opening must not retain its witness after its owner publishes it as private."""
+    from exomem import held_fs, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    path = tmp_path / "ordinary.md"
+    _page(path, "Ordinary")
+    if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    acquire = filesystem_type.read_version_probe
+    def publish_after_acquisition(self, *args, **kwargs):
+        result = acquire(self, *args, **kwargs)
+        identity = result.require().version.identity
+        monkeypatch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root, **_kwargs: reserved_paths.IdentityCatalogue(
+            {(identity.device, identity.inode, identity.kind): "embeddings-store"},
+        ))
+        return result
+    monkeypatch.setattr(filesystem_type, "read_version_probe", publish_after_acquisition)
+    assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
 
 
 def test_write_during_optional_witness_close_returns_consumed_bytes_without_a_version(tmp_path, monkeypatch):

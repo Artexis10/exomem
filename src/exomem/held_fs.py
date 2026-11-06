@@ -191,6 +191,26 @@ class HeldFile:
         return False
 
 
+class HeldVersionProbe:
+    """One ordinary read admission held through a fresh closing version check."""
+
+    __slots__ = ()
+    parent_identity: StableIdentity
+    version: FileVersion
+
+    def __enter__(self) -> HeldVersionProbe:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+    def require_current(self, *, admit_identity: Callable[[StableIdentity], None]) -> None:
+        raise NotImplementedError
+
+
 class HeldFilesystem:
     """A retained vault-root anchor with handle-relative leaf operations."""
 
@@ -254,6 +274,15 @@ class HeldFilesystem:
         require_name: bool = True,
     ) -> HeldResult[None]:
         raise NotImplementedError
+
+    def read_version_probe(
+        self, parent_path: str, leaf: str, *, admit_identity: Callable[[StableIdentity], None],
+    ) -> HeldResult[HeldVersionProbe]:
+        """Admit the parent before opening its leaf; retain no admission callback.
+
+        Unsupported backends keep the caller's canonical full-read fallback.
+        """
+        return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "read version probe is unavailable"))
 
     def read(self, file: HeldFile, *, max_bytes: int | None = None) -> HeldResult[bytes]:
         raise NotImplementedError

@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64, c_ulong
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import request_budget
@@ -25,6 +26,7 @@ from .held_fs import (
     HeldFilesystem,
     HeldFsError,
     HeldResult,
+    HeldVersionProbe,
     SagaRecord,
     StableIdentity,
     name_variants,
@@ -169,6 +171,18 @@ def _identity(info: os.stat_result) -> StableIdentity:
     else:
         kind = "other"
     return StableIdentity(info.st_dev, info.st_ino, kind, info.st_nlink)
+
+
+def _file_version(info: os.stat_result) -> FileVersion:
+    return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _version_witness_supported(descriptor: int) -> bool:
+    if _FSTATFS is None:
+        return False
+    info = _StatFs()
+    # 0xef53 is the kernel's closed ext2/ext3/ext4 filesystem magic.
+    return _FSTATFS(descriptor, byref(info)) == 0 and info.f_type == 0xEF53
 
 
 def _same_object(left: StableIdentity, right: StableIdentity) -> bool:
@@ -340,23 +354,71 @@ class PosixHeldFile(HeldFile):
 
     def version(self) -> FileVersion:
         self.check()
-        info = _fstat(self.descriptor)
-        return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        return _file_version(_fstat(self.descriptor))
 
     def version_witness_supported(self) -> bool:
         self.check()
         # O_PATH alone does not establish an ordinary reader's current admission.
-        if _FSTATFS is None or self.access == "identity":
-            return False
-        info = _StatFs()
-        # 0xef53 is the kernel's closed ext2/ext3/ext4 filesystem magic.
-        return _FSTATFS(self.descriptor, byref(info)) == 0 and info.f_type == 0xEF53
+        return self.access != "identity" and _version_witness_supported(self.descriptor)
 
     def close(self) -> None:
         if not self.closed:
             _close(self.descriptor)
             _close(self.parent_descriptor)
             self.closed = True
+
+
+@dataclass(slots=True)
+class PosixVersionProbe(HeldVersionProbe):
+    filesystem: PosixHeldFilesystem
+    parent_path: str
+    leaf: str
+    parent_identity: StableIdentity
+    version: FileVersion
+    descriptor: int
+    parent_descriptor: int | None
+    closed: bool = False
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            try:
+                _close(self.descriptor)
+            finally:
+                if self.parent_descriptor is not None:
+                    _close(self.parent_descriptor)
+
+    def require_current(self, *, admit_identity: Callable[[StableIdentity], None]) -> None:
+        parent_descriptor = descriptor = None
+        try:
+            if self.closed or self.filesystem.closed:
+                raise OSError(errno.ESTALE, "held version probe is closed")
+            request_budget.checkpoint()
+            parent_descriptor = _open_relative(
+                self.filesystem.descriptor, self.parent_path, _IDENTITY_FLAGS | os.O_DIRECTORY,
+            )
+            parent_identity = _identity(_fstat(parent_descriptor))
+            admit_identity(parent_identity)
+            if not _same_object(parent_identity, self.parent_identity):
+                raise OSError(errno.ESTALE, "held parent identity changed")
+            descriptor = _open_relative(parent_descriptor, self.leaf, _IDENTITY_FLAGS)
+            current = _file_version(_fstat(descriptor))
+            if current.identity.kind != "file":
+                raise OSError(errno.ELOOP, "leaf is not a regular file")
+            admit_identity(current.identity)
+            if current != self.version:
+                raise OSError(errno.ESTALE, "held file version changed")
+        except TimeoutError:
+            raise
+        except OSError as error:
+            raise _error(error) from error
+        finally:
+            try:
+                if descriptor is not None:
+                    _close(descriptor)
+            finally:
+                if parent_descriptor is not None:
+                    _close(parent_descriptor)
 
 
 class PosixHeldFilesystem(HeldFilesystem):
@@ -518,6 +580,77 @@ class PosixHeldFilesystem(HeldFilesystem):
             if parent_descriptor is not None:
                 _close(parent_descriptor)
             return HeldResult(error=_error(error))
+
+    def read_version_probe(
+        self, parent_path: str, leaf: str, *, admit_identity: Callable[[StableIdentity], None],
+    ) -> HeldResult[HeldVersionProbe]:
+        parts = _parts(parent_path)
+        if parts is None or not _leaf(leaf):
+            return HeldResult(error=_invalid())
+        if self.closed or not sys.platform.startswith("linux"):
+            return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "read version probe is unavailable"))
+        parent_descriptor, grandparent_descriptor, descriptor = self.descriptor, None, None
+        transferred = False
+        try:
+            # Borrow the root and own descendants together; no independently owned wrapper needs a dup.
+            for index, part in enumerate(parts):
+                request_budget.checkpoint()
+                child = _open_relative(parent_descriptor, part, _DIRECTORY_FLAGS)
+                previous, parent_descriptor = parent_descriptor, child
+                if index == len(parts) - 1:
+                    grandparent_descriptor = previous
+                elif previous != self.descriptor:
+                    _close(previous)
+            parent_identity = _identity(_fstat(parent_descriptor))
+            grandparent_identity = (_identity(_fstat(grandparent_descriptor))
+                                    if grandparent_descriptor is not None else None)
+            # Parent admission precedes the ordinary leaf open: closing it can release POSIX record locks.
+            admit_identity(parent_identity)
+            descriptor = _open_relative(parent_descriptor, leaf, _READ_FLAGS)
+            identity = _identity(_fstat(descriptor))
+            if identity.kind != "file":
+                raise OSError(errno.ELOOP, "leaf is not a regular file")
+            admit_identity(identity)
+            if not _same_object(_identity(_fstat(parent_descriptor)), parent_identity):
+                raise OSError(errno.ESTALE, "held parent changed")
+            if grandparent_descriptor is not None and (
+                not _same_object(_identity(_fstat(grandparent_descriptor)), grandparent_identity)
+                or not _same_object(
+                    _identity(_stat(parts[-1], dir_fd=grandparent_descriptor, follow_symlinks=False)), parent_identity,
+                )
+            ):
+                raise OSError(errno.ESTALE, "held parent name changed")
+            version = _file_version(_fstat(descriptor))
+            if version.identity != identity:
+                raise OSError(errno.ESTALE, "held file identity changed")
+            if not _version_witness_supported(descriptor):
+                return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "descriptor version witness is unavailable"))
+            previous, grandparent_descriptor = grandparent_descriptor, None
+            if previous is not None and previous != self.descriptor:
+                _close(previous)
+            probe = PosixVersionProbe(
+                self, parent_path, leaf, parent_identity, version, descriptor,
+                parent_descriptor if parent_descriptor != self.descriptor else None,
+            )
+            result = HeldResult(value=probe)
+            transferred = True
+            return result
+        except TimeoutError:
+            raise
+        except OSError as error:
+            return HeldResult(error=_error(error))
+        finally:
+            try:
+                if grandparent_descriptor is not None and grandparent_descriptor != self.descriptor:
+                    _close(grandparent_descriptor)
+            finally:
+                if not transferred:
+                    try:
+                        if descriptor is not None:
+                            _close(descriptor)
+                    finally:
+                        if parent_descriptor != self.descriptor:
+                            _close(parent_descriptor)
 
     def validate_directory(
         self,
