@@ -1997,6 +1997,11 @@ class LeaseConfig:
     def enabled(self) -> bool:
         return bool(self.url)
 
+    @property
+    def coordinated_across_hosts(self) -> bool:
+        """Writer authority can move to another host: coordination is on in the multi-host topology."""
+        return self.enabled and self.topology == "multi-host"
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LeaseConfig:
         values = os.environ if env is None else env

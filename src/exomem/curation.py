@@ -3651,8 +3651,9 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
         if writer is None:
             return
         reason = RECOVERY_STORE_TRANSACTION_ABSENT
-    elif step["kind"] in PRESERVATION_STEP_KINDS and not writer_lease.active_manager().config.enabled:
-        # Another host can take the lease over before this host's `started` reaches it.
+    elif step["kind"] in PRESERVATION_STEP_KINDS and not writer_lease.active_manager().config.coordinated_across_hosts:
+        # Under writer-lease coordination across hosts, another host can take the lease over before this
+        # host's `started` reaches it.
         writer, reason = None, RECOVERY_PUBLICATION_NOT_STARTED
     else:
         return

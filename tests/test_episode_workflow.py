@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
+from test_managed_collections_migration import coordinator_url as coordinator_url
 
 from exomem import commands, curation, episode_store, episode_workflow, server
 from exomem import episode_model as model
@@ -1643,6 +1644,16 @@ def _routed_preservation(vault: Path, kind: str, filename: str) -> tuple[dict, d
     return original, leaf, native, disposed
 
 
+def _coordinate_writes(monkeypatch: pytest.MonkeyPatch, url: str, topology: str) -> None:
+    """Take the vault's writer lease from the coordinator at `url`, in a `topology` deployment."""
+    for name, value in {
+        "EXOMEM_WRITER_LEASE_URL": url, "EXOMEM_WRITER_LEASE_TOPOLOGY": topology,
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "episode", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+
 def _publication_record(vault: Path, leaf: dict, attempt: int) -> Path:
     """Where curation keeps the publication record of one episode attempt of `leaf`."""
     invocation = model.invocation_id(model.episode_id(KEY), {**leaf, "binding": {"operation_id": leaf["operation_id"]}}, attempt)
@@ -1690,10 +1701,16 @@ def test_moved_core_after_partial_native_publication_stays_uncertain(vault, owne
     assert carriers == [elsewhere]
 
 
-def test_native_attempt_stopped_before_first_install_retries_once(vault, owner, enabled, monkeypatch):
-    """A preservation killed before it began publishing must retry once at its sealed allocation, not stay stuck."""
+@pytest.mark.parametrize("lease", ["uncoordinated", "single-host"])
+def test_native_attempt_stopped_before_first_install_retries_once(vault, owner, enabled, monkeypatch, request, lease):
+    """A preservation killed before it began publishing must retry once at its sealed allocation, not stay stuck.
+
+    A single-host coordinator keeps writer authority on this host, so it proves as much as no coordinator.
+    """
     from exomem import vault as vault_writes
 
+    if lease == "single-host":
+        _coordinate_writes(monkeypatch, request.getfixturevalue("coordinator_url"), lease)
     _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "stopped.bin")
     log_before = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
 
@@ -1761,6 +1778,30 @@ def test_failed_rollback_then_kill_keeps_native_attempt_uncertain(vault, owner, 
     assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
     assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
     assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "started"
+
+
+def test_native_attempt_under_a_multi_host_lease_stays_uncertain(vault, owner, enabled, monkeypatch, coordinator_url):
+    """An unstarted record proves nothing when another host can take writer authority before `started` reaches it."""
+    from exomem import vault as vault_writes
+
+    _coordinate_writes(monkeypatch, coordinator_url, "multi-host")
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "elsewhere.bin")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "intent"
+    assert not (vault / native["destination"]).exists()
 
 
 def test_missing_publication_record_keeps_native_attempt_uncertain(vault, owner, enabled, monkeypatch):
