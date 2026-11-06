@@ -21,7 +21,7 @@ When an artifact item's staged copy is missing in a recorded stage, `apply` SHAL
 - the Source page holds the text between its fences, byte for byte, as the plan's `original_sha256` and `original_bytes` describe;
 - the staged file still matches the manifest entry and the plan.
 
-A page of a paged collection SHALL remove only the text that it filed. When the call budget runs low, `finish` SHALL stop starting removals; the copies that remain count as filed copies.
+A page of a paged collection SHALL remove only the text that it filed. When the call budget runs low, `finish` SHALL stop starting removals; the copies that remain are unchecked and count as unfiled. A repeat `finish` of a finished run that still owes a check SHALL check and remove those copies, and SHALL change nothing else of its record.
 
 When a text item's staged copy is missing in a recorded stage, the run SHALL treat the item as consumed when its Source page verifies in the same way.
 
@@ -59,6 +59,13 @@ When a text item's staged copy is missing in a recorded stage, the run SHALL tre
 - **WHEN** the Source page of a filed text item no longer holds the planned text between its fences, or the item still owes its note, or the item failed
 - **THEN** its staged copy remains, and the residual reports it as unfiled
 - **AND** a text item whose Source page no longer holds its text is reported as `source_differs`, so `finish` offers the review and never the close-the-import action
+- **AND** a copy that `finish` did not reach is reported as `unchecked`, with the same effect
+
+#### Scenario: A repeat finish checks the copies the first one did not reach
+
+- **WHEN** `finish` runs out of its call budget before it checks every filed text copy, and the run is then finished again
+- **THEN** the first `finish` reports the copies it did not reach as `unchecked` and offers no close-the-import action
+- **AND** the repeat `finish` removes the copies whose Source page holds the text, and reports no unchecked copy
 
 #### Scenario: Opted-out runs keep their staged copies
 

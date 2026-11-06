@@ -30,6 +30,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "ineligible": (False, "{n} of a kind that adoption does not import"),
     OUTSIDE_RUN: (False, "{n} not scanned (hidden, added after the scan, or on a later page)"),
     "source_differs": (False, "{n} with a Source page that no longer holds the text"),
+    "unchecked": (False, "{n} not yet checked against their Source page; call finish again to check them"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
 })
@@ -158,6 +159,7 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     skipped = {row.get("path"): row.get("code") for row in plan.get("skipped") or []}
     selected = set((page.get("selection") or {}).get("paths") or [])
     outcomes = page.get("outcomes") or {}
+    removes_copies = page.get("consume", True)  # a run that opted out never checks or removes a copy
 
     def classify(path: str) -> str | None:
         item = items.get(path)
@@ -169,6 +171,8 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
             if status in filed_statuses:
                 if outcome.get("source_differs"):
                     return "source_differs"
+                if item["form"] == "text" and removes_copies and not outcome.get("consumed"):
+                    return "unchecked"  # `finish` has not yet checked this copy against its Source page, nor removed it
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:
@@ -213,13 +217,15 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
     the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
     the last page's report covers the whole stage. The reasons are a closed set of result keys that this
-    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `pending`,
-    `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then reports)
-    and `outside_run` (hidden or added after the scan, or on a later page not yet scanned). `text` and `kept`
-    are in the Knowledge Base and only their staged copy stays. Every other reason is a file that adoption did
-    not file, `source_differs` included: a filed text whose Source page no longer holds its text, so that the
-    staged copy is the only exact one. `unfiled` counts those, and `summary` says in one sentence what needs
-    the person. The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem command,
+    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `unchecked`,
+    `pending`, `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes`
+    then reports) and `outside_run` (hidden or added after the scan, or on a later page not yet scanned). `text`
+    and `kept` are in the Knowledge Base and only their staged copy stays. Every other reason is a file that
+    adoption did not file. `source_differs` is a filed text whose Source page no longer holds its text, so that
+    the staged copy is the only exact one. `unchecked` is a filed text that `finish` has not yet checked against
+    its Source page (its call budget ran out, for example); a repeat `finish` checks it. A run that opted out of
+    consuming never checks, so its filed text stays `text`. `unfiled` counts those, and `summary` says in one
+    sentence what needs the person. The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem command,
     so its stage goes by hand. Both name the whole stage folder, which holds the residual and nothing else. A
     page that later pages follow names no discard route, because the folder still holds their files:
     `more_pages` says so.

@@ -29,7 +29,7 @@ A text item is not consumed in `apply`, because its note may still be owed. `fin
 
 The file watcher no longer matters: the vault scans skip `_Imports/<import_id>/` (task 3.5), so a removal publishes nothing. A text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact.
 
-`finish` stops starting removals when the call budget runs low. The copies that remain stay in the residual as filed copies, and the discard removes them. A page of a paged collection removes only its own filed text.
+`finish` stops starting removals when the call budget runs low. The copies that remain stay in the residual as `unchecked`, which counts as unfiled, so `finish` offers the review and no close. A repeat `finish` on the finished run checks them and removes the verified copies. A page of a paged collection removes only its own filed text.
 
 A stage is recorded when its own manifest lists each staged file with its path, size and SHA-256:
 
@@ -56,7 +56,7 @@ The committed Source is the recovery record, not a flag in the run object. When 
 - `retry_failed`;
 - a concurrent run on the same stage.
 
-Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending, outside the run, and a filed text whose Source page no longer holds its text) from the filed copies that remain, and a `summary` sentence names the unfiled groups. A review is offered only while unfiled files remain.
+Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending, outside the run, and a filed text whose Source page no longer holds its text, and a filed text not yet checked against its Source page) from the filed copies that remain, and a `summary` sentence names the unfiled groups. A review is offered only while unfiled files remain.
 
 ### D3. Free space is checked per chunk
 

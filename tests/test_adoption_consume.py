@@ -285,7 +285,7 @@ def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_rep
     assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["files"] == 0
 
 
-def test_finish_stops_starting_removals_when_its_budget_runs_low_and_counts_the_rest_as_filed(
+def test_finish_stops_starting_removals_when_its_budget_runs_low_and_a_repeat_finish_checks_the_rest(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
@@ -299,15 +299,26 @@ def test_finish_stops_starting_removals_when_its_budget_runs_low_and_counts_the_
             self.affordable -= 1
             return self.affordable >= 0
 
-    monkeypatch.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
-
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    with monkeypatch.context() as short_budget:
+        short_budget.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
+        finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
     left = [name for name in notes if _staged(vault, staged, name).exists()]
     residual = finished["finish"]["residual"]
     assert len(left) == 2 and finished["finish"]["consumed"] == 1
-    assert residual["by_reason"] == {"text": {"files": 2, "bytes": sum(len(notes[name]) for name in left)}}
-    assert residual["unfiled"] == {"files": 0, "bytes": 0}
+    unchecked = {"files": 2, "bytes": sum(len(notes[name]) for name in left)}
+    assert residual["by_reason"] == {"unchecked": unchecked}
+    assert residual["unfiled"] == unchecked
+    assert "call finish again" in residual["summary"]
+    actions = {action["action"]: action["description"] for action in finished["next_actions"]}
+    assert {"finish", "review-residual"} <= set(actions) and "Nothing unfiled is left to lose" not in actions["discard"]
+
+    repeated = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert not any(_staged(vault, staged, name).exists() for name in notes)
+    assert repeated["finish"]["consumed"] == 3
+    assert repeated["finish"]["residual"]["files"] == 0 and repeated["finish"]["residual"]["unfiled"]["files"] == 0
+    assert [action["action"] for action in repeated["next_actions"]] == ["work-item"]
 
 
 def test_a_run_started_with_consume_false_keeps_every_staged_copy(tmp_path: Path) -> None:

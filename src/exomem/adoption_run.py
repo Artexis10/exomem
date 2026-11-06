@@ -959,6 +959,11 @@ def _next_actions(run: dict) -> list[dict]:
             {"action": "work-item", "status": "available",
              "description": "Load bounded read-only context to submit structured proposals."}
         )
+        if _owes_a_text_check(run):
+            actions.append(
+                {"action": "finish", "status": "available",
+                 "description": "Check the staged text copies that the last finish left, and remove those whose Source page holds the text."}
+            )
         actions.extend(_residual_actions((run.get("finish") or {}).get("residual")))
     if _open_cursor(run, "after"):
         actions.append(
@@ -3477,6 +3482,8 @@ def finish(
     store = AdoptionRunStore(root)
     with _LOCK:
         run = store.load(run_id)
+        if run["phase"] == "done" and isinstance(run.get("finish"), dict) and _owes_a_text_check(run):
+            return _finish_text_checks(root, run, store)
         if run["phase"] not in ("applied", "partial"):
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
@@ -3526,6 +3533,37 @@ def finish(
         run["phase"] = "done"
         store.save(run)
     return _present(root, run, coverage=coverage)
+
+
+def _owes_a_text_check(run: dict) -> bool:
+    """Whether a filed text item of this run still has a staged copy that no `finish` has checked and removed."""
+    if not run.get("consume", True):
+        return False
+    outcomes = run.get("outcomes") or {}
+    return any(
+        item["form"] == "text" and (outcomes.get(item["original_path"]) or {}).get("status") in _APPLIED_STATUSES
+        and not outcomes[item["original_path"]].get("consumed")
+        for item in (run.get("plan") or {}).get("items") or []
+    )
+
+
+def _finish_text_checks(root: Path, run: dict, store: AdoptionRunStore) -> dict:
+    """A repeat `finish` of a done run: check the staged text copies that the last one left, and report the residual again.
+
+    The last `finish` may have run out of its call budget, or found a Source page that did not hold the text, which
+    the person has since repaired. The recall check, coverage and run manifest of that `finish` stay as they were.
+    """
+    finish = run["finish"]
+    _consume_filed_text(root, run, _call_budget())
+    removed_folders = adoption_consume.remove_empty_folders(root, run)
+    stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
+    if stage_residual is not None:
+        before = (finish.get("residual") or {}).get("removed_empty_folders", 0)
+        stage_residual["removed_empty_folders"] = before + removed_folders
+    finish["consumed"] = _consumed_count(run.get("outcomes") or {})
+    finish["residual"] = stage_residual
+    store.save(run)
+    return _present(root, run, coverage=finish["coverage"])
 
 
 def _indexing(recall: dict, sample: dict) -> dict:
