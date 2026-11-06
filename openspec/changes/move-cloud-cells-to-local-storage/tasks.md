@@ -198,9 +198,13 @@ Tasks 10.2–10.5 record the delivered source and its historical proof. The dril
     `infra/cloud-rehearsal/reservations/service_test.go` exercises the provider restart, cancellation, token, physical identity, orphan-charge and concurrency-reduction cases with real LVM.
     The cluster report records three complete hourly backups of a serving cell.
     This historical result does not qualify a later provider image; that obligation remains in 10.6.
-- [ ] 10.6 Review the integrated batch, pass CI, merge and qualify its built images through the ordinary release. Keep production activation separate.
+- [x] 10.6 Review the integrated batch, pass CI, merge and qualify its built images through the ordinary release. Keep production activation separate.
   - Source review, CI and merge completed in #2145 and #2185.
     [Release v0.149.0](https://github.com/Artexis10/exomem/releases/tag/v0.149.0) contains both merges; [publisher 40857280151](https://github.com/Artexis10/exomem/actions/runs/40857280151) succeeded.
-    Pending: an exact provider image and compatible build provenance that include the snapshot Secret fix from #2185.
-    The retained drill image uses source `7a84fd129`; its recorded `infra/topolvm/source.patch` and rehearsal workflow differ from v0.149.0 and current source.
-    The release receipt therefore does not close provider-image qualification. Local cutover, production activation and the Home rollout remain separate.
+    The retained drill image uses source `7a84fd129`; its recorded `infra/topolvm/source.patch` and rehearsal workflow differ from v0.149.0 and current source, so it does not qualify the later provider.
+  - The release publishes no provider image; the rehearsal builds it from `infra/topolvm`.
+    [Drill 42258342785](https://github.com/Artexis10/exomem/actions/runs/42258342785) passed all eight checks and the native LVM host proof at `a3fd80194`, which contains #2185.
+    Its provider image is `rehearsal.local/topolvm-reservations@sha256:0271446344c1635025b46df889a65fafcfc165c5dda59c25a6b1f509ced97055`.
+    The `infra/topolvm` tree (`46c594a7d`) and the platform chart tree (`44e574e6d`) at that commit equal those of release v0.161.1, so the result qualifies the released provider source.
+  - The first dispatch at v0.161.1 ([run 42229539815](https://github.com/Artexis10/exomem/actions/runs/42229539815)) failed on two drill harness gaps, not on the provider: the drill did not deploy the key custodian, and its control database missed the operation-grant fixtures. This change fixes both.
+    Local cutover, production activation and the Home rollout remain separate.
