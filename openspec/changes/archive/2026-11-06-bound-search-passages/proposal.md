@@ -6,8 +6,8 @@ A search hit on a Source carries `passage`: the matched chunk, or `MAX_WORDS_PER
 
 ## What Changes
 
-- A passage shows at most `MAX_PASSAGE_CHARS` (4,000) characters. A chunk of 350 words of prose and both context windows fit inside it, so prose passages do not change.
-- A longer passage is cut to that length. The cut opens one context window before the start of the match, so the passage still shows the match.
+- A passage shows at most `MAX_PASSAGE_CHARS` (4,000) characters. Most 350-word chunks of prose fit inside it with both context windows. Code and text without word breaks can pass it.
+- A longer passage is cut to that length. The cut keeps the first place where the query matches in the passage and opens one context window before it, so the passage still shows the match. Without a literal match, the cut keeps the start of the chunk.
 - `offset` and `length` describe the passage as shown, so `read_memory` at `passage.offset` still opens it and returns the rest.
 
 ## Impact

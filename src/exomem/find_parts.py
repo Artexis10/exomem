@@ -16,9 +16,9 @@ from .vault import parse_frontmatter, read_guarded_text
 #: Characters of surrounding text added on each side of the matched passage: about one
 #: paragraph of a hundred words, so the match reads in context without a second read.
 CONTEXT_CHARS = 600
-#: Most characters a passage shows. A chunk of `MAX_WORDS_PER_CHUNK` words of prose and both
-#: context windows fit well inside it. Only text without word breaks, such as a compact JSON
-#: log, reaches it; `read_memory` at the passage's offset returns the rest.
+#: Most characters a passage shows. Most prose chunks of `MAX_WORDS_PER_CHUNK` words fit inside
+#: it with both context windows; code and text without word breaks, such as a compact JSON log,
+#: can pass it. `read_memory` at the passage's offset returns the rest.
 MAX_PASSAGE_CHARS = 4000
 #: Words of a stored chunk compared to place it in the text; the chunk's own words, in order,
 #: are a literal copy of a run of the text, so a short prefix finds it.
@@ -82,9 +82,10 @@ def _grow(text: str, start: int, end: int) -> tuple[int, int]:
 
 
 def _bound(start: int, end: int, focus: int) -> tuple[int, int]:
-    """`[start, end)` cut to `MAX_PASSAGE_CHARS`, opening one context window before `focus`."""
-    if end - start <= MAX_PASSAGE_CHARS:
-        return start, end
+    """`[start, end)` cut to `MAX_PASSAGE_CHARS` and keeping `focus`, where the match starts.
+
+    The cut opens one context window before `focus`, or earlier when `focus` is near the end.
+    """
     lower = max(start, min(focus - CONTEXT_CHARS, end - MAX_PASSAGE_CHARS))
     return lower, lower + MAX_PASSAGE_CHARS
 
@@ -104,7 +105,8 @@ def matched_passage(
     `matched` is a part page, or the Source page for part 1; `base` is where its text starts in
     the whole text. `chunk` is the stored chunk that matched when the hit is semantic. Without
     one, the passage is `MAX_WORDS_PER_CHUNK` words around the first match of the query. A
-    passage longer than `MAX_PASSAGE_CHARS` is cut to that length around where the match starts.
+    passage longer than `MAX_PASSAGE_CHARS` is cut to that length around where the query matches
+    in it, or around the start of the chunk when the query does not match literally.
     The passage text withholds origin carriers as the hit excerpt does; its `offset` and
     `length` count the stored text. Returns None when the page cannot be read or holds no text.
     """
@@ -124,15 +126,16 @@ def matched_passage(
         located = _locate_chunk(text, spans, _chunk_words(chunk, title if isinstance(title, str) else None))
         if located is not None:
             first, end_word = located
-            focus = spans[first][0]
     if first is None:
         anchor = _anchor_word(text, spans, query_norm) if query_norm else None
         if anchor is None:
             return None
         first = max(0, anchor - MAX_WORDS_PER_CHUNK // 2)
         end_word = min(len(spans), first + MAX_WORDS_PER_CHUNK)
-        focus = spans[anchor][0]
-    start, end = _bound(*_grow(text, spans[first][0], spans[end_word - 1][1]), focus)
+    start, end = _grow(text, spans[first][0], spans[end_word - 1][1])
+    if end - start > MAX_PASSAGE_CHARS:
+        match = find_results.anchor_in(text[start:end], query_norm) if query_norm else None
+        start, end = _bound(start, end, start + match[0] if match else spans[first][0])
     shown = extraction_parts.without_spans(text, start, end, provenance.withheld_spans(text, owner_path=source))
     return {
         "matched_part": number,
