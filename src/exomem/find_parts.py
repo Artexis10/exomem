@@ -27,17 +27,18 @@ _LOCATE_WORDS = 12
 
 
 def _word_spans(text: str) -> list[tuple[int, int]]:
+    """`[start, end)` of each run of non-space characters in `text`, in order.
+
+    `str.split` finds the runs; each run's first occurrence after the previous run is where it
+    starts, because only space lies between them. A long part costs one step per word, not per
+    character.
+    """
     spans: list[tuple[int, int]] = []
-    start: int | None = None
-    for at, character in enumerate(text):
-        if character.isspace():
-            if start is not None:
-                spans.append((start, at))
-                start = None
-        elif start is None:
-            start = at
-    if start is not None:
-        spans.append((start, len(text)))
+    at = 0
+    for word in text.split():
+        start = text.find(word, at)
+        at = start + len(word)
+        spans.append((start, at))
     return spans
 
 

@@ -170,8 +170,11 @@ class ProjectedLexicalHit:
 @dataclass(frozen=True, slots=True)
 class _SelectedDocument:
     variant: projections.ProjectionVariant
-    text: str
-    tokens: tuple[str, ...]
+    #: How often each BM25 token occurs, counted once at index build: a request scores a long
+    #: part without counting its tokens again.
+    term_counts: Mapping[str, int]
+    #: The number of BM25 tokens in the document.
+    length: int
     keyword_tokens: frozenset[str]
     #: `text` case-folded once, for the keyword lane's substring test.
     folded: str
@@ -189,10 +192,11 @@ def _document(
     part: projections.ProjectionPart | None = None,
 ) -> _SelectedDocument:
     folded = text.casefold()
+    tokens = bm25.tokenize(text)
     return _SelectedDocument(
         variant,
-        text,
-        tuple(bm25.tokenize(text)),
+        Counter(tokens),
+        len(tokens),
         frozenset(token for token in folded.split() if token),
         text if folded == text else folded,
         part,
@@ -599,7 +603,7 @@ class ProjectedLexicalIndex:
                 )
                 documents[variant.projection_variant_id] = held
                 for document in held:
-                    for token in frozenset(document.tokens):
+                    for token in document.term_counts:
                         postings.setdefault(token, set()).add(document.key)
         self._documents = MappingProxyType(documents)
         self._postings = MappingProxyType(
@@ -681,18 +685,17 @@ class ProjectedLexicalIndex:
             for token, document_frequency in frequencies.items()
         }
         average_length = max(
-            sum(len(document.tokens) for document in documents) / len(documents),
+            sum(document.length for document in documents) / len(documents),
             1.0,
         )
         scores: list[tuple[_SelectedDocument, float]] = []
         for document in candidates:
-            term_counts = Counter(document.tokens)
             score = 0.0
             length_normalization = 1 - _BM25_B + _BM25_B * (
-                len(document.tokens) / average_length
+                document.length / average_length
             )
             for token in query_tokens:
-                frequency = term_counts[token]
+                frequency = document.term_counts.get(token, 0)
                 score += inverse_frequencies[token] * (
                     frequency * (_BM25_K1 + 1)
                 ) / (frequency + _BM25_K1 * length_normalization)
