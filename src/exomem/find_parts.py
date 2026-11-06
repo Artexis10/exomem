@@ -7,6 +7,7 @@ the whole extracted text (`passage`), so a reader can open that spot with `read_
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from . import extraction_parts, find_results, preserve, provenance
@@ -115,15 +116,44 @@ def matched_passage(
         content, _guard = read_guarded_text(vault_root, path)
     except (OSError, UnicodeError):
         return None
-    frontmatter = parse_frontmatter(content)[0]
+    title = parse_frontmatter(content)[0].get("title")
     text = extraction_parts.text_of_part(content) if number > 1 else preserve.extracted_text(content)
+    return passage_in(
+        text,
+        number=number,
+        base=base,
+        chunk=chunk,
+        title=title if isinstance(title, str) else None,
+        query_norm=query_norm,
+        withheld=provenance.withheld_spans(text, owner_path=source),
+    )
+
+
+def passage_in(
+    text: str,
+    *,
+    number: int,
+    base: int,
+    chunk: str | None,
+    title: str | None,
+    query_norm: str,
+    withheld: Iterable[tuple[int, int]] = (),
+    cuts: Sequence[tuple[int, int]] = (),
+) -> dict[str, object] | None:
+    """`{"matched_part", "passage"}` for a match in `text`, the text of part `number`.
+
+    `base` is where the part starts in the whole stored text, and `title` is the title of the
+    page that holds the part, which a semantic `chunk` starts with. The passage text leaves
+    out the `withheld` spans of `text`. `cuts` are the ranges of the stored part that `text`
+    lacks, ordered: `offset` and `length` count stored characters either way, so the passage
+    opens a `read_memory` window at its spot. Returns None when `text` holds no match.
+    """
     spans = _word_spans(text)
     if not spans:
         return None
     first = end_word = None
     if chunk:
-        title = frontmatter.get("title")
-        located = _locate_chunk(text, spans, _chunk_words(chunk, title if isinstance(title, str) else None))
+        located = _locate_chunk(text, spans, _chunk_words(chunk, title))
         if located is not None:
             first, end_word = located
     if first is None:
@@ -136,8 +166,19 @@ def matched_passage(
     if end - start > MAX_PASSAGE_CHARS:
         match = find_results.anchor_in(text[start:end], query_norm) if query_norm else None
         start, end = _bound(start, end, start + match[0] if match else spans[first][0])
-    shown = extraction_parts.without_spans(text, start, end, provenance.withheld_spans(text, owner_path=source))
+    shown = extraction_parts.without_spans(text, start, end, withheld)
+    stored_start = _stored_position(start, cuts)
+    stored_end = _stored_position(end - 1, cuts) + 1 if end > start else stored_start
     return {
         "matched_part": number,
-        "passage": {"text": shown, "part": number, "offset": base + start, "length": end - start},
+        "passage": {"text": shown, "part": number, "offset": base + stored_start, "length": stored_end - stored_start},
     }
+
+
+def _stored_position(at: int, cuts: Sequence[tuple[int, int]]) -> int:
+    """The stored position of the character at `at` in a text that lacks the ordered `cuts`."""
+    for begin, end in cuts:
+        if begin > at:
+            break
+        at += end - begin
+    return at
