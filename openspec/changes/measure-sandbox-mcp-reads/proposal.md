@@ -15,6 +15,7 @@ The durable decision is to extend that observer with selectable configured bars 
 - Decide bar coverage with one predicate on the bar, so selection, the pre-connection check and the summarizer agree, including for typed tools and the `deep` flag.
 - Expose the timed call and case loader to other runners, and add the paired MCP read reference and a pending bar to the latency contract.
 - Keep the wider sandbox programme open: frozen source truth, nine operation families, matched pairs, layer profiles, and a configurable CI gate.
+- Reduce repeated link projection in eligible store queries while preserving eager query results, metadata, response bounds, and disclosure outcomes.
 
 The configured private-sandbox target is p95 below 100 ms for the six collection-store read groups. It is an acceptance bar for the sandbox copy only and never gates a shared runner. Paired allowances stay provisional until matched runs of identical code establish them.
 
@@ -33,5 +34,7 @@ This capability currently lives in the active `bound-request-latency-across-surf
 ## Impact
 
 The change extends `recall_canary` and its existing FastMCP tests. It reuses generated operation schemas, the latency contract, and the existing percentile implementation.
+
+The store query repair reuses the current evaluator and governed projector. File adapters and queries that need projected values for selection keep eager projection.
 
 No dependency, server model, scheduler, governance rule, production write, or automatic repair is added. Sandbox measurement remains an explicit operation. Missing evidence remains incomplete.

@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import bindparam, select
 
 from .. import (
+    call_spans,
     held_fs,
     item_keys,
     memory_refs,
@@ -406,14 +407,20 @@ class CollectionWriter:
                        and (semantic_profile is None or entry.get("semantic_profile") in (None, semantic_profile))]
             manifests = []
             for cid, path in sorted(entries, key=lambda entry: entry[1]):
-                if not self._shown(cid, path, authorize_path):
+                with call_spans.span("records.inventory_store_visibility"):
+                    shown = self._shown(cid, path, authorize_path)
+                if not shown:
                     continue
                 if len(manifests) >= min(max_candidates, max_raw_candidates):
                     raise collections.CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
                     )
-                manifest = self._collection(cid)[1]
-                manifests.append(self._operation.field_plan(manifest).manifest)
+                # Read discovery already admitted the manifest; row admission belongs to the census.
+                with call_spans.span("records.inventory_store_manifest"):
+                    manifest = (self._collection(cid)[1] if self._operation.mutation
+                                else self._collection_manifest(self._collection_row(cid))[0])
+                with call_spans.span("records.inventory_store_fields"):
+                    manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
 
     def released_identities(self, identities, *, authorize_path=None):

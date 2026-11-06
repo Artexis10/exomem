@@ -1273,6 +1273,17 @@ def canonical_request_id(value: object) -> str | None:
 
 
 @contextmanager
+def mcp_request_correlation(request_id: str | None = None):
+    """Bind correlation through outer middleware without starting a call budget."""
+    request_id = mcp_request_id() if request_id is None else request_id
+    token = _MCP_REQUEST_ID.set(request_id)
+    try:
+        yield request_id
+    finally:
+        _MCP_REQUEST_ID.reset(token)
+
+
+@contextmanager
 def mcp_request_context(
     request_id: str,
     *,
@@ -1290,25 +1301,24 @@ def mcp_request_context(
     and `arguments` are read only to exempt the reconcile-class commands, whose
     terminal is the derived state and whose graph join is unbounded by design.
     """
-    token = _MCP_REQUEST_ID.set(request_id)
-    call_token = uuid.uuid4().hex
-    call_reset = _MCP_CALL_TOKEN.set(call_token)
-    budget = (
-        None
-        if request_budget.is_reconcile_class(tool, arguments)
-        else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
-    )
-    budget_reset = request_budget.set_current(budget)
-    activation_reset = _MCP_ACTIVATION_RESULT.set(
-        activation_result.Observation() if tool == "activate_context" else None
-    )
-    try:
-        yield call_token
-    finally:
-        _MCP_ACTIVATION_RESULT.reset(activation_reset)
-        request_budget.reset_current(budget_reset)
-        _MCP_CALL_TOKEN.reset(call_reset)
-        _MCP_REQUEST_ID.reset(token)
+    with mcp_request_correlation(request_id):
+        call_token = uuid.uuid4().hex
+        call_reset = _MCP_CALL_TOKEN.set(call_token)
+        budget = (
+            None
+            if request_budget.is_reconcile_class(tool, arguments)
+            else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
+        )
+        budget_reset = request_budget.set_current(budget)
+        activation_reset = _MCP_ACTIVATION_RESULT.set(
+            activation_result.Observation() if tool == "activate_context" else None
+        )
+        try:
+            yield call_token
+        finally:
+            _MCP_ACTIVATION_RESULT.reset(activation_reset)
+            request_budget.reset_current(budget_reset)
+            _MCP_CALL_TOKEN.reset(call_reset)
 
 
 _SCHEMA_MAPPING_KEYS = ("properties", "$defs", "patternProperties")

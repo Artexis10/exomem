@@ -31,6 +31,7 @@ from exomem import (
     freshness,
     lexstore,
     readiness,
+    request_budget,
     view_lag,
     working_set,
     working_set_index,
@@ -435,6 +436,8 @@ def activation(
     working_set_index.WorkingSetIndex(vault).rebuild()
     working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    # Coverage assertions need complete packets; request-path tests cover budget expiry.
+    monkeypatch.setattr(request_budget, "ACTIVATION_DOOR_BUDGET_SECONDS", 60)
     scheduled: list[str] = []
     monkeypatch.setattr(
         working_set_runtime,
