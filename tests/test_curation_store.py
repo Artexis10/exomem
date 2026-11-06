@@ -194,6 +194,44 @@ def test_stored_plan_identity_is_anchored_and_tampering_refuses_preview(vault: P
         curation.preview(vault, run_id=stored["run_id"])
 
 
+@pytest.mark.parametrize(
+    ("marker", "episode_bound"),
+    [(True, True), (0, True), (2, True), (None, True), (1, False)],
+)
+def test_stored_episode_plan_refuses_missing_unsupported_or_orphan_reader_marker(
+    vault: Path, marker: object, episode_bound: bool
+) -> None:
+    from exomem import curation
+
+    store = curation.CurationStore(vault)
+    stored = store.create_forward(_stored_plan(), binding_manifest=[], registry_ids={})
+    path = store.plan_path(stored["run_id"])
+    malformed = json.loads(path.read_text())
+    if marker is not None:
+        malformed["episode_invocation_version"] = marker
+    if episode_bound:
+        malformed["binding_manifest"] = [{"prepared": {"episode": {"episode": "sample"}}}]
+    path.write_text(json.dumps(malformed))
+    before = {file: file.read_bytes() for file in store.root.rglob("*") if file.is_file()}
+
+    with pytest.raises(curation.CurationError, match="CURATION_PLAN_CORRUPT"):
+        curation.preview(vault, run_id=stored["run_id"])
+
+    assert {file: file.read_bytes() for file in store.root.rglob("*") if file.is_file()} == before
+
+
+def test_episode_plan_reader_marker_keeps_returned_and_anchored_identity_together(vault: Path) -> None:
+    from exomem import curation
+
+    store = curation.CurationStore(vault)
+    stored = store.create_forward(
+        _stored_plan(), binding_manifest=[{"prepared": {"episode": {"episode": "sample"}}}], registry_ids={}
+    )
+
+    assert stored["plan"]["episode_invocation_version"] == 1
+    assert store.identities(stored["run_id"]) == (stored["plan_id"], stored["plan_fingerprint"])
+
+
 def test_forged_committed_receipt_without_matching_witness_is_refused(vault: Path) -> None:
     from exomem import curation
 

@@ -912,3 +912,28 @@ def test_preserve_appends_to_log(vault: Path, newline: str) -> None:
     assert text.index("## [2026-05-25] preserve") < text.index("Older log entry")
     if newline == "\r\n":
         assert b"\n" not in log_file.read_bytes().replace(b"\r\n", b"")
+
+
+def test_preparation_keeps_original_and_companion_unpublished(vault):
+    """A retained binary preview must not publish the original or its companion."""
+    from exomem import memory_refs, vocabulary_gate
+
+    class Prepared(Exception):
+        def __init__(self, value):
+            self.value = value
+
+    def stop(value):
+        raise Prepared(value)
+
+    before = {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    args = dict(scope="study", category="samples", filename="sample.bin", description="A sample.", today=TODAY)
+    with memory_refs._allocated_ids() as identities, vocabulary_gate.preparation_context(vault):
+        with pytest.raises(Prepared) as stopped:
+            preserve_module.preserve(vault, **args, content_stream=io.BytesIO(b"exact original"), _prepare=stop)
+    sealed = stopped.value.value
+    assert {path.relative_to(vault): path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+    with memory_refs._allocated_ids(identities):
+        result = preserve_module.preserve(vault, **args, content_stream=io.BytesIO(b"exact original"), _allocation=sealed["allocation"])
+    assert result.ref == sealed["ref"]
+    assert (vault / result.path).read_bytes() == b"exact original"
+    assert (vault / result.sidecar_path).read_text() == next(write.content for write in sealed["writes"] if isinstance(write.content, str))

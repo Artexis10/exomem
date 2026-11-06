@@ -107,7 +107,27 @@ def _reconcile_held(
             and receipt["outcome"] in curation.COMMITTED_OUTCOMES
         ]
         if len(receipts) != 1:
-            raise _uncertain("one verified committed receipt is required")
+            ordinal = verified_binding["ordinal"]
+            native_binding = plan["binding_manifest"][ordinal]
+            # An existing same-operation witness wins; its owner must repair the terminal first.
+            witness = curation._validated_operation_witness(  # noqa: SLF001
+                store, run, plan_identity=identity, ordinal=ordinal, step=plan["steps"][ordinal],
+                binding=native_binding, operation_identity=operation, compensation=False, live=False,
+            )
+            terminals = [receipt for receipt in reconstructed["receipts"]
+                         if receipt.get("operation_id") == operation
+                         and receipt.get("invocation_id") == leaf.get("invocation_id")
+                         and receipt.get("episode_attempt") == leaf["attempts"]
+                         and curation._valid_no_effect(receipt, plan_identity=identity, binding=native_binding, operation=operation)]  # noqa: SLF001
+            if witness is None and leaf.get("invocation_id") is not None and len(terminals) == 1 and all(
+                attempt["outcome"] != "uncertain" for attempt in leaf["attempt_history"][:-1]
+            ):
+                return episode_model.reconcile_leaf(snapshot, episode_model.VerifiedLeafOutcome(
+                    candidate_id=candidate_id, leaf_id=leaf_id, operation_id=operation,
+                    effect_digest=leaf["effect_digest"], outcome="proven_uncommitted",
+                    receipt_digest=curation._digest(terminals[0]),  # noqa: SLF001
+                ))
+            raise _uncertain("one verified committed receipt or exact native no-effect terminal is required")
         ordinal = verified_binding["ordinal"]
         witness = curation._validated_operation_witness(
             store,
@@ -174,9 +194,12 @@ def _tip_is_live(
             return visible and curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
             )
+        if evidence["step"]["kind"] in curation.PRESERVATION_STEP_KINDS:
+            curation._verify_live_postcondition(vault_root, evidence["witness"], step=evidence["step"], binding=evidence["binding"])  # noqa: SLF001
+            return True
         if after != "absent" and keep is not None and not keep(path):
             return False
-        if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
+        if evidence["step"]["kind"] in curation.COLLECTION_STEP_KINDS:
             # A Records item is current only while its Records receipt agrees.
             if curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]

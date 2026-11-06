@@ -161,9 +161,107 @@ Before an attempt, bind each supported leaf to the exact sealed curation plan, f
 
 Precommit review binds the exact input and candidate/proposal/disposition snapshot; changing that snapshot invalidates readiness. Postcommit review is a separate active-agent attestation with reconciled outcomes. Reviewed-through revision and pending work remain separate: deferred or uncertain candidates may be considered without being complete. Input corrections retain historical reviews but invalidate current readiness/coverage. The pure model validates structure and identity consistency, never authenticity of a caller-supplied receipt or semantic completeness; success observations are internal adapter inputs, not public proposal fields. Persistence must authenticate them before any public command can use them.
 
-Existing curation supports note/entity/relation/edit lifecycle leaves and, by ruling for task 3.5, one Records leaf; not Source, Evidence or Planning execution. The pure slice may represent those destinations but leaves them pending until their existing writer adapters are integrated. It adds no generic execution payload and makes no automatic-capture claim on its own.
+The initial curation integration supports note/entity/relation/edit lifecycle leaves and, by ruling for task 3.5, one Records leaf. Native Source, Evidence and Planning execution follows the owner adapters below. This adds no generic execution payload or automatic-capture claim.
 
-The first recovery integration is a read-only internal receipt adapter. It takes an uncertain leaf from owner-held episode state, reloads the exact sealed curation plan and approval, validates its run/plan/fingerprint/ordinal/step/operation/effect binding, reconstructs authoritative receipts, and verifies the atomic witness against current postimages before creating a committed observation for the pure model. Hold the existing vault consistency guard throughout this read so canonical writers cannot produce a mixed-time multi-path observation; this reuses the mutation boundary without requiring writer authority. It accepts no caller-supplied success proof, executes no writer and repairs no receipt. A witness without its terminal receipt remains uncertain until the existing curation owner recovers it. An as-yet unreconciled historical commit whose live postimage changed also remains uncertain rather than acquiring a fabricated current readback digest; this blocks retry while preserving canonical evidence. A failed receipt or absent witness alone cannot prove noncommit for the current episode attempt, because its binding does not yet identify the corresponding curation attempt.
+#### Native Source, Evidence and Planning effects (3.12)
+
+The closed episode-only kinds are `capture-source`, `preserve-evidence`, `add-plan`,
+`update-plan` and `triage-plan`. General curation cannot seal them. The episode
+owner seals validated single-step plans; existing apply/resume remains the executor.
+Experiment execution stays pending. Binary leaves select an already-preserved whole
+canonical original reference, SHA-256 and size. Temporary paths, upload handles and
+capabilities never become durable selectors. Reacquire through native artifact staging
+with current principal checks and administrative ingress disabled. A reading cannot supply a binary effect.
+
+Preparation runs the actual native owner in an explicit private mode through normalization,
+hierarchy, motivation, lifecycle, history, source guards and complete write-set authorization.
+Suppress optional corpus/model inference and all authoritative publication paths.
+Public callers cannot supply preparation flags, allocations, callbacks, proof objects or receipts.
+Take the final snapshot after all checks and before the first authoritative effect.
+Vault preparation skips graph-debt enqueue and canonical replacement; existing cleanup removes
+temporary files and newly staged directories on every exit. Store preparation rolls back
+SQL and PublicationBatch staging, including `_RecoveryOnly` preservation/quarantine, and returns its refusal.
+It cannot take the normal preservation-only commit path. Preserve ordinary owner behavior.
+Keep Planning's hierarchy callback alongside the separate final preparation seam.
+Use `hold=False`; preparation creates no held candidate, queue, registry commit or receipt.
+
+Vocabulary preparation uses the existing authority owner through a private read-only eligibility check.
+Open existing databases with mode=ro and query_only, retaining protected-file, sidecar, marker, schema and activation guards.
+Read current custody through the existing governance read-only connection and a snapshot transaction.
+Check the complete operation, principal, custody generation and expiry; refresh after waits.
+Only a current matching reserved operation is eligible; changed identity conflicts, committed state requires recovery, and stale state refuses.
+Do not create, repair, reserve, request, spend or advance execution identity counters during preparation.
+Execution retains its normal reservation, final checks and commit guards; preparation grants no future authority.
+
+Freeze writer-chosen destination, canonical reference, timestamp, normalized native arguments
+and core original/companion allocation. Reuse that allocation at execution. Recompute shared
+log/index/bookkeeping postimages under the native writer lease; never freeze their old postimages.
+Registry, target and full write-set authorization remain current execution guards.
+Report known destination duplicates before sealing; prior preservation is not an executed leaf.
+Transfers into another permitted native destination still execute a real native effect.
+Source/Evidence publication consumes the curation witness atomically with original and companion.
+Finalize binary SHA/size through the native verified PreparedBinaryContent stream.
+Historical commitment remains valid independently of mutable extraction text.
+Retain the explicit UUID sequence where the vocabulary owner supplies no deterministic ID.
+Before publication, verify its consumed count and the rebuilt owner-declared core paths, identities and hashes.
+Changed document member order or count must refuse before any member is published.
+
+Planning adapters call the actual facade, including store dispatch, profile checks,
+plan-id translation, hierarchy, motivation, lifecycle, guards, history and attribution.
+Owner-fixed receipts authenticate the exact Planning profile and add/update/triage operation.
+Store proof uses canonical transaction/item-version identity and current rows, never generated files.
+Retain intent support; runtime validates identity/access while the agent judges expressed intent.
+
+Seal bounded optional material support on its leaf: binding input revision, material key,
+representation and reviewed episode input revision. Attempted leaves retain support under reorder/revision.
+Support labels never alter mutation effect_digest or mint another operation for an attempted equivalent effect.
+Planning may retain `source_intent` through the existing origin-input grammar outside mutation arguments and effect_digest.
+Seal the association and revalidate its selected input at the native publication boundary.
+Legacy events gain no synthetic association or defaults. Keep existing origin carrier/parser
+and legacy reading normalization. Add one explicit original input variant with representation
+`original`, whole canonical reference, SHA-256 version and nonnegative size; reject unit/span fields.
+Use a distinct private OriginalInputProof with native byte/access revalidation, never retained-text
+exact-text proof or model-visible binary bytes. Both representations may share one canonical root
+without an independence or equivalence assessment. Store values retain record_field scopes.
+Store body units use profile-built plan_ref/record_ref parents, exact record_identity and owner-fixed profile.
+Extend private parser-parent/scope matching only for that identity; public inputs do not expand
+to arbitrary plan/record URLs or generated paths. Existing authored-origin handling validates only
+new or changed carriers, preserving unchanged historical carriers and unrelated rows without recertification.
+Bind values/body into native versions/transactions and retain proof through final write guards.
+Current row/page/history outputs apply whole-carrier origin projection at final disclosure.
+Unavailable/withheld input revokes that carrier's attribution together; retain existing stale-versus-unavailable policy.
+
+New invocation-bearing attempts privately derive invocation_id from episode_id, leaf_id,
+effect_digest, stable operation_id and episode attempt. Correlation does not replace mutation identity.
+Record uncertainty before dispatch. Every entry to an episode-sealed plan, including ordinary
+curation apply/resume before an episode attempt, joins this immutable journal-bound invocation.
+Serialize dispatch and terminal recording under the existing writer lease; reconciliation uses its consistency guard.
+Only native typed DefiniteNoEffect proves no authoritative publication or positively verified complete rollback.
+Persist one closed distinguishable terminal in the existing curation receipt path, binding invocation,
+plan, operation, prepared effect digest and native reason/evidence. Generic failed receipts, absent
+witnesses, matching bytes and mutable progress cannot prove noncommit. A late duplicate may
+yield typed no-effect evidence without fabricating a commit. Validate exact invocation, plan/approval
+and terminal, exclude conflicting unresolved invocation or commitment, then record proven_uncommitted.
+A verified same-operation commitment wins over earlier no-effect evidence. Check commitment before retry;
+retain allocation, operation and current guards. No-effect retry must avoid the old nonretryable failed_step dead end.
+Unknown crashes remain uncertain. Recover witnessed historical commitment and repair missing terminal
+receipts through curation before reacquiring input custody. Current coverage separately needs authorized output and exact bytes.
+
+New episode-bound seals carry top-level `episode_invocation_version: 1`, including existing curation kinds.
+The sealer adds it before deriving plan, run and operation identities or writing immutable artifacts.
+Stored normalization requires exact integer 1 and exact agreement between marker presence and operative episode metadata; booleans and orphan markers refuse.
+Include the marker in the same sealed fingerprint basis for creation, anchors, identities and episode binding.
+Keep public forward grammar v1, effect/preimage/invocation formulas and unmarked legacy normalization unchanged.
+Older strict readers refuse marked apply/resume before writes; nested metadata or new kinds alone cannot enforce this floor.
+Recovery never reseals old plans. Rollback requires a release that understands marked execution and recovery.
+
+Prove public synthetic preservation, native effects, lost acknowledgement, same-operation recovery,
+Planning correction/history and current coverage. Include preparation rollback/refusal, shared bookkeeping,
+ordinary apply joining, late duplicates, support reorder, revoked store origins and legacy reader refusal.
+File proof does not establish store, installed or ordinary-agent acceptance. New extensions require
+a reader-capable rollback release. Full 3.12/3.14, real-model gates and installed acceptance remain separate.
+
+The first recovery integration is a read-only internal receipt adapter. It takes an uncertain leaf from owner-held episode state, reloads the exact sealed curation plan and approval, validates its run/plan/fingerprint/ordinal/step/operation/effect binding, reconstructs authoritative receipts, and verifies the atomic witness against current postimages before creating a committed observation for the pure model. Hold the existing vault consistency guard throughout this read so canonical writers cannot produce a mixed-time multi-path observation; this reuses the mutation boundary without requiring writer authority. It accepts no caller-supplied success proof, executes no writer and repairs no receipt. A witness without its terminal receipt remains uncertain until the existing curation owner recovers it. An as-yet unreconciled historical commit whose live postimage changed also remains uncertain rather than acquiring a fabricated current readback digest; this blocks retry while preserving canonical evidence. In the initial/legacy adapter, a failed receipt or absent witness cannot prove noncommit because the binding lacks invocation correlation. New invocation-bearing attempts use the exact native terminal contract above; generic failed receipts remain insufficient.
 
 The internal storage slice retains accepted events beneath the existing curation persistence boundary. The journal holds a bounded original evidence reference/excerpt, finite transition intents, validated sealed-plan bindings and adapter-generated committed outcomes; no caller may submit a materialized state or success proof. Reconstruct historical state by replaying accepted events without consulting mutable live postimages. A successfully verified commitment remains historical even after later edits, and cannot become retryable. Fresh postcommit attestations must reverify all claimed effects against current curation evidence under the same consistency boundary; reads label current coverage unchecked. A revision/hash compare-and-swap prevents competing sessions from overwriting accepted history. Validate the bounded hash chain, shapes and pure state transitions on every read; its digest detects corruption, not a malicious vault owner's edits. Reuse the existing no-follow curation reads and guarded atomic writer, with no second executor or database. The owner must durably record an uncertain attempt before calling its existing authorized writer. Storage is internal only: current authorization and retention for all supplied input/intent are trusted-owner preconditions, not implemented public permission checks. Evidence reference resolution, disclosure/retention enforcement, attempt-specific noncommit proof and public command integration remain required unfinished work in 3.2/3.3.
 
@@ -204,8 +302,8 @@ current guards writes no revision. Lost acknowledgements require inspecting publ
 state before another mutation; no transparent replay receipt is promised.
 Legacy evidence normalization, hashes and absent fields remain unchanged. Extended
 journals require this reader-capable release, including supported rollback; older
-strict readers must refuse without changing them. Source/Evidence/Planning adapters,
-proposal association, origin accounting and ordinary mixed-journey acceptance remain open.
+strict readers must refuse without changing them. Material binding alone does not implement
+the native adapters and origin contracts above; ordinary mixed-journey acceptance remains open.
 
 The input owner facade binds every call to the current resolved canonical audience, not a client brand, transport, conversation or authorization-session identifier. Its version-2 journal envelope includes that audience in the root seal and storage identity while retaining the pure model's logical episode identity. Store version-2 journals within an audience-hash directory so later bounded pending-work discovery need not scan other audiences' journals; this slice adds no listing surface. Different audiences may use the same logical episode key without sharing history. An unbound or unresolved caller fails closed; an ownerless version-1 journal is never adopted by its first reader. The internal version-1 store remains a trusted-only compatibility seam.
 

@@ -1468,3 +1468,40 @@ def test_windows_guarded_reader_pins_parent_through_leaf_read(
     assert swap_blocked is True
     assert forbidden_bytes_read is False
     guard.recheck(tmp_path)
+
+
+def test_preparation_checks_complete_batch_without_graph_debt_or_publication(tmp_path: Path, monkeypatch) -> None:
+    """A native preview must not enqueue work or leave its staged parents behind."""
+    target = tmp_path / "Knowledge Base/Notes/new/item.md"
+    checked = []
+
+    class Prepared(Exception):
+        pass
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("preparation published authoritative bookkeeping")
+
+    def stop(writes):
+        checked.extend(writes)
+        assert not target.exists()
+        raise Prepared
+
+    monkeypatch.setattr(vault, "_enqueue_graph_debt", forbidden)
+    with pytest.raises(Prepared):
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(target, "---\ntype: insight\n---\nA result.\n", create_only=True)],
+            vault_root=tmp_path, _prepare=stop,
+        )
+    assert [write.path for write in checked] == [target]
+    assert list(tmp_path.iterdir()) == []
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("last write-set guard refused")
+
+    monkeypatch.setattr(vault, "_validate_batch_write_access", refuse)
+    with pytest.raises(PermissionError, match="last write-set guard refused"):
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(target, "A result.", create_only=True)],
+            vault_root=tmp_path, _prepare=stop,
+        )
+    assert list(tmp_path.iterdir()) == []

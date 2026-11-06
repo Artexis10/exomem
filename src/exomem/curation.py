@@ -14,7 +14,8 @@ import os
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, NoReturn
@@ -23,6 +24,7 @@ from . import capabilities, held_fs
 from .kbdir import kb_dirname
 from .vault import (
     BatchWriteError,
+    DefiniteNoEffect,
     PathGuard,
     PathGuardError,
     PlannedWrite,
@@ -65,6 +67,10 @@ STEP_KINDS: Final[tuple[str, ...]] = (
 #: writer's own receipt -- its audit transition -- corroborates it.
 RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
+# These are closed native operation tokens, never business vocabulary.
+PRESERVATION_STEP_KINDS: Final[frozenset[str]] = frozenset({"capture-source", "preserve-evidence"})
+PLANNING_STEP_KINDS: Final[frozenset[str]] = frozenset({"add-plan", "update-plan", "triage-plan"})
+COLLECTION_STEP_KINDS = RECORDS_STEP_KINDS | PLANNING_STEP_KINDS
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
 #: The revert leaf of `recent_promotions` (promote-referents-without-nudges 2.6):
 #: remove the bullets of one typed edge, keyed by subject page, predicate and
@@ -77,7 +83,7 @@ REMOVE_RELATION_STEP_KIND: Final[str] = "remove-relation"
 COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
 # The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
-_EPISODE_STEP_KINDS = RECORDS_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
+_EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
 MAX_TITLE_CHARS: Final[int] = 500
@@ -91,7 +97,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX24 = re.compile(r"^[0-9a-f]{24}$")
 _PLAN_FIELDS = frozenset({"version", "title", "steps", "entity_candidate"})
 _STEP_FIELDS = frozenset({"step_id", "kind", "args"})
-_SEALED_FIELDS = frozenset({"binding_manifest", "registry_ids", "plan_type", "forward_plan_id"})
+_SEALED_FIELDS = frozenset({"binding_manifest", "registry_ids", "plan_type", "forward_plan_id", "episode_invocation_version"})
 _ENTITY_CANDIDATE_FIELDS = frozenset(
     {
         "review_ref",
@@ -236,7 +242,16 @@ _DELETE_FIELDS = frozenset(
     }
 )
 _RECOVER_FIELDS = frozenset({"trash_path", "restore_path", "allow_curated"})
+# Native leaf fields are a closed wire protocol; original bytes never enter the plan JSON.
+_CAPTURE_SOURCE_FIELDS = frozenset({"original", "content", "title", "source_type", "slug", "url", "tags", "why_captured", "domain", "projects", "raw_protection"})
+_PRESERVE_EVIDENCE_FIELDS = frozenset({"original", "scope", "category", "filename", "content_type", "description", "text", "text_origin", "raw_protection"})
+_ADD_PLAN_FIELDS = frozenset({"collection", "item", "plan_id", "expected_container_hash", "body", "why"})
+_UPDATE_PLAN_FIELDS = frozenset({"collection", "plan_id", "changes", "body", "expected_container_hash", "expected_item_version", "why"})
+_TRIAGE_PLAN_FIELDS = frozenset({"collection", "plan_id", "transition", "expected_container_hash", "expected_item_version", "why"})
 _ARG_FIELDS = {
+    "capture-source": _CAPTURE_SOURCE_FIELDS,
+    "preserve-evidence": _PRESERVE_EVIDENCE_FIELDS,
+    "add-plan": _ADD_PLAN_FIELDS, "update-plan": _UPDATE_PLAN_FIELDS, "triage-plan": _TRIAGE_PLAN_FIELDS,
     "create-note": _CREATE_NOTE_FIELDS,
     "create-entity": _CREATE_ENTITY_FIELDS,
     "accept-relation": _ACCEPT_RELATION_FIELDS,
@@ -252,6 +267,10 @@ _ARG_FIELDS = {
     "update-record": _UPDATE_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
+    "capture-source": frozenset({"original", "title", "source_type"}),
+    "preserve-evidence": frozenset({"original", "scope", "category", "filename"}),
+    "add-plan": frozenset({"collection", "item", "expected_container_hash", "why"}),
+    "update-plan": _UPDATE_PLAN_FIELDS - {"body"}, "triage-plan": _TRIAGE_PLAN_FIELDS,
     "create-note": frozenset({"content", "title"}),
     "create-entity": frozenset({"entity_type", "name", "summary"}),
     "accept-relation": _ACCEPT_RELATION_FIELDS,
@@ -424,13 +443,19 @@ def _folded_segment(part: str) -> str:
 
 
 def normalize_target_path(
-    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, _owner_tree: str | None = None, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
 ) -> str:
     """A confined governed path. `allow_records` is the Records leaf's alone:
     it admits the Records tree, spelled exactly as the Records layer is, and
     nothing else, so that leaf can neither leave the tree nor open it to any
     other kind. Every other kind compares folded segments, so a spelling the
     filesystem folds onto a protected tree is that tree."""
+    if _planning_identity is not None:
+        from . import structured_collections
+
+        if path != structured_collections.plan_ref(*_planning_identity):
+            raise _error("CURATION_TARGET_PROTECTED", "Planning store identity changed")
+        return path
     raw = _require_string(path, field).replace("\\", "/").strip().lstrip("/")
     if (
         raw.endswith("/")
@@ -441,10 +466,19 @@ def normalize_target_path(
     prefix = f"{kb_dirname()}/"
     if not raw.startswith(prefix):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} must target governed knowledge")
+    if _native_paths is not None:
+        if raw not in _native_paths:
+            raise _error("CURATION_TARGET_PROTECTED", "path is outside the sealed native core")
+        return raw
     relative = raw[len(prefix) :]
     parts = relative.split("/")
     first = _folded_segment(parts[0])
     compact = "/".join(_folded_segment(part) for part in parts).replace("_", "-")
+    if _owner_tree is not None:
+        # Native leaf dispatch fixes these owner layers; public curation never supplies one.
+        if _owner_tree not in {"Sources", "Evidence", "Planning"} or parts[0] != _owner_tree or len(parts) < 2:
+            raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside its native owner tree")
+        return raw
     if allow_records:
         # The exact layer `structured_collections._require_profile_layer` places
         # Records collections under; no folded spelling stands in for it.
@@ -467,7 +501,29 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     if missing:
         raise _error("INVALID_CURATION_PLAN", f"steps[{ordinal}].args misses {missing}")
 
-    if kind == "create-note":
+    if kind in PRESERVATION_STEP_KINDS:
+        from . import provenance
+
+        args["original"] = provenance._origin_payload(  # noqa: SLF001
+            {"inputs": {"original": args["original"]}, "assessments": [], "bindings": []}, authoring=True
+        )["inputs"]["original"]
+        if args["original"].get("representation") != "original":
+            raise _error("INVALID_CURATION_PLAN", "native binary effect requires an explicit original")
+        for field in _REQUIRED_FIELDS[kind] - {"original"}:
+            _require_string(args[field], field)
+    elif kind in PLANNING_STEP_KINDS:
+        _require_string(args["collection"], "collection", max_chars=2048)
+        _require_string(args["why"], "why", max_chars=MAX_WHY_CHARS)
+        value_field = {"add-plan": "item", "update-plan": "changes", "triage-plan": "transition"}[kind]
+        if not isinstance(args[value_field], Mapping):
+            raise _error("INVALID_CURATION_PLAN", "Planning payload must be an object")
+        if not _HEX64.fullmatch(str(args["expected_container_hash"])):
+            raise _error("INVALID_CURATION_PLAN", "Planning requires the reviewed container hash")
+        if kind != "add-plan":
+            _require_string(args["plan_id"], "plan_id", max_chars=512)
+            if not _HEX64.fullmatch(str(args["expected_item_version"])):
+                raise _error("INVALID_CURATION_PLAN", "Planning requires the reviewed item version")
+    elif kind == "create-note":
         _require_string(
             args.get("title"), f"steps[{ordinal}].args.title", max_chars=MAX_TITLE_CHARS
         )
@@ -771,8 +827,14 @@ def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
         isinstance(key, str) and isinstance(value, str) for key, value in registries.items()
     ):
         raise _error("CURATION_PLAN_CORRUPT", "stored registry identities are invalid")
+    episode_bound = any(isinstance(prepared := item.get("prepared"), Mapping) and isinstance(prepared.get("episode"), Mapping) for item in manifest)
+    if ("episode_invocation_version" in raw) != episode_bound or episode_bound and (
+        type(raw["episode_invocation_version"]) is not int or raw["episode_invocation_version"] != 1
+    ):
+        raise _error("CURATION_PLAN_CORRUPT", "episode invocation reader marker is invalid")
     return {
         **normalized,
+        **({"episode_invocation_version": 1} if episode_bound else {}),
         "binding_manifest": json.loads(canonical_json(manifest)),
         "registry_ids": dict(registries),
         **({"plan_type": raw["plan_type"]} if isinstance(raw.get("plan_type"), str) else {}),
@@ -1319,6 +1381,61 @@ def _refuse_blocked(contract_result: Any, *, relation_answered: bool) -> None:
     )
 
 
+def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, prepared: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Use native custody and native publication, with one sealed core allocation."""
+    from dataclasses import replace
+
+    from . import add, artifact_recovery, memory_refs, preserve, retained_inputs, schema
+    from .governance.principal import effective_principal
+    from .vault import PreparedBinaryContent, _NativePrepared
+
+    original = args["original"]
+    values = dict(prepared["normalized_native_args"] if prepared is not None else {key: value for key, value in args.items() if key != "original"})
+    page = retained_inputs._read_snapshot(vault_root, original["reference"])  # noqa: SLF001
+    who = replace(effective_principal(), administrative_ingress=False)
+    with artifact_recovery.stage(vault_root, page.page.path, who, expected_sha256=original["version"]) as (held, descriptor):
+        if held.size != original["size"] or held.held is None:
+            raise artifact_recovery.RecoveryUnavailable
+        if prepared is None and kind == "preserve-evidence":
+            duplicate = preserve.find_duplicate_artifact(vault_root, scope=values["scope"], category=values["category"], sha256=held.sha256, raw_protection=values.get("raw_protection", False))
+            if duplicate is not None:
+                raise _error("EPISODE_PRIOR_PRESERVATION", "original already preserved at this native destination")
+        with memory_refs._allocated_ids(prepared["memory_ids"] if prepared is not None else None) as identities:
+            def validate_inputs() -> None:
+                artifact_recovery.require_current(vault_root, held, who)
+                if prepared is not None and identities != prepared["memory_ids"]:
+                    raise _error("CURATION_BINDING_STALE", "native page allocation count changed")
+
+            def stop(snapshot: dict) -> None:
+                core, references = [], {}
+                for write in snapshot.pop("writes"):
+                    row = {"path": write.path.relative_to(vault_root).as_posix()}
+                    if isinstance(write.content, PreparedBinaryContent):
+                        row.update(content_hash=write.content.sha256, size=write.content.size)
+                    else:
+                        row["content_hash"] = text_content_hash(write.content)
+                        reference = memory_refs.ref_from_markdown(write.content)
+                        if reference is not None:
+                            references[row["path"]] = reference
+                    core.append(row)
+                raise _NativePrepared({**snapshot, "memory_ids": list(identities), "core": core, "references": references,
+                                      "original_descriptor": {key: descriptor[key] for key in ("file_name", "mime_type")}})
+
+            with os.fdopen(os.dup(held.held.stream.fileno()), "rb") as stream:
+                internal = {"_allocation": prepared["allocation"] if prepared is not None else None,
+                            "_prepare": stop if prepared is None else None, "_validate_inputs": validate_inputs}
+                try:
+                    binary = prepared["original_descriptor"] if prepared is not None else descriptor
+                    if kind == "capture-source":
+                        result = add.add(vault_root, schema.load_source_schema(vault_root),
+                                         content=values.pop("content", ""), artifact=add.SourceArtifact(stream, binary["file_name"], binary["mime_type"]), **values, **internal)
+                    else:
+                        result = preserve.preserve(vault_root, content_stream=stream, **values, **internal)
+                except _NativePrepared as snapshot:
+                    return snapshot.value
+            return result.as_dict()
+
+
 def _prepare_step(
     vault_root: Path, step: Mapping[str, Any], ordinal: int, *, relation_pending: bool = False
 ) -> dict[str, Any]:
@@ -1352,7 +1469,15 @@ def _prepare_step(
     effect_after: list[dict[str, Any]] = []
 
     try:
-        if kind == "create-note":
+        if kind in PRESERVATION_STEP_KINDS:
+            native = _preservation_call(vault_root, kind, args)
+            prepared = {**native, "destination": native["allocation"]["destination"]}
+            path = prepared["destination"]
+            expected_absent = True
+            effect_before = [{"path": item["path"], "absent": True} for item in native["core"]]
+            effect_after = [{"path": item["path"], "content_hash": item["content_hash"]} for item in native["core"]]
+            after_hash = next(item["content_hash"] for item in native["core"] if item["path"] == path)
+        elif kind == "create-note":
             review = {
                 key: args.pop(key)
                 for key in ("relation_disposition", "relation_review_reason")
@@ -1544,6 +1669,28 @@ def _prepare_step(
             if kind == RECORDS_STEP_KIND:
                 prepared["payload_hash"] = found["payload_hash"]
             after_hash = None
+            effect_after = [{"path": path, "exists": True}]
+        elif kind in PLANNING_STEP_KINDS:
+            from . import planning
+
+            action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+            native = planning.prepare(vault_root, action, args)
+            path = native["path"]
+            prepared = {**native, "destination": path}
+            after_hash = None
+            if native.get("store") is not None:
+                effect_before = []
+            else:
+                path = normalize_target_path(path, _owner_tree="Planning")
+                manifest_path = normalize_target_path(native["manifest_path"], _owner_tree="Planning")
+                _text, manifest_hash = _read_target(vault_root, manifest_path)
+                if kind == "add-plan":
+                    expected_absent = True
+                    effect_before = [{"path": path, "absent": True}]
+                else:
+                    before_hash = native["before_item_hash"]
+                    effect_before = [{"path": path, "content_hash": before_hash}]
+                effect_before.append({"path": manifest_path, "content_hash": manifest_hash})
             effect_after = [{"path": path, "exists": True}]
         elif kind in RECORDS_STEP_KINDS:
             from . import record_governance
@@ -1979,7 +2126,10 @@ def prepare_proposal(
     # published.  A stale review must not leave an inert but misleading plan in
     # the governed run store.
     _validate_entity_candidate_plan(root, validated)
-    manifest = _prepare_manifest(root, validated["steps"])
+    from . import vocabulary_gate
+
+    with vocabulary_gate.preparation_context(root):
+        manifest = _prepare_manifest(root, validated["steps"])
     binding = validated.get("entity_candidate")
     if isinstance(binding, Mapping) and binding.get("candidate_state") == "hydration":
         allowed_paths = {
@@ -2096,7 +2246,7 @@ def _records_store_blockers(
     owned: set[int] = set()
     for index, item in enumerate(plan["binding_manifest"]):
         prepared = item.get("prepared") or {}
-        if item.get("kind") not in RECORDS_STEP_KINDS or not isinstance(
+        if item.get("kind") not in COLLECTION_STEP_KINDS or not isinstance(
             prepared.get("collection_id"), str
         ):
             continue
@@ -2216,6 +2366,7 @@ def compensation_kind(kind: str) -> str:
         OBSERVE_UNIT_STEP_KIND: "unavailable",
         # Authoring the edge again is a new write and a new promotion, never a rollback.
         REMOVE_RELATION_STEP_KIND: "unavailable",
+        **dict.fromkeys(PRESERVATION_STEP_KINDS | PLANNING_STEP_KINDS, "unavailable"),
     }[kind]
 
 
@@ -2286,6 +2437,8 @@ def _witness_basis(
         "update-record": "record_memory:update",
         OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
         REMOVE_RELATION_STEP_KIND: "edit_memory:remove-relation",
+        "capture-source": "capture_memory:source", "preserve-evidence": "preserve_memory:evidence",
+        "add-plan": "plan_memory:add", "update-plan": "plan_memory:update", "triage-plan": "plan_memory:triage",
     }[step["kind"]]
     return {
         "version": 1,
@@ -2331,6 +2484,24 @@ def _finalize_witness_batch(
             continue
         contents[relative] = write.content
     hashes = {path: text_content_hash(content) for path, content in contents.items()}
+    kind = str(step["kind"])
+    if kind in PRESERVATION_STEP_KINDS:
+        from .vault import PreparedBinaryContent
+
+        planned = {}
+        for write in writes:
+            path = Path(write.path).absolute().relative_to(root).as_posix()
+            if isinstance(write.content, PreparedBinaryContent):
+                planned[path] = {"path": path, "content_hash": write.content.sha256, "size": write.content.size}
+            elif isinstance(write.content, str):
+                planned[path] = {"path": path, "content_hash": hashes[path]}
+        core = binding["prepared"]["core"]
+        pending = curation_witness.pending_for(vault_root)
+        if pending is None or pending.native_core is None or set(pending.native_core) != {item["path"] for item in core}:
+            raise _error("CURATION_BINDING_STALE", "native core allocation paths changed")
+        if any(planned.get(item["path"]) != item for item in core):
+            raise _error("CURATION_BINDING_STALE", "native core changed after preparation")
+        return curation_witness.render_with_after(content, binding["effect_after"])
     kind = str(step["kind"])
     source = str(binding["path"])
     destination = str(binding.get("postcondition", {}).get("path") or source)
@@ -2467,6 +2638,9 @@ def _validate_witness(
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
                 allow_records=kind in RECORDS_STEP_KINDS,
+                _owner_tree=({"capture-source": "Sources", "preserve-evidence": "Evidence"}.get(kind) or ("Planning" if kind in PLANNING_STEP_KINDS else None)),
+                _planning_identity=(binding["prepared"]["collection_id"], binding["prepared"]["item_key"]) if kind in PLANNING_STEP_KINDS and binding["prepared"].get("store") is not None else None,
+                _native_paths=frozenset(item["path"] for item in binding["prepared"]["core"]) if kind in PRESERVATION_STEP_KINDS else None,
             )
         except CurationError as error:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "curation postimage is invalid") from error
@@ -2522,7 +2696,7 @@ def records_collections(vault_root: Path, run_id: str) -> set[str]:
     return {
         item["prepared"]["collection_id"]
         for item in plan["binding_manifest"]
-        if item.get("kind") in RECORDS_STEP_KINDS
+        if item.get("kind") in COLLECTION_STEP_KINDS
         and isinstance((item.get("prepared") or {}).get("collection_id"), str)
     }
 
@@ -2623,7 +2797,7 @@ def _records_item_visible(
 
     if not isinstance(binding, Mapping):
         return False
-    if binding.get("kind") not in RECORDS_STEP_KINDS:
+    if binding.get("kind") not in COLLECTION_STEP_KINDS:
         return None
     prepared = binding.get("prepared")
     if not isinstance(prepared, Mapping):
@@ -2665,6 +2839,21 @@ def _verify_records_receipt(
     # The evidence this reads may be damaged: a binding without a collection identity is no store step.
     collection_id = prepared.get("collection_id")
     writer = selected_writer(vault_root, collection_id) if isinstance(collection_id, str) else None
+    if kind in PLANNING_STEP_KINDS:
+        from . import planning
+
+        action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+        if writer is not None:
+            if not planning.store_receipt(writer, store_request_id(str(witness["run_id"]), str(witness["operation_id"])), prepared=prepared, after=after[0], action=action):
+                raise _error("CURATION_OUTCOME_UNCERTAIN", "Planning transaction does not corroborate")
+            return True
+        if action == "add":
+            receipt = planning.add_receipt(vault_root, prepared["manifest_path"], item_key=prepared["item_key"], payload_hash=prepared["payload_hash"])
+        else:
+            receipt = planning.update_receipt(vault_root, prepared["manifest_path"], operation=action, item_key=prepared["item_key"], before_manifest_hash=prepared["before_manifest_hash"], before_container_hash=prepared["before_container_hash"], before_item_hash=prepared["before_item_hash"], after_item_hash=after[0]["content_hash"])
+        if receipt is None or receipt["canonical_path"] != prepared["destination"] or receipt["after_item_hash"] != after[0]["content_hash"]:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "Planning audit does not corroborate")
+        return False
     if writer is not None:
         # On the store thread the transaction row for the step's request id is the receipt.
         from .collection_store import curation_step
@@ -2718,7 +2907,38 @@ def _verify_live_postcondition(
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
 ) -> None:
-    if step is not None and step.get("kind") in RECORDS_STEP_KINDS:
+    if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
+        from dataclasses import replace
+
+        from . import artifact_recovery, originals, retained_inputs
+        from .governance.principal import effective_principal
+
+        if binding is None:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "native preservation needs its original binding")
+        native = binding["prepared"]
+        binaries = {item["path"]: item for item in native["core"] if "size" in item}
+        verified = set()
+        try:
+            who = replace(effective_principal(), administrative_ingress=False)
+            for path, reference in native["references"].items():
+                page = retained_inputs._read_snapshot(vault_root, reference)  # noqa: SLF001
+                if page.page.path != path:
+                    raise _error("CURATION_OUTCOME_UNCERTAIN", "native preservation identity changed")
+                original = originals.binary_binding(page.page.frontmatter)
+                if original is None or original.path not in binaries:
+                    continue
+                expected = binaries[original.path]
+                with artifact_recovery.stage(vault_root, path, who, expected_sha256=expected["content_hash"]) as (held, _descriptor):
+                    if held.size != expected["size"]:
+                        raise artifact_recovery.RecoveryUnavailable
+                    artifact_recovery.require_current(vault_root, held, who)
+                verified.add(original.path)
+            if verified != set(binaries):
+                raise _error("CURATION_OUTCOME_UNCERTAIN", "native preserved originals are incomplete")
+        except (retained_inputs.RetainedInputError, artifact_recovery.RecoveryUnavailable) as error:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "native preserved original is unavailable") from error
+        return
+    if step is not None and step.get("kind") in COLLECTION_STEP_KINDS:
         if binding is None:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "a Records witness needs its binding")
         if _verify_records_receipt(vault_root, binding, witness, kind=step["kind"]):
@@ -2762,6 +2982,8 @@ def _dispatch_step(
     kind = str(step["kind"])
     args = json.loads(canonical_json(step["args"]))
     prepared = dict(binding.get("prepared") or {})
+    if kind in PRESERVATION_STEP_KINDS:
+        return _preservation_call(vault_root, kind, args, prepared=prepared)
     if kind == "create-note":
         relation = {
             key: prepared[key]
@@ -2836,6 +3058,33 @@ def _dispatch_step(
             draft_token=prepared["draft_token"],
             **relation,
         )
+    if kind in PLANNING_STEP_KINDS:
+        from . import plan_memory
+        from .collection_store.preview import selected_writer
+
+        action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+        args = dict(prepared["normalized_native_args"])
+        intent = prepared.get("source_intent")
+        def validate_intent() -> None:
+            from .governance import policy
+            from .origin_bindings import resolve_origin_input
+
+            # Exact identity and release are native checks; the agent judges expressed intent.
+            with policy.outside_request_policy_snapshot():
+                resolve_origin_input(vault_root, intent)
+
+        writer = selected_writer(vault_root, prepared["collection_id"])
+        request = None
+        if writer is not None:
+            from .collection_store import curation_step
+
+            container, version = curation_step.resolve_guards(vault_root, writer, binding, args)
+            args["expected_container_hash"] = container
+            if action != "add":
+                args["expected_item_version"] = version
+            request = store_request_id(run["curation_run"], run["operation"])
+        result = plan_memory._write(vault_root, action, args, request_id=request, history_binding=run, _validate_inputs=validate_intent if intent is not None else None)  # noqa: SLF001
+        return {**result, "path": prepared["destination"]}
     if kind in RECORDS_STEP_KINDS:
         from . import record_governance
         from . import records as records_module
@@ -3212,6 +3461,70 @@ def _record_failed_attempt(
     return receipt
 
 
+_ACTIVE_EPISODE_INVOCATION: ContextVar[tuple | None] = ContextVar("curation_episode_invocation", default=None)
+
+
+@contextmanager
+def _episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, run: str, operation: str):
+    invocation = _join_episode_invocation(vault_root, plan, binding, run, operation)
+    token = _ACTIVE_EPISODE_INVOCATION.set((Path(vault_root).resolve(), run, operation, invocation))
+    try:
+        yield invocation
+    finally:
+        _ACTIVE_EPISODE_INVOCATION.reset(token)
+
+
+def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, run: str, operation: str) -> dict | None:
+    metadata = binding.get("prepared", {}).get("episode")
+    if metadata is None:
+        return None
+    from . import episode_model, episode_workflow
+
+    session = episode_workflow._Session(vault_root, metadata["key"])  # noqa: SLF001
+    candidate, leaf_id = metadata["candidate_id"], metadata["leaf_id"]
+    leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
+    if leaf["effect_digest"] != metadata["effect_digest"] or leaf["binding"] is None or (
+        leaf["binding"]["run_id"], leaf["binding"]["operation_id"]
+    ) != (run, operation):
+        raise _error("CURATION_OUTCOME_UNCERTAIN", "episode invocation differs from its immutable binding")
+    episode_model._binding({**leaf["binding"], "sealed_plan": plan}, leaf)  # noqa: SLF001
+    active = _ACTIVE_EPISODE_INVOCATION.get()
+    if active is not None and active[:3] == (Path(vault_root).resolve(), run, operation):
+        # Only the enclosing, still-running owner call may join its already-recorded invocation.
+        if active[3] is None or leaf.get("invocation_id") != active[3]["invocation_id"] or leaf["outcome"] != "uncertain":
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "active episode invocation changed")
+        return active[3]
+    if leaf["outcome"] == "uncertain":
+        session.transition("reconcile_curation_leaf", candidate=candidate, leaf=leaf_id)
+        leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
+        if leaf["outcome"] != "proven_uncommitted":
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "episode invocation requires native recovery")
+    session.transition("mark_curation_invocation", candidate=candidate, leaf=leaf_id)
+    leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
+    return {"invocation_id": leaf["invocation_id"], "episode_attempt": leaf["attempts"]}
+
+
+def _valid_no_effect(receipt: Mapping, *, plan_identity: str, binding: Mapping, operation: str) -> bool:
+    from . import episode_model
+
+    metadata = binding.get("prepared", {}).get("episode")
+    # The terminal fields and reason token are fixed by the native no-effect protocol.
+    if not isinstance(metadata, Mapping) or set(receipt) != {
+        "version", "attempt", "ordinal", "step_id", "operation_id", "outcome", "invocation_id",
+        "episode_attempt", "plan_id", "prepared_effect_digest", "native_reason", "native_evidence",
+    } or receipt.get("outcome") != "definite-no-effect" or receipt.get("native_reason") != "destination_exists":
+        return False
+    attempt = receipt.get("episode_attempt")
+    if type(attempt) is not int or attempt < 1 or receipt.get("plan_id") != plan_identity or receipt.get("prepared_effect_digest") != _digest(binding):
+        return False
+    identity = episode_model._hash(  # noqa: SLF001
+        "exomem-episode-invocation-v1", episode_model.episode_id(metadata["key"]), metadata["leaf_id"], metadata["effect_digest"], operation, attempt
+    )
+    return receipt.get("invocation_id") == identity and receipt.get("native_evidence") == {
+        "destination": binding["prepared"]["destination"], "publication_started": False,
+    }
+
+
 def _execute_next(
     vault_root: Path,
     run_identity: str,
@@ -3254,7 +3567,7 @@ def _execute_next(
     # A Records step on a collection the store owns commits there; its transaction row is the witness.
     writer = (
         selected_writer(vault_root, binding["prepared"]["collection_id"])
-        if step["kind"] in RECORDS_STEP_KINDS and not compensation
+        if step["kind"] in COLLECTION_STEP_KINDS and not compensation
         else None
     )
     projection: Mapping[str, Any] = {}
@@ -3387,6 +3700,7 @@ def _execute_next(
     execution_binding, prepared_effect, runtime_args = _runtime_execution_binding(
         vault_root, step, binding
     )
+    invocation = _join_episode_invocation(vault_root, plan, binding, run_identity, operation_identity)
     prepared_state = {
         "version": 1,
         "run_id": run_identity,
@@ -3457,6 +3771,22 @@ def _execute_next(
             parent_compensation_plan_id=plan_identity if compensation else None,
         )
         _verify_live_postcondition(vault_root, witness, step=step, binding=execution_binding)
+    except DefiniteNoEffect as error:
+        if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
+            raise
+        receipt = {
+            "version": 1, "attempt": _next_attempt(store, run_identity, step["step_id"]),
+            "ordinal": ordinal, "step_id": step["step_id"], "operation_id": operation_identity,
+            "outcome": "definite-no-effect", **invocation, "plan_id": plan_identity,
+            "prepared_effect_digest": _digest(binding), "native_reason": error.reason,
+            "native_evidence": error.evidence,
+        }
+        if not _valid_no_effect(receipt, plan_identity=plan_identity, binding=binding, operation=operation_identity):
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "native no-effect terminal is invalid") from error
+        store.create_receipt(run_identity, ordinal, step["step_id"], receipt)
+        final = store.reconstruct(run_identity)
+        store.write_state(run_identity, final)
+        return {**final, "mutated": True, "step": receipt}
     except CurationError as error:
         try:
             committed_witness = _committed_operation_witness(
@@ -4027,13 +4357,17 @@ class CurationStore:
             "binding_manifest": json.loads(canonical_json(list(binding_manifest))),
             "registry_ids": dict(registry_ids),
         }
+        if any(isinstance(prepared := item.get("prepared"), Mapping) and isinstance(prepared.get("episode"), Mapping) for item in sealed["binding_manifest"]):
+            # This fixed reader version prevents old executors from bypassing journal correlation.
+            sealed["episode_invocation_version"] = 1
         identity = plan_id(sealed)
         run_identity = f"cur-{(today or dt.date.today()):%Y%m%d}-{identity[:12]}"
         path = self.plan_path(run_identity)
         self._assert_safe(path)
         self._create_plan_at(path, sealed)
         fingerprint = plan_fingerprint(
-            validated, sealed["binding_manifest"], sealed["registry_ids"]
+            {key: value for key, value in sealed.items() if key not in {"binding_manifest", "registry_ids"}},
+            sealed["binding_manifest"], sealed["registry_ids"],
         )
         projection = {
             "version": 1,
@@ -4302,6 +4636,13 @@ class CurationStore:
                         "next_action": None,
                     }
                 committed[step_identity] = receipt
+            elif outcome == "definite-no-effect":
+                if approval is None or step["kind"] not in PRESERVATION_STEP_KINDS or not _valid_no_effect(
+                    receipt, plan_identity=identity, binding=plan["binding_manifest"][ordinal], operation=expected_operation
+                ):
+                    return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
+                # A native zero-publication terminal permits the same operation to retry.
+                failed[step_identity] = {**receipt, "retryable": True}
             elif outcome == "failed":
                 if set(receipt) != {
                     "version",

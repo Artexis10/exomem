@@ -49,6 +49,7 @@ _FIELDS = {
     },
     "attest_precommit": {"input_revision"},
     "mark_attempt_started": {"candidate", "leaf"},
+    "mark_curation_invocation": {"candidate", "leaf"},
     "reconcile_curation_leaf": {"candidate", "leaf"},
     "attest_postcommit": {"input_revision", "leaf_ids"},
 }
@@ -125,13 +126,11 @@ def _apply_event(state: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str
         return model.attest_precommit(state, args["input_revision"])
     if action == "mark_attempt_started":
         return model.mark_attempt_started(state, args["candidate"], args["leaf"])
+    if action == "mark_curation_invocation":
+        return model.mark_curation_invocation(state, args["candidate"], args["leaf"])
     if action == "reconcile_curation_leaf":
         outcome = model.VerifiedLeafOutcome(**evidence["outcome"])
-        if (outcome.candidate_id, outcome.leaf_id, outcome.outcome) != (
-            args["candidate"],
-            args["leaf"],
-            "committed",
-        ):
+        if (outcome.candidate_id, outcome.leaf_id) != (args["candidate"], args["leaf"]) or outcome.outcome not in {"committed", "proven_uncommitted"}:
             raise _error("EPISODE_TRANSITION_INVALID", "accepted outcome differs from command")
         return model.reconcile_leaf(state, outcome)
     return model.attest_postcommit(state, args["input_revision"], args["leaf_ids"])
@@ -355,7 +354,7 @@ class EpisodeStore:
                         candidate_id=args["candidate"],
                         leaf_id=args["leaf"],
                         effect_digest=leaf["effect_digest"],
-                        outcome="committed",
+                        outcome=leaf["outcome"],
                         **proof,
                     )
                 )

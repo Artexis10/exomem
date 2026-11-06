@@ -245,6 +245,8 @@ def append_record(
         None,
     ]
     | None = None,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
@@ -521,6 +523,14 @@ def append_record(
             snapshot,
             planned_paths=tuple(write.path.relative_to(root).as_posix() for write in writes),
         )
+        def prepare_final(_writes) -> None:
+            _prepare({
+                "collection_id": manifest.collection_id, "manifest_path": manifest.path,
+                "semantic_profile": manifest.semantic_profile, "strategy": manifest.storage.strategy,
+                "item_key": key, "path": canonical_path.relative_to(root).as_posix(),
+                "payload_hash": payload_hash, "body": body, "values": dict(values),
+            })
+
         _publish_with_origin(
             root,
             writes,
@@ -530,6 +540,8 @@ def append_record(
                 *((delivery_guard,) if delivery_guard is not None else ()),
             ),
             origin_inputs=(origin_inputs,),
+            _prepare=prepare_final if _prepare is not None else None,
+            _validate_inputs=_validate_inputs,
         )
         committed_path = canonical_path.relative_to(root).as_posix()
         committed = _result(
@@ -567,6 +579,7 @@ def _normalize_item_origin(
     item_path: Callable[[], Path],
     render: Callable[[str], str],
     prepare_inputs: bool = True,
+    _canonical_owner: bool = False,
 ) -> tuple[str, Any]:
     """The one origin normalizer every Markdown-item writer runs.
 
@@ -583,13 +596,20 @@ def _normalize_item_origin(
         if origin_bindings._authored_origin(body, prior_body) is None:  # noqa: SLF001
             return body, None
         body = origin_bindings.place_authored_origin(body, before_source=prior_body)
-        relative = item_path().relative_to(root).as_posix()
-        _fields, rendered_body, _ = vault.parse_frontmatter(render(body))
+        if _canonical_owner:
+            owner_ref = collections._profile_item_ref(manifest.semantic_profile, manifest.collection_id, key)  # noqa: SLF001
+            document = semantic_units.parse_semantic_units(body, parent_ref=owner_ref,
+                _record_parent=(manifest.semantic_profile, manifest.collection_id, key))
+        else:
+            relative = item_path().relative_to(root).as_posix()
+            _fields, rendered_body, _ = vault.parse_frontmatter(render(body))
+            owner_ref = context_refs.vault_ref(relative)
+            document = semantic_units.parse_semantic_units(rendered_body, path=relative)
         body = origin_bindings.normalize_origin_scopes(
             body,
-            document=semantic_units.parse_semantic_units(rendered_body, path=relative),
+            document=document,
             fields=values,
-            owner_ref=context_refs.vault_ref(relative),
+            owner_ref=owner_ref,
             record_identity=(manifest.collection_id, key),
             before_source=prior_body,
         )
@@ -606,6 +626,8 @@ def _publish_with_origin(
     *,
     required_guards: tuple[Any, ...],
     origin_inputs: tuple[Any, ...] = (),
+    _prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
 ) -> None:
     """Publish one atomic batch, holding every prepared origin input unchanged."""
     from . import provenance
@@ -614,6 +636,8 @@ def _publish_with_origin(
     origin_guards: tuple[vault.PathGuard, ...] = ()
 
     def revalidate() -> None:
+        if _validate_inputs is not None:
+            _validate_inputs()
         for item in prepared:
             item.revalidate(root)
 
@@ -625,7 +649,8 @@ def _publish_with_origin(
             writes,
             vault_root=root,
             required_guards=(*required_guards, *origin_guards),
-            _validate_prepared_bindings=revalidate if prepared else None,
+            _validate_prepared_bindings=revalidate if prepared or _validate_inputs is not None else None,
+            _prepare=_prepare,
         )
     except vault.BatchWriteError:
         raise
@@ -672,28 +697,8 @@ def prepare_append(
     """
     root = Path(vault_root)
 
-    def stop(
-        manifest: collections.CollectionManifest,
-        snapshot: record_formats.AdapterSnapshot,
-        key: str,
-        values: Mapping[str, Any],
-        body: str,
-    ) -> None:
-        if any(record.identity.key == key for record in snapshot.records):
-            raise collections.CollectionError("RECORD_ID_CONFLICT", "record key already exists")
-        path, _guards = _new_item_path(root, manifest, key, values, snapshot)
-        raise _AppendPrepared(
-            {
-                "collection_id": manifest.collection_id,
-                "manifest_path": manifest.path,
-                "semantic_profile": manifest.semantic_profile,
-                "strategy": manifest.storage.strategy,
-                "item_key": key,
-                "path": path.relative_to(root).as_posix(),
-                "payload_hash": _payload_hash(manifest, key, values, body),
-                "body": body,
-            }
-        )
+    def stop(prepared: dict[str, Any]) -> None:
+        raise _AppendPrepared(prepared)
 
     try:
         append_record(
@@ -705,7 +710,7 @@ def prepare_append(
             why=why,
             body=body,
             hold=False,
-            validate_snapshot=stop,
+            _prepare=stop,
         )
     except _AppendPrepared as prepared:
         return prepared.prepared
@@ -804,12 +809,29 @@ def update_receipt(
     before_item_hash: str,
     after_item_hash: str,
 ) -> dict[str, Any] | None:
+    return _update_receipt(vault_root, collection, item_key=item_key,
+                           before_manifest_hash=before_manifest_hash, before_container_hash=before_container_hash,
+                           before_item_hash=before_item_hash, after_item_hash=after_item_hash)
+
+
+def _update_receipt(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    item_key: str,
+    before_manifest_hash: str,
+    before_container_hash: str,
+    before_item_hash: str,
+    after_item_hash: str,
+    _profile: str = "records",
+    _operation: str = "update",
+) -> dict[str, Any] | None:
     """Read the exact guarded update from the item's verified audit chain."""
     root = Path(vault_root)
     try:
-        manifest = record_governance.require_records_profile(
-            record_governance.resolve_collection_for_mutation(root, collection)
-        )
+        manifest = record_governance.resolve_collection_for_mutation(root, collection)
+        if manifest.semantic_profile != _profile:
+            return None
         if manifest.storage.strategy != "markdown-items":
             return None
         snapshot = record_formats.load_adapter(root, manifest).read()
@@ -828,7 +850,7 @@ def update_receipt(
             for event in chain.events
             if event["transition_id"] == correlation
             and _event_matches_transition(event, manifest)
-            and event["operation"] == "update"
+            and event["operation"] == _operation
             and event["item_key"] == item_key
             and event["canonical_path"] == record.source.path
             and event["before_manifest_hash"] == before_manifest_hash
@@ -1750,6 +1772,7 @@ def update_record(
     ]
     | None = None,
     _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
     _history_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded, exact-key update to one existing Markdown record.
@@ -1984,7 +2007,7 @@ def update_record(
                 *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
             ),
         )
-        if _prepare is not None:
+        def prepare_final(_writes) -> None:
             _prepare(
                 {
                     "collection_id": manifest.collection_id,
@@ -1996,6 +2019,7 @@ def update_record(
                     "before_manifest_hash": manifest.manifest_version.hash,
                     "before_container_hash": before_container_hash,
                     "before_item_hash": record.source.hash,
+                    "values": dict(values), "prior_values": dict(record.values), "body": body,
                 }
             )
         from . import record_history
@@ -2030,6 +2054,8 @@ def update_record(
                 *(guard for guard in snapshot.path_guards if guard.target != record.source.path),
             ),
             origin_inputs=(origin_inputs,),
+            _prepare=prepare_final if _prepare is not None else None,
+            _validate_inputs=_validate_inputs,
         )
         committed = _result(
             operation=operation,

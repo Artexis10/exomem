@@ -6084,6 +6084,9 @@ def _postfilter(
         from ..episode_recovery import EpisodeInputOwner
 
         cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
+    from .. import origin_bindings
+
+    cleaned = origin_bindings.release_origin_response(vault_root, cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 

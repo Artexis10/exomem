@@ -6,9 +6,9 @@ import hashlib
 import os
 import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,18 @@ def operation_context(
     token = _OPERATION.set(current)
     try:
         yield current
+    finally:
+        _OPERATION.reset(token)
+
+
+@contextmanager
+def preparation_context(vault_root: Path):
+    """Borrow the current operation without advancing execution allocation counters."""
+    current = _OPERATION.get()
+    token = _OPERATION.set(replace(current, uses=[]) if current is not None else None)
+    try:
+        with vocabulary_authority._preparation_scope(vault_root):  # noqa: SLF001
+            yield
     finally:
         _OPERATION.reset(token)
 
@@ -111,7 +123,7 @@ def deterministic_memory_id() -> str | None:
 
 
 class _BatchAuthority:
-    def __init__(self, authority, reservation, operation, context, guard, evidence):
+    def __init__(self, authority, reservation, operation, context, guard, evidence, *, preparation=False):
         self.authority = authority
         self.reservation = reservation
         self.operation = operation
@@ -120,8 +132,12 @@ class _BatchAuthority:
         self.evidence = evidence
         self.closed = False
         self.committed = False
+        self.preparation = preparation
 
     def commit(self) -> None:
+        if self.preparation:
+            # Point-in-time preparation eligibility never grants publication authority.
+            raise vocabulary_authority.VocabularyAuthorityDenied("preparation cannot publish")
         self.evidence.recheck(phase="after")
         manifest = list(self.authority.authority_use_manifest(self.reservation))
         receipt = vocabulary_authority._canonical_receipt_for_writer(
@@ -143,6 +159,8 @@ class _BatchAuthority:
 
     def before_publication(self) -> None:
         self.evidence.recheck(phase="before")
+        if self.preparation and self.authority.check_eligible(self.operation, principal=self.context.principal) != "eligible":
+            raise vocabulary_authority.VocabularyAuthorityConflict("committed operation requires native recovery")
 
     def effect_paths(self) -> frozenset[str]:
         """The paths that this reservation's effects name, for the write gate's grant check."""
@@ -151,7 +169,7 @@ class _BatchAuthority:
     def _close_evidence(self) -> None:
         try:
             self.evidence.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 - borrowed evidence cleanup cannot undo a canonical commit.
             # Evidence is read-only borrowed state. Cleanup cannot undo a
             # canonical commit or turn spent authority into an unspent retry.
             import logging
@@ -312,6 +330,10 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
             scope_proofs=evidence.scope_proofs,
         )
         context.batch += 1
+        if vocabulary_authority._preparing(root):  # noqa: SLF001
+            if authority.check_eligible(operation, principal=context.principal) != "eligible":
+                raise vocabulary_authority.VocabularyAuthorityConflict("committed operation requires native recovery")
+            return _BatchAuthority(authority, None, operation, context, nullcontext(), evidence, preparation=True)
         try:
             reservation = authority.reserve(operation, principal=context.principal)
         except vocabulary_authority.VocabularyAuthorityDenied as exc:

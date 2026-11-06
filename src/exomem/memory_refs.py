@@ -52,6 +52,27 @@ class ReferenceError(Exception):
         return {"code": self.code, "reason": self.reason}
 
 
+_ID_ALLOCATION: contextvars.ContextVar[tuple[list[str], tuple[str, ...] | None] | None] = contextvars.ContextVar(
+    "memory_id_allocation", default=None
+)
+
+
+@contextlib.contextmanager
+def _allocated_ids(expected: Iterable[str] | None = None) -> Iterator[list[str]]:
+    """Retain a native writer's exact page identities across preparation and execution."""
+    identities: list[str] = []
+    sealed = tuple(expected) if expected is not None else None
+    if sealed is not None and any(normalize_id(value) != value for value in sealed):
+        raise ValueError("native page allocation is invalid")
+    token = _ID_ALLOCATION.set((identities, sealed))
+    try:
+        yield identities
+        if sealed is not None and len(identities) != len(sealed):
+            raise ValueError("native page allocation count changed")
+    finally:
+        _ID_ALLOCATION.reset(token)
+
+
 def new_id() -> str:
     # Activated exact-approval retries need the same staged bytes.  The gate
     # only supplies this deterministic value inside one canonical writer
@@ -59,9 +80,18 @@ def new_id() -> str:
     from . import vocabulary_gate
 
     generated = vocabulary_gate.deterministic_memory_id()
-    if generated is not None:
-        return generated
-    return str(uuid.uuid4())
+    allocation = _ID_ALLOCATION.get()
+    if allocation is None:
+        return generated if generated is not None else str(uuid.uuid4())
+    identities, sealed = allocation
+    ordinal = len(identities)
+    if sealed is not None:
+        if ordinal >= len(sealed) or generated is not None and generated != sealed[ordinal]:
+            raise ValueError("native page allocation changed")
+        generated = sealed[ordinal]
+    value = generated if generated is not None else str(uuid.uuid4())
+    identities.append(value)
+    return value
 
 
 def normalize_id(value: object) -> str | None:

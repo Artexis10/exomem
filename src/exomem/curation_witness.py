@@ -20,6 +20,7 @@ class PendingWitness:
     finalize: Callable[[list[Any], str], str | None] | None = None
     ready: bool = False
     consumed: bool = False
+    native_core: tuple[str, ...] | None = None
 
 
 _ACTIVE: ContextVar[PendingWitness | None] = ContextVar(
@@ -58,6 +59,13 @@ def pending_for(vault_root: Path | None) -> PendingWitness | None:
     except OSError:
         return None
     return state
+
+
+def bind_native_core(vault_root: Path, writes: list[Any]) -> None:
+    """Let the native owner identify its complete core before witness finalization."""
+    state = pending_for(vault_root)
+    if state is not None:
+        state.native_core = tuple(write.path.relative_to(vault_root).as_posix() for write in writes)
 
 
 def augment_batch(

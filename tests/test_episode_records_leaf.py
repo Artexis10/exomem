@@ -749,6 +749,11 @@ def test_original_record_origin_proposal_preserves_committed_leaf_when_adding_an
         receipt = curation.CurationStore(vault).reconstruct(bound["run_id"])["receipts"]
         assert len(receipt) == 1
         _write_source_rule(vault, ceiling=0, audience=OWNER_AUDIENCE)
+        if commit_door == "curation":
+            current = _episode(vault, action="candidates")
+            assert current["candidates"][0]["leaves"][0]["outcome"] == "uncertain"
+            reconciled = _resume(vault, current)
+            assert reconciled["candidates"][0]["leaves"][0]["outcome"] == "committed"
         before = _episode(vault, action="candidates")
         repeated = _episode(
             vault, action="prepare", candidate="reading",

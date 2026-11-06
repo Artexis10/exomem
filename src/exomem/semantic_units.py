@@ -296,6 +296,7 @@ class SemanticUnitDocument:
     note_relation_errors: tuple[markdown_relations.RelationValidationError, ...] = ()
     canonical_section_present: bool = False
     canonical_bullet_count: int = 0
+    _record_profile: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
@@ -934,11 +935,20 @@ def parse_semantic_units(
     project: str | None = None,
     page_type: str | None = None,
     candidates: SemanticUnitCandidates | None = None,
+    _record_parent: tuple[str, str, str] | None = None,
 ) -> SemanticUnitDocument:
     """Parse compact observations and rich semantic blocks exactly once each."""
     source = markdown or ""
     source_path = str(path)
-    effective_parent_ref = _effective_parent_ref(parent_ref, source_path)
+    if _record_parent is None:
+        effective_parent_ref = _effective_parent_ref(parent_ref, source_path)
+    else:
+        from . import structured_collections
+
+        profile, collection_id, key = _record_parent
+        if parent_ref != structured_collections._profile_item_ref(profile, collection_id, key):  # noqa: SLF001
+            raise ValueError("native row parent identity is invalid")
+        effective_parent_ref = parent_ref
     lines = _source_lines(source)
     line_by_number = {line.number: line for line in lines}
     if candidates is None:
@@ -1090,6 +1100,7 @@ def parse_semantic_units(
         errors=tuple(errors),
         warnings=tuple(warnings),
         parent_ref=effective_parent_ref,
+        _record_profile=_record_parent[0] if _record_parent is not None else None,
         rich_blocks=tuple(rich_document.blocks),
         semantic_block_errors=tuple(rich_document.errors),
         semantic_block_warnings=tuple(rich_document.warnings),

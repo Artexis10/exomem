@@ -294,6 +294,28 @@ def test_one_immediate_transaction_txns_last_and_atomic_rollback(store, monkeypa
     assert store.connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_preparation_checks_sources_then_rolls_back_the_complete_write(store):
+    create(store)
+    before = list(store.connection.iterdump())
+    files = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+
+    class Prepared(Exception):
+        pass
+
+    def stop(prepared):
+        assert prepared["item_key"] == KEY
+        raise Prepared
+
+    with pytest.raises(collections.CollectionError, match="INVALID_RECORD_SOURCE"):
+        store.append_record(CID, item={"title": "Prepared"}, item_key=KEY, why="Prepare a native leaf.",
+            hold=False, sources=("Knowledge Base/Sources/missing.md",), _prepare=stop)
+    with pytest.raises(Prepared):
+        store.append_record(CID, item={"title": "Prepared"}, item_key=KEY,
+            why="Prepare a native leaf.", hold=False, _prepare=stop)
+    assert list(store.connection.iterdump()) == before
+    assert {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == files
+
+
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_acknowledged_item_is_readable_with_sources_and_exact_body(store, profile):
     from exomem import get_page
@@ -497,3 +519,63 @@ def test_control_transition_chains_without_changing_the_collection_and_splits_la
     assert chain.verify_store_chain(store.connection)[0] == receipts[-1]["commit_seq"] == 3
     assert store.connection.execute(
         "SELECT generation, manifest_version, audit_head FROM collections").fetchone() == before
+
+
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_canonical_origin_binds_row_values_and_body_without_generated_item_proof(store, profile):
+    """A store row must bind its own logical body and values, and reject changed retained input."""
+    from test_origin_bindings import _write
+
+    from exomem import provenance
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal(surface="mcp")):
+        created = create(store, profile)
+        binding = _write(store.root, "Retained account.\n")
+        carrier = provenance.encode_origin({"inputs": {"account": binding}, "assessments": [], "bindings": [
+            {"inputs": ["account"], "scope": {"kind": "record_field", "collection_id": CID, "item_key": KEY, "field": "title"}},
+            {"inputs": ["account"], "scope": {"kind": "unit", "unit_ref": "#finding"}},
+        ]}, authoring=True)
+        body = carrier + "\n- [finding] Retained output. ^finding\n"
+        result = store.append_record(CID, item_key=KEY, item={"title": "Account"}, body=body, expected_container_hash=created["after_container_hash"], why="Retain the output.", hold=False)
+        current = store._item(CID, KEY)
+        normalized = provenance.parse_origin(current["body"], managed=True, strict=True)
+        assert all("fingerprint" in item["scope"] for item in normalized.payload["bindings"])
+        assert current["payload_hash"] != tokens.payload_hash(1, KEY, json.loads(current["values_json"]), body)
+        _write(store.root, "Changed retained account.\n")
+        before = tuple(store.connection.iterdump())
+        with pytest.raises(collections.CollectionError, match="ORIGIN_INPUT_STALE"):
+            store.append_record(CID, item_key=OTHER, item={"title": "Another account"}, body=carrier.replace(KEY, OTHER) + "\n- [finding] Retained output. ^finding\n", expected_container_hash=result["after_container_hash"], why="Retain another output.", hold=False)
+        assert store._item(CID, OTHER) is None
+        assert tuple(store.connection.iterdump()) == before
+
+
+def test_bulk_origin_rejects_a_changed_input_without_advancing_canonical_rows(store):
+    """Bulk writes must authenticate their canonical body just like single-row writes."""
+    from test_origin_bindings import _PATH, _write
+
+    from exomem import provenance
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with request_scope(owner_principal(surface="mcp")):
+        created = create(store)
+        binding = _write(store.root, "Retained bulk account.\n")
+        carrier = provenance.encode_origin({"inputs": {"account": binding}, "assessments": [], "bindings": [
+            {"inputs": ["account"], "scope": {"kind": "unit", "unit_ref": "#finding"}},
+        ]}, authoring=True)
+        body = carrier + "\n- [finding] Retained bulk output. ^finding\n"
+        result = store.bulk_upsert_records(CID, rows=[{"item": {"title": "Account"}, "body": body}],
+            source=_PATH, expected_container_hash=created["after_container_hash"], why="Retain this output.")
+        assert result["committed"], result
+        current = store.connection.execute("SELECT body FROM items").fetchone()[0]
+        normalized = provenance.parse_origin(current, managed=True, strict=True)
+        assert "fingerprint" in normalized.payload["bindings"][0]["scope"]
+        _write(store.root, "Changed retained bulk account.\n")
+        before = tuple(store.connection.iterdump())
+
+        refused = store.bulk_upsert_records(CID, rows=[{"item": {"title": "Another account"}, "body": body}],
+            source=_PATH, expected_container_hash=result["after_container_hash"], why="Retain another output.")
+
+        assert not refused["committed"]
+        assert refused["rows"][0]["code"] == "ORIGIN_INPUT_STALE"
+        assert tuple(store.connection.iterdump()) == before

@@ -258,6 +258,17 @@ def test_floor_two_pending_session_activation_and_session_revocation(
             "expires_at": now + 60,
         },
     )
+    from exomem.vocabulary_effects import Effect
+
+    eligible = vocabulary_authority.CanonicalOperation.from_effects(
+        operation_id="native-preparation", command_digest="a" * 64, image_digest="b" * 64,
+        effects=(Effect("entity_type.add", registry_path.relative_to(vault).as_posix(), "venue"),),
+        registry_digests={"entity_types": "c" * 64}, target_digests={},
+    )
+    before_preparation = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with request_scope(principal):
+        assert authority.check_eligible(eligible, principal=principal, now=now) == "eligible"
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before_preparation
     with request_scope(principal):
         committed = manager.invoke(
             schema_command,
@@ -348,3 +359,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
         connection.close()
     with pytest.raises(vocabulary_authority.VocabularyAuthorityUnavailable):
         authority.status(_principal(rotated.context), now=now)
+    after_close = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with request_scope(_principal(rotated.context)), pytest.raises(vocabulary_authority.VocabularyAuthorityUnavailable):
+        authority.check_eligible(eligible, principal=_principal(rotated.context), now=now)
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == after_close

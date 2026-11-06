@@ -71,8 +71,8 @@ Byte-equivalent replacement under current guards SHALL add no revision. After lo
 SHALL inspect public state before another mutation; transparent lost-ack replay SHALL
 NOT be promised. Extended journals SHALL require this reader-capable release, including
 supported rollback. Older strict readers SHALL refuse them before modification.
-This increment SHALL NOT imply completed native effect adapters, proposal association,
-origin accounting, compilation coverage or ordinary mixed-journey acceptance.
+Material binding alone SHALL NOT imply native execution, compilation coverage or ordinary mixed-journey acceptance.
+The native-effect requirements below separately govern execution and its associations.
 
 #### Scenario: A later recap keeps the original material handle
 
@@ -96,6 +96,147 @@ origin accounting, compilation coverage or ordinary mixed-journey acceptance.
 - **WHEN** current guards accompany an equivalent replacement or an explicit empty envelope
 - **THEN** the equivalent replacement writes nothing, while clearing appends one input revision and later recaps inherit the clear
 - **AND** stale guards refuse before sealing or writing any replacement
+
+### Requirement: Episode native effects prepare through final owner checks without publication
+
+The episode owner SHALL support closed native kinds `capture-source`, `preserve-evidence`,
+`add-plan`, `update-plan` and `triage-plan` through existing curation execution.
+General curation SHALL NOT seal these episode-only kinds; Experiment execution remains pending.
+Binary leaves SHALL select an already-preserved whole canonical original reference,
+SHA-256 and size, never a temporary path, upload handle or capability.
+Execution SHALL reacquire current authorized bytes through native artifact recovery
+with administrative ingress disabled. A reading SHALL NOT substitute for binary custody.
+
+Private preparation SHALL run actual owner normalization, hierarchy, motivation, lifecycle,
+history, source guards and complete write-set authorization. Its final snapshot SHALL follow
+all checks and precede any authoritative effect. Preparation SHALL suppress optional inference,
+canonical replacement, graph-debt enqueue, derived publication, registry commits and receipts.
+Existing cleanup SHALL remove temporary staging on every exit. Store preparation SHALL roll back
+SQL and PublicationBatch staging, including recovery-only preservation/quarantine, and return its refusal without committing preservation.
+Planning SHALL retain its hierarchy callback alongside the separate final preparation seam.
+Preparation SHALL use hold=False and create no held candidate. Ordinary operations SHALL retain existing behavior.
+Public callers SHALL NOT supply internal preparation flags, callbacks, allocations or proof objects.
+
+Vocabulary preparation SHALL use existing databases read-only with the current protected-file, sidecar,
+marker, schema, activation and custody guards. It SHALL check complete operation identity and current
+custody generation/expiry, refreshing after waits without reservation, request, spend or execution-counter advancement.
+Only a current matching reservation SHALL remain eligible; committed operations SHALL require recovery.
+Ordinary execution SHALL retain its existing reservation and final commit guards.
+
+Preparation SHALL freeze normalized semantic payload, native destination, canonical reference,
+timestamp and core original/companion allocation. Execution SHALL reuse that allocation and
+recompute shared bookkeeping under the native lease with current registry/target/write-set guards.
+It SHALL NOT overwrite shared logs/indexes with prepared postimages.
+Known destination duplicates SHALL be reported before sealing without fabricating executed leaves.
+Source/Evidence publication SHALL consume its curation witness atomically with original and companion,
+finalizing binary SHA/size through the native verified stream. Historical commitment SHALL NOT depend on mutable extraction text.
+Where no deterministic vocabulary ID exists, preparation SHALL seal the explicit native UUID sequence.
+Before publication, execution SHALL verify consumed count and rebuilt owner-declared core paths, identities and hashes.
+
+Planning leaves SHALL invoke the Planning facade, including store dispatch and current profile,
+plan-id, hierarchy, motivation, lifecycle, history, attribution and authorization rules.
+Owner-fixed receipts SHALL authenticate the exact Planning profile and add/update/triage operation.
+Store proof SHALL bind canonical transaction/item-version identity and current rows, never generated files.
+Intent support SHALL retain runtime identity/access proof; the active agent SHALL judge expressed intent.
+
+#### Scenario: Refused preparation leaves no authoritative side effects
+
+- **WHEN** native preparation reaches graph debt, history refusal or a store recovery-only preservation path
+- **THEN** SQL/publication staging rolls back and no canonical replacement, queue entry, held candidate or receipt remains
+- **AND** ordinary non-preparation operations retain their existing behavior
+
+#### Scenario: Independently prepared captures preserve shared bookkeeping
+
+- **WHEN** two prepared captures execute against shared logs or indexes
+- **THEN** each reuses its core allocation and recomputes bookkeeping under the native lease without losing the other's entry
+
+### Requirement: Exact episode invocations authenticate no-effect retry and commitment recovery
+
+New invocation-bearing attempts SHALL privately derive invocation_id from episode_id,
+leaf_id, effect_digest, operation_id and episode attempt. The journal SHALL record uncertainty before dispatch.
+Every entry to an episode-sealed plan, including ordinary curation apply/resume before an
+episode attempt, SHALL join the same journal-tracked invocation. Dispatch and terminal persistence
+SHALL serialize under the existing writer lease. Invocation correlation SHALL NOT replace stable mutation identity.
+
+Only native typed DefiniteNoEffect SHALL authenticate no authoritative publication or positively
+verified complete rollback. Curation SHALL persist a closed distinguishable terminal in its existing receipt
+path, binding invocation, plan, operation, prepared effect digest and native reason/evidence.
+Generic failures, absent witnesses, matching bytes and mutable progress SHALL NOT prove no effect.
+Reconciliation SHALL validate exact original plan/approval and invocation, exclude conflicting
+unresolved invocation or commitment, then use the typed proven_uncommitted transition.
+A verified same-operation commitment SHALL take precedence over earlier no-effect evidence.
+Before retry, execution SHALL check commitment again and retain allocation, operation and current guards.
+The no-effect terminal SHALL NOT inherit a nonretryable failed_step dead end.
+A crash without terminal proof SHALL remain uncertain.
+
+Recovery SHALL inspect same-operation commitment and repair missing terminal receipts through
+curation before reacquiring original custody. Historical commitment SHALL survive missing input.
+Current readback/coverage SHALL separately require current authorized output and exact binary bytes.
+Legacy receipts/journals SHALL retain normalization and absent fields without synthetic invocation defaults.
+Unsupported strict readers SHALL refuse new extensions before modification.
+New episode-bound seals, including existing kinds, SHALL carry top-level `episode_invocation_version: 1`
+before hashing or publication. Stored normalization SHALL admit only exact integer 1 with operative episode metadata,
+and SHALL reject missing, unsupported, boolean or orphan markers.
+Creation, anchors, identities and episode binding SHALL use the same marked sealed fingerprint basis.
+Public forward grammar v1 and legacy unmarked normalized bytes and identities SHALL remain unchanged.
+Recovery SHALL NOT reseal historical plans. Rollback SHALL require a release that supports marked execution and recovery.
+
+#### Scenario: An older executor cannot bypass episode correlation through an existing kind
+
+- **WHEN** an older strict reader applies or resumes a marked episode-bound create-note plan
+- **THEN** it refuses the unknown sealed-plan marker before approval or mutation
+- **AND** an unmarked legacy plan keeps its prior normalized bytes and identities
+
+#### Scenario: Ordinary apply joins the episode before dispatch
+
+- **WHEN** ordinary curation apply or resume executes an episode-sealed plan before episode resume has attempted it
+- **THEN** the executor records the journal-bound invocation before the native effect and episode recovery recognizes its commitment
+
+#### Scenario: A late duplicate permits only proved same-operation reconsideration
+
+- **WHEN** a duplicate appears after uncertainty and the native owner proves definite no effect
+- **THEN** exact invocation reconciliation permits guarded retry of the same operation without fresh allocation or a failed-step dead end
+- **AND** a later verified commitment wins over the earlier no-effect terminal
+
+#### Scenario: Lost acknowledgement recovers without vanished input
+
+- **WHEN** a native effect commits atomically, its acknowledgement is lost and original input later disappears
+- **THEN** curation recovers historical commitment before custody checks without executing another effect
+- **AND** missing or changed output keeps current coverage unavailable independently
+
+### Requirement: Leaf support preserves immutable original and reading provenance
+
+Bounded optional leaf support SHALL select binding input revision, material key,
+representation and reviewed episode input revision. Preparation SHALL resolve and seal it on the leaf.
+Attempted leaves SHALL retain support across reorder/revision. Support labels SHALL NOT alter mutation
+effect_digest or create another operation for an attempted equivalent mutation. Legacy events SHALL gain no synthetic support.
+Planning MAY retain optional source_intent through the existing origin-input grammar outside mutation arguments and effect_digest.
+Preparation SHALL seal that association and execution SHALL revalidate it at the native publication boundary.
+
+The existing origin carrier SHALL retain legacy reading normalization exactly. One explicit original
+variant SHALL contain representation=original, whole canonical reference, SHA-256 version and nonnegative size;
+it SHALL reject unit fragments and text spans. Native original byte/access proof SHALL use a distinct
+private proof type, never retained-text proof or model-visible binary content. Both representations MAY share
+one canonical source root without an inferred equivalence or independence assessment.
+
+Store values SHALL retain record_field scopes. Store body units SHALL use profile-built
+plan_ref/record_ref parser parents, exact record_identity and owner-fixed profile. Private parser-parent and
+scope matching SHALL admit only that native identity. Public input references SHALL NOT expand to arbitrary
+plan/record URLs or generated paths. Existing authored-origin handling SHALL validate only new or changed
+carriers, preserving unchanged historical carriers and unrelated rows without recertification.
+Native versions/transactions SHALL bind values/body and retain proof through final write guards.
+Current page, row and history outputs SHALL use whole-carrier origin projection at final disclosure.
+An unavailable/withheld bound input SHALL revoke the carrier's attribution together, preserving existing stale-versus-unavailable behavior.
+
+#### Scenario: Support reorder cannot mint another mutation
+
+- **WHEN** an attempted leaf's proposal is reordered or its support label is revised
+- **THEN** its immutable support and stable operation prevent an equivalent mutation from executing again
+
+#### Scenario: Store-origin input is revoked before final disclosure
+
+- **WHEN** a canonical store value or body unit has native original support that becomes unavailable or withheld
+- **THEN** row/history disclosure revokes the whole bound attribution carrier without certifying a generated item path
 
 ### Requirement: Conversational correction updates knowledge without erasing provenance
 

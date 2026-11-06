@@ -342,14 +342,16 @@ def test_reviewer_regressions_for_dispositions_duplicates_and_routes() -> None:
     with pytest.raises(episode_model.EpisodeError, match="EPISODE_DUPLICATE_EFFECT"):
         episode_model.revise_proposal(state, candidate_id, _proposal(same_a, same_b))
 
-    state = episode_model.start_episode("turn-records", _input())
-    state = episode_model.declare_candidate(state, "records-event")
-    candidate_id = state["candidates"][0]["candidate_id"]
-    pending = {**_proposal(), "route": "records", "leaves": []}
-    state = episode_model.revise_proposal(state, candidate_id, pending)
-    state = episode_model.set_disposition(state, candidate_id, "routed", "Await Records adapter.")
-    state = episode_model.attest_precommit(state, 1)
-    assert state["pending_leaf_ids"] == [candidate_id]
+    for route in ("records", "source", "evidence", "planning"):
+        state = episode_model.start_episode("turn-" + route, _input())
+        state = episode_model.declare_candidate(state, route + "-event")
+        candidate_id = state["candidates"][0]["candidate_id"]
+        pending = {**_proposal(), "route": route, "leaves": []}
+        state = episode_model.revise_proposal(state, candidate_id, pending)
+        state = episode_model.set_disposition(state, candidate_id, "routed", "Await the owning adapter.")
+        state = episode_model.attest_precommit(state, 1)
+        assert state["pending_leaf_ids"] == [candidate_id]
+        assert state["candidates"][0]["leaves"] == []
 
 
 def test_uncertain_metadata_is_frozen_and_proven_uncommitted_effect_can_revise() -> None:
@@ -668,3 +670,15 @@ def test_a_revised_proposal_withdraws_its_disposition() -> None:
     assert revised["candidates"][0]["disposition"] is None
     with pytest.raises(model.EpisodeError, match="EPISODE_COVERAGE_INCOMPLETE"):
         model.attest_precommit(revised, 1)
+
+
+def test_legacy_attempt_state_adds_no_invocation_or_association_defaults() -> None:
+    """Replay of the original attempt protocol must retain its original state shape."""
+    from exomem import episode_model as model
+
+    state, candidate, leaf, _step = _prepared()
+    legacy = model.mark_attempt_started(state, candidate, leaf)
+    current = model._owned(legacy, candidate, leaf)
+    assert "invocation_id" not in current
+    assert "support" not in current and "source_intent" not in current
+    assert set(current["attempt_history"][-1]) == {"attempt", "outcome", "outcome_proof"}

@@ -974,14 +974,37 @@ Pairing and producer attribution remain caller-authored; they establish neither 
 
 Journals with material bindings require a reader-capable release, including on rollback.
 Older strict readers refuse those journals before changing them; no migration rewrites legacy journals.
-Native Source, Evidence and Planning effect adapters and the ordinary mixed-media journey remain pending.
+Source, Evidence and Planning effects use their native writers through sealed episode leaves.
+The ordinary mixed-media journey still needs separate acceptance evidence.
 
 ### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
 - `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.
-- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Never a free-form effect.
-- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed leaf needs the next `effect_revision`; a committed one cannot change.
+- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Native episode kinds also include `capture-source`, `preserve-evidence`, `add-plan`, `update-plan` and `triage-plan`.
+- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args, support?, source_intent?}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed effect needs the next `effect_revision`; an attempted leaf keeps its exact effect and associations.
 - `resume` needs `journal_digest` from your last candidates/prepare/disposition result (a stale one is refused with `EPISODE_REVISION_CONFLICT`) and `input_revision` (the revision your coverage review covered); `order` and `max_leaves` (1 to 16, default 8) bound the pass.
 - Finish with one `coverage` pass: compare the input it names with each receipt and readback, prepare anything omitted or misrouted, then attest with `resume` and `postcommit`. A committed note is not coverage.
+
+Native binary leaves require `args.original: {representation: "original", reference, version, size}`.
+Use a whole canonical original reference, its exact SHA-256 and byte size.
+Temporary paths, upload handles and readable extraction text cannot substitute for original custody.
+Use the native writer's other arguments for the selected Source or Evidence destination.
+Preparation verifies the complete native write without publishing; execution retains its sealed core allocation and checks current authority again.
+Known prior preservation refuses before sealing; it does not count as an executed leaf.
+
+Planning leaves use the native add, update or triage arguments, including current guards and an attributable reason.
+Optional leaf `source_intent` uses the existing origin-input grammar and retains the input that expresses the intended work.
+Optional `support: {binding_input_revision, material_key, representation, reviewed_input_revision}` identifies reviewed material without changing the mutation effect.
+These associations prove neither expressed intent nor completeness; the active agent makes those judgments.
+An origin carrier may also use `{representation: "original", reference, version, size}` for a retained original input.
+That proof authenticates current bytes and access; it does not replace exact reading-text proof.
+Original and reading inputs may share one source without proving independent origins or equivalent content.
+
+Ordinary curation apply and resume also record the episode invocation before dispatch.
+After a lost reply, inspect and reconcile the same operation before retrying.
+Only its exact native no-effect terminal permits a same-operation retry; a generic error remains uncertain.
+Historical commitment can recover after input loss, while current coverage still requires authorized output and exact original bytes.
+New episode-bound plans require a reader that understands their invocation marker, including after rollback.
+Older strict readers refuse those plans before applying them; legacy unmarked plans keep their identities.
 
 ### Result shapes
 - record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped}`.

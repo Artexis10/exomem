@@ -233,6 +233,7 @@ def _projection(session: _Session) -> dict[str, Any]:
                     "operation_id": binding.get("operation_id"),
                     "outcome": leaf["outcome"],
                     "attempts": leaf["attempts"],
+                    **({"support": leaf["support"]} if "support" in leaf else {}),
                     "receipt_digest": proof.get("receipt_digest"),
                 }
             )
@@ -434,7 +435,7 @@ def coverage(vault_root: Path, *, episode: Any) -> dict[str, Any]:
                     binding = leaf["binding"]
                     sealed = curation.CurationStore(session.vault_root).load_plan(binding["run_id"])[
                         "binding_manifest"][binding["ordinal"]]
-                    if sealed.get("kind") in curation.RECORDS_STEP_KINDS:
+                    if sealed.get("kind") in curation.COLLECTION_STEP_KINDS:
                         prepared = sealed["prepared"]
                         subject = writer.admitted_item_metadata(
                             prepared["collection_id"], prepared["item_key"], path)
@@ -480,7 +481,7 @@ def _prepare_seal(vault_root: Path, leaf: Mapping[str, Any]) -> curation.Prepare
     `prepare` seals only once every leaf has passed, and the sealed plan is
     inert until `resume` executes it.
     """
-    return curation.prepare_proposal(
+    prepared = curation.prepare_proposal(
         vault_root,
         {
             "version": 1,
@@ -491,6 +492,10 @@ def _prepare_seal(vault_root: Path, leaf: Mapping[str, Any]) -> curation.Prepare
         # only a `records` candidate reaches here with a Records leaf.
         allow_records=True,
     )
+    if "source_intent" in leaf:
+        origin_bindings.resolve_origin_input(vault_root, leaf["source_intent"])
+        prepared.binding_manifest[0]["prepared"]["source_intent"] = leaf["source_intent"]
+    return prepared
 
 
 def _committed(vault_root: Path, run_id: str) -> bool:
@@ -692,7 +697,9 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
             digest = model._effect(leaf["kind"], args)  # noqa: SLF001
             if digest == old["effect_digest"]:
                 leaf["args"], leaf["effect_digest"] = args, digest
-        changed = old is not None and old["effect_digest"] != leaf["effect_digest"]
+        changed = old is not None and (old["effect_digest"] != leaf["effect_digest"] or any(
+            old.get(field) != leaf.get(field) for field in ("support", "source_intent")
+        ))
         eligible = old is None or not old["attempts"] or (
             changed and old["outcome"] == "proven_uncommitted"
         )
@@ -703,7 +710,8 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
     normalized_proposal = {
         **proposed,
         "leaves": [
-            {name: leaf[name] for name in ("leaf_key", "effect_revision", "kind", "args")}
+            {**{name: leaf[name] for name in ("leaf_key", "effect_revision", "kind", "args")},
+             **{name: leaf[name] for name in ("support", "source_intent") if name in leaf}}
             for leaf in incoming
         ],
     }
@@ -757,7 +765,23 @@ def prepare(vault_root: Path, *, episode: Any, candidate: Any, proposal: Any) ->
         )
         for leaf in unsealed
     ]
+    for leaf, _prepared in ready:
+        if "source_intent" in leaf:
+            origin_bindings.resolve_origin_input(session.vault_root, leaf["source_intent"])
+        support = leaf.get("support")
+        if support is not None:
+            material = model.material_binding(session.state)
+            if material is None or material[0] != support["binding_input_revision"] or support["reviewed_input_revision"] != session.state["input_revisions"][-1]["revision"]:
+                raise _error("EPISODE_INPUT_REVISION_STALE", "leaf support must review the current material binding and input")
+            selected = next((item for item in material[1]["items"] if item["key"] == support["material_key"]), None)
+            if selected is None or support["representation"] not in selected:
+                raise _error("EPISODE_PROPOSAL_INVALID", "leaf support selects no bound representation")
     for leaf, prepared in ready:
+        support = leaf.get("support")
+        prepared.binding_manifest[0]["prepared"]["episode"] = {
+            "key": session.key, "candidate_id": identity, "leaf_id": leaf["leaf_id"],
+            "effect_digest": leaf["effect_digest"], **({"support": dict(support)} if support is not None else {}),
+        }
         proposed = curation.seal_proposal(session.vault_root, prepared, allow_records=True)
         commands.append(
             (
@@ -875,7 +899,8 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
                 raise
             blocked.append({"leaf_id": leaf["leaf_id"], "code": error.code})
             continue
-        reconciled.append({"leaf_id": leaf["leaf_id"], "outcome": "committed"})
+        current = model._owned(session.state, candidate_id, leaf["leaf_id"])  # noqa: SLF001
+        reconciled.append({"leaf_id": leaf["leaf_id"], "outcome": current["outcome"]})
     return reconciled, blocked
 
 
@@ -899,12 +924,12 @@ def _refused_for_caller(vault_root: Path, binding: Mapping[str, Any]) -> bool:
         plan = curation.CurationStore(vault_root).load_plan(binding["run_id"])
         step = plan["steps"][binding["ordinal"]]
         item = plan["binding_manifest"][binding["ordinal"]]
-        if step["kind"] in curation.RECORDS_STEP_KINDS:
+        if step["kind"] in curation.COLLECTION_STEP_KINDS:
             writer = selected_writer(vault_root, item["prepared"]["collection_id"])
             if writer is not None:
                 # On the store thread, under the policy the write itself meets: the whole collection
                 # is released to this caller, or it reads as absent.
-                with writer.read_collection(item["prepared"]["collection_id"], facade_profile="records",
+                with writer.read_collection(item["prepared"]["collection_id"], facade_profile="planning" if step["kind"] in curation.PLANNING_STEP_KINDS else "records",
                                             mutation=True):
                     return False
             manifest = record_governance.resolve_collection_for_mutation(
@@ -969,27 +994,33 @@ def _execute(session: _Session, candidate_id: str, leaf_id: str) -> tuple[str, d
     snapshot = session.state["current_precommit"]["snapshot"]
     # Durably uncertain before the writer runs: a crash from here on can only
     # be reconciled from receipts, never retried under a fresh identity.
-    session.transition("mark_attempt_started", candidate=candidate_id, leaf=leaf_id)
     store = curation.CurationStore(session.vault_root)
-    if store.approval_path(binding["run_id"]).exists():
-        result = curation.resume(
-            session.vault_root, run_id=binding["run_id"], plan_id=binding["plan_id"]
-        )
-    else:
-        result = curation.apply(
-            session.vault_root,
-            run_id=binding["run_id"],
-            plan_id=binding["plan_id"],
-            expected_plan_fingerprint=binding["plan_fingerprint"],
-            why=(
-                f"Episode {session.state['episode_id'][:12]} leaf {leaf_id[:12]} under "
-                f"precommit {snapshot[:12]}."
-            ),
-        )
+    plan = store.load_plan(binding["run_id"])
+    with curation._episode_invocation(  # noqa: SLF001
+        session.vault_root, plan, plan["binding_manifest"][binding["ordinal"]], binding["run_id"], binding["operation_id"]
+    ):
+        if store.approval_path(binding["run_id"]).exists():
+            result = curation.resume(
+                session.vault_root, run_id=binding["run_id"], plan_id=binding["plan_id"]
+            )
+        else:
+            result = curation.apply(
+                session.vault_root,
+                run_id=binding["run_id"],
+                plan_id=binding["plan_id"],
+                expected_plan_fingerprint=binding["plan_fingerprint"],
+                why=(
+                    f"Episode {session.state['episode_id'][:12]} leaf {leaf_id[:12]} under "
+                    f"precommit {snapshot[:12]}."
+                ),
+            )
+    session.current = session.store.read(session.identity)
     session.transition("reconcile_curation_leaf", candidate=candidate_id, leaf=leaf_id)
     step = result.get("step") if isinstance(result, Mapping) else None
     # A plan already applied elsewhere (through `maintain_memory` curation
     # apply, say) is reconciled from its receipt; this pass wrote nothing.
+    if isinstance(step, Mapping) and step.get("outcome") == "definite-no-effect":
+        return "stale", {"leaf_id": leaf_id, "code": step["native_reason"], "outcome": "proven_uncommitted"}
     kind = "replayed" if curation.valid_replay_result(result) else "executed"
     return kind, {
         "leaf_id": leaf_id,
