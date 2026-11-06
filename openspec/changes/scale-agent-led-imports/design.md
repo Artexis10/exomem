@@ -56,7 +56,7 @@ The committed Source is the recovery record, not a flag in the run object. When 
 - `retry_failed`;
 - a concurrent run on the same stage.
 
-Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending and outside the run) from the filed copies that remain, and a `summary` sentence names the unfiled groups. A review is offered only while unfiled files remain.
+Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending, outside the run, and a filed text whose Source page no longer holds its text) from the filed copies that remain, and a `summary` sentence names the unfiled groups. A review is offered only while unfiled files remain.
 
 ### D3. Free space is checked per chunk
 

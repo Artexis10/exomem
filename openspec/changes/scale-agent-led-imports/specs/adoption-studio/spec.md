@@ -57,7 +57,8 @@ When a text item's staged copy is missing in a recorded stage, the run SHALL tre
 #### Scenario: Finish keeps a text copy it cannot vouch for
 
 - **WHEN** the Source page of a filed text item no longer holds the planned text between its fences, or the item still owes its note, or the item failed
-- **THEN** its staged copy remains, and the residual reports it
+- **THEN** its staged copy remains, and the residual reports it as unfiled
+- **AND** a text item whose Source page no longer holds its text is reported as `source_differs`, so `finish` offers the review and never the close-the-import action
 
 #### Scenario: Opted-out runs keep their staged copies
 

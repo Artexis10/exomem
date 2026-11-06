@@ -3430,6 +3430,7 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
     `apply` keeps a text item's copy, because the item may still owe its note. By `finish` an item that is
     `applied` or `already-applied` is done. Its copy goes only after the Source page's fence body hashes to the plan
     and the held, hash-checked removal of `adoption_consume.remove_staged` passes; any refusal keeps the copy. A copy
+    whose Source page does not hold the text is flagged `source_differs`, which the residual reports as unfiled. A copy
     that is already gone (a `finish` stopped after its removal) is settled through its Source. The call stops
     starting removals when its budget runs low, and the copies left stay as filed copies in the residual.
     """
@@ -3451,9 +3452,13 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
             budget.note_truncated("finish.consume_text")
             return
         if os.path.lexists(root / planned["original_path"]):
-            consumed = _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned) and (
-                adoption_consume.remove_staged(root, stage, planned)
-            )
+            if _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned):
+                outcome.pop("source_differs", None)
+                consumed = adoption_consume.remove_staged(root, stage, planned)
+            else:
+                # The staged copy is then the only exact one, so the residual reports it as unfiled.
+                outcome["source_differs"] = True
+                consumed = False
         else:
             consumed = _filed_and_gone(root, run, reads, planned) is not None
         if consumed:

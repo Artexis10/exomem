@@ -231,7 +231,12 @@ def test_a_text_copy_stays_when_its_source_no_longer_holds_the_text(tmp_path: Pa
     assert _staged(vault, staged, "plan.md").read_bytes() == kept
     assert not _staged(vault, staged, "menu.md").exists()
     assert finished["finish"]["consumed"] == 1
-    assert finished["finish"]["residual"]["by_reason"] == {"text": {"files": 1, "bytes": len(kept)}}
+    residual = finished["finish"]["residual"]
+    assert residual["by_reason"] == {"source_differs": {"files": 1, "bytes": len(kept)}}
+    assert residual["unfiled"] == {"files": 1, "bytes": len(kept)}
+    assert residual["summary"] == "1 file was not filed: 1 with a Source page that no longer holds the text."
+    actions = {action["action"]: action["description"] for action in finished["next_actions"]}
+    assert "review-residual" in actions and "Nothing unfiled is left to lose" not in actions["discard"]
 
 
 def test_a_text_item_that_still_owes_its_note_keeps_its_staged_copy_through_a_partial_finish(tmp_path: Path) -> None:

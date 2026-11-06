@@ -29,6 +29,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "unselected": (False, "{n} not selected"),
     "ineligible": (False, "{n} of a kind that adoption does not import"),
     OUTSIDE_RUN: (False, "{n} not scanned (hidden, added after the scan, or on a later page)"),
+    "source_differs": (False, "{n} with a Source page that no longer holds the text"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
 })
@@ -166,6 +167,8 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
+                if outcome.get("source_differs"):
+                    return "source_differs"
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:
@@ -210,14 +213,16 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
     the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
     the last page's report covers the whole stage. The reasons are a closed set of result keys that this
-    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `pending`, `unselected`, `ineligible`,
-    `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then reports) and `outside_run` (hidden
-    or added after the scan, or on a later page not yet scanned). `text` and `kept` are in the Knowledge Base and
-    only their staged copy stays; every other reason is a file that adoption did not file. `unfiled` counts
-    those, and `summary` says in one sentence what needs the person. The Cloud route discards a stage with
-    `transfer_memory`; a local import has no Exomem command, so its stage goes by hand. Both name the whole
-    stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
-    route, because the folder still holds their files: `more_pages` says so.
+    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `pending`,
+    `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then reports)
+    and `outside_run` (hidden or added after the scan, or on a later page not yet scanned). `text` and `kept`
+    are in the Knowledge Base and only their staged copy stays. Every other reason is a file that adoption did
+    not file, `source_differs` included: a filed text whose Source page no longer holds its text, so that the
+    staged copy is the only exact one. `unfiled` counts those, and `summary` says in one sentence what needs
+    the person. The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem command,
+    so its stage goes by hand. Both name the whole stage folder, which holds the residual and nothing else. A
+    page that later pages follow names no discard route, because the folder still holds their files:
+    `more_pages` says so.
     """
     recorded_stage = run.get("stage")
     if not isinstance(recorded_stage, dict):
