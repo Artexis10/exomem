@@ -11590,7 +11590,7 @@ def op_maintain_memory(
     if mode == "collections-store":
         if (
             categories is not None
-            or dry_run is not True
+            or dry_run not in (None, True)  # it has no write path: an omitted dry_run is the preflight
             or rebuild_embeddings
             or detail != "actionable"
             or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
@@ -11601,8 +11601,8 @@ def op_maintain_memory(
             or why is not None
         ):
             raise ValueError(
-                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight with "
-                "dry_run=true; migrating a vault is the declared offline upgrade step"
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight and takes no "
+                "arguments; migrating a vault is the declared offline upgrade step"
             )
         from .collection_store import preflight as store_preflight
 

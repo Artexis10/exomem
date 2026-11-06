@@ -9,6 +9,12 @@
 
 ## 2. Confirm on a live upgrade
 
-- [ ] 2.1 Run an online-upgrade rehearsal with steady writes. Confirm that the
+- [x] 2.1 Run an online-upgrade rehearsal with steady writes. Confirm that the
   standby carries `semantic_corpus` to promotion and that the promoted worker logs
   no cold corpus build.
+  Verified 2026-11-03 on release 0.158.1: an online upgrade of a fresh copy of a
+  12.7k-page production vault, with steady reads and writes (77 each, none failed).
+  The standby built the corpus context before promotion, promotion carried
+  `semantic_corpus`, and the promoted worker reused that context ("context reused")
+  and logged no corpus build. The standby's build settled, so the kept-unsettled
+  branch itself did not run in this rehearsal; its tests cover it.

@@ -89,7 +89,7 @@ Ordinary recall SHALL continue over its admitted retrieval projection and exact 
 - **THEN** ordinary managed retrieval still refuses before consulting a stale catalogue
 
 ### Requirement: Published catalogue admission survives strict readiness demotion
-After managed warm-up, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Every catalogue read in that request SHALL use the admitted checkpoint, with exact pending custody overlaid. A stale projection SHALL load its paths from the matching catalogue rather than walking current canonical files. Request-local admission SHALL NOT promote strict health readiness or escape into another request, vault or catalogue scope. Strict health retrieval readiness (`ready`, `admitted=true`) SHALL stay strict; only the serving status MAY follow a servable lag, after this process has made a strict proof, as `install-readiness` defines.
+After managed warm-up, and during it once this process has made a strict catalogue proof since its warm began, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Every catalogue read in that request SHALL use the admitted checkpoint, with exact pending custody overlaid. A stale projection SHALL load its paths from the matching catalogue rather than walking current canonical files. Request-local admission SHALL NOT promote strict health readiness or escape into another request, vault or catalogue scope. Strict health retrieval readiness (`ready`, `admitted=true`) SHALL stay strict; only the serving status MAY follow a servable lag, after this process has made a strict proof, as `install-readiness` defines.
 
 #### Scenario: Repair demotes readiness while a pending edit is durable
 - **WHEN** a compatible published catalogue exists, a committed edit has exact pending custody, and repair or health has demoted strict readiness
@@ -111,3 +111,12 @@ After managed warm-up, ordinary recall SHALL re-prove a policy-compatible publis
 - **WHEN** a proven process serves recall from a published catalogue that trails a live projection and health reports retrieval as `lagging`
 - **THEN** health reports `admitted=false` for that retrieval state
 - **AND** the request still discloses the projection lag it serves
+
+#### Scenario: A warm that proved its catalogue serves a later lag
+- **WHEN** a managed process proved its catalogue strictly in its current warm and a live projection then advances before that warm finishes
+- **THEN** keyword recall serves the published catalogue with the projection lag disclosed instead of refusing with the warming outcome
+- **AND** lanes whose components are not ready are skipped and named in the `warming` object
+
+#### Scenario: A warm that has not proved its catalogue still refuses
+- **WHEN** a managed process has not proved its catalogue in its current warm and strict readiness is not admitted
+- **THEN** recall refuses with the warming outcome while that warm runs

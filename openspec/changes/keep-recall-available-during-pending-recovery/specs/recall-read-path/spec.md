@@ -84,6 +84,15 @@ Selection SHALL materialize the evidence needed after the transaction closes. Qu
 - **THEN** health reports `admitted=false` for that retrieval state
 - **AND** the request still discloses the projection lag it serves
 
+#### Scenario: A warm that proved its catalogue serves a later lag
+- **WHEN** a managed process proved its catalogue strictly in its current warm and a live projection then advances before that warm finishes
+- **THEN** keyword recall serves the published catalogue with the projection lag disclosed instead of refusing with the warming outcome
+- **AND** lanes whose components are not ready are skipped and named in the `warming` object
+
+#### Scenario: A warm that has not proved its catalogue still refuses
+- **WHEN** a managed process has not proved its catalogue in its current warm and strict readiness is not admitted
+- **THEN** recall refuses with the warming outcome while that warm runs
+
 ## ADDED Requirements
 
 ### Requirement: Pending hydration limits reduce coverage without disabling recall

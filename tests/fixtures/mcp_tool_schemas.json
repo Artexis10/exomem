@@ -3008,8 +3008,7 @@
                 "kind": {
                   "const": "collections-store",
                   "type": "string"
-                },
-                "collection": {}
+                }
               },
               "required": [
                 "kind"
@@ -3458,10 +3457,6 @@
               "type": "integer",
               "default": 5
             },
-            "collection": {
-              "type": "string",
-              "description": "Planning or Records collection for structured-files."
-            },
             "rebuild_embeddings": {
               "description": "fix only.",
               "type": "boolean",
@@ -3475,6 +3470,10 @@
             "run_id": {
               "type": "string",
               "description": "Curation run or maintenance job identity."
+            },
+            "collection": {
+              "type": "string",
+              "description": "Planning or Records collection for structured-files."
             },
             "plan_id": {
               "type": "string",

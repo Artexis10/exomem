@@ -31,3 +31,4 @@
 - [ ] 5.1 Run independent adversarial review and scoped integration checks; verify exact current content, privacy, and full delivery CI.
 - [ ] 5.2 Coordinate managed release and rollback; verify real recall and coverage through the shared canary under natural concurrent traffic.
 - [ ] 5.3 Synchronize and archive the completed change through OpenSpec; verify strict validation before and after archival.
+  `serve-lag-after-warm-proof` archived first and changed the same recall-read-path requirement. This change's `MODIFIED` block now carries that change's scenarios "A warm that proved its catalogue serves a later lag" and "A warm that has not proved its catalogue still refuses"; keep them when this block is next edited.

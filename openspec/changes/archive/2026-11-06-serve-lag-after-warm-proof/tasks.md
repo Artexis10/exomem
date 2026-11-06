@@ -16,5 +16,7 @@
 ## 3. Verification and delivery
 
 - [x] 3.1 Run the scoped readiness, health, recall, standby and managed-restart suites and compare failure names with the base commit; run Ruff, targeted mypy, the privacy gate, `openspec validate --all --strict` and the archive-discipline check.
-- [ ] 3.2 Live: on the next promotion under writes, `/health/ready` stays ready from the promoted worker's first catalogue proof to the end of its warm.
-- [ ] 3.3 At archive, if `keep-recall-available-during-pending-recovery` archived first, merge this recall-read-path block with the canonical requirement and keep that change's scenarios (see design.md, "Archive order").
+- [x] 3.2 Live: on the next promotion under writes, `/health/ready` stays ready from the promoted worker's first catalogue proof to the end of its warm.
+  Verified 2026-11-03 on release 0.158.1, in an online upgrade of a fresh copy of the production vault under steady reads and writes: `/health/ready` sampled every 10 s answered 200 from the promoted worker's first sample through the end of its warm (about 80 s), with no 503. One later sample, about four minutes after the warm ended, answered 503 with no recorded reason. The production promotion to 0.161.1 on 2026-11-05 answered no 503 after the promoted worker turned ready; its samples after promotion were sparse.
+- [x] 3.3 At archive, if `keep-recall-available-during-pending-recovery` archived first, merge this recall-read-path block with the canonical requirement and keep that change's scenarios (see design.md, "Archive order").
+  That change had not archived, so this change archives first. Its task 5.3 now carries the merge obligation.
