@@ -6110,6 +6110,7 @@ def _check_note_cohesion(
     from . import note_cohesion, semantic_index
 
     type_basis = note_types.Basis(vault_root)
+    status_basis = lifecycle_statuses.Basis(vault_root)
     findings: list[AuditFinding] = []
     for page in pages:
         request_budget.checkpoint()
@@ -6134,6 +6135,7 @@ def _check_note_cohesion(
             frontmatter=page.frontmatter,
             units=len(state.document.units),
             type_basis=type_basis,
+            status_basis=status_basis,
         )
         if found is not None:
             findings.append(found)

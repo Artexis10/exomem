@@ -39,9 +39,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import note_types, recall_policy, temporal
+from . import access, lifecycle_statuses, note_types, recall_policy, temporal
 from .find_corpus import NAVIGATION_BASENAMES
-from .structure_promotion import BREADTH_TAGS, _terms
+from .structure_promotion import BREADTH_TAGS
 
 if TYPE_CHECKING:
     from .audit import AuditFinding
@@ -95,7 +95,9 @@ def _breadth_declared(frontmatter: Mapping[Any, Any]) -> bool:
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
         return False
-    return bool(_terms(str(tag) for tag in raw) & BREADTH_TAGS)
+    # Exact tag match, as the other breadth checks do: a tag such as `snapshot-testing`
+    # names a subject, not a declared breadth.
+    return bool({str(tag).strip().casefold().lstrip("#") for tag in raw} & BREADTH_TAGS)
 
 
 def is_candidate(
@@ -124,6 +126,7 @@ def finding(
     frontmatter: Mapping[Any, Any],
     units: int,
     type_basis: note_types.Basis,
+    status_basis: lifecycle_statuses.Basis | None = None,
 ) -> AuditFinding | None:
     """The page's `note_cohesion` finding, or None when it is not eligible or below a step."""
     from .audit import AuditFinding
@@ -134,6 +137,15 @@ def finding(
     ):
         return None
     if not recall_policy.is_recall_candidate(vault_root, rel_path):
+        return None
+    # Only a live page in a writable tree can be split or kept whole by its owner; a
+    # superseded, archived, dropped or draft page is never asked.
+    status = (status_basis or lifecycle_statuses.Basis(vault_root)).classify(
+        frontmatter.get("status"), path=rel_path, frontmatter=frontmatter
+    )
+    if not status.recurrence_evidence:
+        return None
+    if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
         return None
     step, next_step = reached
     authored = temporal.parse(frontmatter.get("updated") or frontmatter.get("created"))
@@ -151,6 +163,9 @@ def finding(
         meta={
             # The step, so a dismissal holds within it and the item reopens at the next.
             "signal_version": str(step),
+            # One item per page with its own id, so a decision on another page-level
+            # family never settles this question, and the reverse.
+            "review_partition": CATEGORY,
             "units": units,
             "step_units": step,
             "next_step_units": next_step,

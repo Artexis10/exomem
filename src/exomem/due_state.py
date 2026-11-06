@@ -4197,13 +4197,11 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, tuple[str, str, s
     **The coupling this depends on.** A `ref` is a page-level identity and a
     fingerprint is a per-finding one, so the map is only well defined while at
     most one projection row per ref carries a fingerprint. That holds today
-    because every category except `unfinished_experiments` and `note_cohesion`
-    stamps a `review_partition` into its ref, which makes the ref per-finding too.
-    Those two share a ref only on a page that holds both findings, and the collision
-    rule below drops that ref. It is a property of how the projection composes
-    refs, not an invariant anything else enforces — so a new category that omits
-    the partition would silently make this map ambiguous and stamp the wrong
-    identity on the ledger.
+    because every category except `unfinished_experiments` stamps a
+    `review_partition` into its ref, which makes the ref per-finding too. It is
+    a property of how the projection composes refs, not an invariant anything
+    else enforces — so a new category that omits the partition would silently
+    make this map ambiguous and stamp the wrong identity on the ledger.
 
     Rather than take first-category-wins on a collision, a conflicting ref is
     DROPPED and logged: an unstamped row is a measurement gap, a wrongly
@@ -4262,10 +4260,6 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
     page-local and partitions its review id per finding, so the page's own check
     yields the item the whole-vault union would. `unfinished_experiments` has no
     partition and shares its id with other page-level queues, so it is not here.
-    `note_cohesion` has no partition either, but it yields one finding per page and
-    is outside the default union, so the page's own check yields exactly its stored
-    item. When an experiment page also holds one, the two entries share a ref,
-    `_fingerprints_by_ref` drops it, and the lookup takes the whole-vault path.
     A grouped observation backfill entry spans many pages: one page never
     reproduces it, and its lookup takes the whole-vault path.
 

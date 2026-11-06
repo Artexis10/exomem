@@ -38,7 +38,7 @@ Size alone may schedule a judgement, because the item claims nothing about the p
 
 ### D3. One item per page, fingerprinted by step
 
-The finding uses the page's memory ref as its target and no review partition, so `item_id` is stable per page. Its `signal_version` is the step value. A dismissal therefore binds to the step: the page stays quiet within that step and reopens when it reaches the next step. The existing composer (`due_state._entry`, `review_state.component_fingerprint`) builds the identity for the write path and the projection alike. A second composer would break dismissal, as it did for an earlier family.
+The finding uses the page's memory ref as its target and the constant review partition `note_cohesion`, so `item_id` is stable per page and differs from every other page-level family. Without the partition, a dismissal recorded for another family on the same page would also settle this question, and the reverse. Its `signal_version` is the step value. A dismissal therefore binds to the step: the page stays quiet within that step and reopens when it reaches the next step. The existing composer (`due_state._entry`, `review_state.component_fingerprint`) builds the identity for the write path and the projection alike. A second composer would break dismissal, as it did for an earlier family.
 
 ### D4. The write response asks while the item is open
 

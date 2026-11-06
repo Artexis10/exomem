@@ -32,14 +32,16 @@ def _unit(number: int) -> str:
     )
 
 
-def _page(units: int, *, tags: str = "travel", page_type: str = "research-note") -> str:
+def _page(
+    units: int, *, tags: str = "travel", page_type: str = "research-note", status: str = "active"
+) -> str:
     body = "\n".join(_unit(number) for number in range(1, units + 1))
     return (
         "---\n"
         "title: Seasonal fare scouting\n"
         f"type: {page_type}\n"
         "project: travel\n"
-        "status: active\n"
+        f"status: {status}\n"
         "exomem_id: 00000000-0000-4000-8000-0000000005a1\n"
         "updated: 2026-08-15\n"
         f"tags: [{tags}]\n"
@@ -126,6 +128,59 @@ def test_a_dismissal_holds_within_a_step_and_reopens_at_the_next(vault: Path) ->
     assert reopened["step_units"] == 21
     assert reopened["ref"] == first["ref"]
     assert reopened["fingerprint"] != first["fingerprint"]
+
+
+def test_dismissing_another_family_on_the_page_leaves_the_question_open(vault: Path) -> None:
+    """Without its own partition the item shares the page's bare review id, so a
+    decision on relation debt for the page would silently settle this question."""
+    _put(vault, PAGE, _page(8))
+    asked = _grow_by_one(vault, 9)["structure_suggestion"]
+    relation_debt = [
+        item
+        for item in commands.op_attention(vault, categories=["relation_debt"])["items"]
+        if item.get("path") == PAGE
+    ]
+    assert relation_debt, "the fixture page must also carry relation debt"
+
+    commands.op_triage_memory(
+        vault, ref=relation_debt[0]["ref"], action="dismiss", why="intentional: no links needed"
+    )
+
+    still = _grow_by_one(vault, 10)["structure_suggestion"]
+    assert (still["ref"], still["fingerprint"]) == (asked["ref"], asked["fingerprint"])
+
+
+def test_a_page_that_is_no_longer_live_is_never_asked(vault: Path) -> None:
+    _put(vault, PAGE, _page(20, status="superseded"))
+
+    assert _note_cohesion_findings(vault) == []
+
+
+def test_a_tag_that_only_contains_a_breadth_word_still_asks(vault: Path) -> None:
+    _put(vault, PAGE, _page(20, tags="travel, snapshot-testing"))
+
+    assert _note_cohesion_findings(vault) == [PAGE]
+
+
+def test_a_stored_quiet_for_a_removed_family_is_not_offered_as_a_decision(vault: Path) -> None:
+    """The removed scope-divergence audit left quiet decisions in existing vaults.
+    Listed, they offered a reset that the family registry then refused."""
+    import json
+
+    store = review_state.ReviewStateStore(vault)
+    payload = review_state.empty_state()
+    payload["dispositions"]["scope_divergence_semantic"] = {
+        "disposition": "quiet",
+        "reason": "intentional",
+        "why": "intentional: too frequent",
+        "updated_at": "2026-10-01T00:00:00Z",
+    }
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    view = commands.op_review_memory(vault, mode="dispositions")
+
+    assert [row["family"] for row in view["dispositions"]] == []
 
 
 def test_a_quiet_family_withholds_the_question_and_leaves_the_item_open(vault: Path) -> None:

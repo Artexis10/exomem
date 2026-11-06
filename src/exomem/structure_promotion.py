@@ -30,9 +30,9 @@ BREADTH_TAGS = frozenset({"hub", "snapshot"})
 
 #: Closed-class English function words: prepositions, conjunctions, auxiliaries,
 #: pronouns, determiners and a few ubiquitous verbs. Never a content word, however
-#: common. Shared by every comparison built on `_terms` (scope divergence here,
-#: collection claims routing), so declared prose such as "not because after first
-#: use" contributes no term that an unrelated page could share.
+#: common. Shared by every comparison built on `_terms` (collection claims routing)
+#: and by collection candidates, so declared prose such as "not because after
+#: first use" contributes no term that an unrelated page could share.
 FUNCTION_WORDS = frozenset(
     {
         "a", "about", "across", "after", "again", "against", "all", "also", "am",

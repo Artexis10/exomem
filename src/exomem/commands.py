@@ -10245,10 +10245,15 @@ def _dispositions_view(vault_root: Path) -> dict:
     # Both counts reduce every decision record, withheld pages' included, so they
     # are the owner's aggregate: another audience gets the refusal, not a number.
     refusal = egress.owner_only_aggregate(Path(vault_root))
+    registered = review_state_module.registered_families()
     rows = []
     for family in sorted(dispositions):
         record = dispositions[family]
         if not isinstance(record, dict):
+            continue
+        if family not in registered:
+            # A retired family's record governs nothing and cannot be reset, so
+            # listing it would offer the user a decision they cannot take.
             continue
         if str(record.get("disposition") or "") not in {"quiet", "off"}:
             # A slate-only row: the family carries a durable `quiet_offered_at`

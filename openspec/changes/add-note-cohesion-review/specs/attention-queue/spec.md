@@ -4,11 +4,11 @@
 
 The audit registry SHALL add the category `note_cohesion`. Its review items have the standard reference, fingerprint, dismiss, snooze and reopen semantics.
 
-A page SHALL be eligible when its note type has role `compiled`, it is recall-eligible, it does not carry a breadth tag (`hub` or `snapshot`), and its file name is not `index.md` or `log.md`. An eligible page's size step SHALL be the largest value of the sequence 9, 14, 21, 32, 48, … that its semantic-unit count reaches, where each value is the previous value multiplied by 1.5 and rounded up. An eligible page that reaches a step SHALL produce exactly one `info` item.
+A page SHALL be eligible when its note type has role `compiled`, its lifecycle status is live, it lies in a read-write tree, it is recall-eligible, it does not carry a breadth tag (exactly `hub` or `snapshot`), and its file name is not `index.md` or `log.md`. Superseded, archived, dropped and draft pages SHALL NOT be asked. An eligible page's size step SHALL be the largest value of the sequence 9, 14, 21, 32, 48, … that its semantic-unit count reaches, where each value is the previous value multiplied by 1.5 and rounded up. An eligible page that reaches a step SHALL produce exactly one `info` item.
 
 The item SHALL carry the page's unit count, its step and its next step. Its detail SHALL state the question: does this page answer more than one independent question? The item SHALL NOT claim that the page is overloaded, and SHALL carry no strength, score or terms.
 
-The item's identity SHALL be the page: one item per page, with no review partition. Its signal version SHALL be the step value, so that a decision binds to the step. A dismissal SHALL hold while the page stays within that step, and the item SHALL reopen when the page reaches the next step. A page that falls below the base step, or gains a breadth tag, SHALL leave the family without any recorded decision.
+The item's identity SHALL be the page and the family: one item per page, whose review identity is distinct from every other family's item on the same page. Its signal version SHALL be the step value, so that a decision binds to the step. A dismissal SHALL hold while the page stays within that step, and the item SHALL reopen when the page reaches the next step. A page that falls below the base step, or gains a breadth tag, SHALL leave the family without any recorded decision.
 
 Because its step sequence is the system's choice and not an authored date, the category SHALL be registered and selectable but SHALL NOT join the default attention union.
 
@@ -34,6 +34,21 @@ Because its step sequence is the system's choice and not an authored date, the c
 
 - **WHEN** a compiled page with 40 semantic units carries the `hub` tag
 - **THEN** no `note_cohesion` item exists for that page
+
+#### Scenario: A decision on another family leaves the question open
+
+- **WHEN** a page holds an open `note_cohesion` item and an open `relation_debt` item, and the `relation_debt` item is dismissed by its ref
+- **THEN** the `note_cohesion` item stays open and the next compiled write to the page still carries the question
+
+#### Scenario: A superseded page is never asked
+
+- **WHEN** a compiled page with 20 semantic units has the status `superseded`
+- **THEN** no `note_cohesion` item exists for that page
+
+#### Scenario: A tag that only contains a breadth word does not exempt the page
+
+- **WHEN** a compiled page with 20 semantic units carries the tag `snapshot-testing`
+- **THEN** the page has an open `note_cohesion` item
 
 #### Scenario: Sources are never asked
 
