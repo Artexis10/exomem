@@ -20,6 +20,7 @@ from exomem import (
 )
 from exomem import vault as vault_module
 from exomem.governance.principal import owner_principal, request_scope
+from exomem.vault import content_hash
 
 
 def test_draft_retry_after_log_publication_keeps_one_activity(vault, monkeypatch) -> None:
@@ -72,6 +73,7 @@ def test_edit_recovery_keeps_the_first_committing_attempts_server_time(vault, mo
     change = {
         "path": created.path, "why": "Correct the conclusion.",
         "new_body": "## Claim\n\nA corrected conclusion.\n",
+        "expected_hash": content_hash((vault / created.path).read_text(encoding="utf-8")),
         "relation_disposition": "reviewed_none", "relation_review_reason": "No honest relation applies.",
     }
     validation = edit.edit(vault, validate_only=True, **change)
@@ -151,7 +153,11 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     arguments = {
         "path": path,
         "why": "Record another authored relation.",
-        "operation": {"kind": "replace_body", "new_body": changed_body},
+        "operation": {
+            "kind": "replace_body",
+            "new_body": changed_body,
+            "expected_hash": content_hash((vault / path).read_text(encoding="utf-8")),
+        },
     }
     with request_scope(owner_principal(surface="mcp")):
         written = bound(**arguments)
@@ -167,6 +173,7 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
             "new_body": (changed_body + "\nClarify the conclusion without another relation.\n").replace(
                 target.removesuffix(".md"), Path(target).stem
             ),
+            "expected_hash": content_hash((vault / path).read_text(encoding="utf-8")),
         },
     )
     graph_sync.await_active_rebuild(vault, timeout=30)
@@ -375,7 +382,11 @@ def test_a_mutation_reason_cannot_author_server_provenance(vault: Path) -> None:
         vault,
         created.path,
         why,
-        operation={"kind": "replace_body", "new_body": "## Claim\n\nA revised conclusion.\n"},
+        operation={
+            "kind": "replace_body",
+            "new_body": "## Claim\n\nA revised conclusion.\n",
+            "expected_hash": content_hash((vault / created.path).read_text(encoding="utf-8")),
+        },
     )
     graph_sync.await_active_rebuild(vault, timeout=30)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()

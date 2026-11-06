@@ -42,7 +42,7 @@ from . import (
     vault,
 )
 from . import find as find_module
-from .cli_ops import RELATION_REVIEW_STABLE_ID_REMEDIATION, OpError
+from .cli_ops import OpError, relation_review_stable_id_remediation
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
@@ -5708,10 +5708,10 @@ def _disposition_finding(
         # Kept terse deliberately. Findings share a bounded response budget, and
         # a wordier draft of this string pushed omitted contract results from 1
         # to 17 in the 120 KB directory-review validation. The size guard in
-        # test_disposition_remediation_is_route_neutral is the ceiling to
+        # test_legacy_edit_reports_identity_backfill_before_review_replay is the ceiling to
         # respect when editing it.
         remediation=(
-            ("Add a qualifying typed relation. " + RELATION_REVIEW_STABLE_ID_REMEDIATION)
+            ("Add a qualifying typed relation. " + relation_review_stable_id_remediation())
             if existing and page.identity_kind == "path"
             else (
                 "Add a qualifying typed relation. Retriggers: "

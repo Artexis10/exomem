@@ -12,7 +12,7 @@ from typing import Annotated
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
-from . import access, memory_refs, note_types, reserved_paths, source_capture, vault
+from . import access, cli_ops, memory_refs, note_types, reserved_paths, source_capture, vault
 
 RECEIPT_MAX_BYTES = 16 * 1024
 MAX_HOPS = 32
@@ -279,7 +279,8 @@ def prepare_correction(root: Path, value: SourceCorrection) -> CorrectionPlan:
         _require_canonical_page(root, path, text, scan=True)
         reference = memory_refs.ref_from_markdown(text)
         if reference is None or metadata.get(memory_refs.ID_FIELD) != memory_refs.parse_memory_ref(reference):
-            raise ValueError("SOURCE_CORRECTION_ID_REQUIRED: preview maintain_memory(mode='backfill-ids'), start it with dry_run=false, the preview's plan_id and a why (the local CLI needs no plan_id), then read the Source again and retry")
+            preview, apply = cli_ops.backfill_ids_route()
+            raise ValueError(f"SOURCE_CORRECTION_ID_REQUIRED: preview {preview}, start it with {apply}, dry_run=false, the preview's plan_id and a why (the local CLI needs no plan_id), then read the Source again and retry")
         if vault.content_hash(text) != correction["expected_hash"]:
             raise ValueError("SOURCE_CORRECTION_STALE: historical Source page changed; read it again and retry")
         entry, receipt_guard = _receipt(root, reference)

@@ -115,6 +115,18 @@ GRAPH_UNPROVEN = "unproven"
 
 
 @dataclass(frozen=True, slots=True)
+class TaskEntry:
+    """The stored identity and admission fields task discovery needs."""
+
+    entry_id: str
+    anchor_kind: str
+    path: str
+    ref: str | None
+    title: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class Entry:
     """One catalogue row and the raw declarations it carries."""
 
@@ -373,6 +385,15 @@ class ContextCatalogue:
         """Every entry with its raw declarations, ordered by id."""
         conn = self._connect()
         return () if conn is None else _load(conn, kind=kind)
+
+    def task_entries(self) -> tuple[TaskEntry, ...]:
+        """Read admission fields without loading every entry's declarations."""
+        conn = self._connect()
+        if conn is None:
+            return ()
+        return tuple(TaskEntry(*row) for row in conn.execute(
+            "SELECT entry_id, anchor_kind, path, ref, title, status FROM entries ORDER BY entry_id",
+        ))
 
     def stance_ids(self) -> list[str]:
         """Only entries with the schema boolean mark, without loading declarations."""

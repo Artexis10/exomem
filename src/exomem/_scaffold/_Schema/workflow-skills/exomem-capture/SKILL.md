@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 7748f5576004916dc7000db86fafe7c528406ee4523b3486f8d325575138ba5f
+  skill_contract: e3b6e53e12b3106139fdfce9f05c0b2ec851f790bb09e564b3b1f3ea16f54de1
   version: "0.1.0"
 ---
 
@@ -174,8 +174,8 @@ Keep raw source verbatim when it matters. Keep compiled notes concise, attribute
 
 ## Mistakes to avoid
 Do not save unresolved brainstorming as a conclusion. Do not bury raw evidence
-inside a compiled note. Apply entity eligibility in
-[engagement](references/engagement.md). Do not create a parallel
+inside a compiled note. A single incidental mention, unresolved identity, or
+transient participant stays in source/note context. Do not create a parallel
 page when an existing active note or entity should be edited, linked, or
 superseded.
 

@@ -1357,7 +1357,7 @@ def task_candidates(
     from .governance import egress
 
     page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-    entries = [entry for entry in catalogue.entries() if entry.path
+    entries = [entry for entry in catalogue.task_entries() if entry.path
                and context_views._admits(entry, caller.visible)
                and (page_visible is None or page_visible(entry.path))]
     by_path = {entry.path: entry for entry in entries}
@@ -1454,6 +1454,8 @@ def task_candidates(
                 [], limit + 1, categories, (), "kb", fresh,
                 allowed_parent_paths=allowed,
                 admitted_parent_paths=allowed,
+                # This branch proved FULL source access and filtered this request's catalogue paths.
+                released_parent_paths=allowed,
                 query_units=bm25.token_units(query_text, query=True),
                 term_budget=working_set_runtime.material_term_budget(),
                 recall_checkpoint=checkpoint, allow_delta=False,

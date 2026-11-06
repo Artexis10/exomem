@@ -15,6 +15,7 @@ from exomem import (
     delete_file,
     extract,
     extraction_parts,
+    find_parts,
     media_processing,
     media_worker,
     preserve,
@@ -93,6 +94,24 @@ def test_a_five_mebibyte_document_is_one_findable_document_read_in_windows(vault
         os.path.basename(stub.path),
         os.path.basename(stub.sidecar_path),
     ]
+
+
+def test_a_log_without_word_breaks_returns_a_bounded_passage_that_still_opens_the_match(vault) -> None:
+    # One compact JSON record per line has no spaces, so each line is one "word": a passage of
+    # MAX_WORDS_PER_CHUNK words around the match ran to hundreds of kilobytes in every hit.
+    # The phrase sits inside a record longer than the bound, far from where its word starts.
+    record = '{"level":"INFO","logger":"exomem.mutation_lock","fields":{"wait_ms":1.33,"holder":"x"}}' * 6
+    lines = [f'{{"line":{number}}}{record}' for number in range(400)]
+    lines[300] = f'{lines[300] * 10}{{"message":"{PLANTED}"}}{lines[300]}'
+    text = "\n".join(lines)
+    stub = _extract(vault, "ci-shard.log.txt", text)
+
+    [hit] = find_module.find(vault, query=PLANTED)
+
+    assert PLANTED in hit.passage["text"]
+    assert len(hit.passage["text"]) <= find_parts.MAX_PASSAGE_CHARS
+    found = commands.op_read_memory(vault, path=stub.sidecar_path, offset=hit.passage["offset"])
+    assert PLANTED in found["body"]
 
 
 def _small_parted_source(vault, monkeypatch: pytest.MonkeyPatch, filename: str = "note.txt"):

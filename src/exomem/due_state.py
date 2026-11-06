@@ -3131,24 +3131,30 @@ def in_batch_scope() -> bool:
 # --------------------------------------------------------------------------
 
 
+def _resolved_leads(packet: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The released ``(path, ref)`` of each resolved anchor; a project anchor has no page path."""
+    if packet.get("abstained"):
+        return []
+    # A maps packet's turn slice lists what the turn resolved beside its map: a `resolved` match is a resolved anchor.
+    slice_block = packet.get("turn_slice")
+    slice_items = slice_block.get("items") if isinstance(slice_block, Mapping) else None
+    return [
+        (str(anchor.get("path") or ""), str(anchor["ref"]))
+        for anchor in (*(packet.get("anchors") or ()), *(slice_items or ()))
+        if isinstance(anchor, Mapping) and "resolved" in (anchor.get("status"), anchor.get("match"))
+        and anchor.get("ref")
+    ]
+
+
 def relevant_material(packet: Mapping[str, Any]) -> dict[str, str]:
     """Exact released current page paths and their already served parent identities."""
     from . import context_refs, retained_inputs
     from .governance import egress
 
-    if packet.get("abstained"):
+    leads = _resolved_leads(packet)
+    if not leads:
         return {}
-    # A maps packet's turn slice lists what the turn resolved beside its map: a `resolved` match is a resolved anchor.
-    slice_block = packet.get("turn_slice")
-    slice_items = slice_block.get("items") if isinstance(slice_block, Mapping) else None
-    material = {
-        str(anchor["path"]): str(anchor["ref"])
-        for anchor in (*(packet.get("anchors") or ()), *(slice_items or ()))
-        if isinstance(anchor, Mapping) and "resolved" in (anchor.get("status"), anchor.get("match"))
-        and anchor.get("path") and anchor.get("ref")
-    }
-    if not material:
-        return {}
+    material = {path: ref for path, ref in leads if path}
     for unit in packet.get("units") or ():
         if not isinstance(unit, Mapping) or unit.get("history") is True:
             continue
@@ -3173,12 +3179,42 @@ def relevant_material(packet: Mapping[str, Any]) -> dict[str, str]:
     return material
 
 
+def _lead_neighbourhoods(vault_root: Path, leads: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Each page a resolved anchor's index row is typed-linked to, mapped to that anchor's ref.
+
+    Due work sits on member pages (evidence, notes, sources), not on the anchor
+    page itself, so the association reads the anchor's own index neighbourhood.
+    The rows are the activation index's cached rows; a missing index adds nothing.
+    """
+    from . import working_set_index
+
+    index = working_set_index.WorkingSetIndex(vault_root)
+    try:
+        rows = index.anchors()
+    finally:
+        index.close()
+    by_ref = {row.ref: row for row in rows if row.ref}
+    by_path = {row.path: row for row in rows if row.path}
+    associated: dict[str, str] = {}
+    for path, ref in leads:
+        row = by_ref.get(ref) or by_path.get(path)
+        if row is None:
+            continue
+        for neighbour in sorted(row.neighbourhood):
+            associated.setdefault(neighbour, ref)
+    return associated
+
+
 def for_activation(
     vault_root: Path, packet: dict[str, Any], *, purpose: str | None = None,
 ) -> None:
-    """Associate one existing due finding with current material, without recovery."""
-    material = relevant_material(packet)
-    if not material:
+    """Associate one existing due finding with current material, without recovery.
+
+    The finding may sit on released material or on a page a resolved anchor links;
+    the candidate names that anchor, and a finding on released material comes first.
+    """
+    leads = _resolved_leads(packet)
+    if not leads:
         return
     from . import request_budget, working_set
 
@@ -3186,30 +3222,37 @@ def for_activation(
     if working_set.budget_exhausted("working_set.relevant_due"):
         return
     budget = request_budget.current()
-    try:
-        rows = served_entries(vault_root, paths=frozenset(material), recover=False, purpose=purpose)
-    except Exception:  # noqa: BLE001 - missing advice never prevents current context
-        log.debug("relevant due advice unavailable", exc_info=True)
-        return
+    direct = relevant_material(packet)
+    with call_spans.span("working_set.relevant_due", {}) as fields:
+        try:
+            linked = _lead_neighbourhoods(vault_root, leads)
+            associated = {**linked, **direct}
+            fields["paths"] = len(associated)
+            rows = served_entries(vault_root, paths=frozenset(associated), recover=False, purpose=purpose)
+        except Exception:  # noqa: BLE001 - missing advice never prevents current context
+            log.debug("relevant due advice unavailable", exc_info=True)
+            return
     # A started read cannot be interrupted; late advice is truncated, never skipped.
     if budget is not None and budget.remaining() <= 0:
         budget.note_truncated("working_set.relevant_due")
         return
-    for row in rows:
-        anchor = material.get(str(row.get("path") or ""))
-        if anchor:
-            packet["relevant_due_refs"] = [{
-                "ref": row["ref"], "fingerprint": row["fingerprint"],
-                "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
-            }]
-            return
+    for material in (direct, associated):
+        for row in rows:
+            anchor = material.get(str(row.get("path") or ""))
+            if anchor:
+                packet["relevant_due_refs"] = [{
+                    "ref": row["ref"], "fingerprint": row["fingerprint"],
+                    "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
+                }]
+                return
 
 
 def filter_relevant_refs(packet: dict[str, Any]) -> dict[str, Any]:
     """Withdraw advice whose exact released material disappeared at final egress."""
     if "relevant_due_refs" not in packet:
         return packet
-    material = frozenset(relevant_material(packet).values())
+    # A candidate names a released anchor or an already served parent.
+    material = frozenset(relevant_material(packet).values()) | {ref for _, ref in _resolved_leads(packet)}
     kept = [
         item for item in packet["relevant_due_refs"]
         if isinstance(item, Mapping) and item.get("anchor") in material

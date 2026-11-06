@@ -1,0 +1,58 @@
+# Project keys for research-notes (`project:`) and cross-cutting notes
+# (`projects:` list on insights/failures/patterns/production-logs).
+#
+# Single source of truth. exomem loads this at startup; adding a key here
+# makes it immediately accepted by `note`/`replace`/`audit`. New keys also
+# auto-register here the first time you use them, so you can just start
+# writing and let this grow.
+#
+# Format: `key: { folder: <Folder Name>, category: <bucket> }`. Category is
+# informational (umbrella / product / activity / domain / cross-cutting) — it
+# groups keys in `Notes/index.md` and isn't enforced by validation.
+# Add `tenant_scoped: true` to a key whose pages may carry a `tenant:` field,
+# e.g. `client-work: { folder: Client Work, category: product, tenant_scoped: true }`;
+# `audit` flags `tenant:` on pages of every other project. A page whose
+# `projects:` list contains a tenant-scoped key is accepted.
+# Add `domain: <domain key>` (or a list of keys) to a key to make its pages
+# members of those topics, e.g. `work: { folder: Work, category: domain, domain: ops }`.
+# A value must resolve through the domains registry (`_Schema/source-taxonomy.yaml`
+# or a built-in); one that does not joins no topic and is counted as unresolved.
+# Exomem itself declares topics for a key, a folder or a tag as `project`, `folder`
+# or `tag` carriers in `_Schema/topic-carriers.yaml`; a hand-written `domain` stays a reviewed input and is never rewritten.
+#
+# These are starter examples — rename or replace them with your own.
+
+# How new note filenames are derived from their titles.
+#
+#   slug   lowercase-ascii-kebab-case (the default, and what every existing
+#          vault already uses)
+#   title  the title itself, with only the characters a filesystem cannot
+#          carry removed, so the name reads the way it does in Obsidian's
+#          quick switcher and file explorer
+#
+# Shipped unset so an upgrade never changes what an existing vault names its
+# files. Nothing on disk is renamed when this changes; it governs new names
+# only, so the two styles can coexist in one vault.
+#
+# filename_style: title
+
+projects:
+  # Cross-cutting — anything not tied to a specific project or domain.
+  personal:
+    folder: Personal
+    category: cross-cutting
+
+  # Example software project (rename to your own).
+  project-alpha:
+    folder: Project Alpha
+    category: product
+
+  # A second example project — used to show cross-project patterns.
+  project-beta:
+    folder: Project Beta
+    category: product
+
+  # Example domain (rename/delete; the writer adds new keys as you use them).
+  work:
+    folder: Work
+    category: domain

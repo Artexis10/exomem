@@ -248,8 +248,9 @@ retry the unchanged call after `retry_after_ms`.
 `edit_note` is one tool. New calls supply `path`, `why`, and one nested
 `operation` selected by `kind`:
 
-- `replace_body`: `new_body`; optional `tags`, `expected_hash`, and semantic
-  review fields.
+- `replace_body`: `new_body` and `expected_hash`, the `content_hash` of a
+  whole-page read (a windowed read of a long Source returns none); optional
+  `tags` and semantic review fields.
 - `replace_tags`: `tags`; optional `expected_hash` and semantic review fields.
 - `replace_string`: `old_string`, `new_string`; optional `replace_all`, `tags`,
   `validate_only`, `expected_hash`, and semantic review fields.

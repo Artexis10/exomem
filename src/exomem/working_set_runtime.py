@@ -81,6 +81,7 @@ CACHE_SIZE = 16
 
 _PACKET_WARNING_EMITTED = False
 _SLICE_WARNING_EMITTED = False
+_RELEASED_CORPUS_TASKS_WARNING_EMITTED = False
 
 
 def activation_packet_mode() -> str:
@@ -112,6 +113,26 @@ def activation_turn_slice() -> bool:
             log.warning("invalid EXOMEM_ACTIVATION_TURN_SLICE; using on")
             _SLICE_WARNING_EMITTED = True
     return True
+
+
+def activation_released_corpus_tasks() -> bool:
+    """Whether task discovery may prepare the caller's complete released corpus; `off` is the default.
+
+    Discovery takes that path whenever the raw fast path is unavailable: for a restricted caller, and for every
+    caller on a vault with a file release policy, a bound writer or an enrolled collection store. It prepares the
+    whole corpus on each request, which does not yet meet the activation latency ceiling at scale, so such a
+    request gets an unavailable task context unless the setting is `on`.
+    """
+    global _RELEASED_CORPUS_TASKS_WARNING_EMITTED
+    value = os.environ.get("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "off")
+    # nosemgrep: ep-word-set -- The activation specification fixes both values of the setting.
+    if value in ("on", "off"):
+        return value == "on"
+    with _CACHE_LOCK:
+        if not _RELEASED_CORPUS_TASKS_WARNING_EMITTED:
+            log.warning("invalid EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS; using off")
+            _RELEASED_CORPUS_TASKS_WARNING_EMITTED = True
+    return False
 
 
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(

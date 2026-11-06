@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 7748f5576004916dc7000db86fafe7c528406ee4523b3486f8d325575138ba5f
+  skill_contract: e3b6e53e12b3106139fdfce9f05c0b2ec851f790bb09e564b3b1f3ea16f54de1
   version: "0.32.0"
 ---
 
@@ -162,23 +162,13 @@ A landing includes a durable conclusion, a recurring entity with reusable facts,
 a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
 and diagnosed failure route respectively to a how-to note, experiment, and failure.
-Mid-thought exploration, tentative events, and names without reusable facts stay unwritten.
-Judge each landing independently of the task or artifact that carried it.
+Mid-thought exploration, tentative events, and incidental names stay unwritten.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a
-conversation's decision or stopping point, close in two steps, only when requested
-or permitted by the live proactive-capture disposition. First record one bounded recap
-with `record_episode/read_episode`; its response names the ref to cite. Then update
-each page whose knowledge a Decided item changed (entity facets, decisions, workflow
-contracts) with `edit_note`, `change_observations` or `supersede_note`. Compile or
-explicitly dismiss every Decided item before citing the recap from updated compiled
-notes. An entity, plan or record page takes no citation. One note's citation covers
-the whole recap revision by linkage, so finish the whole pass before citing.
-A recap is never recorded twice for this. At `off`,
-or when the user asked only for a recap, a recap request alone does not authorize page
-edits. The recap is what the next session on any client sees first. Nothing durable
-happened: record nothing.
+conversation's decision or stopping point, record one bounded recap with
+`record_episode/read_episode` only when requested or permitted by the live proactive-capture
+disposition; it is what the next session on any client sees first.
 
 ## Recall loop
 

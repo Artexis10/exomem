@@ -106,7 +106,7 @@ def test_preflight_reports_every_collection_and_leaves_the_vault_untouched(tmp_p
     assert not authority.marker_path(root).exists() and not connection.store_path(root).exists()
     assert not list(state_paths.vault_state_dir(root).glob("collections-preflight-*"))
     with pytest.raises(ValueError, match="INVALID_ARGUMENTS"):
-        call(root)
+        call(root, dry_run=False)
 
 
 def test_a_failed_proof_names_its_collection_and_check(tmp_path, monkeypatch):
@@ -150,3 +150,34 @@ def test_a_non_owner_is_refused_before_any_collection_is_read(tmp_path, monkeypa
     with pytest.raises((OpError, CollectionStoreError), match="OWNER_REQUIRED|owner"):
         call(root, GUEST, dry_run=True)
     assert read == []
+
+
+def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch):
+    """A public check_memory schema that offers no way to call the preflight: the handler wanted
+    dry_run=true, which the schema never offered, so every call failed."""
+    import asyncio
+
+    from fastmcp import Client
+
+    from exomem import server as server_module
+
+    root = vault(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(root))
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    server = server_module.build_server(require_auth=False)
+
+    async def run():
+        async with Client(server) as client:
+            report = await client.call_tool("check_memory", {"operation": {"kind": "collections-store"}},
+                                            raise_on_error=False)
+            return report
+
+    try:
+        report = asyncio.run(run())
+    finally:
+        writer_lease.reset_managers_for_tests()
+    assert report.structured_content["verdict"] == "blocked"
+    assert report.structured_content["blocked"] == [BROKEN]

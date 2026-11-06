@@ -621,6 +621,45 @@ def test_due_advice_rides_on_a_resolved_lead(vault: Path) -> None:
     assert "relevant_due_refs" not in _activate(vault, turn=IRRELEVANT_TURN)
 
 
+LOAD_TEST = f"{KB}/Notes/Insights/cargo-sled-load-test.md"
+
+
+def test_due_advice_on_a_page_the_resolved_anchor_links_names_that_anchor(vault: Path) -> None:
+    """Due work sits on member pages, not on the anchor page: a due prediction on a note that links the
+    resolved anchor is raised for that anchor. A caller whose view withholds the note is told nothing."""
+    from exomem import due_state, working_set_index
+
+    _structured(vault)
+    yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+    _write(vault, LOAD_TEST, (
+        "---\ntype: insight\nstatus: active\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n"
+        "# Cargo sled load test\n\nA winter towing trial of the [[Cargo Sled]].\n\n"
+        f"## Prediction\n\n- id: p1\n- check_by: {yesterday}\n\nThe sled holds 400 kg on packed snow.\n"
+    ))
+    due_state.reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _cold()
+    served = due_state.served_entries(vault)
+    due = [row for row in served if row["path"] == LOAD_TEST]
+    assert len(due) == 1, "the linked note must owe one due item"
+    assert not [row for row in served if row["path"] == CARGO_SLED], "the anchor page itself owes nothing"
+    packet = _activate(vault, turn=SLED_TURN)
+    assert [item["match"] for item in packet["turn_slice"]["items"] if item["ref"] == CARGO_SLED] == ["resolved"]
+    assert packet["relevant_due_refs"] == [{
+        "ref": due[0]["ref"], "fingerprint": due[0]["fingerprint"],
+        "category": due[0]["category"], "due_since": due[0]["due_since"], "anchor": CARGO_SLED,
+    }]
+    # The control: the same turn from a caller whose view withholds the note.
+    _withhold(vault, LOAD_TEST, ceiling=0)
+    _built(vault).close()
+    _cold()
+    with principal.request_scope(_external()), principal.invocation_scope():
+        restricted = _activate(vault, _external(), turn=SLED_TURN)
+    assert [item["match"] for item in restricted["turn_slice"]["items"] if item["ref"] == CARGO_SLED] == ["resolved"]
+    assert "relevant_due_refs" not in restricted
+
+
 # --------------------------------------------------------------------------- #
 # The conversation
 # --------------------------------------------------------------------------- #
