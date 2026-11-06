@@ -222,7 +222,9 @@ def suggestion_for_state(vault_root: Path, state: Any) -> dict[str, Any] | None:
         "next_step_units": meta["next_step_units"],
         "ref": entry["ref"],
         "fingerprint": entry["fingerprint"],
-        "question": f"{QUESTION} Keep whole: {_keep_whole_call(entry['ref'], entry['fingerprint'])}",
+        "question": (
+            f"{QUESTION} Keep whole: {_keep_whole_call(entry['ref'], entry['fingerprint'])}"
+        ),
     }
 
 
