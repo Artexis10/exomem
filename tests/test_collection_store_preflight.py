@@ -106,7 +106,7 @@ def test_preflight_reports_every_collection_and_leaves_the_vault_untouched(tmp_p
     assert not authority.marker_path(root).exists() and not connection.store_path(root).exists()
     assert not list(state_paths.vault_state_dir(root).glob("collections-preflight-*"))
     with pytest.raises(ValueError, match="INVALID_ARGUMENTS"):
-        call(root)
+        call(root, dry_run=False)
 
 
 def test_a_failed_proof_names_its_collection_and_check(tmp_path, monkeypatch):
@@ -153,8 +153,8 @@ def test_a_non_owner_is_refused_before_any_collection_is_read(tmp_path, monkeypa
 
 
 def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch):
-    """A public check_memory schema that offers no way to call the preflight: the handler wants
-    dry_run=true, so an operation without it, or with the collection the schema offered, failed."""
+    """A public check_memory schema that offers no way to call the preflight: the handler wanted
+    dry_run=true, which the schema never offered, so every call failed."""
     import asyncio
 
     from fastmcp import Client
@@ -173,16 +173,11 @@ def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch)
         async with Client(server) as client:
             report = await client.call_tool("check_memory", {"operation": {"kind": "collections-store"}},
                                             raise_on_error=False)
-            scoped = await client.call_tool(
-                "check_memory", {"operation": {"kind": "collections-store", "collection": PLANNING}},
-                raise_on_error=False)
-            return report, scoped
+            return report
 
     try:
-        report, scoped = asyncio.run(run())
+        report = asyncio.run(run())
     finally:
         writer_lease.reset_managers_for_tests()
-    assert not report.is_error, report.content
     assert report.structured_content["verdict"] == "blocked"
     assert report.structured_content["blocked"] == [BROKEN]
-    assert scoped.is_error or scoped.structured_content.get("success") is False

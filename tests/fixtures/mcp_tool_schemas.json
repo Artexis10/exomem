@@ -3008,13 +3008,6 @@
                 "kind": {
                   "const": "collections-store",
                   "type": "string"
-                },
-                "dry_run": {
-                  "description": "Report without writing. Default true for fix/backfill-ids, false for reconcile.",
-                  "enum": [
-                    true
-                  ],
-                  "type": "boolean"
                 }
               },
               "required": [
