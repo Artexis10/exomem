@@ -44,7 +44,7 @@ import boto3
 import yaml
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
-from cellctl.control_test_contract import control_test_sql, export_test_sql, import_test_sql
+from cellctl.control_test_contract import control_database_sql
 from cellctl.k8s_client import (
     DELETION_SECRET_NAME_ANNOTATION,
     DELETION_SECRET_NAMESPACE_ANNOTATION,
@@ -1485,12 +1485,9 @@ async def control_database(stack: infra.Stack) -> None:
     owner = await asyncpg.connect(stack.postgres.dsn("substrate_owner", from_host=True))
     try:
         await owner.execute(TENANTS_STANDIN_SQL)
-        schema_sql, grants_sql = control_test_sql(FIXTURES)
-        await owner.execute(schema_sql)
-        # cellctl reads a cell's open import and open exports on every pass.
-        await owner.execute(import_test_sql(FIXTURES))
-        await owner.execute(export_test_sql(FIXTURES))
-        await owner.execute(grants_sql)
+        # The same scripts, in the same order, as cellctl's own live suite.
+        for script in control_database_sql(FIXTURES):
+            await owner.execute(script)
     finally:
         await owner.close()
 
@@ -1499,7 +1496,8 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
                      *, provider_image: str | None = None) -> str:
     """Renders the platform chart with local storage and applies what the
     drill runs: TopoLVM, the snapshot CRDs and controller, the classes,
-    cellctl with its RBAC and admission. Returns the node label TopoLVM's
+    cellctl with its RBAC and admission, and the key custodian that writes
+    each cell's object-store key. Returns the node label TopoLVM's
     node plugin selects."""
 
     values = {
@@ -1525,7 +1523,9 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         renderer = platform.PLATFORM_CHART / "reservation-post-renderer.py"
         rendered_schema = run([sys.executable, str(renderer)], input_text=yaml.safe_dump_all(documents))
         documents = [doc for doc in yaml.safe_load_all(rendered_schema.stdout) if doc]
+    documents += platform.custodian_documents(stack, values)
     report.overlays.append(platform.overlay_cellctl(documents))
+    report.overlays.append(platform.overlay_custodian(documents))
     report.overlays.append(platform.trust_storage_ca(stack, documents))
     report.adaptations.append(
         f"the chart is rendered with --api-versions {platform.SNAPSHOT_CLASS_API}, standing in for the second upgrade "
@@ -1545,10 +1545,12 @@ def install_platform(stack: infra.Stack, cellctl_image: str, report: DrillReport
         stack, cell_token_key=secrets.token_bytes(32), control_plane_key=substrate.b64url(secrets.token_bytes(32))
     )
     platform._kubectl_apply(stack, platform.cellctl_secret_documents(stack, secrets_values))
+    platform._kubectl_apply(stack, platform.custodian_secret_documents(stack))
     platform._kubectl_apply(stack, workloads)
     report.stages["platform"]["applied"] = sorted({f"{doc['kind']}/{doc['metadata']['name']}" for doc in documents})
     for namespace, deployment in (
         (platform.CLOUD_NAMESPACE, "cellctl"),
+        (platform.CUSTODY_NAMESPACE, "key-custodian"),
         *((platform.PLATFORM_NAMESPACE, name) for name in platform.LOCAL_STORAGE_CONTROLLERS),
     ):
         platform.wait_rollout(stack, namespace, deployment, timeout=420)

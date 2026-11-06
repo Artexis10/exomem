@@ -16,6 +16,22 @@ from . import package_skills, workflow_skills
 
 _SCHEMA_BASE = "https://agent-plugins.org/schemas/1.0.0/"
 
+# Each generated edition maps to its provider and whether it carries command hooks.
+# The Claude directory admits command hooks only from Verified organizations, so its
+# edition omits them; the hooked edition ships through the repository marketplace.
+_EDITIONS = {
+    "claude": ("claude", False),
+    "claude-hooks": ("claude", True),
+    "openai": ("openai", False),
+}
+# Claude's directory policy fixes this closed set of admitted file types; a licence,
+# readme and .gitignore are admitted by name. ICO is omitted: the published checklist
+# holds it for a reviewer although the portal admits it.
+_CLAUDE_DIRECTORY_SUFFIXES = frozenset(
+    (".md", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+)
+_CLAUDE_DIRECTORY_NAMES = frozenset(("LICENSE", ".gitignore"))
+
 
 def _definition(root: Path) -> dict:
     return json.loads((root / "plugins/cloud/definition.json").read_text(encoding="utf-8"))
@@ -88,6 +104,22 @@ def _validate_openai(root: Path, package: Path) -> None:
         jsonschema.validate(value, schema)
 
 
+def _validate_claude_directory(package: Path) -> None:
+    for path in sorted(package.rglob("*")):
+        if not path.is_file():
+            continue
+        name = path.relative_to(package).as_posix()
+        if name.startswith("hooks/") or name == "hooks.json":
+            raise ValueError(f"Claude directory edition must not ship hooks: {name}")
+        if path.suffix.lower() not in _CLAUDE_DIRECTORY_SUFFIXES and (
+            path.name not in _CLAUDE_DIRECTORY_NAMES
+        ):
+            raise ValueError(f"Claude directory edition admits no {name}")
+    manifest = json.loads((package / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+    if "hooks" in manifest:
+        raise ValueError("Claude directory edition must not declare hooks")
+
+
 def _claude_hooks(root: Path, target: Path) -> None:
     """Register release-owned hooks without implementing provider behaviour."""
     hooks = target / "hooks"
@@ -139,8 +171,11 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
     workflow_skills.validate_skill_contract()
     destination = Path(output) if output is not None else root / "plugins/cloud/generated"
     destination.mkdir(parents=True, exist_ok=True)
-    for provider in ("claude", "openai"):
-        target = destination / provider
+    # The repository's own marketplace lists the hooked Claude edition under this name.
+    repository = definition["repository"].removeprefix("https://github.com/")
+    full_install = f"/plugin install {definition['name']} --marketplace {repository}"
+    for edition, (provider, hooked) in _EDITIONS.items():
+        target = destination / edition
         if target.exists():
             shutil.rmtree(target)
         target.mkdir()
@@ -169,7 +204,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "It does not automatically import every old conversation.\n\n"
             "## Data handling\n\n"
             "MCP tool arguments, including user turns sent to `recall_context`, reach "
-            "the authenticated Exomem Cloud service. Reads return authorized account "
+            "the authenticated Exomem service. Reads return authorized account "
             "content; successful writes persist governed memory in that account. OAuth "
             "selects the account, and this package reaches Exomem only through that "
             "admitted MCP connection. It does not import a local vault or share "
@@ -181,11 +216,19 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "Trusted lifecycle hooks support Claude Code and Cowork; they do not "
                 "run in Claude Chat. Hooks request native MCP activation rather than "
                 "injecting a context packet.\n\n"
-                if provider == "claude"
+                if hooked
                 else "This public directory package contains skills and a remote MCP "
                 "connection, without lifecycle hooks.\n\n"
             )
-            + f"## Release notes\n\n{definition['release_notes'][provider]}\n\n"
+            + (
+                "Lifecycle hooks are available in the full Exomem plugin. They add "
+                "automatic recall, capture checks and continuation on Claude Code and "
+                f"Cowork. To use it in Claude Code, run `{full_install}` instead of "
+                "installing this edition.\n\n"
+                if provider == "claude" and not hooked
+                else ""
+            )
+            + f"## Release notes\n\n{definition['release_notes'][edition]}\n\n"
             + f"Publisher: {definition['author']['name']}.\n\n"
             f"[Documentation]({definition['documentation']}) · "
             f"[Privacy policy]({definition['privacy']}) · "
@@ -193,11 +236,12 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             f"[Support]({definition['support']})\n"
         )
         (target / "README.md").write_text(readme, encoding="utf-8", newline="\n")
-        if provider == "claude":
+        if hooked:
             _claude_hooks(root, target)
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(
                     "\n## Claude lifecycle hooks\n\n"
+                    f"To install this plugin in Claude Code, run `{full_install}`. "
                     "On supported Cowork/Claude Code surfaces, trust the plugin's command "
                     "hooks through the normal client approval flow. They invoke canonical "
                     "Python scripts directly and require a real `python3` executable on "
@@ -211,6 +255,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "inside the versioned package. Hook logs contain metadata only, "
                     "not prompt or assistant snippets. Hooks do not execute in Claude Chat.\n"
                 )
+        if provider == "claude":
             manifest = {
                 "name": definition["name"],
                 "displayName": definition["display_name"],
@@ -235,6 +280,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
                 )
             )
+            if not hooked:
+                _validate_claude_directory(target)
         else:
             from .cloud_plugin_evals import directory_cases
 
@@ -294,7 +341,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 )
             )
             _validate_openai(root, target)
-        _zip_tree(target, destination / f"{provider}.zip")
+        _zip_tree(target, destination / f"{edition}.zip")
     files = {
         path.relative_to(destination).as_posix(): _sha256(path.read_bytes())
         for path in sorted(destination.rglob("*"))

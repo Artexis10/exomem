@@ -4,7 +4,7 @@ Exomem is a living knowledge base for your AI assistants, not a dump of chat his
 
 As you work, Exomem helps your assistant bring relevant context forward, connect ideas, identify what has changed, and preserve lasting outcomes when your settings and assistant support it. Answers can point back to the notes and evidence behind them. Outdated information can be reviewed or superseded instead of silently piling up.
 
-Pick up projects in another conversation or across supported AI assistants connected to the same Exomem account. Exomem does not automatically import your past conversations or access arbitrary files on your device. Connect an existing Exomem Cloud account; registration, invitations, and billing are handled separately on the website.
+Pick up projects in another conversation or across supported AI assistants connected to the same Exomem account. Exomem does not automatically import your past conversations or access arbitrary files on your device. Connect an existing Exomem account; registration, invitations, and billing are handled separately on the website.
 
 ## Getting started
 
@@ -20,7 +20,7 @@ Give the assistant the information to save or name the project you mean. Exomem 
 
 ## Data handling
 
-MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem Cloud service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account, and this package reaches Exomem only through that admitted MCP connection. It does not import a local vault or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
+MCP tool arguments, including user turns sent to `recall_context`, reach the authenticated Exomem service. Reads return authorized account content; successful writes persist governed memory in that account. OAuth selects the account, and this package reaches Exomem only through that admitted MCP connection. It does not import a local vault or share authorization between accounts. Your AI provider also processes the conversation and tool results under its policies.
 
 ## Surface support
 
@@ -28,7 +28,7 @@ Skills and the remote MCP connector carry the portable operating contract. This 
 
 ## Release notes
 
-Updates the Dot E branding and memory workflow guidance. Connect an existing Exomem Cloud account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.
+Updates the Dot E branding and memory workflow guidance. Connect an existing Exomem account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.
 
 Publisher: Substrate Systems OÜ.
 

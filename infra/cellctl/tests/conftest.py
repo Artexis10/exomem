@@ -23,14 +23,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 
-from cellctl.control_test_contract import (
-    access_record_test_sql,
-    control_test_sql,
-    export_test_sql,
-    import_test_sql,
-    media_key_test_sql,
-    operation_grant_test_sql,
-)
+from cellctl.control_test_contract import control_database_sql
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CONTRACT_ALERTS = json.loads(
@@ -199,17 +192,8 @@ async def _create_cell_db(server: PostgresServer) -> str:
     owner_connection = await asyncpg.connect(owner_dsn)
     try:
         await owner_connection.execute(TENANTS_STANDIN_SQL)
-        schema_sql, grants_sql = control_test_sql(FIXTURES)
-        await owner_connection.execute(schema_sql)
-        await owner_connection.execute(import_test_sql(FIXTURES))
-        await owner_connection.execute(export_test_sql(FIXTURES))
-        await owner_connection.execute(grants_sql)
-        # Mirrors Substrate migration 0081 (media key columns) and its grants stanza, which the
-        # pinned Substrate commit does not have yet. It must follow the grants, which revoke.
-        await owner_connection.execute(media_key_test_sql(FIXTURES))
-        # Mirrors Substrate migration 0082 (the export and import grant columns) and its grants stanzas.
-        await owner_connection.execute(operation_grant_test_sql(FIXTURES))
-        await owner_connection.execute(access_record_test_sql(FIXTURES))
+        for script in control_database_sql(FIXTURES):
+            await owner_connection.execute(script)
     finally:
         await owner_connection.close()
     return name

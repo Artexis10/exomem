@@ -1,12 +1,17 @@
 ## ADDED Requirements
 
 ### Requirement: Activation associates one relevant due candidate with current material
-Resolved activation SHALL carry at most one optional `relevant_due_refs` candidate from the maintained due projection, associated with released current material. Each candidate SHALL contain `ref`, `fingerprint`, `category`, `due_since`, and `anchor`. Empty advice SHALL be omitted. The association SHALL use resolved anchors, served unit parents, or current-state sources. Recent context, upkeep, ambiguity, and partial-only anchors SHALL NOT trigger advice.
+Resolved activation SHALL carry at most one optional `relevant_due_refs` candidate from the maintained due projection, associated with released current material. Each candidate SHALL contain `ref`, `fingerprint`, `category`, `due_since`, and `anchor`. Empty advice SHALL be omitted. The association SHALL use resolved anchors, the pages that a resolved anchor's activation index entry is typed-linked to, served unit parents, or current-state sources. A candidate on a linked page SHALL name that resolved anchor as `anchor`. Only due items that the caller's audience may see SHALL be considered. Recent context, upkeep, ambiguity, and partial-only anchors SHALL NOT trigger advice.
 
 #### Scenario: A relevant sixth item reaches activation
 - **WHEN** five older unrelated due items precede a due item on material that activation serves
 - **THEN** activation returns the relevant item's review ref and existing review fingerprint
 - **AND** the response contains no global counts, scores, or generated explanation
+
+#### Scenario: A due item on a page the resolved anchor links
+- **WHEN** the turn resolves an anchor whose own page owes nothing, and a page typed-linked to that anchor owes a due item
+- **THEN** activation returns that item's review ref and fingerprint with the resolved anchor as `anchor`
+- **AND** a caller whose view withholds the linked page receives no `relevant_due_refs`
 
 #### Scenario: Recent or partial material gives no advice
 - **WHEN** a due item's page appears only in recent context or as a partial anchor
