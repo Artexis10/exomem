@@ -116,9 +116,6 @@ log = logging.getLogger(__name__)
 # 4 moves `SIDE_FAMILY` to its own file. v3 code would read a v4 main file as
 # "no candidates", so the bump makes a rolled-back runtime rebuild instead.
 SCHEMA_VERSION = 4
-#: A v3 file holds `SIDE_FAMILY` inline, which `load` still reads, so an upgrade
-#: does not pay a full rebuild; the next save writes it in the v4 layout.
-_READABLE_VERSIONS = frozenset({3, SCHEMA_VERSION})
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -305,7 +302,7 @@ def load(vault_root: Path) -> dict[str, Any] | None:
         return None
     try:
         payload = _read_json(path)
-        if not isinstance(payload, dict) or payload.get("version") not in _READABLE_VERSIONS:
+        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
             return None
         categories = payload.get("categories")
         if not isinstance(categories, dict):
