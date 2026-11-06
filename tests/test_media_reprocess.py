@@ -509,6 +509,11 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
     finally:
         media_processing.set_media_runtime_available(vault)
 
+    # Once the pause ends, a retry still leaves the blocked reprocess to a new request.
+    assert media_processing.retry_media(vault, binary).requeued == 0
+    (job,) = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.BLOCKED
+
     media_processing.reprocess_media(vault, binary, language="et")
     _run_to_idle(vault, worker)
     assert engine.languages == [None, "et"]

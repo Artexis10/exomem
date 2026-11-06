@@ -1584,6 +1584,82 @@ def test_retry_all_media_reconciles_stale_completed_before_requeue(vault: Path) 
     assert jobs[failed_binary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
 
 
+def _image_whose_clip_stage_the_pause_blocked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """A photo with its text read, whose queued CLIP stage the extraction pause blocked."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "paused-photo.jpg", data=b"\xff\xd8\xff")
+    queued = media_processing.reconcile_media(vault, binary)
+    completed = queued.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: ocr:test"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\nA caption read from the photo.\n"
+    queued.sidecar_path.write_text(completed, encoding="utf-8")
+    media_processing.reconcile_media(vault, binary)  # retires the finished OCR stage, keeps CLIP
+    media_processing.mark_processing_unavailable(
+        vault,
+        reason="MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set",
+        next_action="enable media extraction, restart the service, then retry",
+    )
+    return binary, queued.sidecar_path
+
+
+def _end_the_extraction_pause(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    _media_processing().set_media_runtime_available(vault)
+
+
+def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary, sidecar = _image_whose_clip_stage_the_pause_blocked(vault, monkeypatch)
+    before = sidecar.read_bytes()
+    try:
+        # While the pause lasts, retry keeps the work blocked and the status says what to clear.
+        assert media_processing.retry_media(vault, binary).requeued == 0
+        [paused] = media_jobs.status(vault)["jobs"]
+        assert paused["state"] == media_jobs.BLOCKED
+        assert "restart the service" in paused["next_action"]
+
+        _end_the_extraction_pause(vault, monkeypatch)
+        [ended] = media_jobs.status(vault)["jobs"]
+        assert ended["state"] == media_jobs.BLOCKED
+        assert "restart the service" not in ended["next_action"]
+
+        retried = media_processing.retry_media(vault, binary)
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    assert retried.requeued == 1
+    assert retried.state == media_jobs.PENDING
+    [queued] = media_jobs.status(vault)["jobs"]
+    assert queued["state"] == media_jobs.PENDING and queued["error"] is None
+    claimed = media_jobs.MediaJobStore(vault).claim_next()
+    assert claimed is not None and claimed.do_clip and not claimed.do_ocr
+    assert sidecar.read_bytes() == before
+
+
+def test_bulk_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary, _sidecar = _image_whose_clip_stage_the_pause_blocked(vault, monkeypatch)
+    try:
+        _end_the_extraction_pause(vault, monkeypatch)
+
+        requeued = media_processing.retry_all_media(vault, limit=10)
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    assert requeued == 1
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["path"] == binary.relative_to(vault).as_posix()
+    assert job["state"] == media_jobs.PENDING
+
+
 def test_retry_all_media_excludes_every_ambiguous_batch_failure(vault: Path) -> None:
     media_processing = _media_processing()
     limit = 2

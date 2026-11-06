@@ -2395,10 +2395,11 @@ class MediaJobStore:
         try:
             # Waiting and over-budget rows return by themselves, when memory, the
             # cell's limit, the engine's budget, the job timeout or the engine switch
-            # changes; a retry would only repeat their verdict.
+            # changes; a retry would only repeat their verdict. A reprocess row is
+            # left to a new request, as `retryable_jobs` leaves it.
             candidates = conn.execute(
                 f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
-                f"{target_clause} AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
+                f"{target_clause} AND reprocess = 0 AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
                 f"IN ({_SELF_RETURNING_SQL})) AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id)",
                 params,
@@ -3119,8 +3120,11 @@ def _status_job(row: Any) -> dict[str, Any]:
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
     if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
+        # The row keeps the pause's error after the flag is cleared; the retry is then all that is left.
         actions[BLOCKED] = (
-            "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+            "retry, since media extraction is enabled again"
+            if not os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+            else "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
             "restart the service, then retry"
         )
     if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
