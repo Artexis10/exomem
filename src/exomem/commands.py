@@ -4726,7 +4726,10 @@ def op_edit(
         UNREADABLE.
     """
     if new_body is not None and expected_hash is None:
-        raise ValueError(f"INVALID_EDIT: {edit_operations_module.REPLACE_BODY_HASH_RULE}")
+        raise ValueError(
+            "INVALID_EDIT: a whole-body edit requires `expected_hash`, the "
+            f"{edit_operations_module.REPLACE_BODY_HASH_RULE}"
+        )
     active = [
         n
         for n, on in (

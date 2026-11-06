@@ -42,10 +42,7 @@ class _GuardedSemanticEditOperation(_SemanticEditOperation):
 
 #: A whole-body write must name the exact page it replaces. A windowed read of a long
 #: Source returns no `content_hash`, so requiring one refuses a body built from part of a page.
-REPLACE_BODY_HASH_RULE = (
-    "replace_body requires `expected_hash`: pass the `content_hash` from a whole-page "
-    "read_memory of this page (a read with `offset` returns none; read it without one)"
-)
+REPLACE_BODY_HASH_RULE = "`content_hash` of a whole-page read; a read with `offset` has none"
 
 
 class ReplaceBodyOperation(_GuardedSemanticEditOperation):
@@ -227,11 +224,11 @@ def _invalid_from_validation(operation: object, error: ValidationError) -> Value
     guidance: list[str] = []
     for item in error.errors(include_url=False):
         loc = tuple(item.get("loc", ()))
+        location = ".".join(str(part) for part in loc) or "operation"
         rule = _required_field_rule(loc, item)
         if rule is not None:
-            guidance.append(rule)
+            guidance.append(f"{location}: required, {rule}")
             continue
-        location = ".".join(str(part) for part in loc) or "operation"
         guidance.append(f"{location}: {item.get('msg', 'invalid value')}")
     return ValueError(f"INVALID_EDIT:{selected} is invalid: {'; '.join(guidance)}")
 

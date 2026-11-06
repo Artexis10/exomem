@@ -49,6 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Material binding adds a closed envelope and keyed read: record_episode measures 5,402 B
 # and read_episode measures 1,994 B. Their ceilings round to 5,450 B and 2,000 B;
 # the complete local wire measures 167,706 B, so its budget rises to 168,000 B.
+# A required `expected_hash` on replace_body, with its one-line instruction, adds 60 B:
+# edit_note measures 7,210 B and its ceiling rounds to 7,250 B. The total budget is unchanged.
 TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
@@ -74,7 +76,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "connect_memory": 4500,
     "coordination_status": 500,
     "create_note": 5700,
-    "edit_note": 7150,
+    "edit_note": 7250,
     "episode_memory": 4200,
     "govern_memory": 3100,
     "grant_session_access": 2050,

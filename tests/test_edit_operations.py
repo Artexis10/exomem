@@ -542,7 +542,7 @@ def test_nested_edit_memory_replace_body_without_expected_hash_writes_nothing(
     page = vault / NOTE_PATH
     before = page.read_bytes()
 
-    with pytest.raises(ValueError, match="content_hash` from a whole-page read_memory"):
+    with pytest.raises(ValueError, match="expected_hash: required, `content_hash` of a whole-page read"):
         commands.op_edit_memory(
             vault,
             path=NOTE_PATH,
