@@ -76,3 +76,21 @@ def operation_grant_test_sql(fixtures: Path) -> str:
 def access_record_test_sql(fixtures: Path) -> str:
     """The canonical access migration and additive grants, after the existing grant fixtures."""
     return _committed_sql(fixtures, "access_migration") + "\n" + _committed_sql(fixtures, "access_grants")
+
+
+def control_database_sql(fixtures: Path) -> list[str]:
+    """Every script that builds a disposable control database, in the order they must run.
+
+    Each caller that builds one runs this list, so a new fixture reaches every caller at once.
+    The later fixtures follow the pinned grants, which revoke earlier grants on the cell table.
+    """
+    schema_sql, grants_sql = control_test_sql(fixtures)
+    return [
+        schema_sql,
+        import_test_sql(fixtures),
+        export_test_sql(fixtures),
+        grants_sql,
+        media_key_test_sql(fixtures),
+        operation_grant_test_sql(fixtures),
+        access_record_test_sql(fixtures),
+    ]
