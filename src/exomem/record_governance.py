@@ -1102,10 +1102,11 @@ class _LinkProjector:
         seen = self.admitted.get(relative)
         if seen is None:
             check = self.visible_path or self.authorize_path
-            seen = self.admitted[relative] = (
-                check(relative) if check is not None
-                else _authorize(self.root, relative, policy=self.policy)
-            )
+            with call_spans.span("records.link_visibility"):
+                seen = self.admitted[relative] = (
+                    check(relative) if check is not None
+                    else _authorize(self.root, relative, policy=self.policy)
+                )
         return seen
 
     def _memory_target(self, identity: str) -> str | None:
@@ -1302,19 +1303,21 @@ class _LinkProjector:
                 target = canonical + ".md"
             else:
                 return False
-            _path, relative = cast(
-                tuple[Path, str],
-                vault.resolve_under_vault(self.root, target, must_exist=True, must_be_file=True),
-            )
-            vault.PathGuard.capture(self.root, relative, leaf_policy="stable")
+            with call_spans.span("records.link_path_validation"):
+                _path, relative = cast(
+                    tuple[Path, str],
+                    vault.resolve_under_vault(self.root, target, must_exist=True, must_be_file=True),
+                )
+                vault.PathGuard.capture(self.root, relative, leaf_policy="stable")
         except vault.VaultPathError as error:
             if error.code != "NOT_FOUND":
                 return False
             try:
-                _path, relative = cast(
-                    tuple[Path, str], vault.resolve_under_vault(self.root, target)
-                )
-                vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
+                with call_spans.span("records.link_path_validation"):
+                    _path, relative = cast(
+                        tuple[Path, str], vault.resolve_under_vault(self.root, target)
+                    )
+                    vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
             except (vault.VaultPathError, vault.PathGuardError):
                 return False
             return self._remember(f"forward:{relative}", False)
@@ -1324,10 +1327,10 @@ class _LinkProjector:
             return self.verdicts[relative]
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
-        return self._remember(
-            relative, (self.authorize_path(relative) if self.authorize_path is not None
+        with call_spans.span("records.link_authorize"):
+            allowed = (self.authorize_path(relative) if self.authorize_path is not None
                        else _authorize(self.root, relative, receipt=True, policy=self.policy))
-        )
+        return self._remember(relative, allowed)
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
@@ -1477,6 +1480,7 @@ def query_collection(
                 project_values=links,
                 project_child_value=links.project_presentation_value,
                 late_link_projection=late_link_projection,
+                stage_store_projection=writer is not None and not late_link_projection,
                 **kwargs,
             )
         egress.emit_boundary_receipt(collector)
@@ -1911,13 +1915,16 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
 
 def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, Any]:
     """Read every inventory path under the caller's single authorization pass."""
+    from .governance import artifact_census
 
     def authorize(path: str) -> bool:
         return _authorize(root, path, receipt=True)
 
     with call_spans.span("records.inventory_discovery"):
+        # One fresh proposal set per inventory; both sweeps still guard and authorize the disk paths.
+        listing = artifact_census.vault_listing(root)
         discovered, unreadable = collections.discover_collections_with_errors(
-            root, authorize_path=authorize, semantic_profile=semantic_profile
+            root, authorize_path=authorize, semantic_profile=semantic_profile, listing=listing
         )
     manifests = [
         manifest
@@ -1948,7 +1955,7 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
                 owned_views = owned_view_paths(writer._operation)
         with call_spans.span("records.inventory_legacy"):
             legacy, legacy_truncated = collections.discover_legacy_trackers(
-                root, authorize_path=authorize, owned_views=owned_views
+                root, authorize_path=authorize, owned_views=owned_views, listing=listing
             )
     from . import due_state
 

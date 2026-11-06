@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,20 @@ def _clear_resolved_budget():
 def test_no_budget_outside_an_mcp_call() -> None:
     """CLI, watcher and in-process callers behave exactly as before."""
     assert request_budget.current() is None
+
+
+def test_outer_correlation_does_not_consume_the_tool_deadline(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    with command_surface.mcp_request_correlation() as request_id:
+        assert request_budget.current() is None
+        clock[0] += 100
+        with command_surface.mcp_request_context(request_id, tool="ask_memory"):
+            assert command_surface.mcp_request_id() == request_id
+            assert request_budget.current().remaining() == 50
+        assert request_budget.current() is None
+        assert command_surface.peek_request_id() == request_id
+    assert command_surface.peek_request_id() is None
 
 
 def test_an_mcp_call_carries_the_default_fifty_second_deadline() -> None:

@@ -27,6 +27,65 @@ def _write(vault: Path, rel: str, text: str) -> str:
     return rel
 
 
+def test_staged_columns_keep_governed_order_from_excluded_rows() -> None:
+    """Windowing first would lose columns or admit them in schema order."""
+    rows = [
+        {"key": "excluded", "first": None, "second": "visible"},
+        {"key": "returned", "first": "visible", "second": "visible", "empty": []},
+    ]
+
+    def project(values):
+        return {key: value for key, value in values.items() if value is not None and value != []}
+
+    query = {"path": "fixture", "format": "adapter",
+             "filters": [{"column": "key", "value": "returned"}]}
+    eager = qd.evaluate_rows([project(row) for row in rows], **query)
+    staged = qd.evaluate_rows(rows, project_values=project, **query)
+
+    assert staged == eager
+    assert staged.columns == ["key", "second", "first"]
+    assert staged.total_rows == 2 and staged.total_matched == 1
+    assert staged.rows == [{"key": "returned", "first": "visible", "second": "visible"}]
+
+
+@pytest.mark.parametrize("first_visible", [499, 500])
+def test_staged_column_discovery_keeps_the_eager_window(first_visible: int) -> None:
+    """A field on the 501st row must not expand inferred columns, even when returned."""
+    rows = [{"key": index, "optional": None} for index in range(501)]
+    rows[first_visible]["optional"] = "visible"
+
+    def project(values):
+        return {key: value for key, value in values.items() if value is not None}
+
+    query = {"path": "fixture", "format": "adapter",
+             "filters": [{"column": "key", "value": 500}]}
+    eager = qd.evaluate_rows([project(row) for row in rows], **query)
+    staged = qd.evaluate_rows(rows, project_values=project, **query)
+
+    assert staged == eager
+    assert staged.columns == (["key", "optional"] if first_visible == 499 else ["key"])
+    assert staged.total_rows == 501 and staged.returned == 1
+
+
+@pytest.mark.parametrize("columns", [None, ["key"]])
+def test_staged_cap_uses_governed_and_selected_columns(monkeypatch, columns) -> None:
+    """Capping raw rows drops valid output and advances continuations incorrectly."""
+    monkeypatch.setattr(qd, "MAX_RESPONSE_BYTES", 220)
+    rows = [{"key": index, "hidden": "x" * 1_000, "visible": "v" * 100}
+            for index in range(3)]
+
+    def project(values):
+        return {key: value for key, value in values.items() if key != "hidden"}
+
+    query = {"path": "fixture", "format": "adapter", "columns": columns}
+    eager = qd.evaluate_rows([project(row) for row in rows], **query)
+    staged = qd.evaluate_rows(rows, project_values=project, **query)
+
+    assert staged == eager
+    assert staged.returned == (1 if columns is None else 3)
+    assert staged.truncated is (columns is None)
+
+
 # ---------------- CSV ----------------
 
 
