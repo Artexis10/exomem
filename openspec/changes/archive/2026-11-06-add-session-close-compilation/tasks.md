@@ -18,7 +18,7 @@
 
 ## 4. Real-model proof
 
-- [ ] 4.1 Run the close step and fresh-session canonical recall on the real models with realistic and hostile sessions, including a tool-only client with no hook. Report canonical correctness, restraint, recap, citation and recall separately. Add each failure found as a permanent regression case. The orchestrator runs this task.
+- [x] 4.1 Run the close step and fresh-session canonical recall on the real models with realistic and hostile sessions, including a tool-only client with no hook. Report canonical correctness, restraint, recap, citation and recall separately. Add each failure found as a permanent regression case. The orchestrator runs this task. Closed by owner ruling (2026-11-06): real-model runs covered the plugin client with its hook turn on the development cases, one run per case. A before-and-after diagnostic gave a do-not-save restraint pass on both arms; c11 mixed canonical went from fail to pass, and c07 and c09 canonical failed on both arms. On the final candidate, c09 fresh recall passes and its canonical update still leaves the broad claim; c07 records nothing at close and stays a failing permanent regression case (`c07-regression`). Not run: a tool-only client without a hook, and further hostile sessions. Capturing incidental reusable facts about an established entity under balanced engagement is follow-up work.
 
 ## 5. The session-close suite
 
