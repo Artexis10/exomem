@@ -22,6 +22,11 @@
         "mcp",
         "notes"
       ]
+    },
+    {
+      "name": "exomem-cloud",
+      "source": "./plugins/cloud/generated/claude-hooks",
+      "category": "knowledge"
     }
   ]
 }

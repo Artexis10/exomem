@@ -9,7 +9,9 @@
 
 - [ ] 1.5 Resolve the audited directory findings in the canonical tool/Skill source: enforce mutation admission for vocabulary-question review, clarify adoption presentation, link shared API documentation and use returned upload credentials only. Independently verify historical profiles and ordinary read behavior; regenerate packages, release, and revalidate both actual provider drafts. Record provider-review holds separately from actionable defects and ignored-field warnings.
 
-- [ ] 1.6 Separate local service credential readers from canonical native-MCP hooks. Keep the dependency in self-hosted installs and health checks, exclude it from Cloud archives, and verify packaged activation/capture plus the actual Claude draft rescan. Record remaining provider-review holds without removing useful hooks.
+- [ ] 1.6 Separate local service credential readers from canonical native-MCP hooks. Keep the dependency in self-hosted installs and health checks, exclude it from Cloud archives, and verify packaged activation/capture plus the actual Claude draft rescan. Record remaining provider-review holds; the directory edition omits command hooks (1.7).
+
+- [x] 1.7 Generate the Claude directory edition without command hooks or scripts and a hooked edition listed in the repository marketplace; verify that generation rejects a hook or script in the directory edition and that both editions and the marketplace pass the Claude plugin validator.
 
 ## 2. Behavioural evaluation
 
