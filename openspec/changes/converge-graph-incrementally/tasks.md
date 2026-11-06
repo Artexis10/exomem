@@ -274,7 +274,7 @@ The concurrent and settled-state reports below bind to its corrected candidate.
   Release qualification closes the task. Full run 42295026758 on `756c6a13`, the tested parent of the v0.162.0 release commit, passed 148 jobs.
   The run includes the required gate, the concurrent-writer graph convergence job and the 2k and 8k semantic write latency gate.
   The release commit adds only release metadata and generated packages.
-- [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
+- [x] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
   The repeated source inventory confirms that only the writer terminal opts into the availability check.
   Other acknowledgement readers retain their existing lineage contract.
@@ -289,6 +289,11 @@ The concurrent and settled-state reports below bind to its corrected candidate.
   The report must bind the package digest, release source, interpreter, response, validation and convergence.
   Full HTTPS/OAuth, client-selection and signed promotion evidence remains a separate Records promotion requirement.
   Records promotion consumes graph proof; it does not gate this graph acceptance.
+  The released v0.162.0 wheel passed this check on 2026-11-06 in a disposable vault and a private network namespace.
+  The wheel matched its published release digest, and the runtime ran Python 3.13 with the tag's own scripts.
+  A real `change_records` create returned a committed terminal with `pending`, `GRAPH_SYNC_REPAIR_QUEUED` and a checkpoint.
+  The unchanged terminal passed the graph validator, and the validator rejected an unknown outcome value.
+  The expected `derived_from` relation became available, and a later read found the settled outcome `completed` with zero queued paths.
 
 ## 7. Phase 3 — availability fence, conditional on measurement
 
