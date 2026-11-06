@@ -21,6 +21,7 @@ class PendingWitness:
     ready: bool = False
     consumed: bool = False
     native_core: tuple[str, ...] | None = None
+    before_publication: Callable[[], None] | None = None
 
 
 _ACTIVE: ContextVar[PendingWitness | None] = ContextVar(
@@ -35,12 +36,14 @@ def atomic_witness(
     content: str,
     *,
     finalize: Callable[[list[Any], str], str | None] | None = None,
+    before_publication: Callable[[], None] | None = None,
 ) -> Iterator[PendingWitness]:
     state = PendingWitness(
         vault_root=Path(vault_root).resolve(),
         path=Path(path),
         content=content,
         finalize=finalize,
+        before_publication=before_publication,
     )
     token: Token[PendingWitness | None] = _ACTIVE.set(state)
     try:
@@ -85,6 +88,26 @@ def augment_batch(
     content = state.content if content is None else content
     state.content = content
     return [*writes, planned_write(path=state.path, content=content, create_only=True)], state
+
+
+def publication_hook(state: PendingWitness | None) -> Callable[[], None] | None:
+    """The owner's write that the witnessed batch runs before its first install, or None.
+
+    The owner's write is a batch of its own, so it runs with this seam suspended: inside the seam it
+    would try to carry this witness too.
+    """
+    if state is None or state.before_publication is None:
+        return None
+    write = state.before_publication
+
+    def run() -> None:
+        token = _ACTIVE.set(None)
+        try:
+            write()
+        finally:
+            _ACTIVE.reset(token)
+
+    return run
 
 
 def render_with_after(content: str, after: list[dict[str, Any]]) -> str:

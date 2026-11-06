@@ -1165,6 +1165,8 @@ class StoreServer:
         self.refusal = ("COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
         self._stack = self._scope = None
         self._retry_at = 0.0
+        self._boundary = None  # this vault's mutation boundary, read only to see whether another thread holds it
+        self._held_elsewhere_since = None  # when a starved tick began waiting out another thread's hold
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {"create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0}
         self._served_at = 0.0  # when the store thread last finished a request
@@ -1372,11 +1374,13 @@ class StoreServer:
                         self._ticks = {tick: min(due, served) for tick, due in self._ticks.items()}
                         # The wake's publication pass is views work until a tick starts it, even if no request ever pauses.
                         self._views_after, self._views_passes, self._views_owed = None, 0, True
-                    if self._starved("views", served):
+                    if self._starved("views", served) and not self._boundary_held_elsewhere(served):
                         # Saved views get one bounded turn per starvation bound even when requests never stop.
+                        self._held_elsewhere_since = None  # a started tick ends any wait; a later hold starts anew
                         self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
+                    self._held_elsewhere_since = None
                     self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
@@ -1407,14 +1411,35 @@ class StoreServer:
         and the gap also counts from the end of this thread's own last request. Here a lease handoff
         holds back even a starved tick, so the handoff drains the store first. The starved views turn
         after a request (``_run``) does not ask about a handoff, as the views turn there never did.
+        Both also hold back while another thread holds the vault boundary (``_boundary_held_elsewhere``).
         """
         if now < self._ticks[name]:
             return False
-        if self._starved(name, now) and not self.manager._store_handoff:
+        if (self._starved(name, now) and not self.manager._store_handoff
+                and not self._boundary_held_elsewhere(now)):
             return True
         free_since = foreground_priority.bulk_free_since()
         return (free_since is not None and not self._aside()
                 and now - max(free_since, self._served_at) >= FOREGROUND_GRACE_SECONDS)
+
+    def _boundary_held_elsewhere(self, now):
+        """Whether a starved tick waits while another thread holds the vault boundary.
+
+        Maintenance proves collection ownership under that boundary. Started during
+        another thread's hold, it waits there while the holder's own store reads queue
+        behind it, so a short hold becomes a long one. Waiting here serves those reads
+        first. The wait ends one mutation timeout after it began, as long as the tick's
+        own blocked wait would take, so back-to-back holders cannot starve maintenance.
+        A tick that starts ends the wait (``_run``), so the next hold gets a full one.
+        """
+        if self._boundary is None:
+            self._boundary = self.manager._mutation_coordinator_for(self.root)
+        if not self._boundary.held_by_another_thread():
+            self._held_elsewhere_since = None
+            return False
+        if self._held_elsewhere_since is None:
+            self._held_elsewhere_since = now
+        return now - self._held_elsewhere_since < self.manager._mutation_timeout_seconds
 
     def _idle_wait(self, name, now):
         """Seconds to wait for a request before the next look at the tick gate."""
