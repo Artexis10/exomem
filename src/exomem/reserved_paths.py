@@ -140,8 +140,8 @@ class InternalStateDescriptor:
     #: Whether the family once lived inside the vault. Only such a family has legacy state for the
     #: one-time migration to move, so only its id joins the migration manifest's descriptor set.
     #: A new family is born external, so the default is False: it adds no migration, an upgrade
-    #: stays seamless and an older reader accepts it. Only the families that the relocation moved
-    #: set True, and that set is closed.
+    #: stays seamless and an older reader accepts it. Set True only for a family that once lived
+    #: inside the vault or that a restore writes back inside it, and ship that with its migration.
     migrates_from_vault: bool = False
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
