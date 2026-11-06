@@ -3212,7 +3212,7 @@ def test_the_retained_status_names_the_original_whose_companion_blocks_the_censu
 
 def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path, selected_store, monkeypatch):
     """Catches a status and a ledger that grow with every damaged companion of a large vault."""
-    from exomem import commands, media_store
+    from exomem import commands, media_allowance, media_store
 
     paths = [_stored(vault, f"evicted-{number}", 100) for number in range(3)]
     for path in paths:
@@ -3220,7 +3220,7 @@ def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path,
     _retained(selected_store, vault)
     for path in paths:
         _companion(path).write_bytes(b"")
-    monkeypatch.setattr(media_store, "CENSUS_BLOCKERS_SHOWN", 2)
+    monkeypatch.setattr(media_allowance, "BLOCKERS_SHOWN", 2)
 
     with pytest.raises(media_store.MediaStoreError):
         media_store.drain_census(vault)

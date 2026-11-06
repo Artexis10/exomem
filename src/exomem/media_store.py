@@ -896,9 +896,8 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
                 continue
             entry = {"path": row["binary_rel"], "original_state": snapshot.state,
                      "code": code, "ciphertext_size": row["ciphertext_size"]}
-            if code in media_allowance.ALLOWANCE_REFUSAL_CODES and usage is not None and usage.blockers:
-                entry["blocked_by"] = [{"path": item.path, "reason": item.reason} for item in usage.blockers]
-                entry["blocked_total"] = usage.blockers_total
+            if code in media_allowance.ALLOWANCE_REFUSAL_CODES and usage is not None:
+                entry.update(media_allowance.blocked_fields(usage.blockers, usage.blockers_total))
             result.append(entry)
     return result, coverage
 
@@ -1716,10 +1715,6 @@ def evict_to_target(vault: Path) -> int:
 # Knowledge Base rare while a restore that brings back evicted originals is seen within the hour.
 CENSUS_INTERVAL_SECONDS = 3600
 
-# An unknown census names this many blocking originals at most, in path order: enough for the owner to start
-# on, small enough that a vault with many damaged companions grows neither the ledger row nor the status.
-CENSUS_BLOCKERS_SHOWN = 5
-
 
 # What a drain pass yielded to; the codes of a busy slot or store are the hydration's own.
 WAIT_OWNER_READ, WAIT_PENDING_JOB = "OWNER_READ_RECENT", "PENDING_JOB"
@@ -1843,7 +1838,7 @@ def _released_rows(vault: Path, ledger: MediaJobStore, evicted: Iterable[str]) -
             _require_released(vault, relative)
         except ValueError:  # A damaged companion: the cause may name a path, so it is not chained.
             blocked.append(relative)
-            if len(blocked) == CENSUS_BLOCKERS_SHOWN:
+            if len(blocked) == media_allowance.BLOCKERS_SHOWN:
                 break
     if blocked:
         raise _CompanionBlocks(blocked)

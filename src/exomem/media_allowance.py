@@ -17,8 +17,9 @@ MEDIA_ALLOWANCE_EXCEEDED = "MEDIA_ALLOWANCE_EXCEEDED"
 ALLOWANCE_REFUSAL_CODES = (MEDIA_ALLOWANCE_UNKNOWN, MEDIA_ALLOWANCE_EXCEEDED)
 
 
-# An unknown census names this many unreadable notes at most, in path order: enough for the owner to start
-# on, small enough that a vault with many damaged notes grows neither the ledger row nor the status.
+# An unknown census names this many blocking notes at most, in path order: enough for the owner to start on,
+# small enough that a vault with many damaged notes grows neither the ledger row nor the status. The owner
+# census and the retained-store census of media_store share it.
 BLOCKERS_SHOWN = 5
 # A reason is the walk's own message about a note; the cap keeps a long parser message off the status.
 REASON_MAX_CHARS = 160
@@ -30,6 +31,16 @@ class Blocker:
 
     path: str
     reason: str
+
+
+def blocked_fields(blockers: tuple[Blocker, ...], total: int) -> dict:
+    """The status fields that name the notes behind an unknown census, or none when no note explains it.
+
+    The notes stay out of every message: each is its own entry with a path, which egress filters one by one.
+    """
+    if not blockers:
+        return {}
+    return {"blocked_by": [{"path": item.path, "reason": item.reason} for item in blockers], "blocked_total": total}
 
 
 @dataclass(frozen=True, slots=True)
