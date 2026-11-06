@@ -338,6 +338,20 @@ spec:
               value: {{ .Values.mediaEdge.credentialEpochs | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_STORE_POLICY
               value: {{ .Values.mediaEdge.storePolicy | toJson | quote }}
+            - name: CELLCTL_MEDIA_PHYSICAL_HEADROOM
+              value: {{ .Values.mediaEdge.physicalHeadroom | quote }}
+            - name: CELLCTL_MEDIA_BUCKET_ID
+              value: {{ .Values.mediaEdge.bucketId | quote }}
+            - name: CELLCTL_MEDIA_LIST_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mediaEdge.listSecretName }}
+                  key: keyId
+            - name: CELLCTL_MEDIA_LIST_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mediaEdge.listSecretName }}
+                  key: applicationKey
             {{- if .Values.mediaEdge.allCells }}
             - name: CELLCTL_MEDIA_EDGE_ALL_CELLS
               value: "true"

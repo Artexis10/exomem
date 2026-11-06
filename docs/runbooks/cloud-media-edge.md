@@ -22,6 +22,10 @@ canary has served real traffic.
   With the edge off, cellctl runs on a schema with or without the columns.
 - The edge's bucket and its application key are separate from cellctl's backup key.
   Create a bucket key limited to the media bucket.
+- cellctl meters each cell's stored bytes with a second key for the same bucket. It can only list.
+  Terraform creates it with the edge key, in `infra/terraform/durability/media.tf`.
+- The key watcher's pinned set lists both keys and the bucket's settings. Pin them as
+  "Pin the media keys" in `cloud-key-custody.md` says, right after the Terraform apply.
 
 ## Create the Secrets
 
@@ -37,9 +41,14 @@ directory when you finish.
 5. Create the bucket-key Secret:
    `kubectl -n exomem-cloud create secret generic exomem-media-edge-b2 --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
 
+6. Create the list-key Secret for cellctl. Take the values from the `cloud_media_list_application_key_id` and
+   `cloud_media_list_application_key` outputs of `infra/terraform/durability`:
+   `kubectl -n exomem-cloud create secret generic exomem-cloud-media-list --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
+
 The private key goes only to cellctl. The edge receives the public key and the
-bucket key, and never a cell's keys. For a managed deployment, deliver the same
-three Secrets through the static-secret procedure instead of `kubectl`.
+bucket key, and never a cell's keys. cellctl receives the list key, which cannot read or change a file.
+For a managed deployment, deliver the same four Secrets through the static-secret
+procedure instead of `kubectl`.
 
 ## Turn it on for the canary
 
@@ -47,7 +56,11 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 2. Pick a free address in the Service range for the edge. Record it.
 3. Set these values and deploy the chart:
    `mediaEdge.enabled=true`, `mediaEdge.endpoint=http://<address>:8769`,
-   `mediaEdge.bucket=<bucket>`, `mediaEdge.cellIds=["<canary>"]`.
+   `mediaEdge.bucket=<bucket>`, `mediaEdge.bucketId=<bucket id>`, `mediaEdge.cellIds=["<canary>"]`.
+   Take the bucket name and ID from the `cloud_media_bucket_name` and `cloud_media_bucket_id` outputs.
+   `mediaEdge.physicalHeadroom` defaults to 2: cellctl alerts when a cell's prefix holds more than
+   `mediaEdge.storePolicy.allowance_bytes` times that factor. It is a starting figure. Change it from
+   the readings in the cellctl log line `holds <n> media byte(s)` once a canary has run for a month.
 4. Check that `exomem-media-edge` is Ready and that its Service address matches `mediaEdge.endpoint`.
 5. Check that ConfigMap `exomem-media-edge-active-set` lists the canary in `active-set.json`.
 6. Wait for cellctl to re-render the canary. Check that its Secret `cell-credentials` has the keys
@@ -61,6 +74,25 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
+
+## Read the physical meter
+
+After each backup of a cell that has a media store, cellctl lists that cell's prefix
+`cells/<cell>/` in the media bucket with the list key. It logs the bytes of all upload versions, the count of
+unfinished large files and the count of hide entries. The figure is the operator's. It is not the owner's allowance,
+and a failed listing leaves it unknown, never 0.
+
+Two platform alerts name the cell and no content:
+
+- `media-hide-entry-<cell_id>` fires on any hide entry. The edge cannot write one, so a credential other than
+  the edge's touched the bucket. Check the key watcher, then the provider's event log.
+- `media-over-allowance-<cell_id>` fires when the prefix holds more than the allowance times
+  `mediaEdge.physicalHeadroom`. Kept versions count in full until the follow-on change destroys them, so a
+  cell that rewrites its originals grows this figure without growing the owner's.
+
+Both alerts resolve on the next listing that shows neither, and when the cell is deleted. A restart of cellctl
+forgets that an alert fired: it fires again at the next listing, but it does not resolve one that was
+fixed during the restart. Resolve that one at the receiver.
 
 ## Replace one cell's credential
 

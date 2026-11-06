@@ -28,6 +28,27 @@ The key custodian creates each per-cell key. `cellctl` cannot create that Secret
 Until D3 is in force, `cellctl` can render a Job that reads the Secret, so it can reach a cell's key by that route.
 No other credential can create or delete a key.
 
+## Pin the media keys
+
+The key watcher reports a key or a bucket setting that its pinned set does not list. The set is the GitHub
+Actions secret `KEY_WATCHER_PINNED_SET` in environment `key-watcher`. GitHub never returns a secret's value,
+so the current document is the copy that you keep from the last time you wrote it. The set is live state.
+Never replace it from a template; read the current value, change it and write it back.
+
+1. Apply the durability root with the operator's approval. Expect one new key, `cellctl_media_list`, and
+   the outputs `cloud_media_list_application_key_id` and `cloud_media_edge_application_key_id`.
+2. Open your copy of the current pinned set. In the `founder` account, add both key IDs to `pinned_key_ids`.
+   Skip an ID that the list already holds.
+3. In that account's `buckets`, add the media bucket under its ID from `cloud_media_bucket_id`, if it is
+   missing. Copy each setting from the provider's `b2_list_buckets` response for that bucket.
+   The fields are `bucketType`, `fileLockEnabled`, `defaultRetention`, `lifecycleRules`,
+   `defaultServerSideEncryption`, `replicationConfiguration` and `corsRules`.
+4. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+5. Run the watcher once: `gh workflow run b2-key-watcher.yml`. Expect the run to end with `0 active` for both accounts.
+
+Until step 4, the watcher reports the new key as unpinned. The alert is expected for that window.
+A bucket setting that differs from the copy shows as a reason token that names the field and no value.
+
 ## Clean up after a cell deletion
 
 `cellctl` cannot delete the deleted cell's key. It cannot delete a new cell's backup files, which the lock keeps.

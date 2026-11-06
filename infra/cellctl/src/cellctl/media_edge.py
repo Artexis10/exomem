@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -286,6 +287,9 @@ class MediaEdgeConfig:
     credential_epochs: Mapping[str, int] = field(default_factory=dict)
     # Eviction and hydration settings the runtime reads beside the keys.
     store_policy: Mapping[str, bool | int | float] = field(default_factory=dict)
+    # D10: the physical meter alerts above the cell's allowance times this factor, which leaves room for
+    # versions that stay until the follow-on change destroys them. None leaves that alert off.
+    physical_headroom: float | None = None
 
     def __post_init__(self) -> None:
         if not self.url:
@@ -304,6 +308,11 @@ class MediaEdgeConfig:
             or not all(isinstance(cell, str) and CELL_ID_RE.fullmatch(cell) for cell in self.cell_ids)
         ):
             raise ValueError("the media edge selection needs at most 1024 unique base32 cell IDs")
+        if self.physical_headroom is not None and not (
+            type(self.physical_headroom) in (int, float) and math.isfinite(self.physical_headroom)
+            and self.physical_headroom >= 1
+        ):
+            raise ValueError("the media physical headroom factor is a number of at least 1")
         try:
             _cell_integers(dict(self.credential_epochs))
         except ValueError as error:

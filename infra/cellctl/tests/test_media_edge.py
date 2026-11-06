@@ -171,6 +171,9 @@ def test_unusable_edge_settings_are_refused_at_load() -> None:
         {"cell_ids": (CANARY, CANARY)},
         {"credential_epochs": {CANARY: -1}},
         {"store_policy": {"recipient": "age1other"}},
+        {"physical_headroom": 0.5},
+        {"physical_headroom": float("nan")},
+        {"physical_headroom": True},
     ):
         with pytest.raises(ValueError):
             _edge(**overrides)
@@ -188,11 +191,12 @@ def test_the_edge_settings_load_from_the_chart_environment_and_default_to_none(m
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_BUCKET", BUCKET)
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CELL_IDS", json.dumps([CANARY]))
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", json.dumps({CANARY: 3}))
+    monkeypatch.setenv("CELLCTL_MEDIA_PHYSICAL_HEADROOM", "1.5")
 
     config = main.build_media_edge_config()
 
     assert config.selects(CANARY) and not config.selects(OTHER) and config.epoch(CANARY) == 3
-    assert config.max_object_bytes == 1 << 30 and config.bucket == BUCKET
+    assert config.max_object_bytes == 1 << 30 and config.bucket == BUCKET and config.physical_headroom == 1.5
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_ALL_CELLS", '"yes"')
     with pytest.raises(ValueError, match="all-cells switch"):
         main.build_media_edge_config()
@@ -312,6 +316,8 @@ class Fleet:
         self.memory = reconcile.LoopMemory()
         self.connection: asyncpg.Connection | None = None
         self.hetzner = FakeHetznerVolumeProvider()
+        # The list-only key's view of the media bucket, when a test meters it.
+        self.media_listing = None
 
     async def seed(self, *cell_ids: str) -> None:
         for cell_id in cell_ids:
@@ -321,7 +327,7 @@ class Fleet:
     async def run(self, now: datetime = NOW) -> bool:
         return await reconcile.reconcile_once(
             self.connection, self.cluster, self.hetzner, _secrets_config(), self.config,
-            now=now, memory=self.memory)
+            now=now, memory=self.memory, media_listing=self.media_listing)
 
     async def rows(self) -> dict[str, object]:
         return {row.cell_id: row for row in await db.select_all_rows(self.connection, media_keys=True)}

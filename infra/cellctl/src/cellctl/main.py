@@ -207,6 +207,22 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
         all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
         credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
         store_policy=_json_env("CELLCTL_MEDIA_EDGE_STORE_POLICY", "{}", dict, "media store policy"),
+        physical_headroom=float(os.environ["CELLCTL_MEDIA_PHYSICAL_HEADROOM"]),
+    )
+
+
+def build_media_listing() -> B2ObjectStorage | None:
+    """add-cloud-media-store D7, D10: the list-only key for the media bucket, which cellctl uses for the
+    physical meter and for nothing else. None while the media edge is off."""
+
+    if not os.environ.get("CELLCTL_MEDIA_EDGE_URL"):
+        return None
+    return B2ObjectStorage(
+        B2Config(
+            key_id=os.environ["CELLCTL_MEDIA_LIST_KEY_ID"],
+            application_key=os.environ["CELLCTL_MEDIA_LIST_APPLICATION_KEY"],
+            bucket_id=os.environ["CELLCTL_MEDIA_BUCKET_ID"],
+        )
     )
 
 
@@ -322,6 +338,7 @@ def run() -> None:
             bucket_id=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_ID"],
         )
     )
+    media_listing = build_media_listing()
     volume_provider = HetznerVolumeProvider(read_only_token=os.environ["CELLCTL_HETZNER_READ_TOKEN"])
 
     async def serve():
@@ -360,6 +377,7 @@ def run() -> None:
                 config=build_reconcile_config(),
                 heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
                 backup_listing=backup_listing,
+                media_listing=media_listing,
             )
         finally:
             stop.set()

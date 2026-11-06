@@ -103,7 +103,11 @@ class B2ObjectStorage(B2Session):
                     or not entry["fileId"]
                 ):
                     raise ValueError("malformed B2 file version entry")
-                versions.append(ObjectVersion(key=entry["fileName"], version_id=entry["fileId"]))
+                size, action = entry.get("contentLength"), entry.get("action")
+                versions.append(ObjectVersion(
+                    key=entry["fileName"], version_id=entry["fileId"],
+                    size=size if type(size) is int and size >= 0 else None,
+                    action=action if isinstance(action, str) else None))
 
             if "nextFileName" not in payload or "nextFileId" not in payload:
                 raise ValueError("missing B2 file version cursor")

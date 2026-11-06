@@ -39,8 +39,13 @@ class ObjectStorageKey:
 
 @dataclass(frozen=True)
 class ObjectVersion:
+    """One listed version. `size` and `action` are what the provider reported, and None when it
+    reported none: the physical meter (media_meter.py) treats a missing size as unknown, never as 0."""
+
     key: str
     version_id: str
+    size: int | None = None
+    action: str | None = None
 
 
 class ObjectStorage(Protocol):

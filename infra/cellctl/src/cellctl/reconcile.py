@@ -107,6 +107,7 @@ from .media_edge import (
     unwrap_bundle,
     wrap_bundle,
 )
+from .media_meter import UNKNOWN, PhysicalFigure, meter_prefix, over_allowance
 from .rollout import (
     current_image,
     initial_image,
@@ -288,6 +289,12 @@ class LoopMemory:
     # The generation of a set the edge loaded that cellctl did not publish. The edge refuses a
     # generation at or below its own, so the next plan rises past it.
     media_edge_foreign: int = 0
+    # D10: each metered cell's physical figure from its latest listing (UNKNOWN when it failed), the
+    # `last_backup_at` it was listed for (once per backup hold), and when a failed listing may be retried.
+    # A restart forgets all three and lists each cell once more.
+    media_physical: dict[str, PhysicalFigure] = field(default_factory=dict)
+    media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
+    media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
     # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
     # process fills it from every deleted row, so a restart never loses the alert; the receiver
     # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
@@ -1379,8 +1386,10 @@ async def reconcile_once(
     now: datetime | None = None,
     memory: LoopMemory | None = None,
     backup_listing=None,
+    media_listing=None,
 ) -> bool:
-    """One pass. `backup_listing` only lists a new cell's locked backups. Returns whether the next one
+    """One pass. `backup_listing` only lists a new cell's locked backups, and `media_listing` only the media
+    bucket's prefixes for the physical meter. Returns whether the next one
     is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
@@ -1593,6 +1602,7 @@ async def reconcile_once(
             fast = True
 
     await _cleanup_alerts(cluster, cluster_config, memory, now)
+    await _media_physical_meter(cluster, cluster_config, rows, memory, media_listing, now)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1719,6 +1729,66 @@ async def _cleanup_alerts(
         # Without a delivery Secret the log line is the only notice, as for the other alerts.
         if memory.alert_delivered.get(alert) or cluster_config.alert_delivery_secret is None:
             memory.cleanup_pending.discard(cell_id)
+
+
+# A failed listing is tried again after this long: the meter is a report, and a provider outage
+# must not turn it into a listing on every pass.
+MEDIA_METER_RETRY = timedelta(minutes=5)
+
+
+async def _media_physical_meter(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, rows: list[CellRow], memory: LoopMemory,
+    listing, now: datetime,
+) -> None:
+    """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
+    shows. A hide marker alerts at once, since the edge cannot hide. So does a prefix above the cell's
+    allowance times the configured headroom. An unknown figure changes no alert: it is neither within the
+    allowance nor resolved. The figure is the operator's; the owner's meter and the cell's record stay as
+    they are."""
+    edge = cluster_config.media_edge
+    if edge is None or listing is None:
+        return
+    metered = {row.cell_id for row in rows if _media_mode(cluster_config, row) is not None}
+    for row in rows:
+        if row.cell_id not in metered:
+            continue
+        retry_at = memory.media_meter_retry_at.get(row.cell_id)
+        listed_for_this_backup = (row.cell_id in memory.media_metered_for
+                                  and memory.media_metered_for[row.cell_id] == row.last_backup_at)
+        if listed_for_this_backup or (retry_at is not None and now < retry_at):
+            continue
+        figure = await asyncio.to_thread(meter_prefix, listing, row.cell_id)
+        memory.media_physical[row.cell_id] = figure
+        if figure is UNKNOWN:
+            memory.media_meter_retry_at[row.cell_id] = now + MEDIA_METER_RETRY
+            # One failed listing ends the pass's metering: a provider that is down would otherwise cost
+            # one timeout per cell before this pass reconciles anything else.
+            break
+        memory.media_meter_retry_at.pop(row.cell_id, None)
+        memory.media_metered_for[row.cell_id] = row.last_backup_at
+        # Without a delivery Secret the log line is the only notice, so a hide entry logs as a warning.
+        logger.log(logging.WARNING if figure.hides else logging.INFO,
+                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s) and %d hide marker(s) in the bucket",
+                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes,
+                   figure.unfinished, figure.hides)
+    allowance = edge.store_policy.get("allowance_bytes")
+    for cell_id, figure in list(memory.media_physical.items()):
+        hide_alert, over_alert = alerts.media_alerts(cell_id)
+        if cell_id not in metered:
+            # A cell that left the store (deleted) forgets its figure; an alert it raised resolves.
+            for alert in (hide_alert, over_alert):
+                if memory.alert_delivered.get(alert):
+                    await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
+            del memory.media_physical[cell_id]
+            memory.media_metered_for.pop(cell_id, None)
+            memory.media_meter_retry_at.pop(cell_id, None)
+            continue
+        exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
+        for alert, firing in ((hide_alert, None if figure.hides is None else figure.hides > 0),
+                              (over_alert, exceeds)):
+            # None is unknown: send nothing. A cell that never alerted needs no resolution either.
+            if firing or (firing is False and memory.alert_delivered.get(alert)):
+                await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
 
 
 async def _growth_alert(
