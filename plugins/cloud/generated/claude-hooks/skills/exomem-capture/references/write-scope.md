@@ -1,0 +1,192 @@
+# Write Scope
+
+The single most important rule of this skill: **what can and cannot be written
+to.** Everything else is downstream.
+
+## Memory boundary
+
+Keep temporary working context in the current conversation. Exomem holds durable
+preferences, feedback, personal baselines, project context, decisions, failures,
+experiments, and proof-bearing records, subject to the live capture policy.
+Custom instructions can guide one client; they do not replace this durable home.
+Use native memory only as an explicit fallback when Exomem cannot capture.
+Move durable results to Exomem when capture becomes available.
+
+Do not turn transient scratch, reminders, tasks, credentials, or every passing
+chat remark into KB material. Capture only raw material worth preserving or a
+compiled conclusion that future agents should be able to retrieve.
+
+## Binary placement decision tree
+
+Three locations hold binary files in the KB. Pick by **origin and purpose**:
+
+```
+Is the artifact something you reason from (input to your thinking)?
+  │
+  ├─ Yes → Sources/<type>/_attachments/
+  │         (a markdown source-note in Sources/<type>/ captures the analytical surface;
+  │          the binary lives alongside as the original reference)
+  │
+  └─ No → is this a selected/approved final deliverable or proof-bearing output?
+           │
+           ├─ Yes → Evidence/<scope>/<category>/
+           │         (the exact adopted final; drafts and revised-away siblings stay ephemeral)
+           │
+           └─ No → was the artifact produced by your own compiled note?
+                    │
+                    ├─ Yes → Notes/<type>/<scope>/_attachments/
+                    │         (supporting output kept with the note that produced it)
+                    │
+                    └─ No → Evidence/<scope>/<category>/
+                             (a third-party artifact preserved as-received;
+                              append-only, no analytical processing, no frontmatter)
+```
+
+**Worked examples:**
+
+- An article or PDF you found that informs a project → `Sources/Articles/_attachments/` with a markdown capture in `Sources/Articles/`. You reason from it.
+- A selected social image, approved report, or published export → `Evidence/<scope>/<category>/`. Preserve the exact adopted final, not its draft siblings.
+- Supporting output from a compiled note that was never adopted as a deliverable → `Notes/<...>/_attachments/`.
+- An official document received from a third party → `Evidence/<scope>/`. Third party, preserve as-received.
+- A Sources/Sessions transcript of a conversation → not a binary case; lives as markdown in `Sources/Sessions/` directly.
+
+**Why this matters:** mixing layers dilutes their epistemic discipline. Evidence
+holds exact proof-bearing or adopted-final bytes; Sources hold material reasoned
+from. MIME never chooses between them. Keep the layers honest and the categories
+stay useful.
+
+**How the bytes get there (never base64 through the model):** the tree above is
+*where* a binary lands; delivery is a separate question of *how*. Encoding a file
+into a tool argument is billed as model output tokens, so always deliver
+out-of-band — the upload endpoint (or the prefilled upload page when you're on
+claude.ai web), a file-sync drop (e.g. Obsidian Sync), or a direct disk write from Claude Code.
+Full detail: `references/operations.md` § preserve.
+
+## Writeable paths (Knowledge Base only)
+
+The skill may write to anything inside `<vault>/Knowledge Base/`, subject to
+per-operation rules:
+
+| Path | Operations | Notes |
+|---|---|---|
+| `Knowledge Base/Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
+| `Knowledge Base/Notes/**` | note, replace | Follow the live engagement policy, operation envelope, and standing authority. `_attachments/` subfolders may hold binary outputs (append-only). |
+| `Knowledge Base/Entities/**` | link, replace | Follow the live engagement policy, operation envelope, and standing authority. |
+| `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and adopted-final artifacts; never edit existing files; no frontmatter required on binaries |
+| `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every governed write |
+| `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every governed write |
+| `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |
+| `Knowledge Base/_Schema/**` | governed schema and registry writers | Follow the operation envelope and any active holds. Instruction changes require an explicit user request; never rewrite the skill autonomously. |
+
+## A legacy page `prepare_note/change_observations` refuses
+
+`prepare_note/change_observations` only mutates a writable compiled page. A page with no compiled
+`type`, or no frontmatter at all, refuses with a remediation and a structured
+`resolution` naming the existing edit owner. Use that authorized owner for an
+in-place correction and verify the current page and retained interpretation.
+If the surface lacks that writer, report the unavailable operation and retain
+the intended correction for a capable surface. Do not create a dated child.
+Migrate the legacy page into a compiled type only on request
+(`read_import` and `import_memory`) — nothing here does that automatically.
+
+## Read-only paths (rest of the vault)
+
+The skill **reads from** any folders in the vault outside `Knowledge Base/` to
+inform compiled notes (links, citations, context). It **never writes to** them.
+Examples of folders you might keep alongside the KB:
+
+- Hand-authored reference or strategy material (`Reference/`, `Strategy/`, …)
+- Personal trackers, datasets, or admin folders
+- Any other top-level folder in the vault that is not `Knowledge Base/`
+
+If you explicitly ask the skill to write to one of these paths, it **declines and
+explains** that those are read-only inputs, and offers to compile the finding into
+a `Notes/Research/<scope>/` page that links back instead.
+
+The single exception: an explicit, unambiguous override in the conversation
+("override write-scope, edit that file directly"). The skill can then comply but
+must (1) show the proposed diff first, (2) note that this bypasses the standard
+rule, and (3) wait for an explicit second confirmation. The rule prevents
+accidental modification, not deliberate human intent.
+
+## Per-subtree access overrides (`_access.yaml`)
+
+The location rules above are the defaults. To carve out **exceptions** — a curated
+hand-thinking folder you keep inside `Knowledge Base/` but never want the skill to
+write, a specific read-only sibling outside it, or a private subtree that shouldn't
+even be searchable — add an optional `Knowledge Base/_access.yaml`:
+
+```yaml
+# Both lists are optional. Each entry is a subtree prefix — a top-level sibling
+# folder, or a KB-relative path (a leading "Knowledge Base/" is allowed and ignored).
+readonly:          # findable + indexed, but every write is refused
+  - Reference
+  - Notes/Research/Frozen Report
+excluded:          # hidden from find + embeddings AND unwritable (truly private)
+  - Personal/Journal
+```
+
+- **`readonly:`** — pages stay searchable and readable, but any write (Tier 1 or
+  Tier 2) is a **hard refusal with no conversational override**. Use it to fold a
+  curated folder into the KB without exposing it to edits.
+- **`excluded:`** — the subtree is removed from `find` and the embedding index *and*
+  write-protected. Use it for genuinely private material.
+- **Hot-reloaded.** Edit the file desk-side; the next call sees the new policy — no
+  restart (same as `project-keys.yaml`).
+- **Absent by default.** `init` does not ship this file; with no `_access.yaml`, only
+  `Sources/` / `Evidence/` (append-only) differ from ordinary read-write. Run
+  `exomem personalize` to generate a starter policy from a scan of your vault.
+- **Resolution order** for any path: `excluded` → `readonly` → append-only
+  (`Sources/` / `Evidence/`) → read-write.
+
+This is the config behind the "read-only / excluded subtrees are write-protected" line
+in SKILL.md — it gives a subtree the same write-refusal that everything outside
+`Knowledge Base/` gets by location.
+
+## Why hand-authored paths are read-only
+
+LLM-compiled material has different epistemic status from hand-authored material.
+Mixing them blurs which claims you stand behind vs. which the model produced. The
+Knowledge Base exists as a separate layer precisely so this distinction stays
+sharp. Compiled research can and should **link** into hand-authored material —
+that's how the layers connect — but should never **modify** it.
+
+## Sources are append-only
+
+Within `Knowledge Base/Sources/`, files are never edited after creation. If a
+source needs correction:
+
+- For factual error: capture a new source, supersede the compiled notes that drew on the old one.
+- For typo or formatting: leave it. Sources reflect what was captured at capture-time.
+- For a wrong `source_type` or `domain`: correct it with
+  `change_files(operation={'kind': 'reclassify', 'path': ..., 'source_kind': ..., 'domain': ..., 'reason': ...})`.
+- To undo the latest correction:
+  `change_files(operation={'kind': 'revert-reclassification', 'path': ..., 'reason': ...})`.
+
+The append-only rule governs **content, not location**, and not the capture-time
+classification. Relocating a source *within* `Sources/` — e.g. into a themed
+sub-folder — is allowed via `move_file`: the bytes are unchanged, only the path
+moves, and inbound wikilinks are rewritten. Reclassification is the governed form
+of the same thing: it derives the destination from the corrected classification
+rather than accepting one, requires a reason, appends the previous path, kind
+and domain to `reclassified_from`, and leaves the body byte-identical. Use
+`operation='propose-reclassification'` to see the destination, the references it
+rewrites, and any refusal first. A link that names the source by bare name keeps
+resolving after the move; a path link in an append-only page would dangle, so the
+move is refused. Revert restores the latest recorded path, kind and domain; it
+refuses an entry that records only a path. Moving a file *out* of `Sources/`
+(or *into* it from elsewhere) remains forbidden.
+
+## Index files are skill-managed
+
+`index.md` files (top-level and per-subfolder) are written by the skill on every
+confirmed write. They are **catalogs**, not curated docs — don't hand-edit them.
+If audit detects index drift, it proposes a regeneration.
+
+The split between `index.md` (catalog) and `log.md` (chronological activity feed)
+is deliberate. Subfolder `index.md` files are catalog-only: a header, a brief
+one-line statement of what the folder holds, then the entry list. Orientation
+prose belongs in the schema, not in indexes.
+
+The skill never writes to `_Schema/SKILL.md` or anything in `_Schema/references/`.
+The schema evolves through human edit. Self-modification is out of scope.

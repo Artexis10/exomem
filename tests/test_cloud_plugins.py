@@ -34,12 +34,12 @@ def test_directory_starters_ship_from_the_shared_product_definition(tmp_path: Pa
         manifest["extensions"]["com.openai"]["interface"]["defaultPrompt"]
         == definition["default_prompts"]
     )
-    for provider in ("claude", "openai"):
-        readme = (tmp_path / provider / "README.md").read_text()
+    for edition in ("claude", "claude-hooks", "openai"):
+        readme = (tmp_path / edition / "README.md").read_text()
         for prompt in definition["default_prompts"]:
             assert prompt in readme
         assert definition["description"] in readme
-        assert definition["release_notes"][provider] in readme
+        assert definition["release_notes"][edition] in readme
 
 
 def test_claude_directory_manifest_declares_privacy_policy(tmp_path: Path) -> None:
@@ -76,8 +76,8 @@ def test_claude_directory_links_and_icon_are_complete(tmp_path: Path) -> None:
 def test_public_readmes_explain_data_handling_and_all_product_links(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
     definition = json.loads((ROOT / "plugins/cloud/definition.json").read_text())
-    for provider in ("claude", "openai"):
-        readme = (tmp_path / provider / "README.md").read_text()
+    for edition in ("claude", "claude-hooks", "openai"):
+        readme = (tmp_path / edition / "README.md").read_text()
         for key in ("privacy", "terms", "support", "documentation"):
             assert definition[key] in readme
         assert "Data handling" in readme
@@ -88,14 +88,14 @@ def test_public_readmes_explain_data_handling_and_all_product_links(tmp_path: Pa
 
 def test_claude_readme_discloses_content_free_hook_observability(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
-    readme = (tmp_path / "claude/README.md").read_text()
+    readme = (tmp_path / "claude-hooks/README.md").read_text()
     assert "Hook logs contain metadata only" in readme
     assert "not prompt or assistant snippets" in readme
 
 
 def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
-    with zipfile.ZipFile(tmp_path / "claude.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "claude-hooks.zip") as archive:
         manifest = json.loads(archive.read(".claude-plugin/plugin.json"))
         # Default hooks/hooks.json is loaded once, never also declared inline.
         assert "hooks" not in manifest
@@ -139,8 +139,38 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
                 archive.read("hooks/" + filename)
                 == (ROOT / "src/exomem/_hooks" / filename).read_bytes()
             )
-    with zipfile.ZipFile(tmp_path / "openai.zip") as archive:
-        assert not any(name.startswith("hooks/") for name in archive.namelist())
+    for unhooked in ("claude.zip", "openai.zip"):
+        with zipfile.ZipFile(tmp_path / unhooked) as archive:
+            assert not any(name.startswith("hooks/") for name in archive.namelist())
+
+
+def test_claude_directory_edition_ships_only_admitted_files(tmp_path: Path) -> None:
+    # Catch the directory edition regaining command hooks or a script, which the
+    # directory refuses from an unverified publisher.
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    with zipfile.ZipFile(tmp_path / "claude.zip") as archive:
+        names = archive.namelist()
+        assert "hooks" not in json.loads(archive.read(".claude-plugin/plugin.json"))
+    assert {".claude-plugin/plugin.json", ".mcp.json", "README.md", "LICENSE"} <= set(names)
+    assert any(name.startswith("skills/") for name in names)
+    assert {
+        Path(name).suffix for name in names if name != "LICENSE"
+    } <= cloud_plugins._CLAUDE_DIRECTORY_SUFFIXES
+
+
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    [("hooks/hooks.json", '{"hooks":{}}'), ("skills/exomem/scripts/run.py", "print(1)\n")],
+)
+def test_claude_directory_validation_rejects_hooks_and_scripts(
+    tmp_path: Path, relative: str, content: str
+) -> None:
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    planted = tmp_path / "claude" / relative
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text(content)
+    with pytest.raises(ValueError, match="Claude directory edition"):
+        cloud_plugins._validate_claude_directory(tmp_path / "claude")
 
 
 def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_path: Path) -> None:
@@ -156,7 +186,7 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
         b"EXOMEM_REST_API_KEY",
         b"Authorization",
     )
-    with zipfile.ZipFile(tmp_path / "built/claude.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "built/claude-hooks.zip") as archive:
         assert "hooks/exomem_local_credentials.py" not in archive.namelist()
         for name in archive.namelist():
             if name.startswith("hooks/") and name.endswith(".py"):
@@ -412,7 +442,7 @@ def test_cloud_openai_schema_and_public_archives(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "openai/mcp.json").read_text())["mcpServers"] == {
         "exomem": {"type": "streamable-http", "url": "https://exomem.substratesystems.io/mcp"}
     }
-    archives = [tmp_path / "claude.zip", tmp_path / "openai.zip"]
+    archives = [tmp_path / "claude.zip", tmp_path / "claude-hooks.zip", tmp_path / "openai.zip"]
     assert_public_artifacts_clean(
         archives,
         labels={path: f"plugins/cloud/generated/{path.name}" for path in archives},
