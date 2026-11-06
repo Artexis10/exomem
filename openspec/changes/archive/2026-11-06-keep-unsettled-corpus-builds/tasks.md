@@ -16,4 +16,5 @@
   12.7k-page production vault, with steady reads and writes (77 each, none failed).
   The standby built the corpus context before promotion, promotion carried
   `semantic_corpus`, and the promoted worker reused that context ("context reused")
-  and logged no corpus build.
+  and logged no corpus build. The standby's build settled, so the kept-unsettled
+  branch itself did not run in this rehearsal; its tests cover it.
