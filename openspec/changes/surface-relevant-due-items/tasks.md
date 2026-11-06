@@ -5,7 +5,7 @@
 - [x] 1.1 Select stored due and artifact-role page buckets without recovery; verify subset, full, disposition, and audience behavior.
 - [x] 1.2 Attach one candidate after guarded activation and retain its exact material association through final egress; verify the sixth-item public workflow.
 - [x] 1.3 Render complete candidate identities within the hook ceiling; verify fitting and omitted candidates.
-- [x] 1.4 Associate due work on pages that a resolved anchor's index entry links, naming that anchor, and record the stage outcome in a `working_set.relevant_due` span; verify a linked note's due item reaches a maps activation and a caller who may not see the note gets none.
+- [x] 1.4 Associate due work on pages that a resolved anchor's index entry links, naming that anchor and preferring a finding on released material; verify a linked note's due item reaches a maps activation and a caller who may not see the note gets none.
       Evidence: `test_due_advice_on_a_page_the_resolved_anchor_links_names_that_anchor` in `tests/test_activate_context_turn_slice.py`; on installed 0.161.1 no activation carried a candidate because no due item sits on an anchor page.
 
 ## 2. Portable handling

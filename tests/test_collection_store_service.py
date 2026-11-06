@@ -2126,7 +2126,7 @@ def test_a_boundary_holder_s_store_reads_are_not_queued_behind_maintenance_waiti
     service. Once the hold ends, the deferred tick runs.
     """
     server = runtime._SERVERS[service.root]
-    ticked, real_tick = [], server._views_tick
+    ticked, finished, real_tick = [], [], server._views_tick
 
     def maintenance():
         ticked.append(time.monotonic())
@@ -2138,11 +2138,18 @@ def test_a_boundary_holder_s_store_reads_are_not_queued_behind_maintenance_waiti
                 pass
         except OpError:
             pass
-        return real_tick()
+        try:
+            return real_tick()
+        finally:
+            finished.append(time.monotonic())
 
     monkeypatch.setattr(server, "_views_tick", maintenance)
     boundary_wait = service.manager._mutation_timeout_seconds
     _until(lambda: not service.manager._store_handoff)
+    # The fixture's append woke a views pass. The store thread runs one tick at a time, so once
+    # this patched tick has run to its end, no tick that started before the hold is in flight.
+    server._ticks["views"] = time.monotonic() - 60
+    _until(lambda: finished)
     refusals = []
     with service.manager.consistency_guard(service.root, operation="test command hold"):
         server._ticks["views"] = time.monotonic() - 60  # long starved

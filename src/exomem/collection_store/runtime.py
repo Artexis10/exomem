@@ -1376,9 +1376,11 @@ class StoreServer:
                         self._views_after, self._views_passes, self._views_owed = None, 0, True
                     if self._starved("views", served) and not self._boundary_held_elsewhere(served):
                         # Saved views get one bounded turn per starvation bound even when requests never stop.
+                        self._held_elsewhere_since = None  # a started tick ends any wait; a later hold starts anew
                         self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
+                    self._held_elsewhere_since = None
                     self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
@@ -1428,6 +1430,7 @@ class StoreServer:
         behind it, so a short hold becomes a long one. Waiting here serves those reads
         first. The wait ends one mutation timeout after it began, as long as the tick's
         own blocked wait would take, so back-to-back holders cannot starve maintenance.
+        A tick that starts ends the wait (``_run``), so the next hold gets a full one.
         """
         if self._boundary is None:
             self._boundary = self.manager._mutation_coordinator_for(self.root)

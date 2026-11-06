@@ -3179,43 +3179,39 @@ def for_activation(
     """Associate one existing due finding with current material, without recovery.
 
     The finding may sit on released material or on a page a resolved anchor links;
-    the candidate names that anchor. The span's ``outcome`` says which way it ended.
+    the candidate names that anchor, and a finding on released material comes first.
     """
-    with call_spans.span("working_set.relevant_due", {"outcome": "no_lead"}) as fields:
-        leads = _resolved_leads(packet)
-        if not leads:
-            return
-        from . import request_budget, working_set
+    leads = _resolved_leads(packet)
+    if not leads:
+        return
+    from . import request_budget, working_set
 
-        # Optional advice must not start source IO without the activation stage reserve.
-        if working_set.budget_exhausted("working_set.relevant_due"):
-            fields["outcome"] = "budget"
-            return
-        budget = request_budget.current()
-        associated = relevant_material(packet)
+    # Optional advice must not start source IO without the activation stage reserve.
+    if working_set.budget_exhausted("working_set.relevant_due"):
+        return
+    budget = request_budget.current()
+    direct = relevant_material(packet)
+    with call_spans.span("working_set.relevant_due", {}) as fields:
         try:
-            for neighbour, ref in _lead_neighbourhoods(vault_root, leads).items():
-                associated.setdefault(neighbour, ref)
+            linked = _lead_neighbourhoods(vault_root, leads)
+            associated = {**linked, **direct}
             fields["paths"] = len(associated)
             rows = served_entries(vault_root, paths=frozenset(associated), recover=False, purpose=purpose)
         except Exception:  # noqa: BLE001 - missing advice never prevents current context
             log.debug("relevant due advice unavailable", exc_info=True)
-            fields["outcome"] = "unavailable"
             return
-        # A started read cannot be interrupted; late advice is truncated, never skipped.
-        if budget is not None and budget.remaining() <= 0:
-            budget.note_truncated("working_set.relevant_due")
-            fields["outcome"] = "budget"
-            return
-        fields["outcome"] = "no_match"
+    # A started read cannot be interrupted; late advice is truncated, never skipped.
+    if budget is not None and budget.remaining() <= 0:
+        budget.note_truncated("working_set.relevant_due")
+        return
+    for material in (direct, associated):
         for row in rows:
-            anchor = associated.get(str(row.get("path") or ""))
+            anchor = material.get(str(row.get("path") or ""))
             if anchor:
                 packet["relevant_due_refs"] = [{
                     "ref": row["ref"], "fingerprint": row["fingerprint"],
                     "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
                 }]
-                fields["outcome"] = "attached"
                 return
 
 
