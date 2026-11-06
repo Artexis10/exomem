@@ -3748,6 +3748,7 @@
                   "type": "string"
                 },
                 "expected_hash": {
+                  "description": "replace_body requires `expected_hash`: pass the `content_hash` from a whole-page read_memory of this page (a read with `offset` returns none; read it without one)",
                   "type": "string"
                 },
                 "kind": {
@@ -3765,6 +3766,7 @@
                 }
               },
               "required": [
+                "expected_hash",
                 "kind",
                 "new_body"
               ],

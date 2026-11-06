@@ -395,6 +395,7 @@ def test_entity_facet_operation_is_valid_narrow_and_rejects_broad_mutants() -> N
             "operation": {
                 "kind": "replace_body",
                 "new_body": "# Example Person\n\nOne durable facet.\n",
+                "expected_hash": "a" * 64,
             },
         },
     }

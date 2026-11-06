@@ -4694,9 +4694,10 @@ def op_edit(
             Requires frontmatter and cannot be `updated`, which is auto-bumped.
         value: New value for `field` (scalar/list/dict).
         allow_curated: Allow a frontmatter patch under a curated tree.
-        expected_hash: Optional drift guard. Pass the `content_hash` you
-            got from `get`; the edit refuses (STALE_EDIT) if the file
-            changed on disk since, so you never clobber another writer.
+        expected_hash: Drift guard, required with `new_body` and optional
+            otherwise. Pass the `content_hash` from a whole-page read; the
+            edit refuses (STALE_EDIT) if the file changed on disk since, so
+            you never clobber another writer.
         validate_only: Validate the exact proposed bytes without writing for
             every edit mode. Surgical edits also report match counts and lines.
         transition_token: Exact semantic transition token returned by a
@@ -4716,6 +4717,7 @@ def op_edit(
 
     Errors:
         INVALID_EDIT (nothing to edit, old_string+new_body both given,
+        new_body without expected_hash,
         new_string missing/equal, path in Sources/Evidence); NOT_FOUND;
         STRING_NOT_FOUND (surgical snippet absent); AMBIGUOUS_MATCH
         (snippet not unique and replace_all=False); ALREADY_SUPERSEDED;
@@ -4723,6 +4725,8 @@ def op_edit(
         FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
+    if new_body is not None and expected_hash is None:
+        raise ValueError(f"INVALID_EDIT: {edit_operations_module.REPLACE_BODY_HASH_RULE}")
     active = [
         n
         for n, on in (

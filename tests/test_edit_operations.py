@@ -14,13 +14,15 @@ from exomem.edit_operations import (
     normalize_edit_surface_arguments,
 )
 
+HASH = "a" * 64  # payload-shape tests write nothing, so any well-formed digest will do
+
 
 @pytest.mark.parametrize(
     ("operation", "expected"),
     [
         (
-            {"kind": "replace_body", "new_body": "After", "tags": ["new"]},
-            {"new_body": "After", "tags": ["new"], "validate_only": False},
+            {"kind": "replace_body", "new_body": "After", "expected_hash": HASH, "tags": ["new"]},
+            {"new_body": "After", "expected_hash": HASH, "tags": ["new"], "validate_only": False},
         ),
         (
             {"kind": "replace_tags", "tags": ["new"]},
@@ -126,7 +128,10 @@ def test_each_variant_forbids_fields_from_other_branches() -> None:
 @pytest.mark.parametrize(
     ("legacy", "nested"),
     [
-        ({"new_body": "After", "tags": ["new"]}, {"kind": "replace_body", "new_body": "After", "tags": ["new"]}),
+        (
+            {"new_body": "After", "expected_hash": HASH, "tags": ["new"]},
+            {"kind": "replace_body", "new_body": "After", "expected_hash": HASH, "tags": ["new"]},
+        ),
         ({"tags": ["new"]}, {"kind": "replace_tags", "tags": ["new"]}),
         (
             {"old_string": "Before", "new_string": "After"},
@@ -509,13 +514,58 @@ def test_python_runtime_accepts_nested_and_deprecated_flat_forms(monkeypatch) ->
     nested = commands.op_edit_memory(
         Path("/vault"),
         **common,
-        operation={"kind": "replace_body", "new_body": "After"},
+        operation={"kind": "replace_body", "new_body": "After", "expected_hash": HASH},
     )
     with pytest.warns(DeprecationWarning):
-        legacy = commands.op_edit_memory(Path("/vault"), **common, new_body="After")
+        legacy = commands.op_edit_memory(Path("/vault"), **common, new_body="After", expected_hash=HASH)
 
     assert nested == legacy == {"path": common["path"]}
     assert calls == [
-        {**common, "new_body": "After", "validate_only": False},
-        {**common, "new_body": "After", "validate_only": False},
+        {**common, "new_body": "After", "expected_hash": HASH, "validate_only": False},
+        {**common, "new_body": "After", "expected_hash": HASH, "validate_only": False},
     ]
+
+
+NOTE_PATH = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+
+
+def test_nested_edit_memory_replace_body_without_expected_hash_writes_nothing(vault: Path) -> None:
+    from exomem import commands
+
+    page = vault / NOTE_PATH
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="expected_hash"):
+        commands.op_edit_memory(
+            vault,
+            path=NOTE_PATH,
+            why="Whole-body write built from a partial read.",
+            operation={"kind": "replace_body", "new_body": "Only the part the caller saw.\n"},
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_flat_edit_new_body_needs_expected_hash_and_succeeds_with_the_current_one(vault: Path) -> None:
+    from exomem import commands
+    from exomem.vault import content_hash, parse_frontmatter
+
+    page = vault / NOTE_PATH
+    before = page.read_bytes()
+    _meta, body, _text = parse_frontmatter(before.decode("utf-8"))
+    arguments = {
+        "path": NOTE_PATH,
+        "why": "Whole-body write through the CLI and REST edit.",
+        # Keeps the page's own content and adds a relation so the semantic contract accepts it.
+        "new_body": (
+            f"{body.rstrip()}\n\n## Relations\n"
+            "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]\n"
+        ),
+    }
+
+    with pytest.raises(ValueError, match="expected_hash"):
+        commands.op_edit(vault, **arguments)
+    assert page.read_bytes() == before
+
+    commands.op_edit(vault, **arguments, expected_hash=content_hash(before.decode("utf-8")))
+    assert "## Relations" in page.read_text(encoding="utf-8")

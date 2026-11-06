@@ -158,7 +158,7 @@ NOTE = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragme
 
 def _add_relation(vault: Path, path: str, bullet: str) -> None:
     """Author one `## Relations` bullet on an existing page through the ordinary editor."""
-    from exomem.vault import parse_frontmatter
+    from exomem.vault import content_hash, parse_frontmatter
 
     _frontmatter, body, _text = parse_frontmatter((vault / path).read_text(encoding="utf-8"))
     section = "" if "## Relations" in body else "\n## Relations\n"
@@ -166,7 +166,11 @@ def _add_relation(vault: Path, path: str, bullet: str) -> None:
         vault,
         path,
         "Author a synthetic relation.",
-        operation={"kind": "replace_body", "new_body": f"{body.rstrip()}\n{section}{bullet}\n"},
+        operation={
+            "kind": "replace_body",
+            "new_body": f"{body.rstrip()}\n{section}{bullet}\n",
+            "expected_hash": content_hash((vault / path).read_text(encoding="utf-8")),
+        },
     )
 
 
@@ -292,7 +296,7 @@ def test_a_dismissed_entry_stays_dismissed_when_its_page_is_edited_and_linked_ag
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The review fingerprint is the promotion's identity, not a hash of the page or its dependants."""
-    from exomem.vault import parse_frontmatter
+    from exomem.vault import content_hash, parse_frontmatter
 
     _as(monkeypatch, "session-a")
     entity = _create_entity(vault, "Tidal Ledger")
@@ -308,7 +312,11 @@ def test_a_dismissed_entry_stays_dismissed_when_its_page_is_edited_and_linked_ag
     _frontmatter, body, _text = parse_frontmatter((vault / entity).read_text(encoding="utf-8"))
     commands.op_edit_memory(
         vault, entity, "Edit the promoted page.",
-        operation={"kind": "replace_body", "new_body": f"{body.rstrip()}\nA later synthetic sentence.\n"},
+        operation={
+            "kind": "replace_body",
+            "new_body": f"{body.rstrip()}\nA later synthetic sentence.\n",
+            "expected_hash": content_hash((vault / entity).read_text(encoding="utf-8")),
+        },
     )
     _add_relation(vault, NOTE, f"- supports [[{entity.removesuffix('.md')}]]")
 
