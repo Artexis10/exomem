@@ -463,6 +463,28 @@ def render_text_source(
     return "\n".join([*lines, fence, text, fence, ""])
 
 
+def text_source_body(page: str) -> str | None:
+    """The original text that `render_text_source` fenced in a page, or None when the page is not in that format.
+
+    The inverse of our own page format. The page ends with the closing fence, a run of backticks that the text
+    cannot hold, so the text cannot hold the opening line (`## Capture`, a blank line, the fence) either: the last
+    opening line before the closing fence is the real one. A page that later back-references changed in its front
+    matter still parses, because the text sits after it. Nothing is trimmed, so a CRLF, a missing final newline and an
+    empty text come back exactly.
+    """
+    if not page.endswith("\n"):
+        return None
+    head = page[:-1]
+    fence = head[len(head.rstrip("`")):]
+    if len(fence) < 3 or not head[: -len(fence)].endswith("\n"):
+        return None
+    head = head[: -len(fence) - 1]
+    opening = f"\n{CAPTURE_HEADING}\n\n{fence}\n"
+    at = head.rfind(opening)
+    text = None if at == -1 else head[at + len(opening):]
+    return text if text is not None and _fence_for(text) == fence else None
+
+
 def render_artifact_source(
     planned: Mapping[str, Any], *, date_iso: str, collection: str | None,
     source_id: str | None = None,

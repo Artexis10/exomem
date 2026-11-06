@@ -18,6 +18,7 @@ from exomem import (
     cloud_import_job,
     held_fs,
     local_import,
+    request_budget,
     state_migration,
     state_paths,
 )
@@ -189,8 +190,7 @@ def test_a_staged_copy_stays_when_the_knowledge_base_copy_no_longer_matches_the_
     assert reply["consumed"] == 0
 
 
-def test_text_items_keep_their_staged_copies(tmp_path: Path) -> None:
-    """A text item is mostly a note that is still owed a draft note, so its staged copy stays until discard."""
+def test_apply_keeps_a_text_item_s_staged_copy_because_its_note_may_still_be_owed(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     note = b"# Field plan\n\nInvented plan for the week.\n"
     staged = _stage(tmp_path, vault, {"plan.md": note, "paper.pdf": PDF})
@@ -202,16 +202,121 @@ def test_text_items_keep_their_staged_copies(tmp_path: Path) -> None:
     assert not _staged(vault, staged, "paper.pdf").exists()
 
 
+def test_finish_removes_the_text_it_filed_and_offers_no_review_when_nothing_is_unfiled(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": note, "paper.pdf": PDF})
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    residual = finished["finish"]["residual"]
+    assert not _staged(vault, staged, "plan.md").exists()
+    assert finished["finish"]["consumed"] == 2
+    assert (residual["files"], residual["unfiled"]) == (0, {"files": 0, "bytes": 0})
+    assert "review-residual" not in {action["action"] for action in finished["next_actions"]}
+
+
+def test_a_text_copy_stays_when_its_source_no_longer_holds_the_text(tmp_path: Path) -> None:
+    """The staged text may be the only faithful copy, so it goes only after the Source's fence body matches the plan."""
+    vault = _vault(tmp_path)
+    kept, removed = b"# Plan\n\nInvented plan for the week.\n", b"# Menu\n\nInvented menu for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": kept, "menu.md": removed})
+    run_id, _plan_id, reply = _adopt(vault, staged["start_path"])
+    source = vault / _outcome(reply, staged, "plan.md")["target_path"]
+    source.write_text(source.read_text(encoding="utf-8").replace("Invented plan", "Edited plan"), encoding="utf-8")
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert _staged(vault, staged, "plan.md").read_bytes() == kept
+    assert not _staged(vault, staged, "menu.md").exists()
+    assert finished["finish"]["consumed"] == 1
+    assert finished["finish"]["residual"]["by_reason"] == {"text": {"files": 1, "bytes": len(kept)}}
+
+
+def test_a_text_item_that_still_owes_its_note_keeps_its_staged_copy_through_a_partial_finish(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    owed, filed = b"# Plan\n\nInvented plan for the week.\n", b"# Menu\n\nInvented menu for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": owed, "menu.md": filed})
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+    store = adoption_run.AdoptionRunStore(vault)
+    run = store.load(run_id)
+    run["outcomes"][f"{staged['start_path']}/Field Notes/plan.md"]["status"] = "source-applied"
+    run["phase"] = "partial"
+    store.save(run)
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert _staged(vault, staged, "plan.md").read_bytes() == owed
+    assert not _staged(vault, staged, "menu.md").exists()
+    residual = finished["finish"]["residual"]
+    assert finished["finish"]["consumed"] == 1 and residual["by_reason"] == {"pending": {"files": 1, "bytes": len(owed)}}
+    assert residual["unfiled"] == {"files": 1, "bytes": len(owed)}
+
+
+def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_repeat(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _vault(tmp_path)
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": note})
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+    real_save = adoption_run.AdoptionRunStore.save
+
+    def stop_when_finish_saves(self, run):
+        if run.get("phase") == "done":
+            raise OSError("the call stopped before it saved")
+        return real_save(self, run)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run.AdoptionRunStore, "save", stop_when_finish_saves)
+        with pytest.raises(OSError, match="stopped before it saved"):
+            adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    assert not _staged(vault, staged, "plan.md").exists()
+
+    stored = adoption_run.AdoptionRunStore(vault).load(run_id)
+    assert adoption_run.probe_staleness(vault, stored) == []
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["files"] == 0
+
+
+def test_finish_stops_starting_removals_when_its_budget_runs_low_and_counts_the_rest_as_filed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _vault(tmp_path)
+    notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
+    staged = _stage(tmp_path, vault, notes)
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+
+    class AffordsOneStart(request_budget.RequestBudget):
+        affordable = 1
+
+        def can_afford(self, reserve: float) -> bool:
+            self.affordable -= 1
+            return self.affordable >= 0
+
+    monkeypatch.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    left = [name for name in notes if _staged(vault, staged, name).exists()]
+    residual = finished["finish"]["residual"]
+    assert len(left) == 2 and finished["finish"]["consumed"] == 1
+    assert residual["by_reason"] == {"text": {"files": 2, "bytes": sum(len(notes[name]) for name in left)}}
+    assert residual["unfiled"] == {"files": 0, "bytes": 0}
+
+
 def test_a_run_started_with_consume_false_keeps_every_staged_copy(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE})
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF, "pic.png": IMAGE, "plan.md": note})
 
     _run_id, _plan_id, reply = _adopt(vault, staged["start_path"], consume=False)
 
     assert reply["consumed"] == 0 and all(not o.get("consumed") for o in reply["outcomes"].values())
     assert _staged(vault, staged, "paper.pdf").read_bytes() == PDF
     assert _staged(vault, staged, "pic.png").read_bytes() == IMAGE
-    assert all((vault / o["artifact_path"]).read_bytes() for o in reply["outcomes"].values())
+    assert _staged(vault, staged, "plan.md").read_bytes() == note
+    assert all((vault / o["artifact_path"]).read_bytes() for o in reply["outcomes"].values() if "artifact_path" in o)
 
 
 def test_nothing_is_removed_from_a_folder_under_imports_that_has_no_manifest(tmp_path: Path) -> None:
@@ -219,11 +324,15 @@ def test_nothing_is_removed_from_a_folder_under_imports_that_has_no_manifest(tmp
     folder = vault / "_Imports" / str(uuid.uuid4()) / "Field Notes"
     folder.mkdir(parents=True)
     (folder / "paper.pdf").write_bytes(PDF)
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    (folder / "plan.md").write_bytes(note)
 
-    _run_id, _plan_id, reply = _adopt(vault, str(folder.parent.relative_to(vault)))
+    run_id, _plan_id, reply = _adopt(vault, str(folder.parent.relative_to(vault)))
+    adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
-    assert next(iter(reply["outcomes"].values()))["status"] == "applied" and reply["consumed"] == 0
+    assert {o["status"] for o in reply["outcomes"].values()} == {"applied"} and reply["consumed"] == 0
     assert (folder / "paper.pdf").read_bytes() == PDF
+    assert (folder / "plan.md").read_bytes() == note
 
 
 def test_a_file_a_manifest_does_not_describe_is_never_removed(tmp_path: Path) -> None:
@@ -416,13 +525,16 @@ def test_finish_removes_the_folders_consuming_emptied_and_reports_what_still_sit
     finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
     residual = finished["finish"]["residual"]
-    assert finished["finish"]["consumed"] == 2 and not _staged(vault, staged, "sub").exists()
+    assert finished["finish"]["consumed"] == 3 and not _staged(vault, staged, "sub").exists()
     assert residual["by_reason"] == {
-        "text": {"files": 1, "bytes": len(note)}, "unselected": {"files": 1, "bytes": len(PDF + b"left")},
+        "unselected": {"files": 1, "bytes": len(PDF + b"left")},
         "failed": {"files": 1, "bytes": len(changed)}, "ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
-    assert residual["files"] == 4 and residual["removed_empty_folders"] >= 1
+    assert residual["files"] == 3 and residual["removed_empty_folders"] >= 1
+    assert residual["unfiled"] == {"files": 3, "bytes": len(PDF + b"left") + len(changed) + len(b"hidden bytes")}
+    assert residual["summary"].startswith("3 files were not filed: ")
+    assert {action["action"] for action in finished["next_actions"]} >= {"review-residual", "discard"}
     assert staged["start_path"] in residual["discard"]
-    assert _staged(vault, staged, "plan.md").read_bytes() == note
+    assert not _staged(vault, staged, "plan.md").exists()
 
 
 def test_finish_removes_the_whole_stage_when_nothing_is_left_and_names_the_cloud_route_when_something_is(
@@ -436,25 +548,45 @@ def test_finish_removes_the_whole_stage_when_nothing_is_left_and_names_the_cloud
     assert not (vault / "_Imports" / emptied).exists()
     assert (residual["files"], residual["discard"]) == (0, None)
 
-    note = b"# Field plan\n\nInvented plan for the week.\n"
-    with_text = _cloud_stage(vault, {"paper.pdf": IMAGE, "plan.md": note})
-    run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{with_text}")
+    with_hidden = _cloud_stage(vault, {"paper.pdf": IMAGE})
+    hidden = vault / "_Imports" / with_hidden / "Field Notes" / ".cache" / "blob.bin"
+    hidden.parent.mkdir()
+    hidden.write_bytes(b"hidden bytes")
+    run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{with_hidden}")
 
     residual = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]["residual"]
 
-    assert residual["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
+    assert residual["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
     assert "transfer_memory" in residual["discard"] and "import_discard" in residual["discard"]
-    assert with_text in residual["discard"]
+    assert with_hidden in residual["discard"]
 
 
 def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    staged = _stage(tmp_path, vault, {"sub/inner.pdf": IMAGE})
+    note = b"# Field plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {"sub/inner.pdf": IMAGE, "plan.md": note})
     _staged(vault, staged, "empty").mkdir()
     run_id, _plan_id, _reply = _adopt(vault, staged["start_path"], consume=False)
 
     finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
+    residual = finished["finish"]["residual"]
     assert _staged(vault, staged, "sub/inner.pdf").read_bytes() == IMAGE and _staged(vault, staged, "empty").is_dir()
-    assert finished["finish"]["residual"]["by_reason"] == {"kept": {"files": 1, "bytes": len(IMAGE)}}
-    assert finished["finish"]["residual"]["removed_empty_folders"] == 0
+    assert _staged(vault, staged, "plan.md").read_bytes() == note
+    assert residual["by_reason"] == {"kept": {"files": 1, "bytes": len(IMAGE)}, "text": {"files": 1, "bytes": len(note)}}
+    assert residual["removed_empty_folders"] == 0 and finished["finish"]["consumed"] == 0
+
+
+def test_when_every_file_left_in_the_stage_is_filed_finish_closes_the_import_with_no_question_to_the_person(
+        tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"], consume=False)
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    residual = finished["finish"]["residual"]
+    actions = {action["action"]: action["description"] for action in finished["next_actions"]}
+    assert residual["unfiled"]["files"] == 0 and "already in the Knowledge Base" in residual["summary"]
+    assert "review-residual" not in actions
+    assert "delete the folder" in actions["discard"] and "agrees" not in actions["discard"]

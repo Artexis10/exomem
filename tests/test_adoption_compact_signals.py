@@ -100,7 +100,7 @@ def test_a_compact_start_reply_on_a_paged_folder_carries_the_cursor_of_the_next_
 
 def test_a_compact_finish_reply_reports_what_stays_staged_and_how_it_is_discarded(vault, build) -> None:
     note = b"# Field plan\n\nInvented plan for the week.\n"
-    stage = paging._stage(vault, {"a.pdf": paging.PDF + b"a", "plan.md": note})
+    stage = paging._stage(vault, {"a.pdf": paging.PDF + b"a", "plan.md": note, ".cache/blob.bin": b"hidden bytes"})
 
     async def scenario(client):
         run_id = (await _import(client, "start", path=stage))["run_id"]
@@ -115,7 +115,29 @@ def test_a_compact_finish_reply_reports_what_stays_staged_and_how_it_is_discarde
     reply = _session(build(), scenario)
 
     residual = reply["finish"]["residual"]
-    assert (residual["files"], residual["bytes"]) == (1, len(note))
-    assert residual["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
+    assert (residual["files"], residual["bytes"]) == (1, len(b"hidden bytes"))
+    assert residual["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
+    assert residual["unfiled"] == {"files": 1, "bytes": len(b"hidden bytes")} and "not filed" in residual["summary"]
     assert stage.removeprefix("_Imports/") in residual["discard"]
     assert {"review-residual", "discard"} <= {action["action"] for action in reply["next_actions"]}
+
+
+def test_a_compact_finish_reply_of_an_import_that_filed_everything_has_removed_the_text_and_asks_nothing(
+        vault, build) -> None:
+    stage = paging._stage(vault, {"a.pdf": paging.PDF + b"a", "plan.md": b"# Field plan\n\nInvented plan for the week.\n"})
+
+    async def scenario(client):
+        run_id = (await _import(client, "start", path=stage))["run_id"]
+        await _import(client, "select", run_id=run_id, include=[stage])
+        plan_id = (await _import(client, "plan", run_id=run_id))["plan_id"]
+        applied = await _import(client, "apply", run_id=run_id, plan_id=plan_id)
+        while applied.get("continuation"):
+            applied = await _import(
+                client, "apply", run_id=run_id, plan_id=plan_id, continuation=applied["continuation"])
+        return await _import(client, "finish", run_id=run_id, write_manifest=False)
+
+    reply = _session(build(), scenario)
+
+    assert not (vault / stage / "plan.md").exists()
+    assert reply["finish"]["residual"]["files"] == 0 and reply["finish"]["residual"]["unfiled"]["files"] == 0
+    assert "review-residual" not in {action["action"] for action in reply["next_actions"]}

@@ -1,8 +1,8 @@
 ## ADDED Requirements
 
-### Requirement: Recorded staged artifacts are consumed after verified filing
+### Requirement: Recorded staged files are consumed after verified filing
 
-A run SHALL consume only artifact items whose staged copies lie in a recorded import stage `_Imports/<import_id>/`. A recorded stage has a manifest that lists each staged file's stage-relative path, size and SHA-256: the Cloud import receipt's member manifest for an `adopt` import, or the stage record that `exomem import` writes when an import finishes. A run started with `consume=false` SHALL never consume. Text items SHALL never be consumed.
+A run SHALL consume only staged copies that lie in a recorded import stage `_Imports/<import_id>/`. A recorded stage has a manifest that lists each staged file's stage-relative path, size and SHA-256: the Cloud import receipt's member manifest for an `adopt` import, or the stage record that `exomem import` writes when an import finishes. A run started with `consume=false` SHALL never consume. `apply` SHALL consume artifact items. `finish` SHALL consume text items.
 
 After the chunk that files an artifact item commits, `apply` SHALL remove its staged copy only when all of these hold:
 
@@ -12,7 +12,20 @@ After the chunk that files an artifact item commits, `apply` SHALL remove its st
 
 The removal SHALL go through the held filesystem with an identity check. A removal that fails SHALL leave the item applied and not consumed.
 
-When an artifact item's staged copy is missing in a recorded stage, `apply` SHALL resolve the item through the import index, by collection, `collection_path` and `original_sha256`, before it reports a failure. Repeat-call re-verification and staleness probes SHALL treat a missing staged copy whose Source verifies as consumed. The run SHALL report a `consumed` count separately from `verified_unchanged`. `finish` SHALL remove empty folders left in the stage, SHALL report the residual still in the stage (unselected, ineligible, failed and text items) with counts and bytes, and SHALL name the discard route.
+When an artifact item's staged copy is missing in a recorded stage, `apply` SHALL resolve the item through the import index, by collection, `collection_path` and `original_sha256`, before it reports a failure. Repeat-call re-verification and staleness probes SHALL treat a missing staged copy whose Source verifies as consumed. The run SHALL report a `consumed` count separately from `verified_unchanged`. `finish` SHALL remove empty folders left in the stage.
+
+`finish` SHALL remove the staged copy of a text item only when all of these hold:
+
+- the outcome is `applied` or `already-applied`, so an item that still owes its note keeps its copy;
+- the run did not start with `consume=false`, and the stage is recorded;
+- the Source page holds the text between its fences, byte for byte, as the plan's `original_sha256` and `original_bytes` describe;
+- the staged file still matches the manifest entry and the plan.
+
+A page of a paged collection SHALL remove only the text that it filed. When the call budget runs low, `finish` SHALL stop starting removals; the copies that remain count as filed copies.
+
+When a text item's staged copy is missing in a recorded stage, the run SHALL treat the item as consumed when its Source page verifies in the same way.
+
+`finish` SHALL report the residual still in the stage with counts and bytes. The residual SHALL separate the files that adoption did not file (`unfiled`, with its files and bytes) from the filed copies that remain. It SHALL carry a `summary` sentence that names the unfiled files and the reason for each group. It SHALL name the discard route. It SHALL offer a review only while unfiled files remain.
 
 #### Scenario: Filing a recorded stage keeps about one copy of its artifacts
 
@@ -35,10 +48,26 @@ When an artifact item's staged copy is missing in a recorded stage, `apply` SHAL
 - **WHEN** a second run applies an item whose staged copy the first run consumed
 - **THEN** the second run resolves it as already applied through the import index
 
-#### Scenario: Text and opted-out runs keep their staged copies
+#### Scenario: Finish removes the filed text it verified
 
-- **WHEN** a run files text items, or a run over a recorded stage started with `consume=false` files artifacts
-- **THEN** those staged copies remain after apply
+- **WHEN** a run files text items from a recorded stage and `finish` runs
+- **THEN** each filed text item's staged copy is gone, and `consumed` counts it
+- **AND** the residual reports no unfiled file and `finish` offers no review
+
+#### Scenario: Finish keeps a text copy it cannot vouch for
+
+- **WHEN** the Source page of a filed text item no longer holds the planned text between its fences, or the item still owes its note, or the item failed
+- **THEN** its staged copy remains, and the residual reports it
+
+#### Scenario: Opted-out runs keep their staged copies
+
+- **WHEN** a run over a recorded stage started with `consume=false` files artifacts or text
+- **THEN** those staged copies remain after apply and after finish
+
+#### Scenario: A stop between a removal and the save recovers from the Source
+
+- **WHEN** `finish` stops after it removes a text copy and before it saves the run
+- **THEN** a repeat call reads the item as consumed through its verified Source, not as changed or missing
 
 ### Requirement: Apply bounds space, memory and time per chunk
 

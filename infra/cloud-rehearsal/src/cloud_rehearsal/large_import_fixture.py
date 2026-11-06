@@ -25,7 +25,7 @@ DEFAULT_TARGET_BYTES = 6_000_000_000
 
 # Dispositions are this module's own closed result set, fixed by construction.
 FILED_ARTIFACT = "filed_artifact"  # a visible non-text file under the ceiling: Source, then consumed
-FILED_TEXT = "filed_text"  # a note or caption: filed as text, its staged copy stays until discard
+FILED_TEXT = "filed_text"  # a note or caption: filed as text, then consumed when its page finishes
 OVER_CEILING = "over_ceiling"  # above the adoption ceiling: stays staged, never filed
 HIDDEN_FOLDER = "hidden_folder"  # inside a hidden folder that the client sent: stays staged
 HIDDEN_FILE = "hidden_file"  # a hidden file outside any hidden folder that the client sent
@@ -34,7 +34,6 @@ LEFT_BEHIND = "left_behind"  # hidden and the client was not told to send it: ne
 # The product's residual report groups a staged leftover under these result keys. Mapping the
 # dispositions onto them is a fixed protocol of the report, not a vocabulary of the data.
 RESIDUAL_REASON = {
-    FILED_TEXT: "text",
     OVER_CEILING: "over_ceiling",
     HIDDEN_FOLDER: "ineligible",
     HIDDEN_FILE: "outside_run",
@@ -395,7 +394,7 @@ def expected_stage(entries: Iterable[Entry]) -> dict[str, tuple[int, str]]:
 
 
 def expected_leftover(entries: Iterable[Entry]) -> dict[str, tuple[int, str]]:
-    """What stays staged once every artifact is consumed."""
+    """What stays staged once every filed file is consumed."""
     return {e.path: (e.size, e.sha256) for e in entries if e.disposition in RESIDUAL_REASON}
 
 
@@ -409,7 +408,7 @@ def expected_by_reason(entries: Iterable[Entry]) -> dict[str, int]:
 
 
 def count_consumable(entries: Iterable[Entry]) -> int:
-    return sum(1 for e in entries if e.disposition == FILED_ARTIFACT)
+    return sum(1 for e in entries if e.disposition in FILED)
 
 
 def _examples(paths: Iterable[str], limit: int = 3) -> str:

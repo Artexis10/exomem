@@ -223,14 +223,15 @@ def test_plan_refuses_a_page_while_an_earlier_page_is_unapplied_and_then_destina
 def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_their_files(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     note = b"# Field plan\n\nInvented plan for the week.\n"
-    stage = _stage(vault, {"a.pdf": PDF + b"a", "b.pdf": PDF + b"b", "plan.md": note})
+    stage = _stage(vault, {"a.pdf": PDF + b"a", "b.pdf": PDF + b"b", "plan.md": note, ".cache/blob.bin": b"hidden bytes"})
     first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
     _apply_page(vault, first, stage)
 
     finished_early = adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
     early = finished_early["finish"]["residual"]
 
-    assert (early["more_pages"], early["files"], early["discard"]) == (True, 1, None)
+    assert (early["more_pages"], early["files"], early["discard"]) == (True, 2, None)
+    assert (vault / stage / "plan.md").read_bytes() == note
     assert not {"review-residual", "discard"} & {action["action"] for action in finished_early["next_actions"]}
     last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
     _apply_page(vault, last, stage)
@@ -238,9 +239,32 @@ def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_thei
     finished_last = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)
     final = finished_last["finish"]["residual"]
 
-    assert final["more_pages"] is False and final["by_reason"] == {"text": {"files": 1, "bytes": len(note)}}
+    assert final["more_pages"] is False and final["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
+    assert not (vault / stage / "plan.md").exists()
     assert stage.removeprefix("_Imports/") in final["discard"]
     assert {"review-residual", "discard"} <= {action["action"] for action in finished_last["next_actions"]}
+
+
+def test_finish_of_a_page_removes_only_its_own_text_and_a_later_page_still_links_to_it(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    notes = {
+        "a.md": b"# Alpha\n\nInvented alpha.\n", "b.md": b"# Beta\n\nInvented beta.\n",
+        "c.md": b"# Gamma\n\nSee [[a]] and [[b]].\n",
+    }
+    stage = _stage(vault, notes)
+    first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
+    _apply_page(vault, first, stage)
+
+    adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+
+    assert [name for name in notes if (vault / stage / name).exists()] == ["c.md"]
+    last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
+    _apply_page(vault, last, stage)
+    planned = adoption_run.AdoptionRunStore(vault).load(last["run_id"])["plan"]["items"]
+    links = next(item for item in planned if item["collection_path"] == "c.md")["links"]
+    assert {link["raw"] for link in links["resolved"]} == {"a", "b"} and links["unresolved"] == []
+    finished = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)
+    assert finished["finish"]["residual"]["files"] == 0
 
 
 def test_the_last_page_reports_an_earlier_page_s_failed_file_as_failed_before_it_offers_the_discard(
@@ -258,4 +282,4 @@ def test_the_last_page_reports_an_earlier_page_s_failed_file_as_failed_before_it
 
     final = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)["finish"]["residual"]
 
-    assert {reason: row["files"] for reason, row in final["by_reason"].items()} == {"failed": 1, "text": 1}
+    assert {reason: row["files"] for reason, row in final["by_reason"].items()} == {"failed": 1}

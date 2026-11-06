@@ -9,16 +9,54 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 from . import adoption_plan, held_fs, import_stage
 
 # The outcome statuses of an item that is in the Knowledge Base; a run, its residual report and a discard all read them here.
 FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
-#: The reasons that mean the member is in the Knowledge Base although its staged copy stays; a residual record leaves them out.
-FILED_REASONS = ("text", "kept")  # nosemgrep: ep-word-set -- two of the closed result keys that `_page_classifier` returns.
 #: Why a staged file no scan of the run covers stays.
 OUTSIDE_RUN = "outside_run"
+#: Each result key of `_page_classifier` (and `OUTSIDE_RUN`) as (whether the member is in the Knowledge Base although its
+#: staged copy stays, how the residual summary counts such files; `{n}` is their number). The residual record, `unfiled`
+#: and `summary` all read this table.
+STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- the closed result keys that `_page_classifier` returns, a protocol of this report and not vocabulary.
+    "failed": (False, "{n} failed"),
+    "over_ceiling": (False, "{n} over the size limit"),
+    "pending": (False, "{n} waiting to be applied"),
+    "unselected": (False, "{n} not selected"),
+    "ineligible": (False, "{n} of a kind that adoption does not import"),
+    OUTSIDE_RUN: (False, "{n} not scanned (hidden, added after the scan, or on a later page)"),
+    "text": (True, "{n} text"),
+    "kept": (True, "{n} artifact"),
+})
+
+
+def _stay(reason: str) -> tuple[bool, str]:
+    """The table row of a reason; a reason the table lacks is not filed, so that its copy is reported and never hidden."""
+    return STAYS.get(reason, (False, "{n} " + reason))
+
+
+def is_filed(reason: str) -> bool:
+    """Whether a member that stays for this reason is in the Knowledge Base."""
+    return _stay(reason)[0]
+
+
+def _summary(by_reason: dict[str, dict[str, int]], unfiled: dict[str, int]) -> str:
+    """One sentence that says what in the stage needs the person, built from the counts of `by_reason`."""
+
+    def groups(filed: bool) -> str:
+        ordered = sorted(by_reason, key=lambda reason: (-by_reason[reason]["files"], reason))
+        return ", ".join(_stay(reason)[1].format(n=by_reason[reason]["files"]) for reason in ordered if is_filed(reason) is filed)
+
+    if not by_reason:
+        return "No file is left in the stage."
+    if not unfiled["files"]:
+        return f"Every file left in the stage is already in the Knowledge Base ({groups(True)})."
+    count = unfiled["files"]
+    return f"{count} file{' was' if count == 1 else 's were'} not filed: {groups(False)}."
 
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
@@ -172,9 +210,11 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
     the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
     the last page's report covers the whole stage. The reasons are a closed set of result keys that this
-    report defines, not vocabulary: `failed`, `text`, `kept`, `pending`, `unselected`, `ineligible`,
+    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `pending`, `unselected`, `ineligible`,
     `over_ceiling` (above the adoption ceiling, which `ceiling_bytes` then reports) and `outside_run` (hidden
-    or added after the scan, or on a later page not yet scanned). The Cloud route discards a stage with
+    or added after the scan, or on a later page not yet scanned). `text` and `kept` are in the Knowledge Base and
+    only their staged copy stays; every other reason is a file that adoption did not file. `unfiled` counts
+    those, and `summary` says in one sentence what needs the person. The Cloud route discards a stage with
     `transfer_memory`; a local import has no Exomem command, so its stage goes by hand. Both name the whole
     stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
     route, because the folder still holds their files: `more_pages` says so.
@@ -190,6 +230,9 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
         entry["files"] += 1
         entry["bytes"] += size
     files = sum(entry["files"] for entry in by_reason.values())
+    unfiled = {
+        key: sum(entry[key] for reason, entry in by_reason.items() if not is_filed(reason)) for key in ("files", "bytes")
+    }
     route = (
         f"call transfer_memory with action import_discard, import_id {recorded_stage['stage']} and confirm=true"
         if recorded_stage.get("proof") == import_stage.CLOUD_PROOF
@@ -198,7 +241,8 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     more_pages = bool((run.get("paging") or {}).get("more"))
     report = {
         "folder": folder, "files": files, "bytes": sum(entry["bytes"] for entry in by_reason.values()),
-        "by_reason": by_reason, "more_pages": more_pages, "discard": route if files and not more_pages else None,
+        "by_reason": by_reason, "unfiled": unfiled, "summary": _summary(by_reason, unfiled),
+        "more_pages": more_pages, "discard": route if files and not more_pages else None,
     }
     if "over_ceiling" in by_reason:
         from . import client_artifacts

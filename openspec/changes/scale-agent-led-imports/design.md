@@ -23,7 +23,13 @@ The independent critique of the first draft found no route to byte loss: every c
 
 ### D1. Only artifacts in a recorded stage, and only listed files, are consumable
 
-A run consumes only artifact items. Text items, which are mostly Markdown notes owed draft notes, stay staged until discard. Text is a small share of bytes, and a text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact. Consuming text would also need fence-level verification, would interfere with the owed-note step, and would make the file watcher publish deletions for every note.
+`apply` consumes artifact items. `finish` consumes filed text items. Both consume only from a recorded stage, and only after the Knowledge Base copy is verified.
+
+A text item is not consumed in `apply`, because its note may still be owed. `finish` runs after the notes, so it removes a text copy only for an item whose outcome is `applied` or `already-applied`. The Source page holds the text between its fences. Before `finish` removes the copy, it reads that text with `adopt.text_source_body`, the inverse of the page format that `render_text_source` writes, and compares its bytes and SHA-256 with the plan. The Source page as a whole is not byte-stable, because a later note appends `ingested_into`. Only the fenced text is checked. A page that does not parse, or a text that differs, keeps the copy.
+
+The file watcher no longer matters: the vault scans skip `_Imports/<import_id>/` (task 3.5), so a removal publishes nothing. A text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact.
+
+`finish` stops starting removals when the call budget runs low. The copies that remain stay in the residual as filed copies, and the discard removes them. A page of a paged collection removes only its own filed text.
 
 A stage is recorded when its own manifest lists each staged file with its path, size and SHA-256:
 
@@ -50,7 +56,7 @@ The committed Source is the recovery record, not a flag in the run object. When 
 - `retry_failed`;
 - a concurrent run on the same stage.
 
-Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual (unselected, ineligible, failed and text items) with counts and bytes, and the discard route.
+Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending and outside the run) from the filed copies that remain, and a `summary` sentence names the unfiled groups. A review is offered only while unfiled files remain.
 
 ### D3. Free space is checked per chunk
 

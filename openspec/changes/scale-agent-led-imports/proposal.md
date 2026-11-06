@@ -12,7 +12,7 @@ The intended experience is that a person asks their agent to bring their data in
 
 ## What changes
 
-- **Consume filed artifacts.** After adoption files an artifact from an import stage and verifies the Knowledge Base copy, it removes the staged copy. This applies only when the stage's manifest lists the file with the same path, size and hash. Notes and other text stay staged until discard: they are a small share of bytes. A folder that a person created is never consumed. A run can opt out.
+- **Consume filed files.** After adoption files an artifact from an import stage and verifies the Knowledge Base copy, it removes the staged copy. `finish` does the same for filed text, after it checks the text in the Source page. This applies only when the stage's manifest lists the file with the same path, size and hash. A folder that a person created is never consumed. A run can opt out.
 - **Stage manifests.** The Cloud import Job lists each staged member in its receipt. The local `exomem import` command writes a stage record with the same list when an import finishes.
 - **Recovery and parallel runs.** A missing staged copy resolves through the committed Source, so a crash or a parallel run never turns into a failure.
 - **Paging.** `adoption_studio start` pages through any number of candidates with an opaque cursor that keeps one collection identity. Pages plan in order and never guess a link target.
