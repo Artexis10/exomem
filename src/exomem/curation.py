@@ -91,6 +91,10 @@ REMOVE_RELATION_STEP_KIND: Final[str] = "remove-relation"
 #: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
 # nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
 COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
+#: Curation's own closed recovery-proof reasons for a stopped episode attempt, beside the native
+#: `DefiniteNoEffect.DESTINATION_EXISTS`. Curation owns them, so they live here and not in `vault`.
+RECOVERY_STORE_TRANSACTION_ABSENT: Final[str] = "store_transaction_absent"
+RECOVERY_NATIVE_CORE_ABSENT: Final[str] = "native_core_absent"
 # The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
@@ -2511,6 +2515,9 @@ def _finalize_witness_batch(
             raise _error("CURATION_BINDING_STALE", "native core allocation paths changed")
         if any(planned.get(item["path"]) != item for item in core):
             raise _error("CURATION_BINDING_STALE", "native core changed after preparation")
+        # A recovery proof reads an absent core as an unpublished batch, so a core path publishes first.
+        if not writes or Path(writes[0].path).absolute().relative_to(root).as_posix() not in {item["path"] for item in core}:
+            raise _error("CURATION_STEP_FAILED", "the native batch does not publish a core path first")
         return curation_witness.render_with_after(content, binding["effect_after"])
     kind = str(step["kind"])
     source = str(binding["path"])
@@ -3509,6 +3516,7 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
     # Pre-dispatch journal bookkeeping, like this store's plan and state files, is not the
     # command's commit: a writer refusal after it must answer uncommitted with its own code.
     if leaf["outcome"] == "uncertain":
+        _record_recovery_proof(vault_root, session.state, candidate, leaf_id)
         session.transition("reconcile_curation_leaf", commit_point=False, candidate=candidate, leaf=leaf_id)
         leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
         if leaf["outcome"] != "proven_uncommitted":
@@ -3521,25 +3529,156 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
     return {"invocation_id": leaf["invocation_id"], "episode_attempt": leaf["attempts"]}
 
 
-def _valid_no_effect(receipt: Mapping, *, plan_identity: str, binding: Mapping, operation: str) -> bool:
+def _no_effect_evidence(reason: Any, *, run: str, step: Mapping, binding: Mapping, operation: str) -> dict | None:
+    """The exact evidence a no-effect terminal of this step carries for `reason`; None when it does not fit.
+
+    Each closed reason fits one step family alone: the native destination stop and curation's
+    core-absence proof fit a preservation step, the transaction-absence proof a store-sealed step.
+    """
+    prepared = binding.get("prepared", {})
+    if step["kind"] in PRESERVATION_STEP_KINDS:
+        if reason == DefiniteNoEffect.DESTINATION_EXISTS:
+            return DefiniteNoEffect.destination_evidence(prepared["destination"])
+        if reason == RECOVERY_NATIVE_CORE_ABSENT:
+            return {"destination": prepared["destination"], "core_published": False}
+    if step["kind"] in COLLECTION_STEP_KINDS and prepared.get("store") is not None and reason == RECOVERY_STORE_TRANSACTION_ABSENT:
+        return {"request_id": store_request_id(run, operation)}
+    return None
+
+
+def _no_effect_receipt(
+    store: CurationStore, run: str, *, ordinal: int, step: Mapping, operation: str, invocation: Mapping,
+    plan_identity: str, binding: Mapping, reason: str, evidence: Mapping,
+) -> dict[str, Any]:
+    """The one terminal shape of a typed no-effect stop, native or curation's recovery proof."""
+    return {
+        "version": 1, "attempt": _next_attempt(store, run, str(step["step_id"])),
+        "ordinal": ordinal, "step_id": step["step_id"], "operation_id": operation,
+        "outcome": "definite-no-effect", "invocation_id": invocation["invocation_id"],
+        "episode_attempt": invocation["episode_attempt"], "plan_id": plan_identity,
+        "prepared_effect_digest": _digest(binding), "native_reason": reason, "native_evidence": dict(evidence),
+    }
+
+
+def _valid_no_effect(receipt: Mapping, *, run: str, plan_identity: str, step: Mapping, binding: Mapping, operation: str) -> bool:
     from . import episode_model
 
     metadata = binding.get("prepared", {}).get("episode")
-    # The terminal fields are fixed by the native no-effect protocol, which owns its reason token.
+    # The terminal fields are fixed by the typed no-effect protocol; `_no_effect_evidence` owns its closed reasons.
     if not isinstance(metadata, Mapping) or set(receipt) != {
         "version", "attempt", "ordinal", "step_id", "operation_id", "outcome", "invocation_id",
         "episode_attempt", "plan_id", "prepared_effect_digest", "native_reason", "native_evidence",
-    } or receipt.get("outcome") != "definite-no-effect" or receipt.get("native_reason") != DefiniteNoEffect.DESTINATION_EXISTS:
+    } or receipt.get("outcome") != "definite-no-effect":
         return False
+    evidence = _no_effect_evidence(receipt.get("native_reason"), run=run, step=step, binding=binding, operation=operation)
     attempt = receipt.get("episode_attempt")
-    if type(attempt) is not int or attempt < 1 or receipt.get("plan_id") != plan_identity or receipt.get("prepared_effect_digest") != _digest(binding):
+    if evidence is None or type(attempt) is not int or attempt < 1 or receipt.get("plan_id") != plan_identity or receipt.get("prepared_effect_digest") != _digest(binding):
         return False
     identity = episode_model._hash(  # noqa: SLF001
         "exomem-episode-invocation-v1", episode_model.episode_id(metadata["key"]), metadata["leaf_id"], metadata["effect_digest"], operation, attempt
     )
-    return receipt.get("invocation_id") == identity and receipt.get(
-        "native_evidence"
-    ) == DefiniteNoEffect.destination_evidence(binding["prepared"]["destination"])
+    return receipt.get("invocation_id") == identity and receipt.get("native_evidence") == evidence
+
+
+def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate_id: str, leaf_id: str) -> None:
+    """Prove that a stopped episode attempt published nothing, or repair the commit it left.
+
+    Under the held vault mutation boundary alone, for the latest attempt of a bound uncertain leaf
+    with an invocation identity, and only when every receipt of its operation is an earlier
+    attempt's no-effect terminal and no commitment is found. A store-sealed step served on this
+    thread proves that the store holds no transaction for its request id; a native preservation
+    step proves that every sealed core path is absent. Anything else changes nothing, so the leaf
+    stays uncertain. Episode reconciliation then reads the terminal like any other receipt.
+    """
+    from . import episode_model, writer_lease
+    from .collection_store.preview import selected_writer
+
+    root = Path(vault_root)
+    if not writer_lease.active_manager().holds_mutation_boundary(root):
+        return
+    leaf = episode_model._owned(state, candidate_id, leaf_id)  # noqa: SLF001
+    binding, attempts = leaf["binding"], leaf["attempts"]
+    if (
+        leaf["outcome"] != "uncertain"
+        or binding is None
+        or leaf.get("invocation_id") is None
+        or leaf["invocation_id"] != episode_model.invocation_id(state["episode_id"], leaf, attempts)
+        or any(attempt["outcome"] == "uncertain" for attempt in leaf["attempt_history"][:-1])
+    ):
+        return
+    store = CurationStore(root)
+    run = binding["run_id"]
+    try:
+        plan = store.load_plan(run)
+        identity, fingerprint = store.identities(run)
+        verified = episode_model._binding({**binding, "sealed_plan": plan}, leaf)  # noqa: SLF001
+        if (identity, fingerprint) != (verified["plan_id"], verified["plan_fingerprint"]):
+            return
+        store.validated_approval(run, required=True)
+        reconstructed = store.reconstruct(run)
+    except (CurationError, episode_model.EpisodeError):
+        return
+    if reconstructed["phase"] == "blocked":
+        return
+    ordinal, operation = verified["ordinal"], verified["operation_id"]
+    step, sealed = plan["steps"][ordinal], plan["binding_manifest"][ordinal]
+    prepared = sealed["prepared"]
+    writer = None
+    if step["kind"] in COLLECTION_STEP_KINDS and prepared.get("store") is not None:
+        from .cli_ops import OpError
+
+        try:
+            writer = selected_writer(root, prepared["collection_id"])
+        except OpError:
+            return
+    if writer is None and step["kind"] not in PRESERVATION_STEP_KINDS:
+        return
+    receipts = [receipt for receipt in reconstructed["receipts"] if receipt.get("operation_id") == operation]
+    if any(receipt.get("outcome") in COMMITTED_OUTCOMES for receipt in receipts):
+        return
+    try:
+        # For a store step this reads the transaction row, which can exist without its evidence file.
+        witness = _committed_operation_witness(
+            store, run, writer=writer, plan_identity=identity, ordinal=ordinal, step=step,
+            binding=sealed, operation_identity=operation, compensation=False,
+        )
+    except CurationError:
+        return
+    if witness is not None:
+        _recover_committed_witness(
+            store, run, ordinal=ordinal, step=step, operation_identity=operation, witness=witness,
+            effect=_effect_projection(str(step["kind"]), {}, sealed), compensation=False,
+        )
+        return
+    if not all(
+        receipt.get("outcome") == "definite-no-effect"
+        and _valid_no_effect(receipt, run=run, plan_identity=identity, step=step, binding=sealed, operation=operation)
+        and receipt["episode_attempt"] < attempts
+        for receipt in receipts
+    ):
+        return
+    if writer is not None:
+        reason = RECOVERY_STORE_TRANSACTION_ABSENT
+    else:
+        try:
+            if not all(_guarded_absent(root, str(item["path"])) for item in prepared["core"]):
+                return
+        except CurationError:
+            return
+        reason = RECOVERY_NATIVE_CORE_ABSENT
+    evidence = _no_effect_evidence(reason, run=run, step=step, binding=sealed, operation=operation)
+    if evidence is None:
+        return
+    receipt = _no_effect_receipt(
+        store, run, ordinal=ordinal, step=step, operation=operation,
+        invocation={"invocation_id": leaf["invocation_id"], "episode_attempt": attempts},
+        plan_identity=identity, binding=sealed, reason=reason, evidence=evidence,
+    )
+    if not _valid_no_effect(receipt, run=run, plan_identity=identity, step=step, binding=sealed, operation=operation):
+        return
+    writer_lease.validate_active_write_fence()
+    store.create_receipt(run, ordinal, str(step["step_id"]), receipt)
+    store.write_state(run, store.reconstruct(run))
 
 
 def _execute_next(
@@ -3791,14 +3930,14 @@ def _execute_next(
     except DefiniteNoEffect as error:
         if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
             raise
-        receipt = {
-            "version": 1, "attempt": _next_attempt(store, run_identity, step["step_id"]),
-            "ordinal": ordinal, "step_id": step["step_id"], "operation_id": operation_identity,
-            "outcome": "definite-no-effect", **invocation, "plan_id": plan_identity,
-            "prepared_effect_digest": _digest(binding), "native_reason": error.reason,
-            "native_evidence": error.evidence,
-        }
-        if not _valid_no_effect(receipt, plan_identity=plan_identity, binding=binding, operation=operation_identity):
+        receipt = _no_effect_receipt(
+            store, run_identity, ordinal=ordinal, step=step, operation=operation_identity, invocation=invocation,
+            plan_identity=plan_identity, binding=binding, reason=error.reason, evidence=error.evidence,
+        )
+        # A native owner stops with its own reason; the recovery reasons belong to curation alone.
+        if error.reason != DefiniteNoEffect.DESTINATION_EXISTS or not _valid_no_effect(
+            receipt, run=run_identity, plan_identity=plan_identity, step=step, binding=binding, operation=operation_identity
+        ):
             raise _error("CURATION_OUTCOME_UNCERTAIN", "native no-effect terminal is invalid") from error
         store.create_receipt(run_identity, ordinal, step["step_id"], receipt)
         final = store.reconstruct(run_identity)
@@ -4655,11 +4794,12 @@ class CurationStore:
                     }
                 committed[step_identity] = receipt
             elif outcome == "definite-no-effect":
-                if approval is None or step["kind"] not in PRESERVATION_STEP_KINDS or not _valid_no_effect(
-                    receipt, plan_identity=identity, binding=plan["binding_manifest"][ordinal], operation=expected_operation
+                if approval is None or not _valid_no_effect(
+                    receipt, run=run_identity, plan_identity=identity, step=step,
+                    binding=plan["binding_manifest"][ordinal], operation=expected_operation,
                 ):
                     return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
-                # A native zero-publication terminal permits the same operation to retry.
+                # A typed zero-publication terminal (native, or curation's recovery proof) permits the same operation to retry.
                 failed[step_identity] = {**receipt, "retryable": True}
             elif outcome == "failed":
                 if set(receipt) != {

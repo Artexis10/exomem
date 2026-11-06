@@ -122,7 +122,10 @@ def _reconcile_held(
                          if receipt.get("operation_id") == operation
                          and receipt.get("invocation_id") == leaf.get("invocation_id")
                          and receipt.get("episode_attempt") == leaf["attempts"]
-                         and curation._valid_no_effect(receipt, plan_identity=identity, binding=native_binding, operation=operation)]  # noqa: SLF001
+                         and curation._valid_no_effect(  # noqa: SLF001
+                             receipt, run=run, plan_identity=identity, step=plan["steps"][ordinal],
+                             binding=native_binding, operation=operation,
+                         )]
             if witness is None and leaf.get("invocation_id") is not None and len(terminals) == 1 and all(
                 attempt["outcome"] != "uncertain" for attempt in leaf["attempt_history"][:-1]
             ):
@@ -131,7 +134,7 @@ def _reconcile_held(
                     effect_digest=leaf["effect_digest"], outcome="proven_uncommitted",
                     receipt_digest=curation._digest(terminals[0]),  # noqa: SLF001
                 ))
-            raise _uncertain("one verified committed receipt or exact native no-effect terminal is required")
+            raise _uncertain("one verified committed receipt or exact typed no-effect terminal is required")
         ordinal = verified_binding["ordinal"]
         witness = curation._validated_operation_witness(
             store,

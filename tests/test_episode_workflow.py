@@ -1610,6 +1610,106 @@ def test_late_native_duplicate_proves_no_effect_and_retries_the_same_operation(v
     assert (vault / native["allocation"]["artifact"]).read_bytes() == b"Retained retry bytes."
 
 
+class ProcessDeath(BaseException):
+    """A killed process: the vault rolls nothing back and curation records nothing for it."""
+
+
+def _resume_through_the_dispatcher(vault: Path, journal_digest: str) -> dict:
+    """`resume` as every door runs it, under the vault mutation boundary that the dispatcher holds."""
+    from exomem import writer_lease
+
+    command = next(item for item in commands.product_commands_for("mcp") if item.name == "episode_memory")
+    return writer_lease.invoke_command(
+        command, vault, schema_module.load_source_schema(vault), episode=KEY,
+        action="resume", input_revision=1, journal_digest=journal_digest,
+    )
+
+
+def test_partial_native_publication_without_witness_stays_uncertain(vault, owner, enabled, monkeypatch):
+    """A capture that installed its page and died before its witness must never be proved unpublished."""
+    from exomem import vault as vault_writes
+
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename="partial.bin", content="Partially captured bytes.")
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="partial", proposal=_proposal("source", [
+        {"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "title": "Partial account", "source_type": "session",
+        }}], title="Partial account"))
+    leaf = _candidate(prepared, "partial")["leaves"][0]
+    page = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]["destination"]
+    disposed = _workflow(vault, action="disposition", candidate="partial", disposition="routed", reason="Keep the account.")
+    pages_before = set(_canonical_files(vault))
+    dispatch, installed = curation._dispatch_step, vault_writes._after_batch_destination_published
+    dispatched = []
+
+    def counted(*args, **kwargs):
+        dispatched.append(args[1]["step_id"])
+        return dispatch(*args, **kwargs)
+
+    def die_after_the_page(path):
+        installed(path)
+        if path == vault / page:
+            raise ProcessDeath
+
+    monkeypatch.setattr(curation, "_dispatch_step", counted)
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_after_batch_destination_published", die_after_the_page)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    for _resume in range(2):
+        resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+        assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+
+    current = _candidate(_workflow(vault, action="candidates"), "partial")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert len(dispatched) == 1
+    assert set(_canonical_files(vault)) - pages_before == {page}
+
+
+def test_native_preservation_stopped_before_publication_retries_its_allocation(vault, owner, enabled, monkeypatch):
+    """A preservation killed before its first publication must retry once at its sealed paths, not stay stuck."""
+    from exomem import vault as vault_writes
+
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename="stopped.bin", content="Stopped account bytes.")
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="evidence", proposal=_proposal("evidence", [
+        {"leaf_key": "preserve", "effect_revision": 1, "kind": "preserve-evidence", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "scope": "study", "category": "accounts", "filename": "stopped.bin",
+        }}], title="Stopped account"))
+    leaf = _candidate(prepared, "evidence")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="evidence", disposition="routed", reason="Retain the account.")
+    log_before = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    publish, core = vault_writes._before_batch_destination_published, {vault / item["path"] for item in native["core"]}
+
+    def die_before_the_first_core_write(path, *, restoring):
+        if path in core:
+            raise ProcessDeath
+        publish(path, restoring=restoring)
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_before_batch_destination_published", die_before_the_first_core_write)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    assert not (vault / native["destination"]).exists()
+    retried = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    final = _candidate(retried, "evidence")["leaves"][0]
+    assert (final["outcome"], final["attempts"], final["operation_id"]) == ("committed", 2, leaf["operation_id"])
+    proof, commit = curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"]
+    assert (proof["native_reason"], proof["episode_attempt"]) == (curation.RECOVERY_NATIVE_CORE_ABSENT, 1)
+    assert commit["outcome"] == "committed"
+    artifact, companion = vault / native["allocation"]["artifact"], vault / native["destination"]
+    assert artifact.read_bytes() == b"Stopped account bytes."
+    assert sorted(path.name for path in artifact.parent.iterdir()) == sorted({artifact.name, companion.name})
+    log_after = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    entry = f"preserve | {companion.relative_to(vault / 'Knowledge Base').with_suffix('').as_posix()}\n"
+    assert log_after.count(entry) - log_before.count(entry) == 1
+
+
 def test_ordinary_curation_joins_native_evidence_before_any_episode_attempt(vault, owner, disabled, monkeypatch):
     """The ordinary curation door must track a native invocation without requiring episode enablement."""
     original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename="transfer.bin", content="Retained transfer bytes.")

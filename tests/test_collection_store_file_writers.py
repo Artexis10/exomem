@@ -32,7 +32,7 @@ from exomem import commands, curation, episode_workflow, records, writer_lease
 from exomem import schema as schema_module
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import chain, connection, runtime
+from exomem.collection_store import chain, connection, curation_step, runtime
 from exomem.collection_store.preview import bound_writer
 from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -331,6 +331,94 @@ def test_a_crash_after_the_store_commit_reconciles_from_the_transaction_row(env,
         assert receipts(root, run) == [("recovered-committed", "leaf")]
         assert (store_head(root), transactions(root, run, operation)) == (head, [("append", CID)])
         assert resume_run(root, run, plan_id, key="resume-it-again")["outcome"] == "replayed"
+    finally:
+        service.stop()
+
+
+def test_store_commit_without_evidence_file_is_never_proved_uncommitted(env, capsys, monkeypatch):
+    """Defect: an episode step that the store committed just before the process died has no evidence
+    file, so the next resume proves it published nothing and appends the item a second time."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        run, operation, _plan_id, _fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
+        commit = curation_step.commit
+
+        def die_after_the_commit(*arguments, **keywords):
+            commit(*arguments, **keywords)
+            raise ProcessCut
+
+        reviewed = episode(root, action="candidates")
+        with monkeypatch.context() as crash:
+            crash.setattr(curation_step, "commit", die_after_the_commit)
+            with pytest.raises(ProcessCut):
+                episode(root, action="resume", input_revision=reviewed["input_revision"],
+                        journal_digest=reviewed["journal_digest"])
+        assert transactions(root, run, operation) == [("append", CID)]
+        reviewed = episode(root, action="candidates")
+        leaf_id = reviewed["candidates"][0]["leaves"][0]["leaf_id"]
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+
+        assert resumed["reconciled"] == [{"leaf_id": leaf_id, "outcome": "committed"}], resumed
+        assert resumed["executed"] == []
+        assert receipts(root, run) == [("recovered-committed", "leaf")]
+        assert transactions(root, run, operation) == [("append", CID)]
+        assert titles_in_work(root).count("From an episode") == 1
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize("served", [True, False], ids=["served store", "unserved store"])
+def test_store_step_without_transaction_retries_same_request(env, capsys, monkeypatch, served):
+    """Defect: an episode step that died before its store transaction stays uncertain for good, or
+    retries under another request id; read off the store thread, it is proved unpublished blind."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        run, operation, _plan_id, _fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
+        dispatch, resolve, dispatching = curation._dispatch_step, curation_step.resolve_guards, []
+
+        def tracked(*arguments, **keywords):
+            dispatching.append(arguments[1]["step_id"])
+            return dispatch(*arguments, **keywords)
+
+        def die_before_the_store_write(*arguments, **keywords):
+            if dispatching:
+                raise ProcessCut
+            return resolve(*arguments, **keywords)
+
+        reviewed = episode(root, action="candidates")
+        with monkeypatch.context() as crash:
+            crash.setattr(curation, "_dispatch_step", tracked)
+            crash.setattr(curation_step, "resolve_guards", die_before_the_store_write)
+            with pytest.raises(ProcessCut):
+                episode(root, action="resume", input_revision=reviewed["input_revision"],
+                        journal_digest=reviewed["journal_digest"])
+        assert transactions(root, run, operation) == []
+        if not served:
+            service.stop()
+        reviewed = episode(root, action="candidates")
+        leaf_id = reviewed["candidates"][0]["leaves"][0]["leaf_id"]
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+
+        if served:
+            assert [item["outcome"] for item in resumed["executed"]] == ["committed"], resumed
+            proof = curation.CurationStore(root).reconstruct(run)["receipts"][0]
+            assert (proof["native_reason"], proof["native_evidence"]) == (
+                curation.RECOVERY_STORE_TRANSACTION_ABSENT, {"request_id": curation.store_request_id(run, operation)})
+            assert receipts(root, run) == [("definite-no-effect", "leaf"), ("committed", "leaf")]
+            assert transactions(root, run, operation) == [("append", CID)]
+            assert titles_in_work(root).count("From an episode") == 1
+        else:
+            assert resumed["blocked"] == [{"leaf_id": leaf_id, "code": "EPISODE_OUTCOME_UNCERTAIN"}], resumed
+            assert receipts(root, run) == []
+            assert transactions(root, run, operation) == []
     finally:
         service.stop()
 

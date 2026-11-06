@@ -898,11 +898,15 @@ def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
 
     The reconcile reads curation evidence alone, never the page, so a page
     withheld from this caller reconciles exactly as a deleted one does.
+    Curation may first record its recovery proof for a stopped attempt, or
+    repair the commit that attempt left, while this call holds the vault boundary.
     """
     reconciled, blocked = [], []
     for candidate_id, leaf in _leaves(session.state):
         if leaf["outcome"] != "uncertain":
             continue
+        # Resume freezes a leaf that stays uncertain here, so curation's proof must come first.
+        curation._record_recovery_proof(session.vault_root, session.state, candidate_id, leaf["leaf_id"])  # noqa: SLF001
         try:
             session.transition(
                 "reconcile_curation_leaf", candidate=candidate_id, leaf=leaf["leaf_id"]
