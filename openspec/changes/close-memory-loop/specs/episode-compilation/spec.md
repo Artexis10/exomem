@@ -164,9 +164,8 @@ terminal in its existing receipt path, binding invocation, plan, operation, prep
 Curation SHALL write a recovery proof only while it holds the vault mutation boundary and a current write fence.
 A recovery proof SHALL cover only the latest attempt of a bound uncertain leaf with an invocation identity.
 Every same-operation receipt SHALL be an earlier attempt's no-effect terminal. No same-operation file witness SHALL exist.
-A store-sealed Records or Planning step SHALL also be read through the serving store, which SHALL hold no transaction for its request id.
-A native preservation step SHALL also have every sealed core path absent, and its batch SHALL publish a core path first.
-Other steps SHALL NOT receive a recovery proof.
+The step SHALL be a store-sealed Records or Planning step, read through the serving store, which SHALL hold no transaction for its request id.
+Other steps, native preservation steps included, SHALL NOT receive a recovery proof.
 Generic failures, absent receipts or file witnesses alone, matching bytes and mutable progress SHALL NOT prove no effect.
 Reconciliation SHALL validate exact original plan/approval and invocation, exclude conflicting
 unresolved invocation or commitment, then use the typed proven_uncommitted transition.
@@ -216,11 +215,10 @@ Recovery SHALL NOT reseal historical plans. Rollback SHALL require a release tha
 - **THEN** curation records a recovery proof and the next attempt commits once with the same operation and request id
 - **AND** a transaction found for that request id repairs the committed receipt instead of recording a proof
 
-#### Scenario: Partial native publication stays uncertain
+#### Scenario: A stopped native preservation attempt stays uncertain
 
-- **WHEN** a native preservation attempt stops after it installed a core path and before its witness
+- **WHEN** a native preservation attempt stops without a native no-effect terminal, whatever its core paths show
 - **THEN** curation records no recovery proof and the leaf stays uncertain
-- **AND** an attempt that stopped before any core path was installed retries with its sealed allocation
 
 ### Requirement: Leaf support preserves immutable original and reading provenance
 

@@ -238,9 +238,8 @@ curation apply/resume before an episode attempt, joins this immutable journal-bo
 Serialize dispatch and terminal recording under the existing writer lease; reconciliation uses its consistency guard.
 Only a typed no-effect proof shows no authoritative publication: native DefiniteNoEffect, or a curation recovery proof
 for a stopped attempt. Curation writes that proof under the held mutation boundary, and only for a store-sealed
-Records/Planning step whose serving store holds no transaction for its request id, or for a native preservation step
-whose every sealed core path is absent and whose batch publishes a core path first.
-This accepts one residual: after a failed rollback and a kill, a retry can leave one duplicate log or index line, never a duplicate original.
+Records/Planning step whose serving store holds no transaction for its request id.
+A stopped native preservation attempt stays uncertain: its core paths are vault files that anyone can move, so their absence cannot show that nothing was published.
 Persist one closed distinguishable terminal in the existing curation receipt path, binding invocation,
 plan, operation, prepared effect digest and closed reason/evidence. Generic failed receipts, absent
 witnesses alone, matching bytes and mutable progress cannot prove noncommit. A late duplicate may

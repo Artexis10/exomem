@@ -91,10 +91,9 @@ REMOVE_RELATION_STEP_KIND: Final[str] = "remove-relation"
 #: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
 # nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
 COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
-#: Curation's own closed recovery-proof reasons for a stopped episode attempt, beside the native
-#: `DefiniteNoEffect.DESTINATION_EXISTS`. Curation owns them, so they live here and not in `vault`.
+#: Curation's own recovery-proof reason for a stopped store-sealed episode attempt, beside the native
+#: `DefiniteNoEffect.DESTINATION_EXISTS`. Curation owns it, so it lives here and not in `vault`.
 RECOVERY_STORE_TRANSACTION_ABSENT: Final[str] = "store_transaction_absent"
-RECOVERY_NATIVE_CORE_ABSENT: Final[str] = "native_core_absent"
 # The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
@@ -2515,9 +2514,6 @@ def _finalize_witness_batch(
             raise _error("CURATION_BINDING_STALE", "native core allocation paths changed")
         if any(planned.get(item["path"]) != item for item in core):
             raise _error("CURATION_BINDING_STALE", "native core changed after preparation")
-        # A recovery proof reads an absent core as an unpublished batch, so a core path publishes first.
-        if not writes or Path(writes[0].path).absolute().relative_to(root).as_posix() not in {item["path"] for item in core}:
-            raise _error("CURATION_STEP_FAILED", "the native batch does not publish a core path first")
         return curation_witness.render_with_after(content, binding["effect_after"])
     kind = str(step["kind"])
     source = str(binding["path"])
@@ -3532,15 +3528,12 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
 def _no_effect_evidence(reason: Any, *, run: str, step: Mapping, binding: Mapping, operation: str) -> dict | None:
     """The exact evidence a no-effect terminal of this step carries for `reason`; None when it does not fit.
 
-    Each closed reason fits one step family alone: the native destination stop and curation's
-    core-absence proof fit a preservation step, the transaction-absence proof a store-sealed step.
+    Each closed reason fits one step family alone: the native destination stop fits a preservation
+    step, curation's transaction-absence proof a store-sealed step.
     """
     prepared = binding.get("prepared", {})
-    if step["kind"] in PRESERVATION_STEP_KINDS:
-        if reason == DefiniteNoEffect.DESTINATION_EXISTS:
-            return DefiniteNoEffect.destination_evidence(prepared["destination"])
-        if reason == RECOVERY_NATIVE_CORE_ABSENT:
-            return {"destination": prepared["destination"], "core_published": False}
+    if step["kind"] in PRESERVATION_STEP_KINDS and reason == DefiniteNoEffect.DESTINATION_EXISTS:
+        return DefiniteNoEffect.destination_evidence(prepared["destination"])
     if step["kind"] in COLLECTION_STEP_KINDS and prepared.get("store") is not None and reason == RECOVERY_STORE_TRANSACTION_ABSENT:
         return {"request_id": store_request_id(run, operation)}
     return None
@@ -3581,14 +3574,14 @@ def _valid_no_effect(receipt: Mapping, *, run: str, plan_identity: str, step: Ma
 
 
 def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate_id: str, leaf_id: str) -> None:
-    """Prove that a stopped episode attempt published nothing, or repair the commit it left.
+    """Prove that a stopped store-sealed episode attempt published nothing, or repair the commit it left.
 
     Under the held vault mutation boundary alone, for the latest attempt of a bound uncertain leaf
     with an invocation identity, and only when every receipt of its operation is an earlier
-    attempt's no-effect terminal and no commitment is found. A store-sealed step served on this
-    thread proves that the store holds no transaction for its request id; a native preservation
-    step proves that every sealed core path is absent. Anything else changes nothing, so the leaf
-    stays uncertain. Episode reconciliation then reads the terminal like any other receipt.
+    attempt's no-effect terminal. The step must be a Records or Planning step sealed to the store
+    that this thread serves, and the store must hold no transaction for its request id. Anything
+    else, a native preservation step included, changes nothing, so the leaf stays uncertain.
+    Episode reconciliation then reads the terminal like any other receipt.
     """
     from . import episode_model, writer_lease
     from .collection_store.preview import selected_writer
@@ -3622,22 +3615,21 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
         return
     ordinal, operation = verified["ordinal"], verified["operation_id"]
     step, sealed = plan["steps"][ordinal], plan["binding_manifest"][ordinal]
-    prepared = sealed["prepared"]
-    writer = None
-    if step["kind"] in COLLECTION_STEP_KINDS and prepared.get("store") is not None:
-        from .cli_ops import OpError
+    if step["kind"] not in COLLECTION_STEP_KINDS or sealed["prepared"].get("store") is None:
+        return
+    from .cli_ops import OpError
 
-        try:
-            writer = selected_writer(root, prepared["collection_id"])
-        except OpError:
-            return
-    if writer is None and step["kind"] not in PRESERVATION_STEP_KINDS:
+    try:
+        writer = selected_writer(root, sealed["prepared"]["collection_id"])
+    except OpError:
+        return
+    if writer is None:
         return
     receipts = [receipt for receipt in reconstructed["receipts"] if receipt.get("operation_id") == operation]
     if any(receipt.get("outcome") in COMMITTED_OUTCOMES for receipt in receipts):
         return
     try:
-        # For a store step this reads the transaction row, which can exist without its evidence file.
+        # This reads the transaction row, which can exist without its evidence file.
         witness = _committed_operation_witness(
             store, run, writer=writer, plan_identity=identity, ordinal=ordinal, step=step,
             binding=sealed, operation_identity=operation, compensation=False,
@@ -3657,15 +3649,7 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
         for receipt in receipts
     ):
         return
-    if writer is not None:
-        reason = RECOVERY_STORE_TRANSACTION_ABSENT
-    else:
-        try:
-            if not all(_guarded_absent(root, str(item["path"])) for item in prepared["core"]):
-                return
-        except CurationError:
-            return
-        reason = RECOVERY_NATIVE_CORE_ABSENT
+    reason = RECOVERY_STORE_TRANSACTION_ABSENT
     evidence = _no_effect_evidence(reason, run=run, step=step, binding=sealed, operation=operation)
     if evidence is None:
         return
@@ -3934,8 +3918,8 @@ def _execute_next(
             store, run_identity, ordinal=ordinal, step=step, operation=operation_identity, invocation=invocation,
             plan_identity=plan_identity, binding=binding, reason=error.reason, evidence=error.evidence,
         )
-        # A native owner stops with its own reason; the recovery reasons belong to curation alone.
-        if error.reason != DefiniteNoEffect.DESTINATION_EXISTS or not _valid_no_effect(
+        # A preservation step validates only the native destination reason, never curation's store proof.
+        if not _valid_no_effect(
             receipt, run=run_identity, plan_identity=plan_identity, step=step, binding=binding, operation=operation_identity
         ):
             raise _error("CURATION_OUTCOME_UNCERTAIN", "native no-effect terminal is invalid") from error
@@ -4799,7 +4783,7 @@ class CurationStore:
                     binding=plan["binding_manifest"][ordinal], operation=expected_operation,
                 ):
                     return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
-                # A typed zero-publication terminal (native, or curation's recovery proof) permits the same operation to retry.
+                # A typed zero-publication terminal (native, or curation's store recovery proof) permits the same operation to retry.
                 failed[step_identity] = {**receipt, "retryable": True}
             elif outcome == "failed":
                 if set(receipt) != {

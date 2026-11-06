@@ -894,12 +894,13 @@ def _order(state: Mapping[str, Any], order: Sequence[str] | None) -> list[tuple[
 
 
 def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
-    """Reconcile every uncertain leaf from the existing curation receipts only.
+    """Reconcile every uncertain leaf from curation evidence alone.
 
-    The reconcile reads curation evidence alone, never the page, so a page
-    withheld from this caller reconciles exactly as a deleted one does.
-    Curation may first record its recovery proof for a stopped attempt, or
-    repair the commit that attempt left, while this call holds the vault boundary.
+    While this call holds the vault boundary, curation may first record its
+    recovery proof for a stopped store-sealed attempt, or the receipt of the
+    commit that attempt left. The reconcile then reads curation evidence alone,
+    never the page, so a page withheld from this caller reconciles exactly as a
+    deleted one does.
     """
     reconciled, blocked = [], []
     for candidate_id, leaf in _leaves(session.state):
