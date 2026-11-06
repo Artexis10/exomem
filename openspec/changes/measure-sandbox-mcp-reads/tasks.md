@@ -25,8 +25,10 @@ The evidence stays outside the repository. It proves the trusted reader protocol
 - [ ] 3.2 Attribute transport, authentication, governance, egress, rendering, store, and serialization costs; report unavailable layers explicitly.
 - [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 targets for the six collection-store groups.
 - [ ] 3.4 Repair the largest measured costs without weakening governance; verify each correction through the same instrument and boundary.
-- [ ] 3.5 Stage projection for eligible store queries through the existing evaluator; prove eager parity for metadata, selection, response bounds, source versions, continuations, and disclosure outcomes.
-- [ ] 3.6 Verify eager fallbacks for unsupported shaping, schema collisions, malformed inputs, and file adapters; measure the candidate through unchanged source cases before claiming a gain.
+- [x] 3.5 Stage projection for eligible store queries through the existing evaluator; prove eager parity for metadata, selection, response bounds, source versions, continuations, and disclosure outcomes.
+- [x] 3.6 Verify eager fallbacks for unsupported shaping, schema collisions, malformed inputs, and file adapters; measure the candidate through unchanged source cases before claiming a gain.
+
+Tasks 3.5 and 3.6 evidence: PR #2441 ships the staged store projection with eager-parity and fallback tests (`tests/test_collection_store_staged_projection.py`, `tests/test_query_data.py`). A randomized six-leg private-sandbox comparison on two unchanged source cases measured candidate-minus-base caller means of -89 ms (95% CI -138 to -40) for a records query and -120 ms (-199 to -42) for a records item read. These intervals are conditional on negligible carryover between legs, which the retained evidence could not verify, so they support the repair on those fixed cases only.
 
 ## 4. CI and delivery
 
