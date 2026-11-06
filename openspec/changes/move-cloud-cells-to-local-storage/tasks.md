@@ -205,7 +205,7 @@ Tasks 10.2–10.5 record the delivered source and its historical proof. The dril
   - The release publishes no provider image; the rehearsal builds it from `infra/topolvm`.
     [Drill 42258342785](https://github.com/Artexis10/exomem/actions/runs/42258342785) passed all eight checks and the native LVM host proof at `a3fd80194`, which contains #2185.
     Its provider image is `rehearsal.local/topolvm-reservations@sha256:0271446344c1635025b46df889a65fafcfc165c5dda59c25a6b1f509ced97055`.
-    The `infra/topolvm` tree (`46c594a7d`) and the platform chart tree (`44e574e6d`) at that commit equal those of release v0.161.1, so the result qualifies the released provider source. The report's provider source tree is `1d7e6a126e`.
+    The `infra/topolvm` tree (`46c594a7d`) and the platform chart tree (`44e574e6d`) at that commit equal those of release v0.161.1, so the result qualifies the released provider source. The report's build provenance records the repository tree `1d7e6a126e` at `a3fd80194`.
   - The first dispatch at v0.161.1 ([run 42229539815](https://github.com/Artexis10/exomem/actions/runs/42229539815)) failed at check 1 because the drill did not deploy the key custodian.
     With that fixed, [run 42250212120](https://github.com/Artexis10/exomem/actions/runs/42250212120) passed checks 1–7 and failed check 8 because the drill's control database missed the operation-grant fixtures. Neither gap was in the provider; this change fixes both.
     Local cutover, production activation and the Home rollout remain separate.
