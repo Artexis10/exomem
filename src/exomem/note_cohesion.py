@@ -143,7 +143,7 @@ def finding(
     status = (status_basis or lifecycle_statuses.Basis(vault_root)).classify(
         frontmatter.get("status"), path=rel_path, frontmatter=frontmatter
     )
-    if not status.recurrence_evidence:
+    if not status.live:
         return None
     if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
         return None

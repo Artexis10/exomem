@@ -150,8 +150,10 @@ def test_dismissing_another_family_on_the_page_leaves_the_question_open(vault: P
     assert (still["ref"], still["fingerprint"]) == (asked["ref"], asked["fingerprint"])
 
 
-def test_a_page_that_is_no_longer_live_is_never_asked(vault: Path) -> None:
-    _put(vault, PAGE, _page(20, status="superseded"))
+@pytest.mark.parametrize("status", ["superseded", "dropped"])
+def test_a_page_that_is_no_longer_live_is_never_asked(vault: Path, status: str) -> None:
+    """Historical and abandoned pages are separate lifecycle classes; neither is asked."""
+    _put(vault, PAGE, _page(20, status=status))
 
     assert _note_cohesion_findings(vault) == []
 
