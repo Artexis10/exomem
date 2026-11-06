@@ -521,6 +521,28 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
     assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 1
 
 
+def test_a_blocked_reprocess_after_the_extraction_pause_says_to_reprocess_not_to_retry(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _Engine(monkeypatch)
+    binary, _sidecar, _worker = _completed(vault, "rec.mp3")
+    media_processing.reprocess_media(vault, binary, language="et")
+    try:
+        media_processing.mark_processing_unavailable(
+            vault,
+            reason="MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set",
+            next_action="enable media extraction, restart the service, then retry",
+        )
+        media_jobs.MediaJobStore(vault).set_worker(os.getpid())  # a worker runs again: the pause ended
+        (job,) = media_jobs.status(vault)["jobs"]
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    assert job["state"] == media_jobs.BLOCKED and job["retryable"] is False
+    assert "reprocess the file again" in job["next_action"]
+    assert "retry" not in job["next_action"]
+
+
 def test_a_failed_reprocess_does_not_starve_the_retry_pass(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

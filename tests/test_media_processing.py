@@ -1606,8 +1606,9 @@ def _image_whose_clip_stage_the_pause_blocked(
     return binary, queued.sidecar_path
 
 
-def _end_the_extraction_pause(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+def _end_the_extraction_pause(vault: Path) -> None:
+    """The service runs a media worker again, and its process holds the runtime row."""
+    media_jobs.MediaJobStore(vault).set_worker(os.getpid())
     _media_processing().set_media_runtime_available(vault)
 
 
@@ -1617,6 +1618,8 @@ def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
     media_processing = _media_processing()
     binary, sidecar = _image_whose_clip_stage_the_pause_blocked(vault, monkeypatch)
     before = sidecar.read_bytes()
+    # The reporting process does not hold the flag, as with the CLI: only a live worker proves the pause ended.
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
     try:
         # While the pause lasts, retry keeps the work blocked and the status says what to clear.
         assert media_processing.retry_media(vault, binary).requeued == 0
@@ -1624,7 +1627,7 @@ def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
         assert paused["state"] == media_jobs.BLOCKED
         assert "restart the service" in paused["next_action"]
 
-        _end_the_extraction_pause(vault, monkeypatch)
+        _end_the_extraction_pause(vault)
         [ended] = media_jobs.status(vault)["jobs"]
         assert ended["state"] == media_jobs.BLOCKED
         assert "restart the service" not in ended["next_action"]
@@ -1648,7 +1651,7 @@ def test_bulk_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
     media_processing = _media_processing()
     binary, _sidecar = _image_whose_clip_stage_the_pause_blocked(vault, monkeypatch)
     try:
-        _end_the_extraction_pause(vault, monkeypatch)
+        _end_the_extraction_pause(vault)
 
         requeued = media_processing.retry_all_media(vault, limit=10)
     finally:

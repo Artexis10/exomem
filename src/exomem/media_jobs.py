@@ -3016,7 +3016,7 @@ def status(
             "gpu_preflight": facts["preflight"],
             "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
             "child_crashes": facts["child_crashes"],
-            "jobs": [_status_job(row) for row in jobs],
+            "jobs": [_status_job(row, worker_active=active) for row in jobs],
             "errors": [_status_error(row) for row in errors],
             "hydration_policy_problem": empty["hydration_policy_problem"],
         }
@@ -3106,7 +3106,7 @@ def _hydration_too_large_action() -> str:
     return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
 
 
-def _status_job(row: Any) -> dict[str, Any]:
+def _status_job(row: Any, *, worker_active: bool) -> dict[str, Any]:
     state = str(row["state"])
     error = str(row["last_error"]) if row["last_error"] is not None else None
     from . import media_engines
@@ -3120,11 +3120,8 @@ def _status_job(row: Any) -> dict[str, Any]:
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
     if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
-        # The row keeps the pause's error after the flag is cleared; the retry is then all that is left.
         actions[BLOCKED] = (
-            "retry, since media extraction is enabled again"
-            if not os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION")
-            else "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+            "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
             "restart the service, then retry"
         )
     if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
@@ -3170,6 +3167,12 @@ def _status_job(row: Any) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     if reprocess_stopped and state == BLOCKED:
         actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+    if state == BLOCKED and worker_active and error and error.startswith("MediaExtractionDisabled:"):
+        # A media worker is built only while the flag is unset, so a live one means the pause ended
+        # and the row only keeps the error it was blocked with.
+        actions[BLOCKED] = "media extraction is enabled again, so " + (
+            "reprocess the file again" if reprocess_stopped else "retry"
+        )
     multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
     unsupported_language = multilingual_unsupported or (
         state == FAILED and (error or "").startswith("UnsupportedLanguage:")
