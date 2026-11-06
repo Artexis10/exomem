@@ -392,6 +392,8 @@ def add(
     expected_container_hash: str | None = None,
     body: str = "",
     why: str,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Capture one Planning item through the shared Markdown-item writer."""
     manifest = record_governance.resolve_collection_for_mutation(vault_root, collection)
@@ -418,7 +420,93 @@ def add(
         body=body,
         why=why,
         validate_snapshot=partial(_validate_final_relationships, vault_root),
+        hold=_prepare is None,
+        _prepare=_prepare,
+        _validate_inputs=_validate_inputs,
     )
+
+
+def prepare(vault_root: Path, action: str, args: Mapping[str, Any], *, _validate_inputs=None) -> dict[str, Any]:
+    """Run the same Planning facade through its final native rollback-only boundary."""
+    from . import plan_memory, vocabulary_gate
+    from .vault import _NativePrepared
+
+    def stop(value):
+        raise _NativePrepared(value)
+
+    with vocabulary_gate.preparation_context(vault_root):
+        try:
+            plan_memory._write(vault_root, action, args, _prepare=stop, _validate_inputs=_validate_inputs)  # noqa: SLF001
+        except _NativePrepared as stopped:
+            result = dict(stopped.value)
+        else:
+            raise CollectionError("RECORD_PREPARE_INCOMPLETE", "Planning did not reach final preparation")
+    manifest = result.pop("manifest", None)
+    if manifest is not None:
+        result.update(collection_id=manifest.collection_id, manifest_path=manifest.path,
+                      semantic_profile=manifest.semantic_profile, strategy=manifest.storage.strategy)
+        result["store"] = {"collection_id": manifest.collection_id, "expected_container_hash": result.pop("container_hash")}
+        if "item_version" in result:
+            result["store"]["expected_item_version"] = result.pop("item_version")
+        result["path"] = collections.plan_ref(manifest.collection_id, result["item_key"])
+    if result["semantic_profile"] != "planning":
+        raise CollectionError("PLANNING_PROFILE_REQUIRED", "Planning collection is required")
+    values = result.pop("values")
+    normalized = {"collection": result["collection_id"], "plan_id": result["item_key"], "why": args["why"],
+                  "expected_container_hash": args["expected_container_hash"]}
+    if action == "add":
+        normalized.update(item=values, body=result["body"])
+    else:
+        before = result.pop("prior_values")
+        changed = {name: value for name, value in values.items() if name not in before or value != before[name]}
+        changed.update({name: None for name in before if name not in values})
+        normalized["transition" if action == "triage" else "changes"] = changed
+        normalized["expected_item_version"] = args["expected_item_version"]
+        if action == "update" and result["body"] is not None:
+            normalized["body"] = result["body"]
+    result["normalized_native_args"] = normalized
+    return result
+
+
+def add_receipt(vault_root: Path, collection, *, item_key: str, payload_hash: str) -> dict | None:
+    """Authenticate exactly one native Planning add through its audit owner."""
+    try:
+        manifest = require_planning_profile(record_governance.resolve_collection_for_mutation(vault_root, collection))
+    except CollectionError:
+        return None
+    return records.append_receipt(vault_root, manifest, item_key=item_key, payload_hash=payload_hash)
+
+
+def update_receipt(vault_root: Path, collection, *, operation: str, **args) -> dict | None:
+    # These two operation tokens are fixed by the Planning receipt protocol.
+    if operation not in {"update", "triage"}:
+        return None
+    return records._update_receipt(vault_root, collection, _profile="planning", _operation="plan_" + operation, **args)  # noqa: SLF001
+
+
+def store_receipt(writer, request_id: str, *, prepared: Mapping, after: Mapping, action: str) -> bool:
+    """Authenticate the native Planning transaction and current canonical row, never its file view."""
+    try:
+        with writer.read_snapshot():
+            found = writer.request_receipt(request_id)
+            if found is None:
+                return False
+            receipt = found["receipt"]
+            cid, key = prepared["collection_id"], prepared["item_key"]
+            writer._collection(cid, facade_profile="planning")  # noqa: SLF001
+            item = writer._item(cid, key)  # noqa: SLF001
+            return bool(
+                item is not None and receipt.get("_plan_receipt") == "exomem.planning-mutation"
+                and receipt.get("operation") == action and receipt.get("collection_id") == cid
+                and receipt.get("plan_id") == key and receipt.get("outcome") == "committed"
+                and receipt.get("before_container_hash") == prepared["store"]["expected_container_hash"]
+                and (action == "add" or receipt.get("before_item_hash") == prepared["store"]["expected_item_version"])
+                and item["payload_hash"] == prepared["payload_hash"]
+                and after == {"path": collections.plan_ref(cid, key), "content_hash": receipt.get("after_item_hash")}
+                and writer.current_guards(cid, key)[1] == receipt["after_item_hash"]
+            )
+    except (CollectionError, KeyError, TypeError):
+        return False
 
 
 def query(
@@ -1371,6 +1459,9 @@ def update(
     expected_container_hash: str,
     expected_item_version: str,
     why: str,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
+    _history_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded authored-property update through the shared writer."""
     manifest = record_governance.resolve_collection_for_mutation(vault_root, collection)
@@ -1417,6 +1508,10 @@ def update(
         delete_fields=deleted,
         body=body,
         validate_snapshot=partial(_validate_final_relationships, vault_root),
+        hold=_prepare is None,
+        _prepare=_prepare,
+        _validate_inputs=_validate_inputs,
+        _history_binding=_history_binding,
     )
 
 
@@ -1429,6 +1524,9 @@ def triage(
     expected_container_hash: str,
     expected_item_version: str,
     why: str,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
+    _history_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply the deliberately narrow Planning transition workflow."""
     if not transition or set(transition) - TRIAGE_FIELDS:
@@ -1480,6 +1578,10 @@ def triage(
         operation="triage",
         delete_fields=tuple(name for name, value in transition.items() if value is None),
         validate_snapshot=partial(_validate_final_relationships, vault_root),
+        hold=_prepare is None,
+        _prepare=_prepare,
+        _validate_inputs=_validate_inputs,
+        _history_binding=_history_binding,
     )
 
 

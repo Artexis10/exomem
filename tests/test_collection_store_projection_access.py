@@ -767,3 +767,44 @@ def test_a_restricted_walk_agrees_with_the_read_door_outside_canonical_ownership
             assert keep(BRIDGE_PATH)
         # Unregistered bytes inside a canonical namespace cannot become ordinary files.
         assert not keep(owned)
+
+
+def test_terminal_origin_release_rechecks_after_canonical_row_hydration(store, monkeypatch):
+    """Revocation after native row read must remove its whole carrier while retaining the row body."""
+    from test_origin_bindings import _write
+
+    from exomem import provenance
+
+    with request_scope(owner_principal(surface="mcp")):
+        store.create_collection(manifest_path(), manifest_text(), why="Create the collection.")
+        original = _write(store.root, "Retained input.\n")
+        carrier = provenance.encode_origin({"inputs": {"input": original}, "assessments": [], "bindings": []})
+        first = store.append_record(CID, item={"title": "Account"}, item_key=KEY,
+                                    body=carrier + "\nUsable row prose.\n", why="Retain the account.")
+        store.reconcile_views()
+    path = first["affected_paths"][0]
+    write_scope(store.root, paths="Unrelated/**")
+    write_rule(store.root, ceiling=0)
+    cross_check = egress._withheld_cross_check
+    raw_row = store.root / path
+    canonical_before = raw_row.read_bytes()
+    revoked = False
+
+    def revoke_after_hydration(*args, **kwargs):
+        nonlocal revoked
+        result = cross_check(*args, **kwargs)
+        if not revoked and isinstance(result, dict) and result.get("path") == path:
+            assert "exomem-origin" in str(result)
+            revoked = True
+            write_scope(store.root, paths="Sources/**")
+        return result
+
+    monkeypatch.setattr(egress, "_withheld_cross_check", revoke_after_hydration)
+    with preview_store(store.root, store.handle), request_scope(_external()):
+        result = _through_dispatcher(store.root, "get", path=path, include_raw=True)
+    assert revoked
+    assert "Usable row prose" in result["body"]
+    assert "exomem-origin" not in str(result)
+    assert original["reference"] not in str(result)
+    assert raw_row.read_bytes() == canonical_before
+    assert "content" not in result

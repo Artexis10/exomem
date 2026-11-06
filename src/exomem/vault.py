@@ -5262,6 +5262,34 @@ def _governed_advisory_target(
     return target
 
 
+class _NativePrepared(Exception):
+    """Owner-local final preparation snapshot; no canonical effect has started."""
+
+    def __init__(self, value: dict):
+        super().__init__("native operation prepared")
+        self.value = value
+
+
+class DefiniteNoEffect(Exception):
+    """A native owner stopped this invocation before its publication path."""
+
+    #: The native no-effect protocol's one reason: the sealed destination already exists.
+    DESTINATION_EXISTS = "destination_exists"
+
+    def __init__(self, reason: str, evidence: dict):
+        super().__init__(reason)
+        self.reason, self.evidence = reason, evidence
+
+    @staticmethod
+    def destination_evidence(destination: str) -> dict:
+        """The exact evidence a `DESTINATION_EXISTS` stop carries and its terminal must repeat."""
+        return {"destination": destination, "publication_started": False}
+
+    @classmethod
+    def destination_exists(cls, destination: str) -> DefiniteNoEffect:
+        return cls(cls.DESTINATION_EXISTS, cls.destination_evidence(destination))
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -5276,6 +5304,7 @@ def batch_atomic_write(
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _prepare: Callable[[list[PlannedWrite]], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -5296,6 +5325,19 @@ def batch_atomic_write(
                 "defer_graph_completion requires vault_root and post_commit_fanout=False"
             )
         caller_writes = list(writes)
+        if _prepare is not None:
+            from . import vocabulary_gate
+
+            # Preparation stages the complete native batch but owns no heat, queue or receipt.
+            with vocabulary_gate.preparation_context(Path(vault_root)):
+                return _batch_atomic_write_locked(
+                    caller_writes, vault_root=vault_root, required_guards=required_guards,
+                    completion_guards=completion_guards, semantic_states=semantic_states,
+                    post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                    defer_graph_completion=defer_graph_completion,
+                    _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                    _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
+                )
         from . import curation_witness
 
         augmented_writes, curation_witness_state = curation_witness.augment_batch(
@@ -5349,6 +5391,7 @@ def _batch_atomic_write_locked(
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _prepare: Callable[[list[PlannedWrite]], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5376,7 +5419,7 @@ def _batch_atomic_write_locked(
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     publication_intents: list[Any] = []
-    publication_intents_enabled = vault_root is not None and (
+    publication_intents_enabled = _prepare is None and vault_root is not None and (
         post_commit_fanout or publication_intents_out is not None
     )
     if vault_root is not None:
@@ -5548,7 +5591,7 @@ def _batch_atomic_write_locked(
     # Later is also wrong: after the replace, a crash cut between the markdown
     # and the enqueue loses the dirty set, which is the whole property the
     # pre-commit ordering buys.
-    if graph_debt_checkpoint is not None:
+    if graph_debt_checkpoint is not None and _prepare is None:
         _enqueue_graph_debt(Path(vault_root), graph_debt_checkpoint)
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
@@ -5570,7 +5613,10 @@ def _batch_atomic_write_locked(
                 # and the seam applies the private-state posture at creation.
                 from . import state_paths
 
-                state_paths.ensure_vault_state_dir(Path(vault_root))
+                if _prepare is None:
+                    state_paths.ensure_vault_state_dir(Path(vault_root))
+                else:
+                    _create_parent_dirs(state_paths.vault_state_dir(Path(vault_root)), created_dirs)
             for directory in write.ensure_directories:
                 if vault_root is None or state_target:
                     _create_parent_dirs(directory, created_dirs)
@@ -5693,7 +5739,7 @@ def _batch_atomic_write_locked(
                     or actual_hash != write.expected_hash
                 ):
                     raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
-        if vault_root is not None:
+        if vault_root is not None and _prepare is None:
             from . import derived_receipts
             from .writer_lease import (
                 active_derived_batch_custody,
@@ -5827,7 +5873,8 @@ def _batch_atomic_write_locked(
             vault_root, staged, snapshots, auxiliary_manifest=_vocabulary_auxiliaries
         )
         validate_active_write_fence()
-        log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
+        if _prepare is None:
+            log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
             if index == 0 and _validate_prepared_bindings is not None:
                 _validate_prepared_bindings()
@@ -5881,6 +5928,9 @@ def _batch_atomic_write_locked(
                 if source_guards[index] is not None
                 else None
             )
+            if index == 0 and _prepare is not None:
+                _prepare(caller_writes)
+                raise ValueError("native preparation must stop before publication")
             replacement_intents: tuple[Any, ...] = ()
             if publication_intents_enabled:
                 from . import file_watcher

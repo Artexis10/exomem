@@ -290,6 +290,15 @@ def _origin_payload(value: object, *, authoring: bool) -> dict:
     inputs = {}
     for label, raw in raw_inputs.items():
         _origin_text(label)
+        if type(raw) is dict and raw.get("representation") == "original":
+            # The explicit original variant is a closed byte-proof protocol, not text attribution.
+            if set(raw) != {"representation", "reference", "version", "size"} or type(raw["size"]) is not int or raw["size"] < 0:
+                raise _origin_invalid("original input fields are invalid")
+            inputs[label] = {
+                "representation": "original", "reference": _origin_reference(raw["reference"], allow_unit=False),
+                "version": _origin_hash(raw["version"]), "size": raw["size"],
+            }
+            continue
         if type(raw) is not dict or set(raw) - {"reference", "version", "unit_fingerprint", "span"}:
             raise _origin_invalid("retained input fields are invalid")
         if not {"reference", "version"} <= set(raw):
@@ -354,7 +363,12 @@ def match_origin_scope(
             if document is None or document.parent_ref is None:
                 return OriginScopeMatch("unavailable")
             parent = document.parent_ref
-            if parent.startswith("exomem://vault/"):
+            if document._record_profile is not None:  # noqa: SLF001
+                from . import structured_collections
+
+                if record_identity is None or owner_ref != parent or parent != structured_collections._profile_item_ref(document._record_profile, *record_identity):  # noqa: SLF001
+                    return OriginScopeMatch("unavailable")
+            elif parent.startswith("exomem://vault/"):
                 # File Records already use the parser's path label, not a memory
                 # UUID. Only their owning adapter may supply that exact label.
                 path = unquote(parent.removeprefix("exomem://vault/"))

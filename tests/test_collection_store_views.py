@@ -50,6 +50,26 @@ def test_failed_commit_does_not_publish_proposed_view(store):
     assert not list(path.parent.glob(".exomem-collection-stage-*"))
 
 
+def test_preparation_rolls_back_foreign_input_recovery(store):
+    from exomem import vault
+
+    create(store)
+    first = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="Observe.")
+    store.reconcile_views()
+    path = store.root / first["affected_paths"][0]
+    frontmatter, body, _ = vault.parse_frontmatter(path.read_text(), strict=True)
+    frontmatter["exomem_view"]["i"] = "00000000-0000-4000-8000-000000000001"
+    path.write_text("---\n" + vault.serialize_frontmatter(frontmatter) + "\n---\n" + body)
+    before = list(store.connection.iterdump())
+    files = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+    with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_DIVERGED"):
+        store.update_record(CID, item_key=KEY, changes={"title": "Two"}, hold=False,
+            expected_container_hash=first["after_container_hash"], expected_item_version=first["after_item_hash"],
+            why="Prepare a native correction.", _prepare=lambda _value: pytest.fail("foreign input was sealed"))
+    assert list(store.connection.iterdump()) == before
+    assert {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == files
+
+
 def test_successive_installs_accept_previous_pending_view(store):
     # Lazy bookkeeping must not misclassify our previous successful install.
     create(store)
