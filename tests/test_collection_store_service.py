@@ -2115,6 +2115,50 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
     assert titles(service.root, CID) == ["Canonical"]
 
 
+
+def test_a_boundary_holder_s_store_reads_are_not_queued_behind_maintenance_waiting_on_its_boundary(
+        service, monkeypatch):
+    """A starved maintenance tick waits while another thread holds the vault boundary.
+
+    Maintenance proves collection ownership under that boundary. Started during a command's hold,
+    it waited there while the command's own store reads queued behind it, so each read sat out a
+    full boundary wait and was refused: a two-second hold became a 45-second one on the live
+    service. Once the hold ends, the deferred tick runs.
+    """
+    server = runtime._SERVERS[service.root]
+    ticked, real_tick = [], server._views_tick
+
+    def maintenance():
+        ticked.append(time.monotonic())
+        # The ownership proof every views pass takes; like `authority.admitted_collections`,
+        # a refused proof admits nothing and the tick stays due.
+        try:
+            with service.manager.consistency_guard(service.root, operation="test ownership proof",
+                                                   holder_kind="collection-read"):
+                pass
+        except OpError:
+            pass
+        return real_tick()
+
+    monkeypatch.setattr(server, "_views_tick", maintenance)
+    boundary_wait = service.manager._mutation_timeout_seconds
+    _until(lambda: not service.manager._store_handoff)
+    refusals = []
+    with service.manager.consistency_guard(service.root, operation="test command hold"):
+        server._ticks["views"] = time.monotonic() - 60  # long starved
+        started = time.monotonic()
+        for _ in range(4):
+            try:
+                server.call(lambda: None, read_only=True)
+            except OpError as error:
+                refusals.append(error.code)
+        elapsed = time.monotonic() - started
+        released = time.monotonic()
+    assert refusals == []
+    assert elapsed < boundary_wait  # unfixed, the second read alone waited out one boundary wait
+    _until(lambda: any(at >= released for at in ticked))
+
+
 @contextmanager
 def held_handoff(service):
     """The lease manager's store handoff, held open while a store borrower has not yet left: what an idle release does."""
