@@ -289,11 +289,14 @@ The concurrent and settled-state reports below bind to its corrected candidate.
   The report must bind the package digest, release source, interpreter, response, validation and convergence.
   Full HTTPS/OAuth, client-selection and signed promotion evidence remains a separate Records promotion requirement.
   Records promotion consumes graph proof; it does not gate this graph acceptance.
-  The released v0.162.0 wheel passed this check on 2026-11-06 in a disposable vault and a private network namespace.
-  The wheel matched its published release digest, and the runtime ran Python 3.13 with the tag's own scripts.
-  A real `change_records` create returned a committed terminal with `pending`, `GRAPH_SYNC_REPAIR_QUEUED` and a checkpoint.
+  The released-package acceptance passed on the v0.162.0 wheel on 2026-11-06 (UTC), in a disposable vault and a private network namespace.
+  The wheel digest matched the published release asset, `sha256:80a49c87c42471ec3c7bbb6e2665ae26d6212500b0e510b1d33fde4ae63d086a`.
+  The runtime ran Python 3.13 with the tag's own scripts. The probe and its report are kept outside the repository.
+  With the graph drain paused, a real `change_records` create returned a committed terminal with `pending`, `GRAPH_SYNC_REPAIR_QUEUED` and a checkpoint.
   The unchanged terminal passed the graph validator, and the validator rejected an unknown outcome value.
-  The expected `derived_from` relation became available, and a later read found the settled outcome `completed` with zero queued paths.
+  After a restart with the drain on, a graph read returned an available graph, including the seeded `derived_from` relation.
+  A later read found the settled outcome `completed` with zero queued paths.
+  This check does not cover the personal service; task 8.10 holds its installed acceptance.
 
 ## 7. Phase 3 — availability fence, conditional on measurement
 
@@ -318,7 +321,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   62 whole-vault publications, seven Class C exhaustions, every one inside committed
   governed writes. 7.2 and 7.4 responded to that and are parked (below); 7.3, 7.6 and 7.7
   landed.
-- [ ] 7.2 **Parked.** Tracked in #2469. Publish a whole-vault pass at the checkpoint it sampled when every
+- [ ] 7.2 **Parked, optional; tracked in #2469.** Publish a whole-vault pass at the checkpoint it sampled when every
   movement across it is recorded (catch-up publication), with the availability marker
   withheld while graph work is queued. Built and pinned on
   `fix/graph-convergence-contract` (`fbd16eea`), then parked by ruling because the
@@ -337,7 +340,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   with the lag on `graph_context`'s refusal, the doctor's warning on covered lag and on
   quarantined paths, and the lag on the drain's settled line
   (`tests/test_graph_lag_reporting.py`). The read fence stays fail-closed.
-- [ ] 7.4 **Parked.** Tracked in #2469. Reduce the stabilization, publication, and supersession retry
+- [ ] 7.4 **Parked, optional; tracked in #2469.** Reduce the stabilization, publication, and supersession retry
   budgets, and retire the drain's whole-vault quiet window. Both depended on 7.2: without
   catch-up a recorded write still defeats a pass, so the #576 re-target and the quiet
   window stay. If revisited, publication attempts stay at four: an attempt that finds
@@ -407,7 +410,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   the earlier drain gate used queued pages and a carry record to explain topology.
   Tasks 8.9 and 8.10 replace that gate because it could preserve stale edges.
   The residue tests compare every edge with a fresh rebuild.
-- [ ] 8.8 **Open, not built.** Tracked in #2469. Evaluate a cheaper route to steady-state convergence than
+- [ ] 8.8 **Open, not built, optional; tracked in #2469.** Evaluate a cheaper route to steady-state convergence than
   7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
   recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
   or publication) and, when it adopts, queue the residue and retire the full marker
@@ -429,7 +432,8 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   A local resolver cannot cross a registry seed using an adopted foreign snapshot's history floor.
   The promotion regression checks incoming links after a newer serving snapshot, ten writes, and a final drain.
   The reviewed repair is merged.
-  A qualified containing release and installed acceptance remain open.
+  v0.162.0 contains the repair and passed release qualification (task 6.3).
+  Installed acceptance on the personal service remains open.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)
 
