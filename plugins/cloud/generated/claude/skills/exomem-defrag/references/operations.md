@@ -216,17 +216,15 @@ fingerprint in their warning text. Triage binds to that exact fingerprint (dismi
 requires a reason); a stale fingerprint simply lets the advisory re-emit when the
 counterpart changes or the written page changes the detected signal class.
 
-A compiled-note write may additionally return `structure_suggestion`, an
-advisory signal that recurring durable material on the written page now sits
-outside its own declared scope. It carries `kind`, a `strength` of either
-`strong` or `moderate`, a deterministically ordered `reasons` list, the count of
-durable units in the group, and at most six `cluster_terms`. Every
-value is derived from the page named in the same response; it never reports a
-path, title, or count belonging to another page. It is advisory only: it is
-absent when nothing is detected, it never changes `status`, `mutated`,
-`warnings_count`, mutation identity, or replay, and detection failure omits the
-field rather than affecting the write. The runtime never creates, moves,
-renames, or deletes anything as a result.
+A compiled-note write may additionally return `structure_suggestion` with `kind`
+`note_cohesion` while the written page has reached a size step and that step is
+unanswered. It carries `units`, `step_units`, `next_step_units`, the review item's
+`ref` and `fingerprint`, and one `question`. Every value is derived from the page
+named in the same response; it never reports a path, title, or count belonging to
+another page. It is advisory only: it is absent when no step is open, it never
+changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and a
+failure to compute it omits the field rather than affecting the write. The runtime
+never creates, moves, renames, or deletes anything as a result.
 
 `response_detail="full"` adds the existing leaf result under
 `diagnostics`. `response_detail="legacy"` returns that old raw leaf result and

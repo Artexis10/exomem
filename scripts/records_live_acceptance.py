@@ -57,8 +57,8 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # which reports a count with no retained texts.
         "warnings",
         # Advisory structural feedback on a compiled-note write. Absent unless the
-        # written page shows recurring durable material outside its declared scope,
-        # and never carried by a Records mutation.
+        # written page has an open note-cohesion item, and never carried by a
+        # Records mutation.
         "structure_suggestion",
         # The episode-completeness advisory. A structured write IS a capture, so a
         # Records mutation does carry it — on the first write after a quiet

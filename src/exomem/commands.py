@@ -1848,12 +1848,20 @@ def op_bootstrap(
                 "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",
                 "write_feedback": "create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with response_detail='full'",
                 "structure_suggestion": (
-                    "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
+                    "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
-                    else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                    else "advisory in the default committed response. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
-                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then " + call_text("manage_memory_file", {"operation": "reclassify", "reason": "..."}) + ".",
-                "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
+                "structure_suggestion_handling": (
+                    "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
+                    + call_text("triage_memory", {"ref": "<ref>", "action": "dismiss", "expected_fingerprint": "<fingerprint>", "why": "intentional: <the one question>"})
+                    + "; it stays quiet until the next size step. Several: propose a split with "
+                    + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
+                    + " and apply it only after the user confirms the previewed plan. A hub by design: add a hub or snapshot tag with a governed edit. source_classification_debt: say it in the user's words, agree a real kind, then "
+                    + call_text("manage_memory_file", {"operation": "reclassify", "reason": "..."})
+                    + "."
+                ),
+                "structure_suggestion_authority": "advisory only; the runtime measures and asks, and never writes",
                 "records_routing": (
                     "a committed note or Evidence write may name one Records collection whose "
                     "claims or claims.match cover it; never append from the advisory alone. Its "

@@ -1,81 +1,32 @@
-"""Advisory detection that a compiled page has outgrown its own declared scope.
+"""Term helpers and the breadth tags that other modules share.
 
-The runtime measures; the agent reasons. This module answers exactly one question
-about the page a caller just wrote: has recurring durable material accumulated that
-sits outside what the page says it is about? It never proposes a destination, never
-names another page, and never moves anything.
+This module once held the lexical `scope_divergence` detector, which compared a
+page's unit tags with its declared identity. It was measured against owner-labelled
+notes, found to track page size rather than meaning, and removed. Whether a page
+answers more than one question is now asked of the connected agent (see
+`note_cohesion`), because that is a judgement about meaning that a word list cannot
+make.
 
-Everything it reads is already parsed and in memory at commit time — the page's
-frontmatter, title, project keys, and semantic units. There is no file read, no
-database access, no embedding, and no model call, so the result is deterministic and
-the cost is a bounded pass over units the write already produced.
+What remains is vocabulary-free plumbing that other modules import:
 
-The signal is convergent by construction. A single tangent cannot trigger it: a term
-only groups material when it recurs across more than one off-scope unit, the group
-must reach enough mass to justify its own note, and the page must still hold its
-original subject. Raw length is never an input, because a long note about one thing
-is not structural debt.
+- `_terms` and `_is_term` normalise tags, titles and project keys into one
+  comparable set of words, script-aware (`text_scripts`);
+- `FUNCTION_WORDS` and `_STOPWORDS` keep glue words out of that set;
+- `BREADTH_TAGS` names the tags that declare a page broad on purpose.
 
-Acting on the advice resolves it. When the corpus already holds eligible compiled
-pages whose declared identity covers a cluster's vocabulary, that material has a home
-and the cluster is dropped from consideration. Nothing about an earlier suggestion is
-remembered to reach that outcome — no acceptance, no dismissal, no cooldown — so
-deleting the destinations brings the advice back. That is deliberate: a suggestion
-cleared by recording a dismissal is indistinguishable from one nobody ever acted on.
-
-Resolution reads only the corpus context the write already built, and it fails open.
-No corpus, or any fault while reading one, leaves the suggestion exactly as it would
-have been. Silence is never the fallback.
-
-Known approximation: recurrence is counted over durable units, not over write events.
-There is no cheap per-page record of which units a given mutation added, and units are
-what writes deposit, so the reason codes speak of units and claim nothing more.
+The collection and record-governance matchers import these. A change to them changes
+every one of those comparisons, so none of them belongs to a single caller.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from collections.abc import Iterable
 
 from .text_scripts import comparison_words, is_scriptio_continua
-
-KIND = "scope_divergence"
-
-#: A page must carry at least this many durable units before its shape means anything.
-MIN_UNITS = 6
-#: A page that declares almost nothing about itself cannot be judged against itself.
-MIN_IDENTITY_TERMS = 2
-#: A unit needs this many out-of-scope terms before one stray word can push it out.
-MIN_OFF_SCOPE_TERMS = 2
-#: A term groups material only when it recurs — this is the recurrence requirement.
-TERM_RECURRENCE_MIN = 2
-#: How much material must gather before a focused child note would actually help.
-CLUSTER_MIN_UNITS = 5
-CLUSTER_MIN_TERMS = 4
-#: Enough of the original subject must remain for "separate" to beat "rename".
-MIN_RETAINED_UNITS = 3
-#: Above this overlap the group is a sub-topic of the declared subject, not a rival.
-MISMATCH_MAX_OVERLAP = 0.34
-#: A destination must own enough of a cluster to count as its home. One shared tag is
-#: an incidental collision — in any sizeable vault some page carries almost any single
-#: term — and letting single matches accumulate would scavenge real divergence quiet.
-MIN_DESTINATION_COVERAGE = 2
-#: Bound on the evidence returned to the caller.
-MAX_CLUSTER_TERMS = 6
-
-REASON_RECURS = "off_scope_cluster_recurs"
-REASON_MASS = "cluster_reaches_child_note_mass"
-REASON_RETAINED = "page_retains_original_scope"
-REASON_MISMATCH = "declared_scope_mismatch"
 
 #: Pages that deliberately announce breadth. Same convention that already exempts
 #: these tags from staleness pressure and semantic-unit requirements elsewhere.
 BREADTH_TAGS = frozenset({"hub", "snapshot"})
-
-#: Filenames the corpus already treats as navigation rather than knowledge.
-NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 
 #: Closed-class English function words: prepositions, conjunctions, auxiliaries,
 #: pronouns, determiners and a few ubiquitous verbs. Never a content word, however
@@ -132,263 +83,3 @@ def _terms(values: Iterable[str]) -> frozenset[str]:
     for value in values:
         out.update(token for token in comparison_words(str(value).casefold()) if _is_term(token))
     return frozenset(out)
-
-
-def _frontmatter_tags(frontmatter: Mapping[Any, Any]) -> list[str]:
-    raw = frontmatter.get("tags")
-    if isinstance(raw, str):
-        return [raw]
-    if isinstance(raw, (list, tuple)):
-        return [str(item) for item in raw]
-    return []
-
-
-@dataclass(frozen=True, slots=True)
-class PageShape:
-    """The minimum a page must expose to be judged. Deliberately not a vault type."""
-
-    page_type: str | None
-    title: str
-    tags: tuple[str, ...]
-    projects: tuple[str, ...]
-    basename: str
-    unit_tags: tuple[tuple[str, ...], ...]
-    #: Vault-relative path, used only to keep the written page out of its own
-    #: destination set. Never reported.
-    path: str = ""
-    #: Whether the type, as written, has note-type role `compiled` for the caller.
-    #: None reads the shipped pack.
-    compiled: bool | None = None
-
-
-def _declared_identity(state: Any) -> frozenset[str]:
-    """The vocabulary a page announces about itself, by the same rule as the subject.
-
-    Deliberately does not touch units: this runs over every candidate destination, and
-    the declared identity is what decides whether a page owns a subject.
-    """
-    frontmatter = getattr(state, "frontmatter", None) or {}
-    return (
-        _terms(_frontmatter_tags(frontmatter))
-        | _terms([getattr(state, "title", None) or ""])
-        | _terms(getattr(state, "projects", None) or ())
-    )
-
-
-def _routed_terms(
-    corpus: Any, *, exclude_path: str, cluster_terms: frozenset[str]
-) -> frozenset[str]:
-    """Cluster vocabulary that eligible compiled pages already declare as their subject.
-
-    Only pages the caller's own recall can reach are considered, so a page the caller
-    is not entitled to see cannot change what the caller is told. A destination has to
-    own `MIN_DESTINATION_COVERAGE` of the cluster before it counts, which is what stops
-    unrelated pages contributing one incidental tag each.
-    """
-    eligible = getattr(corpus, "eligible_compiled_paths", None) or frozenset()
-    routed: set[str] = set()
-    for path, state in getattr(corpus, "pages", {}).items():
-        if path == exclude_path or path not in eligible:
-            continue
-        covered = _declared_identity(state) & cluster_terms
-        if len(covered) >= MIN_DESTINATION_COVERAGE:
-            routed |= covered
-    return frozenset(routed)
-
-
-def _cluster(off_scope: Sequence[frozenset[str]]) -> tuple[list[int], frozenset[str]]:
-    """Group off-scope units by vocabulary that recurs across more than one of them.
-
-    Returns the largest group's unit indices and the recurring terms that formed it.
-    A term appearing in only one unit joins nothing — that is what keeps an
-    incidental aside from ever looking like an emerging project.
-    """
-    counts: dict[str, int] = {}
-    for terms in off_scope:
-        for term in terms:
-            counts[term] = counts.get(term, 0) + 1
-    recurring = {term for term, count in counts.items() if count >= TERM_RECURRENCE_MIN}
-    if not recurring:
-        return [], frozenset()
-
-    # Union-find over units that share at least one recurring term.
-    parent = list(range(len(off_scope)))
-
-    def find(node: int) -> int:
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
-        return node
-
-    def union(left: int, right: int) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    first_seen: dict[str, int] = {}
-    for index, terms in enumerate(off_scope):
-        for term in terms & recurring:
-            if term in first_seen:
-                union(first_seen[term], index)
-            else:
-                first_seen[term] = index
-
-    groups: dict[int, list[int]] = {}
-    for index, terms in enumerate(off_scope):
-        if terms & recurring:
-            groups.setdefault(find(index), []).append(index)
-    if not groups:
-        return [], frozenset()
-
-    # Largest group wins; ties break on the earliest unit so the result is stable.
-    best_root = min(groups, key=lambda root: (-len(groups[root]), groups[root][0]))
-    members = groups[best_root]
-    seeds = frozenset(
-        term for index in members for term in off_scope[index] & recurring
-    )
-    return members, seeds
-
-
-def detect(shape: PageShape, *, corpus: Any = None) -> dict[str, Any] | None:
-    """Decide whether `shape` has outgrown its declared scope. Pure; no I/O.
-
-    `corpus` is the context the mutation already built. Pass it and a cluster whose
-    vocabulary existing eligible pages already own is treated as routed; omit it and
-    the result is exactly what it would have been without resolution.
-    """
-    from . import note_types
-
-    compiled = (
-        shape.compiled
-        if shape.compiled is not None
-        else note_types.Basis(None).selects(shape.page_type, note_types.compiled)
-    )
-    if not compiled:
-        return None
-    if shape.basename.casefold() in NAVIGATION_BASENAMES:
-        return None
-    if len(shape.unit_tags) < MIN_UNITS:
-        return None
-
-    tag_terms = _terms(shape.tags)
-    if tag_terms & BREADTH_TAGS:
-        return None
-
-    identity = tag_terms | _terms([shape.title]) | _terms(shape.projects)
-    if len(identity) < MIN_IDENTITY_TERMS:
-        return None
-
-    off_scope: list[frozenset[str]] = []
-    off_scope_all_terms: list[frozenset[str]] = []
-    retained = 0
-    for tags in shape.unit_tags:
-        terms = _terms(tags)
-        if not terms:
-            continue
-        outside = terms - identity
-        inside = terms & identity
-        if len(outside) > len(inside) and len(outside) >= MIN_OFF_SCOPE_TERMS:
-            off_scope.append(outside)
-            off_scope_all_terms.append(terms)
-        else:
-            retained += 1
-
-    if not off_scope:
-        return None
-
-    members, seeds = _cluster(off_scope)
-    if not members:
-        return None
-
-    # Resolution, evaluated only once a cluster has actually formed so the corpus pass
-    # is paid on the rare page that would otherwise speak, never on ordinary writes.
-    # Routed vocabulary is removed and the existing mass requirement below decides:
-    # one definition of "enough material to justify a child note", and a half-routed
-    # cluster still reports the half that has no home.
-    if corpus is not None:
-        seeds = seeds - _routed_terms(
-            corpus, exclude_path=shape.path, cluster_terms=seeds
-        )
-
-    reasons = [REASON_RECURS]
-    if len(members) >= CLUSTER_MIN_UNITS and len(seeds) >= CLUSTER_MIN_TERMS:
-        reasons.append(REASON_MASS)
-    if retained >= MIN_RETAINED_UNITS:
-        reasons.append(REASON_RETAINED)
-
-    # All three gates must hold. Mass alone is noise; without retained scope the page
-    # has simply moved on, which is a naming problem rather than a splitting one.
-    if REASON_MASS not in reasons or REASON_RETAINED not in reasons:
-        return None
-
-    group_vocabulary = frozenset().union(*(off_scope_all_terms[i] for i in members))
-    overlap = len(group_vocabulary & identity) / len(group_vocabulary)
-    if overlap < MISMATCH_MAX_OVERLAP:
-        reasons.append(REASON_MISMATCH)
-
-    # Most-recurrent terms first for selection, alphabetical for the payload, so the
-    # evidence is both the strongest available and byte-stable across runs.
-    seed_counts = {
-        term: sum(1 for index in members if term in off_scope[index]) for term in seeds
-    }
-    top = sorted(seed_counts, key=lambda term: (-seed_counts[term], term))
-    return {
-        "kind": KIND,
-        "strength": "strong" if REASON_MISMATCH in reasons else "moderate",
-        "reasons": sorted(reasons),
-        "off_scope_units": len(members),
-        "cluster_terms": sorted(top[:MAX_CLUSTER_TERMS]),
-    }
-
-
-def shape_from_state(state: Any) -> PageShape:
-    """Adapt a `SemanticPageState` the write path already built."""
-    from . import note_types
-
-    frontmatter = state.frontmatter or {}
-    # The advisory compares the type as written, under the state's own basis.
-    type_basis = getattr(state, "type_basis", None) or note_types.Basis(None)
-    return PageShape(
-        compiled=type_basis.selects(state.page_type, note_types.compiled),
-        page_type=state.page_type,
-        title=state.title or "",
-        tags=tuple(_frontmatter_tags(frontmatter)),
-        projects=tuple(state.projects or ()),
-        basename=state.path.rsplit("/", 1)[-1],
-        unit_tags=tuple(tuple(unit.tags) for unit in state.document.units),
-        path=state.path,
-    )
-
-
-def suggest_for_state(state: Any, *, corpus: Any = None) -> dict[str, Any] | None:
-    """Detect over a page state the caller already holds."""
-    return detect(shape_from_state(state), corpus=corpus)
-
-
-def suggest_for_page(
-    vault_root: Path, rel_path: str, *, corpus: Any = None
-) -> dict[str, Any] | None:
-    """Detect over a page on disk. For out-of-band callers; the write path uses state."""
-    from . import note_types, semantic_units, vault
-
-    source = (vault_root / rel_path).read_text(encoding="utf-8")
-    frontmatter, body, _ = vault.parse_frontmatter(source)
-    document = semantic_units.parse_semantic_units(body, path=rel_path, validate=False)
-    projects = frontmatter.get("projects") or frontmatter.get("project") or ()
-    if isinstance(projects, str):
-        projects = (projects,)
-    return detect(
-        PageShape(
-            compiled=note_types.Basis(vault_root).selects(
-                frontmatter.get("type"), note_types.compiled
-            ),
-            page_type=frontmatter.get("type"),
-            title=str(frontmatter.get("title") or ""),
-            tags=tuple(_frontmatter_tags(frontmatter)),
-            projects=tuple(str(item) for item in projects),
-            basename=rel_path.rsplit("/", 1)[-1],
-            unit_tags=tuple(tuple(unit.tags) for unit in document.units),
-            path=rel_path,
-        ),
-        corpus=corpus,
-    )

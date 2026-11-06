@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: ff96328730dbc78047db1dc898b529d790f55d90c999db4378d625e48a1e4d8a
+  skill_contract: d0a1cff673e01a731a09483d4ed0156bfa04c28f895fec360aaf7fdf0d357ea5
   version: "0.1.0"
 ---
 

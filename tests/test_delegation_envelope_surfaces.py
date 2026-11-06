@@ -238,7 +238,7 @@ def test_the_plugin_skill_copy_matches_the_scaffold(config, vault: Path) -> None
 #: A REAL registered family, and deliberately a structural one: it is what a
 #: user means by "stop suggesting I split this page up". A made-up family name
 #: would prove the plumbing and nothing about the vocabulary.
-STRUCTURAL_FAMILY = "scope_divergence_semantic"
+STRUCTURAL_FAMILY = "note_cohesion"
 STRUCTURAL_FAMILY_REF = f"exomem://review/family/{STRUCTURAL_FAMILY}"
 STRUCTURAL_WHY = "intentional: this vault keeps broad pages on purpose"
 
@@ -311,7 +311,8 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
         assert "registered" in text, carrier
 
     # Neither one ships a table of family names. The compact bootstrap does
-    # name the one product workflow this contract explicitly teaches.
+    # name the two product workflows it explicitly teaches: both are advisory
+    # kinds that share their name with a registered family.
     view = commands.op_review_memory(vault, mode="dispositions")
     assert STRUCTURAL_FAMILY in view["registered_families"]
     for carrier, text in (("compact bootstrap", taught), ("hookless block", pasted)):
@@ -320,7 +321,8 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
             for family in view["registered_families"]
             if family in text
         ]
-        expected = ["collection_candidate"] if carrier == "compact bootstrap" else []
+        taught_names = ["collection_candidate", "note_cohesion"]
+        expected = taught_names if carrier == "compact bootstrap" else []
         assert listed == expected, f"{carrier} hardcodes a family table: {listed}"
 
 

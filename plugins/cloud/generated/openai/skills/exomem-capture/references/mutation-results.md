@@ -31,13 +31,14 @@ its review ref and complete 24-character signal fingerprint in its warning text;
 triage binds to that exact fingerprint (dismiss requires a reason), and a stale
 fingerprint simply lets the advisory re-emit when the counterpart changes or the
 written page changes the detected signal class.
-A compiled-note write may also carry `structure_suggestion`: an advisory
-`kind`, a `strength` of `strong` or `moderate`, deterministic `reasons`, the
-number of durable units in the group, and up to six recurring `cluster_terms`.
-It is present only when the written page shows recurring durable material
-outside its own declared scope, it reports nothing about any other page, and it
-never affects `status`, `mutated`, or replay. Nothing is reorganised by the
-runtime; acting on it is the agent's decision with the user.
+A compiled-note write may also carry `structure_suggestion`. Its `kind` is
+`note_cohesion` while the written page has reached a size step and nobody has
+answered that step. It holds `units`, `step_units` and `next_step_units`, the
+review item's `ref` and `fingerprint`, and one `question`: does this page answer
+more than one independent question? The runtime counts size and claims nothing
+about the page. The field reports nothing about any other page, and it never
+affects `status`, `mutated`, or replay. Nothing is reorganised by the runtime;
+answering is the agent's decision with the user (see `writing.md`).
 Use `response_detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
 with the former raw result. Response detail is presentation-only: changing it

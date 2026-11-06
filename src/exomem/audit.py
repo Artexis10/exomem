@@ -44,6 +44,11 @@ Checks (all read-only; no writes ever):
   uses). Reported at `info` as a review CANDIDATE, never a defect, and kept out
   of the default attention union — its threshold is the system's invention, not
   something an author declared.
+- `note_cohesion`: a compiled page that has reached a size step (9, 14, 21, 32,
+  48, ... semantic units). Reported at `info` as a question for the connected
+  agent, not as a claim that the page is overloaded, and kept out of the default
+  attention union because its steps are the system's choice. One item per page;
+  a dismissal holds until the page reaches its next step.
 - `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
   resolve, and a supersession component with more than one current head. Both
   are `warn` DEFECTS in authored state with no threshold anywhere, which is why
@@ -172,7 +177,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "entity_type_unregistered",
     "unreflected_outcomes",
     "unreflected_observations",
-    "scope_divergence_semantic",
+    "note_cohesion",
     "entity_recurrence",
     "collection_candidate",
     "artifact_role_promotion",
@@ -218,13 +223,14 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
     # Structural, not lifecycle — and it belongs here anyway, because this tuple's
     # gate is BACKLOG PROFILE rather than category kind (see the note above). A
-    # geometric scope check meets an existing corpus with every page it will ever
-    # flag already written, which is the grandfathered population the opt-in rule
-    # exists to keep off the daily surface. It is registered, selectable, and
-    # triageable from the first run; it simply does not displace what is already
-    # there. Whether it graduates into the default union is a calibration
-    # decision, on evidence this change deliberately does not yet have.
-    "scope_divergence_semantic",
+    # size-step check meets an existing corpus with every long page it will ever
+    # ask about already written, which is the grandfathered population the opt-in
+    # rule exists to keep off the daily surface. Its steps are also a choice this
+    # system made (`note_cohesion.BASE_STEP_UNITS`), not a date an author declared.
+    # It is registered, selectable, and triageable from the first run; it simply
+    # does not displace what is already there. The writing agent meets the same
+    # item through the write-time question, and due-state serves it as a backlog.
+    "note_cohesion",
     # Same exclusion, a different reason for it, and the difference matters.
     # `unfinished_experiments` is held back by a grandfathered POPULATION;
     # `question_aging` is held back because its trigger is a THRESHOLD THIS
@@ -731,11 +737,9 @@ def audit(
                     vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
                 )
             )
-    with stage('scope_divergence_semantic') as run:
+    with stage('note_cohesion') as run:
         if run:
-            findings.extend(
-                _check_scope_divergence_semantic(vault_root, pages, status_basis=status_basis)
-            )
+            findings.extend(_check_note_cohesion(vault_root, pages))
     with stage('entity_recurrence') as run:
         if run:
             findings.extend(
@@ -6085,6 +6089,57 @@ def _check_question_aging(
     return [finding for _, _, _, finding in rows]
 
 
+# ---------------- check: note_cohesion ----------------
+
+
+@call_spans.timed("audit.note_cohesion")
+def _check_note_cohesion(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Ask about each compiled page that has reached a size step.
+
+    The rule, the steps and the question live in `note_cohesion`, which the write
+    path calls as well; this check only parses the pages that module may ask about
+    and counts their semantic units. It claims nothing about a page: a step
+    schedules a judgement that the connected agent makes.
+
+    Takes no `today`. The projection scans with a far-future date, and a page with
+    no authored date is due on the day of computation, which only the clock knows.
+    """
+    from . import note_cohesion, semantic_index
+
+    type_basis = note_types.Basis(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        request_budget.checkpoint()
+        if not note_cohesion.is_candidate(
+            page.rel_path,
+            page_type=page.page_type,
+            frontmatter=page.frontmatter,
+            type_basis=type_basis,
+        ):
+            continue
+        try:
+            # The page's own selected meaning decides which occurrences are units,
+            # as it does for the write path's `after` state.
+            state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
+        except (OSError, ValueError):
+            # Unreadable or unparseable here means unjudgeable, not oversized.
+            continue
+        found = note_cohesion.finding(
+            vault_root,
+            page.rel_path,
+            page_type=page.page_type,
+            frontmatter=page.frontmatter,
+            units=len(state.document.units),
+            type_basis=type_basis,
+        )
+        if found is not None:
+            findings.append(found)
+    return findings
+
+
 # ---------------- check: supersession_integrity ----------------
 
 #: The two authored supersession pointers. `superseded_by` runs old -> new,
@@ -6923,163 +6978,6 @@ def _asserted_contradictions(
             )
         )
     return findings, keys
-
-
-def _scope_divergence_semantic_finding(
-    rel_path: str, advisory: dict
-) -> AuditFinding:
-    """One advisory -> one finding, with the ONE signal version this family uses.
-
-    The fingerprint a review decision binds to is composed by `review_state` from
-    the finding's category, path and `signal_version`; this is the only place the
-    latter is chosen, and it is composed over the SORTED LABEL TERMS rather than
-    the page's bytes. That is deliberate and it is the whole dismissal contract:
-    material change means the divergent group's vocabulary changed, so editing a
-    typo elsewhere on the page cannot resurrect advice somebody already put down,
-    and a genuinely different group cannot inherit the old decision.
-    """
-    from . import structure_promotion_semantic as sensor
-
-    skipped = advisory.get("skipped")
-    if skipped:
-        return AuditFinding(
-            category="scope_divergence_semantic",
-            severity="info",
-            path=rel_path,
-            detail=(
-                f"{advisory['units']} semantic units is over the "
-                f"{sensor.MAX_JUDGED_UNITS}-unit cap for the geometric scope check, "
-                "so this page was NOT judged for scope divergence."
-            ),
-            proposed_fix=(
-                "No action is implied. The page is too large for the pairwise pass; "
-                "splitting it for other reasons would also bring it back into range."
-            ),
-            meta={
-                "skipped": skipped,
-                "units": advisory["units"],
-                "signal_version": content_hash(skipped)[:16],
-            },
-        )
-
-    terms = list(advisory["cluster_terms"])
-    return AuditFinding(
-        category="scope_divergence_semantic",
-        severity="info",
-        path=rel_path,
-        detail=(
-            f"{advisory['off_scope_units']} durable units on this page form a group "
-            "that holds together on its own and sits apart from what the page says "
-            f"it is about ({', '.join(terms)})."
-        ),
-        proposed_fix=(
-            "Surfaced for REVIEW only — a measurement of how this page's material is "
-            "distributed, not a judgment that anything is wrong. If the group is its "
-            "own subject, a focused note is its home; if it belongs here, nothing "
-            "needs doing. Nothing is auto-moved or auto-written."
-        ),
-        meta={
-            "reasons": list(advisory["reasons"]),
-            "strength": advisory["strength"],
-            "off_scope_units": advisory["off_scope_units"],
-            "cluster_terms": terms,
-            "signal_version": content_hash("\n".join(terms))[:16],
-        },
-    )
-
-
-@call_spans.timed("audit.scope_divergence_semantic")
-def _check_scope_divergence_semantic(
-    vault_root: Path,
-    pages: list[find_module.ParsedPage],
-    *,
-    status_basis: lifecycle_statuses.Basis | None = None,
-) -> list[AuditFinding]:
-    """Corpus sweep for pages whose unit GEOMETRY has outgrown their declared scope.
-
-    The lexical write-time advisory (`structure_promotion`) compares vocabulary and
-    is blind when the divergent material wears the parent domain's words. This is
-    the semantic counterpart, and it runs here rather than at commit time for one
-    reason: this is where the vectors already are. Nothing is embedded, no model is
-    called, and no index is added — it reads rows the indexing pipeline already
-    wrote.
-
-    Cost is bounded by construction: EXACTLY ONE corpus-level unit-vector load per
-    sweep, never a per-page query. Pages with no stored vectors are skipped without
-    being judged, because absence of evidence must never become advice.
-    """
-    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return []
-    type_basis = note_types.Basis(vault_root)
-    eligible = {
-        page.rel_path: page
-        for page in pages
-        if _is_active_compiled_rw(
-            vault_root, page, status_basis=status_basis, type_basis=type_basis
-        )
-    }
-    if not eligible:
-        return []
-    try:
-        from . import embeddings as embeddings_module
-        from . import semantic_index, semantic_units
-        from . import structure_promotion_semantic as sensor
-    except ImportError as e:  # numpy is core, but stay defensive
-        log.debug("scope_divergence_semantic sweep unavailable (%s)", e)
-        return []
-
-    try:
-        grouped = embeddings_module.get_embedding_index(
-            vault_root
-        ).all_semantic_unit_vectors()
-    except Exception:  # noqa: BLE001 — a derived sidecar never breaks the audit
-        log.warning("unit-vector read failed; scope_divergence_semantic skipped", exc_info=True)
-        return []
-    if not grouped:
-        return []
-
-    corpus = sensor.destination_corpus(
-        {path: page.frontmatter for path, page in eligible.items()}
-    )
-    findings: list[AuditFinding] = []
-    for rel_path in sorted(eligible):
-        request_budget.checkpoint()
-        rows = grouped.get(rel_path)
-        if not rows:
-            continue  # no stored geometry -> not judged, never advised about
-        try:
-            # The page's own selected meaning decides which occurrences are units.
-            state = semantic_index.selected_parent_index_state(vault_root, rel_path)
-        except (OSError, ValueError):
-            # Unreadable or unparseable here means unjudgeable, not divergent.
-            continue
-        # Geometry may only be read against the parse it was written for. The
-        # generation binds `parent_source_hash`, so any edit moves it. Judging
-        # the vectored subset of an edited page would measure mass and retained
-        # scope over a fraction of the page and call it the page's shape, and a
-        # fabricated label change REOPENS settled dismissals. Not judged until
-        # the pipeline catches up — absence semantics, D1.
-        if any(row.parent_generation != state.parent_generation for row in rows):
-            continue
-        by_key = {row.unit_key: row.vector for row in rows}
-        advisory = sensor.detect(
-            sensor.shape_from_parse(
-                path=rel_path,
-                frontmatter=eligible[rel_path].frontmatter,
-                units=state.document.units,
-                vectors_by_ref={
-                    unit.unit_ref: by_key[key]
-                    for unit in state.document.units
-                    if (key := semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash))
-                    in by_key
-                },
-            ),
-            corpus=corpus,
-        )
-        if advisory is not None:
-            findings.append(_scope_divergence_semantic_finding(rel_path, advisory))
-    return findings
 
 
 def _entity_recurrence_finding(

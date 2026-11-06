@@ -113,7 +113,8 @@ log = logging.getLogger(__name__)
 
 # 3 adds `SOURCE_BACKLOG`: a stored projection without it would read as "no Source is
 # outstanding" until the next reconcile, so the version change forces the rebuild.
-SCHEMA_VERSION = 3
+# 4 adds `note_cohesion`, for the same reason.
+SCHEMA_VERSION = 4
 STATE_FILENAME = ".due-state.json"
 
 #: The one backlog family: captured Sources that no live note compiles, due from their capture
@@ -121,6 +122,12 @@ STATE_FILENAME = ".due-state.json"
 #: itself, and it sorts after every dated obligation, so a large import cannot fill the
 #: five-slot `top` that a due prediction needs.
 SOURCE_BACKLOG = "unprocessed_source"
+
+#: The two backlog families, in served order after every dated obligation. `note_cohesion`
+#: reports a size step this system chose, not an authored date, and it sorts ahead of the
+#: Source backlog because a page that outgrew its subject is nearer to work than a capture
+#: nobody compiled. Counts are exact; nothing here is capped.
+BACKLOG_CATEGORIES: tuple[str, ...] = ("note_cohesion", SOURCE_BACKLOG)
 
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
@@ -138,7 +145,8 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
-    # Last: a backlog rather than an obligation (see `SOURCE_BACKLOG`).
+    # Backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
+    "note_cohesion",
     SOURCE_BACKLOG,
 )
 
@@ -151,6 +159,7 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "unreflected_observations",
     "artifact_role_promotion",
     "transient_state_review",
+    "note_cohesion",
 )
 
 #: The subset a PAGE write settles. `unreflected_outcomes` is not one of them:
@@ -165,6 +174,7 @@ PAGE_DELTA_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "artifact_role_promotion",
     "transient_state_review",
+    "note_cohesion",
 )
 
 #: The remainder: what a STRUCTURED write settles, keyed by plan-item path rather
@@ -607,6 +617,18 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
             else {}
         ),
     }
+
+
+def entry_for(vault_root: Path, finding: Any) -> dict[str, Any] | None:
+    """The stored entry one finding yields, for a carrier that must share the projection's identity.
+
+    A write-time carrier asks "has this been triaged?" of the review-state store. It
+    composes the answer's key here so the item id and fingerprint it reads are the ones
+    the projection stored and the triage surface records.
+    """
+    return _entry(
+        vault_root, finding, review_state_module.refs_for_paths(vault_root, [finding.path])
+    )
 
 
 def observation_facets_component(
@@ -1970,6 +1992,7 @@ def apply_write_deltas(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
+        findings.extend(audit_module._check_note_cohesion(vault_root, pages))
         # Page-local half of a split category: these pages' own pointers only.
         findings.extend(_page_local_supersession(vault_root, pages))
     # One grouping, so the Source rows and the page rows share one review-ref lookup.
@@ -4050,11 +4073,12 @@ def _served_entries_uncached(
     # Dated first, oldest first; dateless last. A defect a human authored no date
     # for is reported with a floor date internally, and left to sort naively it
     # would outrank every genuinely overdue prediction in a five-slot `top`.
-    # The Source backlog sorts after every obligation for the same reason: an
-    # import of thousands of old captures must not push a due prediction out.
+    # The backlogs sort after every obligation for the same reason: an import of
+    # thousands of old captures, or a vault of long notes, must not push a due
+    # prediction out.
     rows.sort(
         key=lambda row: (
-            row["category"] == SOURCE_BACKLOG,
+            _backlog_rank(row["category"]),
             row["due_since"] == _NO_DATE,
             row["due_since"],
             order[row["category"]],
@@ -4062,6 +4086,11 @@ def _served_entries_uncached(
         )
     )
     return rows, horizon, asked, role_token
+
+
+def _backlog_rank(category: str) -> int:
+    """0 for an obligation, then the category's place in `BACKLOG_CATEGORIES`."""
+    return BACKLOG_CATEGORIES.index(category) + 1 if category in BACKLOG_CATEGORIES else 0
 
 
 def _candidate_rank(entry: Mapping[str, Any], row: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -4168,11 +4197,13 @@ def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, tuple[str, str, s
     **The coupling this depends on.** A `ref` is a page-level identity and a
     fingerprint is a per-finding one, so the map is only well defined while at
     most one projection row per ref carries a fingerprint. That holds today
-    because every category except `unfinished_experiments` stamps a
-    `review_partition` into its ref, which makes the ref per-finding too. It is
-    a property of how the projection composes refs, not an invariant anything
-    else enforces — so a new category that omits the partition would silently
-    make this map ambiguous and stamp the wrong identity on the ledger.
+    because every category except `unfinished_experiments` and `note_cohesion`
+    stamps a `review_partition` into its ref, which makes the ref per-finding too.
+    Those two share a ref only on a page that holds both findings, and the collision
+    rule below drops that ref. It is a property of how the projection composes
+    refs, not an invariant anything else enforces — so a new category that omits
+    the partition would silently make this map ambiguous and stamp the wrong
+    identity on the ledger.
 
     Rather than take first-category-wins on a collision, a conflicting ref is
     DROPPED and logged: an unstamped row is a measurement gap, a wrongly
@@ -4231,6 +4262,10 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
     page-local and partitions its review id per finding, so the page's own check
     yields the item the whole-vault union would. `unfinished_experiments` has no
     partition and shares its id with other page-level queues, so it is not here.
+    `note_cohesion` has no partition either, but it yields one finding per page and
+    is outside the default union, so the page's own check yields exactly its stored
+    item. When an experiment page also holds one, the two entries share a ref,
+    `_fingerprints_by_ref` drops it, and the lookup takes the whole-vault path.
     A grouped observation backfill entry spans many pages: one page never
     reproduces it, and its lookup takes the whole-vault path.
 
@@ -4247,6 +4282,9 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
         ),
         "question_aging": lambda root, pages, *, today, now: (
             audit_module._check_question_aging(root, pages, today=today)
+        ),
+        "note_cohesion": lambda root, pages, *, today, now: (
+            audit_module._check_note_cohesion(root, pages)
         ),
         "supersession_integrity": _page_local_supersession,
         "unreflected_observations": lambda root, pages, *, today, now: (
@@ -4343,8 +4381,8 @@ def served(
     # Reserve one bounded display slot for promotion delivery; backlog cannot starve it.
     leading = [row for row in promoted if row.get("new_family")]
     trailing = [row for row in promoted if not row.get("new_family")]
-    authored = [row for row in rows if row["category"] != SOURCE_BACKLOG]
-    backlog = [row for row in rows if row["category"] == SOURCE_BACKLOG]
+    authored = [row for row in rows if not _backlog_rank(row["category"])]
+    backlog = [row for row in rows if _backlog_rank(row["category"])]
     before_notice = max(0, TOP_LIMIT - len(leading) - bool(trailing))
     rows = [*leading, *authored[:before_notice], *trailing, *authored[before_notice:], *backlog]
     if not rows:
@@ -4401,15 +4439,17 @@ def _affected_block(
     if not paths:
         return None
     paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
-    # A write's own advice leaves the Source backlog out: a Source is outstanding from
-    # the moment it is created, so every import would answer with advice about itself.
-    # The backlog reaches the agent through the global block and `review_memory`.
+    # A write's own advice leaves the backlogs out. A Source is outstanding from the
+    # moment it is created, so every import would answer with advice about itself; a
+    # page at a size step has its own carrier, the `note_cohesion` question in the
+    # same response. The backlogs reach the agent through the global block and
+    # `review_memory`.
     result = block([
         row
         for row in served_entries(
             vault_root, today=today, paths=paths, recover=False, payload=payload,
         )
-        if row["category"] != SOURCE_BACKLOG
+        if not _backlog_rank(row["category"])
     ])
     return {**result, "scope": DUE_STATE_AFFECTED_PATHS} if result else None
 
