@@ -109,4 +109,4 @@ Limits:
 - `order` records the page's final write time, so it cannot reconstruct earlier writes to that page.
 - The harness stages the engagement reference in the system prompt, where an ordinary actor may read it on demand.
 - The shell-free actor cannot trigger the landing-based Stop check. `--hook-turn` measures an explicit close prompt instead.
-- Real-model capture, recall and independent judging have not run for this increment. Their behavior and comparative effects remain unverified.
+- Real-model runs covered session-close cases on the plugin client with its hook turn, one run per case. The closure of task 4.1 in the archived `add-session-close-compilation` OpenSpec change reports which cases ran, their results and what did not run.

@@ -44,15 +44,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
 # The generic-relation wording on the write tools adds 50 B; the `offset` cursor on
 # read_memory adds 150 B for windows over long Source text. Keep both integration costs.
-# The record_episode description carries the close step and its completion-before-citation
-# condition, so the total budget and the record_episode ceiling rise 100 B.
-# The `window_days` field on the dispositions kind of read_review sizes the effect window, so the budget rises 150 B.
 # Bounded import status adds four view and paging fields. read_import measures 3,052 B;
 # its ceiling rounds to 3,100 B, and the total budget rises 550 B for those protocol inputs.
-# Material binding adds a closed envelope and keyed read: read_episode measures 1,994 B and its
-# ceiling rounds to 2,000 B. With the record_episode close step, record_episode measures 5,493 B
-# and its ceiling rounds to 5,500 B; the complete local wire measures 167,902 B, so its budget
-# rises to 168,000 B.
+# Material binding adds a closed envelope and keyed read: record_episode measures 5,402 B
+# and read_episode measures 1,994 B. Their ceilings round to 5,450 B and 2,000 B;
+# the complete local wire measures 167,706 B, so its budget rises to 168,000 B.
+# The record_episode close step and the `window_days` field on the dispositions kind of
+# read_review add 196 B. record_episode measures 5,493 B and its ceiling rounds to 5,500 B;
+# the complete local wire measures 167,902 B, so the budget stays at 168,000 B.
 TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
