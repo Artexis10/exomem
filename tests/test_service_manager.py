@@ -818,6 +818,28 @@ def test_conditionally_supporting_candidate_skips_unchanged_physical_families(
     asyncio.run(scenario())
 
 
+def test_served_context_keeps_earlier_application_state_compatible(
+    tmp_path, monkeypatch, candidate_runtime,
+):
+    """A new external sidecar must not require migration during a compatible rollback."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+
+    async def scenario():
+        runtime, actual = candidate_runtime
+        actual["state_descriptors"] = [
+            name for name in actual["state_descriptors"] if name != "served-context"
+        ]
+        target = await runtime.inspect({"python": sys.executable, "version": "1.2.3"})
+        assert runtime.migration_required(target) == (False, "declared_none")
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("invalidate", ["changed-target", "failed-target", "failed-probe"])
 def test_optional_support_cannot_outlive_its_verified_candidate(
     tmp_path, monkeypatch, candidate_runtime, invalidate, abc,

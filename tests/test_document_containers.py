@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import stat
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 from test_media_store import selected_store as selected_store
 
-from exomem import preserve
+from exomem import document_containers, preserve
 
 
 def container_bytes(entries: list[tuple[str | zipfile.ZipInfo, bytes]]) -> bytes:
@@ -855,3 +857,120 @@ def test_unrelated_malformed_frontmatter_keeps_path_only_reading(vault):
     compiled = policy.Policy(fingerprint='probe', scopes={'scope': policy.Scope(id='scope', source='probe', paths=(path,))})
     assert membership.evaluate_snapshot(page, compiled, content_hash=page.snapshot_hash) == frozenset({'scope'})
     assert commands.op_fetch(vault, id=path)['text']
+
+
+def _warm_unclaimed_note(vault, monkeypatch):
+    """An ordinary note decided once, aged past a shortened racy window so the decision is remembered.
+
+    The window stays longer than a filesystem timestamp tick: a rewrite inside the same tick as the remembered
+    version keeps its (size, mtime, ctime), which is the case the real window exists to exclude.
+    """
+    from exomem import vault as vault_module
+    from exomem.governance import policy
+    from exomem.governance.principal import RequestPrincipal
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 50_000_000)
+    stored = _capture(vault, container_bytes([('one.pdf', b'pdf')]))
+    child = stored.document_container['payloads'][0]
+    rules = vault / 'Knowledge Base' / '_Governance'
+    (rules / 'scopes').mkdir(parents=True, exist_ok=True)
+    (rules / 'rules').mkdir(exist_ok=True)
+    sid = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    (rules / 'scopes' / 'container.yaml').write_text(f'governance_version: 1\nid: {sid}\npaths: ["{stored.path}"]\n')
+    (rules / 'rules' / 'external.yaml').write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["{sid}"]\naudience: external\nceiling: 0\n')
+    note = "Knowledge Base/plain-note.md"
+    (vault / note).write_text("---\ntitle: Plain note\ntype: note\n---\n" + "x" * 80 + "\n")
+    time.sleep(0.1)
+    who = RequestPrincipal(audience_id='external')
+    compiled = policy.load(vault)
+    document_containers.clear_unclaimed_notes()
+    assert document_containers.parent_binding_for_path(vault, note) is None
+    assert document_containers._UNCLAIMED, "the unclaimed note was not remembered"
+    return child, note, who, compiled
+
+
+def _refused_everywhere(vault, note, who, compiled):
+    from exomem.governance import egress
+
+    spellings = (note, note.replace("plain", "ｐlain"), note.replace("/", "\\"), note.replace("/", "//", 1))
+    return all(
+        not egress.content_permits(vault, spelling, who)
+        and not egress.container_parent_allows(vault, spelling, policy=compiled, principal=who, purpose=None)
+        for spelling in spellings
+    )
+
+
+def test_remembered_unclaimed_note_is_rechecked_after_a_member_page_replaces_it(vault, monkeypatch):
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    # A rename gives the path a new inode, so a memo keyed on the path alone would miss this.
+    (vault / (child + ".md")).replace(vault / note)
+    assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_remembered_unclaimed_note_is_rechecked_after_a_same_size_claim_rewrite(vault, monkeypatch):
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    page = vault / note
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    original = page.read_bytes()
+    before = page.stat()
+    # Same size, same inode and the old mtime: only the change time tells the rewrite apart.
+    page.write_bytes(forged + b"x" * (len(original) - len(forged)))
+    os.utime(page, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert b"container_member" in page.read_bytes() and page.stat().st_size == len(original)
+    assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_a_claim_written_during_a_slow_read_is_never_remembered_as_unclaimed(vault, monkeypatch):
+    from exomem import reserved_paths
+
+    child, note, who, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    document_containers.clear_unclaimed_notes()
+    page = vault / note
+    original = page.read_bytes()
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    real_read = reserved_paths.read_generic_bytes
+
+    def read_then_claim(root, value, **kwargs):
+        result = real_read(root, value, **kwargs)
+        if value != note:
+            return result
+        # A claim lands after the bytes were read, inside the read, and the read outlasts the racy window.
+        # The handle then reports the claimed version's generation next to the unclaimed bytes.
+        page.write_bytes(forged + b"x" * (len(original) - len(forged)))
+        time.sleep(0.12)
+        info = page.stat()
+        return reserved_paths.GenericFileSnapshot(
+            result.data, result.identity, info.st_mtime, (info.st_size, info.st_mtime_ns, info.st_ctime_ns),
+        )
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", read_then_claim)
+    assert document_containers.parent_binding_for_path(vault, note) is None, "the read returned the unclaimed bytes"
+    assert not document_containers._UNCLAIMED, "the unclaimed bytes were bound to the claimed version"
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", real_read)
+    assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_bytes_remembered_as_unclaimed_are_not_reused_for_a_rewritten_claim(vault, monkeypatch):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    _, note, _, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    page = vault / note
+    document_containers.clear_unclaimed_notes()
+
+    def decide_bytes_on_disk():
+        data = page.read_bytes()
+        return egress.container_parent_allows(
+            vault, note, policy=compiled, principal=owner_principal(), purpose=None,
+            content=data,
+        )
+
+    plain = page.read_bytes()
+    assert decide_bytes_on_disk()
+    assert document_containers._UNCLAIMED, "the unclaimed bytes were not remembered"
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    page.write_bytes(forged + b"x" * (len(plain) - len(forged)))
+    assert page.stat().st_size == len(plain)
+    assert not decide_bytes_on_disk()
+    page.write_bytes(plain)
+    assert decide_bytes_on_disk()

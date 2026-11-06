@@ -289,6 +289,13 @@ def compile_context(
     prepare_slice: Callable[[], tuple[frozenset[str], int]] | None = None,
 ) -> dict[str, Any]:
     """Revalidate before selection, then allocate complete source-bound read routes."""
+    from . import working_set_runtime
+
+    if not working_set_runtime.activation_released_corpus_tasks() and not full_source_access(root, caller):
+        # Without the raw fast path, discovery and method revalidation would prepare released sources on this
+        # request. It reports the state that a released corpus over its preparation allowance already reports,
+        # and held methods reset as they do on every unavailable branch.
+        return empty("unavailable", reset=bool(held))
     sources: dict[str, SourceProjection | None] = {}
     with find_types.timing_span(timings, "working_set.methods"):
         reset = _revalidate(root, held, caller, sources)

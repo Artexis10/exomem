@@ -377,8 +377,6 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
 
     writer, job = derived("metadata-timeout")
     assert finish(writer, job)["state"] == "complete"
-    before = route.run(writer, DERIVED, ROWS, facade_profile="records")
-    assert len(before["rows"]) == 12
     observe = runpy.run_path(str(
         Path(__file__).parents[1] / "scripts" / "_recipient_query_observer.py"
     ))["observe_query_timeouts"]
@@ -390,6 +388,10 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
     clock = SimpleNamespace(monotonic=lambda: offset[0], perf_counter=real_time.perf_counter,
                             thread_time=real_time.thread_time, process_time=real_time.process_time,
                             time_ns=real_time.time_ns)
+    # Baseline and recovery reads use the same clock as the injected deadline.
+    monkeypatch.setattr(runtime, "time", clock)
+    before = route.run(writer, DERIVED, ROWS, facade_profile="records")
+    assert len(before["rows"]) == 12
 
     def assess(*args, **kwargs):
         result = real_assess(*args, **kwargs)
@@ -405,7 +407,6 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
             raise
 
     with monkeypatch.context() as patch:
-        patch.setattr(runtime, "time", clock)
         patch.setitem(observe.__wrapped__.__globals__, "time", clock)
         patch.setattr(derived_rows, "assess", assess)
         patch.setattr(runtime.ReadSession, "check", check)
