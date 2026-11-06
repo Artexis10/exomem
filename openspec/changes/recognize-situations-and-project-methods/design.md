@@ -96,6 +96,32 @@ Close registry observations, clear phase facts and recheck the existing authorit
 An invalid or unsupported proof ends the borrow and enters canonical preparation in the same request, preserving independent rows.
 Mark owned state changed before discarding a proof, and refresh accounting after any owned mutation.
 Advance the postings memory revision before insertion or eviction; equal slot counts do not establish unchanged memory.
+
+Ordinary-page custody classification may reuse a compact fact that the canonical parser found no container-member claim.
+Store only the full-file digest and version witness in the existing page-cache owner.
+Retain no body, parent binding, permission or caller in that fact.
+Do not cache missing companions, supplied or staged content, parsed claims, or missing provenance within the reserved payload subtree.
+Each hit must perform fresh generic private-identity admission and complete parent validation through the existing filesystem owner.
+Acquire the parent and leaf through their existing read operations, then inspect metadata without reading bytes.
+An identity handle or access query cannot replace current read admission.
+Qualify metadata-only reuse from a current held descriptor, initially on the supported native Linux ext family through `fstatfs`.
+Unknown filesystems and unsupported version evidence retain full-byte reads and digest verification.
+Preserve the existing aged-generation assumptions and their documented memory-mapped and long-write limitations.
+Mint a witness from integer versions before and after the same held-file read, with both timestamps already aged when reading starts.
+Canonical parsing must prove absence before the cache retains that witness.
+Changed images and actual custody claims continue through the current parser, binding validator and parent authority checks.
+Every consumed child, source-page and parent-companion image must report its full digest before interpretation, including valid cache hits and refusals.
+
+Keep the existing body-count policy separate from compact facts so a whole-corpus walk cannot erase facts through body eviction or repopulation.
+With a configured positive byte limit, share that limit across both partitions and evict bodies first.
+Without a configured byte limit, bound compact facts by the existing named 32 MiB default and preserve the local body-count policy.
+A zero byte limit disables both partitions.
+Account for fact keys, versions, digests, tables and allocation overlap before retaining them.
+Path and scope invalidation, stale checks, release and idle eviction must cover both partitions; status must expose retained facts honestly.
+Unsupported evidence or cache admission falls back to canonical reading, without a new refusal.
+That fallback costs the caller ordinary read latency; it grants no wider access and changes no parent authority.
+The unchanged latency and memory checks qualify the optimization; the design establishes no measured gain.
+
 Keep one row reservation through canonical projection, proof completion, packing and transfer to resident state.
 After canonical projection returns, replace completed parser claims with measured live output and capture state before proof completion.
 Measure the whole source projection, capture and memo; include the completed proof before packing.

@@ -11,7 +11,7 @@ import stat
 import sys
 import time
 from collections.abc import Callable, Iterator
-from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
+from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64, c_ulong
 from pathlib import Path
 
 from . import request_budget
@@ -120,6 +120,24 @@ class _OpenHow(Structure):
 _LIBC = ctypes.CDLL(None, use_errno=True)
 _LIBC.syscall.argtypes = None
 _LIBC.syscall.restype = c_long
+
+# The verified Linux/glibc x86-64 LP64 sys/vfs.h ABI; others keep full reads.
+class _StatFs(Structure):
+    _fields_ = [
+        ("f_type", c_long), ("f_bsize", c_long),
+        ("counts", c_ulong * 5), ("f_fsid", c_int * 2),
+        ("f_namelen", c_long), ("f_frsize", c_long), ("f_flags", c_long),
+        ("f_spare", c_long * 4),
+    ]
+
+
+_FSTATFS = (getattr(_LIBC, "fstatfs", None)
+            if sys.platform.startswith("linux") and ctypes.sizeof(c_long) == 8
+            and os.uname().machine == "x86_64" and ctypes.sizeof(ctypes.c_void_p) == 8
+            and hasattr(_LIBC, "gnu_get_libc_version") else None)
+if _FSTATFS is not None:
+    _FSTATFS.argtypes = [c_int, ctypes.POINTER(_StatFs)]
+    _FSTATFS.restype = c_int
 
 _RENAME_NOREPLACE = 1
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
@@ -325,6 +343,15 @@ class PosixHeldFile(HeldFile):
         info = _fstat(self.descriptor)
         return FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
+    def version_witness_supported(self) -> bool:
+        self.check()
+        # O_PATH alone does not establish an ordinary reader's current admission.
+        if _FSTATFS is None or self.access == "identity":
+            return False
+        info = _StatFs()
+        # 0xef53 is the kernel's closed ext2/ext3/ext4 filesystem magic.
+        return _FSTATFS(self.descriptor, byref(info)) == 0 and info.f_type == 0xEF53
+
     def close(self) -> None:
         if not self.closed:
             _close(self.descriptor)
@@ -373,12 +400,21 @@ class PosixHeldFilesystem(HeldFilesystem):
         scratch: bool = False,
     ) -> HeldResult[HeldDirectory]:
         parts = _parts(relative)
-        if parts is None or access not in {"read", "flush", "mutate"}:
+        # nosemgrep: ep-word-set -- the closed directory access modes this backend implements.
+        if parts is None or access not in {"read", "flush", "mutate", "identity"}:
             return HeldResult(error=_invalid())
         if exclusive and (not create or not parts):
             return HeldResult(error=_invalid())
         if self.closed:
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
+        if access == "identity":
+            if create or not sys.platform.startswith("linux"):
+                return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "metadata parent acquisition is unavailable"))
+            try:
+                descriptor = _open_relative(self.descriptor, relative, _IDENTITY_FLAGS | os.O_DIRECTORY)
+                return HeldResult(value=PosixHeldDirectory(self, descriptor, access=access))
+            except OSError as error:
+                return HeldResult(error=_error(error))
         descriptor = _dup(self.descriptor)
         parent_descriptor: int | None = None
         # A folder this call just made is empty, so its child needs no listing.

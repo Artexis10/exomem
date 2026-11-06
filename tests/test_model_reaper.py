@@ -189,7 +189,37 @@ def test_find_reaper_observes_activity_during_a_concurrent_cache_hit(
         assert hit.result(timeout=3) is not None
 
     assert not [record for record in caplog.records if record.name == model_reaper.log.name], caplog.text
-    assert find.cache_status()["pages"] == {"entries": 2, "body_chars": 26, "hits": 1}
+    status = find.cache_status()["pages"]
+    assert {key: status[key] for key in ("entries", "body_chars", "hits")} == {"entries": 2, "body_chars": 26, "hits": 1}
+
+
+def test_fact_only_frontmatter_cache_is_active_and_reclaimable(tmp_path, monkeypatch):
+    """A service with no retained bodies must still count compact-fact use and release that memory when idle."""
+    from exomem import document_containers, mode
+
+    cache = find_corpus.FrontmatterCache()
+    monkeypatch.setattr(find_corpus, "CACHE", cache)
+    monkeypatch.setattr(find, "_CACHE", cache)
+    monkeypatch.setattr(mode, "retain_cpu_caches", lambda: False)
+    path = tmp_path / "ordinary.md"
+    path.write_text("---\ntitle: Ordinary\n---\nBody.\n")
+    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    assert not cache.entries and cache.cache_status()["classification_facts"] == 1
+    slot = next(slot for slot in model_reaper.default_slots() if slot.name == "find-ram-caches")
+    assert slot.is_loaded()
+    before = find.cache_activity()
+    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    assert find.cache_activity() != before
+    assert slot.is_loaded()
+    last_activity = slot.last_activity()
+    cache.invalidate_paths(tmp_path, [path.name])
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text("---\ntitle: Replacement\n---\nBody.\n")
+    assert document_containers.parent_binding_for_path(tmp_path, replacement.name) is None
+    assert cache.cache_status()["classification_facts"] == 1
+    assert slot.is_loaded() and slot.last_activity() > last_activity
+    assert slot.unload()
+    assert cache.cache_status()["classification_facts"] == 0
 
 
 def test_a_matrix_served_by_catch_up_counts_as_used(tmp_path: Path, monkeypatch) -> None:

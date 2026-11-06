@@ -542,6 +542,7 @@ def test_published_private_identity_is_implicitly_consumed_by_generic_leaf(
         ),
     )
 
+    assert reserved_paths.inspect_generic_version(tmp_path, "Knowledge Base/Notes/ordinary.bin") is None
     with pytest.raises(reserved_paths.ReservedPathLeafError) as error:
         reserved_paths.read_generic_bytes(
             tmp_path,

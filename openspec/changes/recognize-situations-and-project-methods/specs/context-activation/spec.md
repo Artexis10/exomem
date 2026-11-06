@@ -112,6 +112,23 @@ A complete unchanged generation MAY reuse its resident charge while accounting f
 This reuse SHALL preserve per-row ancestor checks and all current authority, registry, namespace and freshness fences.
 An invalid or unsupported proof SHALL enter canonical preparation in the same request, preserving independently reusable rows.
 Any owned mutation, including postings replacement with unchanged slot counts or interrupted eviction, SHALL trigger admitted accounting refresh before reuse.
+Ordinary-page custody classification MAY reuse only a proven absence of a container-member claim at a current admitted file version.
+These facts SHALL retain a full-file digest and no body, parent binding, permission or caller.
+Missing companions, supplied or staged content, parsed claims and payload-subtree absence SHALL remain outside this cache.
+Every metadata hit SHALL reapply current generic private-identity admission and complete parent checks.
+Every metadata hit SHALL preserve the existing read admission for the parent and leaf without requiring another byte read.
+Generation reuse SHALL require descriptor-qualified filesystem support and integer versions bound to the same aged physical read.
+Unsupported filesystem or version evidence SHALL use full-byte reads and digest verification.
+Existing version-witness assumptions and limitations SHALL remain explicit.
+Every consumed classification image, including a cache hit or refusal, SHALL report its full-file digest through the existing source-release observer before interpretation.
+The existing cache owner SHALL admit fact keys, versions, digests, tables and allocation overlap within finite resource bounds.
+A positive configured byte cap SHALL cover bodies and facts together, with bodies evicted first.
+Without a configured byte cap, compact facts SHALL use the existing finite default; the body-count policy SHALL remain unchanged.
+A zero byte cap SHALL disable both partitions.
+Body eviction and repopulation SHALL NOT erase independent compact facts solely because the scan exceeds the body-count limit.
+Path and scope invalidation, stale checks, release and idle eviction SHALL cover both partitions.
+Cache status SHALL report retained facts and their resource use.
+Unsupported evidence or cache admission SHALL fall back to canonical reading without a cache-specific refusal.
 Timeouts and admission failures SHALL remain preparation failures.
 Allocation failures SHALL propagate after cleanup.
 Shared immutable objects SHALL be charged once per live accounting epoch, which ends before registered objects can be removed.
@@ -124,6 +141,25 @@ With an unchanged effective basis and complete dependency history, resumption SH
 No request SHALL retain authority for source reads after that request ends.
 Existing maps and ordinary pull routes SHALL remain usable when preparation cannot finish.
 The existing latency checks SHALL qualify reuse without increasing their limits or adding artificial warmup.
+
+#### Scenario: Current metadata invalidates cached claim absence
+
+- **GIVEN** an ordinary page has a retained fact that its parsed metadata contains no container-member claim
+- **WHEN** its image or generic private-identity admission changes
+- **THEN** current canonical reading and admission decide the result instead of the earlier absence fact
+- **AND** source-release proof binds the consumed image or declines reuse
+
+#### Scenario: A full scan exceeds the body-cache count
+
+- **WHEN** a whole-source scan exceeds the body-count limit but its compact facts fit the byte allowance
+- **THEN** body eviction and repopulation preserve those independently admitted facts
+- **AND** cache accounting and release cover both partitions
+
+#### Scenario: A filesystem cannot supply the supported version witness
+
+- **WHEN** the current descriptor cannot qualify metadata-only generation reuse
+- **THEN** classification reads current full bytes and verifies their digest
+- **AND** no earlier absence fact bypasses current generic or parent admission
 
 #### Scenario: An ordinary edit preserves independent rows
 

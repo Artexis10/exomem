@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 from exomem import find_corpus
 
@@ -209,3 +212,206 @@ def test_simultaneous_misses_do_not_leave_ghost_byte_charges(tmp_path, monkeypat
         pages = list(pool.map(lambda _: cache.get(path, tmp_path), range(2)))
     assert all(page.body == "WORK " * 500 for page in pages)
     assert cache.get(path, tmp_path) is cache.get(path, tmp_path)
+
+
+def test_container_absence_survives_body_churn_but_not_path_or_scope_invalidation(vault, monkeypatch):
+    """A body LRU must not discard the compact fact that the next ordinary-page read depends on."""
+    from test_governance_egress import _external
+
+    from exomem import document_containers, reserved_paths
+    from exomem import vault as vault_module
+    from exomem.governance import egress, principal
+
+    monkeypatch.setenv("EXOMEM_PAGE_CACHE_SIZE", "1")
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    cache = find_corpus.FrontmatterCache()
+    monkeypatch.setattr(find_corpus, "CACHE", cache)
+    paths = [vault / f"ordinary-{index}.md" for index in range(3)]
+    for path in paths:
+        _page(path, path.stem)
+        assert document_containers.parent_binding_for_path(vault, path.name) is None
+        cache.get(path, vault)
+    assert len(cache.entries) == 1 and cache.cache_status()["classification_facts"] == 3
+    if reserved_paths.inspect_generic_version(vault, paths[0].name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    with monkeypatch.context() as patch:
+        read = reserved_paths.read_generic_bytes
+        def unexpected(root, path, *args, **kwargs):
+            if path == paths[0].name:
+                pytest.fail("an aged fact must not retain or reread the body")
+            return read(root, path, *args, **kwargs)
+        patch.setattr(reserved_paths, "read_generic_bytes", unexpected)
+        with principal.request_scope(_external()):
+            basis = egress.current_source_release_basis(vault)
+            with egress.source_release_proof(vault, basis) as capture:
+                assert document_containers.parent_binding_for_path(vault, paths[0].name) is None
+            assert capture.finish() is not None
+    assert cache.stale_paths(vault, [paths[0].name], {paths[0].name: "0" * 64}) == (paths[0].name,)
+    assert cache.invalidate_paths(vault, [paths[0].name]) == 1
+    assert cache.cache_status()["classification_facts"] == 2
+    cache.invalidate_scope(vault, "vault")
+    assert cache.cache_status()["classification_facts"] == 0
+
+
+def test_container_fact_admission_shares_the_byte_cap_and_evicts_bodies_first(tmp_path, monkeypatch):
+    """Compact metadata must be finite, including map growth, while a small body cap cannot thrash its facts."""
+    from test_released_corpus_memory import _independent_bytes
+
+    from exomem import document_containers
+
+    monkeypatch.setenv("EXOMEM_PAGE_CACHE_BYTES", "6000")
+    cache = find_corpus.FrontmatterCache()
+    monkeypatch.setattr(find_corpus, "CACHE", cache)
+    body = tmp_path / "body.md"
+    body.write_text("Readable body. " * 60)
+    assert cache.get(body, tmp_path) is not None and cache.entries
+    for index in range(10):
+        path = tmp_path / f"ordinary-{index}.md"
+        _page(path, path.stem)
+        assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+        status = cache.cache_status()
+        assert status["classification_bytes"] >= _independent_bytes([cache._container_absence])
+        assert status["classification_bytes"] + cache._retained_bytes <= 6000
+    assert not cache.entries and 1 < cache.cache_status()["classification_facts"] < 10
+    monkeypatch.setenv("EXOMEM_PAGE_CACHE_BYTES", "0")
+    assert not cache.container_absence_enabled()
+    assert not cache.entries and cache.cache_status()["classification_facts"] == 0
+    monkeypatch.delenv("EXOMEM_PAGE_CACHE_BYTES")
+    monkeypatch.setattr(find_corpus, "_page_cache_bytes", lambda: None)
+    monkeypatch.setattr(find_corpus, "_DEFAULT_PAGE_CACHE_BYTES", 3000)
+    for index in range(10):
+        assert document_containers.parent_binding_for_path(tmp_path, f"ordinary-{index}.md") is None
+        assert cache.cache_status()["classification_bytes"] <= 3000
+    assert 0 < cache.cache_status()["classification_facts"] < 10
+    cache.release()
+    assert cache.cache_status()["classification_bytes"] == 0
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_container_fact_cannot_hide_same_size_claim_edits_with_restored_mtime(tmp_path, monkeypatch, trusted):
+    """Both qualified metadata and full-digest fallback must notice changed claims when mtime stays equal."""
+    from exomem import document_containers, held_fs, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    cache = find_corpus.FrontmatterCache()
+    monkeypatch.setattr(find_corpus, "CACHE", cache)
+    path = tmp_path / "ordinary.md"
+    path.write_text("---\ncontainer_ignore: null\n---\nUnchanged body.\n")
+    with held_fs.acquire(tmp_path).require() as filesystem, filesystem.parent(".").require() as parent:
+        with filesystem.file(parent, path.name).require() as file:
+            file_type = type(file)
+    if not trusted:
+        monkeypatch.setattr(file_type, "version_witness_supported", lambda self: False)
+        assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
+    elif reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    with monkeypatch.context() as patch:
+        patch.setattr(document_containers, "parse_frontmatter", lambda *args, **kwargs: pytest.fail("matching full bytes already prove the negative fact"))
+        assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    before = path.stat()
+    path.write_bytes(path.read_bytes().replace(b"container_ignore", b"container_member"))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+    with pytest.raises(ValueError, match="provenance"):
+        document_containers.parent_binding_for_path(tmp_path, path.name)
+    assert cache.cache_status()["classification_facts"] == 0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux held read admission")
+def test_container_metadata_fact_cannot_bypass_a_current_read_open_refusal(tmp_path, monkeypatch):
+    """A sandbox can admit O_PATH metadata while refusing the ordinary read open required by canonical classification."""
+    from exomem import _held_fs_posix, document_containers, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    monkeypatch.setattr(find_corpus, "CACHE", find_corpus.FrontmatterCache())
+    path = tmp_path / "ordinary.md"
+    _page(path, "Ordinary")
+    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    opened = _held_fs_posix._open_relative
+    def refused(parent, name, flags, *args):
+        if name == path.name and not flags & os.O_PATH:
+            raise PermissionError("current read opens are refused")
+        return opened(parent, name, flags, *args)
+    monkeypatch.setattr(_held_fs_posix, "_open_relative", refused)
+    assert reserved_paths.inspect_generic_version(tmp_path, path.name) is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError):
+        document_containers.parent_binding_for_path(tmp_path, path.name)
+
+
+def test_container_metadata_hit_cannot_follow_an_exchanged_parent(tmp_path, monkeypatch):
+    """The identical file behind a new parent symlink must not inherit the old generic admission."""
+    from exomem import document_containers, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    monkeypatch.setattr(find_corpus, "CACHE", find_corpus.FrontmatterCache())
+    parent = tmp_path / "notes"
+    parent.mkdir()
+    path = parent / "ordinary.md"
+    _page(path, "Ordinary")
+    assert document_containers.parent_binding_for_path(tmp_path, "notes/ordinary.md") is None
+    parent.rename(tmp_path / "moved")
+    parent.symlink_to(tmp_path / "moved", target_is_directory=True)
+    assert reserved_paths.inspect_generic_version(tmp_path, "notes/ordinary.md") is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError):
+        document_containers.parent_binding_for_path(tmp_path, "notes/ordinary.md")
+
+
+def test_generic_read_witness_cannot_describe_a_write_after_the_consumed_image(tmp_path, monkeypatch):
+    """A separate before/after pathname probe would certify the wrong full image across this read boundary."""
+    from exomem import held_fs, reserved_paths
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    path = tmp_path / "ordinary.md"
+    path.write_bytes(b"first image")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    read = filesystem_type.read
+    def changed(self, file, **kwargs):
+        result = read(self, file, **kwargs)
+        path.write_bytes(b"other image")
+        return result
+    monkeypatch.setattr(filesystem_type, "read", changed)
+    snapshot = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+    assert snapshot.data == b"first image"
+    assert snapshot.version_witness.version is None
+
+
+def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(tmp_path, monkeypatch):
+    """A sandbox may allow the canonical reader while refusing the optional O_PATH closing probe."""
+    from exomem import document_containers, held_fs, reserved_paths, runtime_resources
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    monkeypatch.setattr(find_corpus, "CACHE", find_corpus.FrontmatterCache())
+    path = tmp_path / "ordinary.md"
+    _page(path, "Ordinary")
+    if reserved_paths.inspect_generic_version(tmp_path, path.name) is None:
+        pytest.skip("requires a descriptor-qualified native ext filesystem")
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    parent = filesystem_type.parent
+    def unavailable(self, relative, **kwargs):
+        if kwargs.get("access") == "identity":
+            return held_fs.HeldResult(error=held_fs.HeldFsError("CAPABILITY_UNAVAILABLE", "metadata closing is unavailable"))
+        return parent(self, relative, **kwargs)
+    monkeypatch.setattr(filesystem_type, "parent", unavailable)
+    snapshot = reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)
+    assert snapshot.data == path.read_bytes() and snapshot.version_witness.version is None
+    assert document_containers.parent_binding_for_path(tmp_path, path.name) is None
+    for failure in (runtime_resources.PreparationBudgetExceeded, TimeoutError):
+        def exhausted(self, relative, *, failure=failure, **kwargs):
+            if kwargs.get("access") == "identity":
+                raise failure("the request ended during metadata validation")
+            return parent(self, relative, **kwargs)
+        monkeypatch.setattr(filesystem_type, "parent", exhausted)
+        with pytest.raises(failure):
+            reserved_paths.inspect_generic_version(tmp_path, path.name)
+        with pytest.raises(failure):
+            reserved_paths.read_generic_bytes(tmp_path, path.name, version_witness=True)

@@ -156,6 +156,10 @@ def default_slots() -> list[ResourceSlot]:
     from . import bm25, find
     from . import embeddings as e
 
+    def release_find_caches():
+        facts = find.cache_status()["pages"].get("classification_facts", 0)
+        return any(find.release_idle_ram_caches().values()) or bool(facts)
+
     return [
         ResourceSlot(
             "embeddings", lambda: e._MODEL is not None,
@@ -192,10 +196,11 @@ def default_slots() -> list[ResourceSlot]:
         _quiet_cache_slot(
             "find-ram-caches",
             lambda: any(
-                section.get("entries", 0) for section in find.cache_status().values()
+                section.get("entries", 0) or section.get("classification_facts", 0)
+                for section in find.cache_status().values()
             ),
-            lambda: any(find.release_idle_ram_caches().values()),
-            find.cache_activity,
+            release_find_caches,
+            lambda: (find.cache_activity(), find.cache_status()["pages"].get("classification_updates", 0)),
         ),
     ]
 

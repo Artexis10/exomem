@@ -194,12 +194,21 @@ class ReservedPathHit:
 
 
 @dataclass(frozen=True, slots=True)
+class GenericFileVersion:
+    """A current generic vault identity and optional aged, descriptor-qualified version."""
+
+    vault_identity: held_fs.StableIdentity
+    version: held_fs.FileVersion | None
+
+
+@dataclass(frozen=True, slots=True)
 class GenericFileSnapshot:
     """Bytes and metadata read from the exact retained generic leaf."""
 
     data: bytes
     identity: held_fs.StableIdentity
     mtime: float
+    version_witness: GenericFileVersion | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1376,6 +1385,7 @@ def read_generic_bytes(
     *,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    version_witness: bool = False,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -1395,7 +1405,7 @@ def read_generic_bytes(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
-            vault_root, value, identities=current, physical=physical
+            vault_root, value, identities=current, physical=physical, version_witness=version_witness
         )
 
 
@@ -1405,6 +1415,7 @@ def _read_generic_bytes_held(
     *,
     identities: IdentityCatalogue,
     physical: bool = False,
+    version_witness: bool = False,
 ) -> GenericFileSnapshot:
 
     parent_path, leaf = _leaf_spelling(value, physical=physical)
@@ -1427,6 +1438,16 @@ def _read_generic_bytes_held(
                 descriptor_id = identities.descriptor_for(file.identity) if identities else None
                 if descriptor_id is not None or file.identity.link_count != 1:
                     raise ReservedPathLeafError("RESERVED_PATH")
+                started, before, qualified = 0, None, False
+                if version_witness:
+                    try:
+                        qualified = file.version_witness_supported()
+                        if qualified:
+                            started, before = time.time_ns(), file.version()
+                    except TimeoutError:
+                        raise
+                    except (OSError, held_fs.HeldFsError, NotImplementedError):
+                        qualified = False
                 read_result = filesystem.read(file)
                 if not read_result.ok:
                     code = read_result.error.code if read_result.error is not None else "IO_REFUSED"
@@ -1439,7 +1460,73 @@ def _read_generic_bytes_held(
                 except OSError as error:
                     raise ReservedPathLeafError("IO_REFUSED") from error
                 _require_current_generic_directory(filesystem, parent)
-                return GenericFileSnapshot(read_result.require(), file.identity, mtime)
+                witness = None
+                if version_witness:
+                    version = None
+                    if qualified:
+                        try:
+                            after = file.version()
+                            if before == after and after.size == len(read_result.require()) and _aged_generic_version(after, started):
+                                _require_current_generic_version(vault_root, value, filesystem, parent_path, leaf, parent, file, after)
+                                version = after
+                        except TimeoutError:
+                            raise
+                        except (OSError, held_fs.HeldFsError, NotImplementedError):
+                            pass  # Optional metadata cannot turn a successful canonical read into a refusal.
+                    witness = GenericFileVersion(filesystem.root_identity, version)
+                return GenericFileSnapshot(read_result.require(), file.identity, mtime, witness)
+
+
+def _aged_generic_version(version: held_fs.FileVersion, started: int) -> bool:
+    from .vault import GENERATION_RACY_WINDOW_NS
+
+    return started - max(version.mtime_ns, version.change_time_ns) > GENERATION_RACY_WINDOW_NS
+
+
+def _require_current_generic_version(root, value, filesystem, parent_path, leaf, parent, file, version):
+    """Reopen the complete parent from the held root, and consume current private identities."""
+    with _generic_identity_catalogue_scope(root, value) as identities:
+        _refuse_private_identity(parent.identity, identities)
+        _refuse_private_identity(file.identity, identities)
+        with filesystem.parent(parent_path, access="identity").require() as current_parent:
+            _refuse_private_identity(current_parent.identity, identities)
+            if _identity_key(current_parent.identity) != _identity_key(parent.identity):
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            with filesystem.file(current_parent, leaf, access="identity").require() as current:
+                _refuse_private_identity(current.identity, identities)
+                if current.version() != version:
+                    raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+
+def inspect_generic_version(vault_root: Path, value: object) -> GenericFileVersion | None:
+    """Inspect a freshly admitted generic leaf without reading its bytes.
+
+    Only a descriptor-qualified native ext filesystem supplies a version.
+    Recent, unknown and unsupported states use the ordinary full reader.
+    As with read_bounded_guarded_generation, shared mmap writes and writes
+    spanning the racy window remain outside the timestamp witness.
+    """
+    request_budget.checkpoint()
+    try:
+        with _generic_identity_catalogue_scope(vault_root, value) as identities:
+            parent_path, leaf = _leaf_spelling(value)
+            with held_fs.acquire(Path(vault_root)).require() as filesystem:
+                with filesystem.parent(parent_path).require() as parent:
+                    _refuse_private_identity(parent.identity, identities)
+                    with filesystem.file(parent, leaf).require() as file:
+                        _require_current_generic_directory(filesystem, parent)
+                        _refuse_private_identity(file.identity, identities)
+                        started = time.time_ns()
+                        version = file.version()
+                        if file.identity.link_count != 1 or not file.version_witness_supported() or not _aged_generic_version(version, started):
+                            return None
+                        _require_current_generic_version(vault_root, value, filesystem, parent_path, leaf, parent, file, version)
+                        request_budget.checkpoint()
+                        return GenericFileVersion(filesystem.root_identity, version)
+    except TimeoutError:
+        raise
+    except (OSError, held_fs.HeldFsError, ReservedPathLeafError, NotImplementedError):
+        return None
 
 
 

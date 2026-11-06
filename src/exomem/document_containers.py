@@ -356,6 +356,7 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if raw is None:
         raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
     in_subtree = in_payload_tree(path)
+    classification_cache = witness = digest = None
     if raw is None:
         if classified.disposition is not reserved_paths.PathDisposition.ORDINARY:
             if in_subtree:
@@ -367,8 +368,27 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
                 (root / page_path).lstat()
             except FileNotFoundError:
                 return None
+        # Only unstaged canonical companions supply filesystem absence facts.
+        if not in_subtree and content is None and not _OVERLAY.get():
+            from . import find_corpus
+
+            if find_corpus.CACHE.container_absence_enabled():
+                classification_cache = find_corpus.CACHE
+                current = reserved_paths.inspect_generic_version(root, page_path)
+                if current is not None:
+                    fact = classification_cache.container_absence(root / page_path, current.vault_identity)
+                    if fact is not None and fact.version == current.version:
+                        if source_release.capture_active(capture_root):
+                            source_release.observed_content(capture_root, page_path, fact.sha256)
+                        classification_cache.hit_container_absence(root / page_path, current.vault_identity, fact)
+                        return None
         try:
-            raw = reserved_paths.read_generic_bytes(root, page_path).data
+            if classification_cache is None:
+                raw = reserved_paths.read_generic_bytes(root, page_path).data
+            else:
+                snapshot = reserved_paths.read_generic_bytes(root, page_path, version_witness=True)
+                raw, witness = snapshot.data, snapshot.version_witness
+                del snapshot
         except (reserved_paths.ReservedPathLeafError, RuntimeError):
             # Inventory loss can precede a typed read error; only physical absence clears an ordinary claim.
             if not in_subtree:
@@ -377,8 +397,17 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
                 except FileNotFoundError:
                     return None
             raise
+    if classification_cache is not None or source_release.capture_active(capture_root):
+        digest = hashlib.sha256(raw).hexdigest()
     if source_release.capture_active(capture_root):
-        source_release.observed_content(capture_root, page_path, hashlib.sha256(raw).hexdigest())
+        source_release.observed_content(capture_root, page_path, digest)
+    if classification_cache is not None and witness is not None:
+        fact = classification_cache.container_absence(root / page_path, witness.vault_identity, digest=digest)
+        if fact is not None and fact.sha256 == digest:
+            classification_cache.hit_container_absence(root / page_path, witness.vault_identity, fact)
+            if fact.version != witness.version:
+                classification_cache.remember_container_absence(root / page_path, witness.vault_identity, digest, witness.version)
+            return None
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -393,6 +422,8 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if not in_subtree:
         # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
         if "container_member" not in fm:
+            if classification_cache is not None and witness is not None:
+                classification_cache.remember_container_absence(root / page_path, witness.vault_identity, digest, witness.version)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:

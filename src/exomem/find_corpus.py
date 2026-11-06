@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from . import freshness, privacy_log, request_budget
+from . import freshness, held_fs, privacy_log, request_budget
 from .find_types import ParsedPage
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import relative_posix
@@ -43,6 +43,7 @@ EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 _DEFAULT_PAGE_CACHE_SIZE = 4096
+_DEFAULT_PAGE_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def _page_cache_size() -> int:
@@ -59,7 +60,7 @@ def _page_cache_size() -> int:
 def _page_cache_bytes() -> int | None:
     from . import mode
 
-    default = 32 * 1024 * 1024 if mode.service_profile_enabled() else None
+    default = _DEFAULT_PAGE_CACHE_BYTES if mode.service_profile_enabled() else None
     raw = os.environ.get("EXOMEM_PAGE_CACHE_BYTES")
     if raw is None or not raw.strip():
         return default
@@ -95,6 +96,25 @@ def _page_retained_bytes(page: ParsedPage) -> int:
     return total
 
 
+@dataclass(slots=True)
+class _ContainerAbsence:
+    """A semantic owner's full-image negative fact, with no page or authority."""
+
+    sha256: str
+    version: held_fs.FileVersion | None
+    weight: int = 0
+
+
+def _container_absence_weight(key, fact):
+    values = (*key, key, fact, fact.sha256, fact.version, fact.weight)
+    if fact.version is not None:
+        version = fact.version
+        identity = version.identity
+        values += (identity, identity.device, identity.inode, identity.kind, identity.link_count,
+                   version.size, version.mtime_ns, version.change_time_ns)
+    return sum(sys.getsizeof(value) for value in values)
+
+
 @dataclass
 class FrontmatterCache:
     """Per-process cache invalidated by file identity or content changes."""
@@ -106,6 +126,9 @@ class FrontmatterCache:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     _weights: dict[Path, int] = field(default_factory=dict, repr=False)
     _retained_bytes: int = field(default=0, repr=False)
+    _container_absence: OrderedDict[tuple[int, int, str], _ContainerAbsence] = field(default_factory=OrderedDict, repr=False)
+    _classification_payload_bytes: int = field(default=0, repr=False)
+    _classification_updates: int = field(default=0, repr=False)
     #: Served-from-cache count: the use signal the idle reaper watches.
     hits: int = 0
 
@@ -116,6 +139,9 @@ class FrontmatterCache:
                 "entries": len(self.entries),
                 "body_chars": sum(len(page.body) for page in self.entries.values()),
                 "hits": int(self.hits),
+                "classification_facts": len(self._container_absence),
+                "classification_bytes": self._classification_bytes(),
+                "classification_updates": self._classification_updates,
             }
 
     def clear(self) -> None:
@@ -140,20 +166,102 @@ class FrontmatterCache:
             self._signatures.clear()
             self._weights.clear()
             self._retained_bytes = 0
+            self._container_absence.clear()
+            self._classification_payload_bytes = 0
+
+    def _classification_bytes(self):
+        return self._classification_payload_bytes + (sys.getsizeof(self._container_absence) if self._container_absence else 0)
+
+    def _discard_fact(self, key):
+        fact = self._container_absence.pop(key, None)
+        if fact is not None:
+            self._classification_payload_bytes -= fact.weight
+        if not self._container_absence:
+            self._container_absence.clear()
+        return fact is not None
+
+    def _discard_body(self, path: Path) -> bool:
+        removed = self.entries.pop(path, None) is not None
+        self._signatures.pop(path, None)
+        self._retained_bytes -= self._weights.pop(path, 0)
+        return removed
 
     def _discard(self, path: Path) -> bool:
         with self._lock:
-            removed = self.entries.pop(path, None) is not None
-            self._signatures.pop(path, None)
-            self._retained_bytes -= self._weights.pop(path, 0)
+            removed = self._discard_body(path)
+            while (key := next((key for key in self._container_absence if key[2] == os.fspath(path)), None)) is not None:
+                removed = self._discard_fact(key) or removed
             return removed
 
     def _evict_to_limits(self, byte_limit: int | None) -> None:
         with self._lock:
+            self._measure_bodies(byte_limit)
             while len(self.entries) > _page_cache_size() or (
-                byte_limit is not None and self._retained_bytes > byte_limit
+                byte_limit is not None and self._retained_bytes + self._classification_bytes() > byte_limit
             ):
-                self._discard(next(iter(self.entries)))
+                if not self.entries:
+                    break
+                self._discard_body(next(iter(self.entries)))
+            fact_limit = _DEFAULT_PAGE_CACHE_BYTES if byte_limit is None else byte_limit
+            while self._container_absence and self._classification_bytes() > fact_limit:
+                self._discard_fact(next(iter(self._container_absence)))
+
+    def _measure_bodies(self, byte_limit):
+        if byte_limit is not None and len(self._weights) != len(self.entries):
+            self._weights = {key: _page_retained_bytes(page) for key, page in self.entries.items()}
+            self._retained_bytes = sum(self._weights.values())
+
+    def container_absence_enabled(self) -> bool:
+        with self._lock:
+            limit = _page_cache_bytes()
+            self._evict_to_limits(limit)
+            return limit != 0
+
+    def container_absence(self, path: Path, vault_identity: held_fs.StableIdentity, *, digest: str | None = None) -> _ContainerAbsence | None:
+        with self._lock:
+            self._evict_to_limits(_page_cache_bytes())
+            key = vault_identity.device, vault_identity.inode, os.fspath(path)
+            fact = self._container_absence.get(key)
+            if fact is not None and digest is not None and fact.sha256 != digest:
+                self._discard_fact(key)
+                return None
+            return fact
+
+    def remember_container_absence(self, path: Path, vault_identity: held_fs.StableIdentity,
+                                   digest: str, version: held_fs.FileVersion | None) -> None:
+        key = vault_identity.device, vault_identity.inode, os.fspath(path)
+        fact = _ContainerAbsence(digest, version)
+        fact.weight = _container_absence_weight(key, fact)
+        with self._lock:
+            byte_limit = _page_cache_bytes()
+            self._measure_bodies(byte_limit)
+            limit = _DEFAULT_PAGE_CACHE_BYTES if byte_limit is None else byte_limit
+            if limit == 0:
+                self._evict_to_limits(0)
+                return
+            self._discard_fact(key)
+            # Admit the old table, replacement table, resize overlap and new record before insertion.
+            while True:
+                bodies = self._retained_bytes if byte_limit is not None else 0
+                peak = bodies + self._classification_payload_bytes + fact.weight + 3 * sys.getsizeof(self._container_absence) + 512
+                if peak <= limit:
+                    break
+                if byte_limit is not None and self.entries:
+                    self._discard_body(next(iter(self.entries)))
+                elif self._container_absence:
+                    self._discard_fact(next(iter(self._container_absence)))
+                else:
+                    return
+            self._container_absence[key] = fact
+            self._classification_payload_bytes += fact.weight
+            self._classification_updates += 1
+
+    def hit_container_absence(self, path: Path, vault_identity: held_fs.StableIdentity, fact: _ContainerAbsence) -> None:
+        key = vault_identity.device, vault_identity.inode, os.fspath(path)
+        with self._lock:
+            if self._container_absence.get(key) is fact:
+                self._container_absence.move_to_end(key)
+                self.hits += 1
 
     def invalidate_paths(self, vault_root: Path, rel_paths: Iterable[str]) -> int:
         """Drop the entries a receipt names, and only those. Returns the count.
@@ -190,6 +298,11 @@ class FrontmatterCache:
             if resolved == anchor or anchor in resolved.parents:
                 self._discard(path)
                 dropped += 1
+        with self._lock:
+            prefix = os.fspath(anchor) + os.sep
+            while (key := next((key for key in self._container_absence if key[2] == os.fspath(anchor) or key[2].startswith(prefix)), None)) is not None:
+                self._discard_fact(key)
+                dropped += 1
         return dropped
 
     def stale_paths(
@@ -213,14 +326,18 @@ class FrontmatterCache:
         for rel in rel_paths:
             for candidate in _cache_key_candidates(root, rel):
                 cached = self.entries.get(candidate)
-                if cached is None:
+                with self._lock:
+                    has_facts = any(key[2] == os.fspath(candidate) for key in self._container_absence)
+                if cached is None and not has_facts:
                     continue
                 if digests is not None and rel in digests:
                     digest = digests[rel]
                 else:
                     content = _read_page_bytes(candidate, root)
                     digest = None if content is None else hashlib.sha256(content).hexdigest()
-                if digest is None or cached.snapshot_hash != digest:
+                with self._lock:
+                    facts_changed = any(fact.sha256 != digest for key, fact in self._container_absence.items() if key[2] == os.fspath(candidate))
+                if digest is None or (cached is not None and cached.snapshot_hash != digest) or facts_changed:
                     stale.append(rel)
                     break
         return tuple(stale)
@@ -251,9 +368,7 @@ class FrontmatterCache:
                     if cached_path in self._signatures
                 }
             byte_limit = _page_cache_bytes()
-            if byte_limit is not None and len(self._weights) != len(self.entries):
-                self._weights = {key: _page_retained_bytes(page) for key, page in self.entries.items()}
-                self._retained_bytes = sum(self._weights.values())
+            self._measure_bodies(byte_limit)
             cached = self.entries.get(path)
             if cached and self._signatures.get(path) == signature:
                 if byte_limit is not None:
@@ -267,7 +382,7 @@ class FrontmatterCache:
         parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
         weight = _page_retained_bytes(parsed) if parsed is not None and byte_limit is not None else 0
         with self._lock:
-            self._discard(path)
+            self._discard_body(path)
             if parsed is not None and (byte_limit is None or weight <= byte_limit):
                 self.entries[path] = parsed
                 self._signatures[path] = signature

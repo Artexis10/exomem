@@ -182,6 +182,14 @@ class HeldFile:
     def version(self) -> FileVersion:
         raise NotImplementedError
 
+    def version_witness_supported(self) -> bool:
+        """Whether this exact descriptor supports the aged ordinary-write witness.
+
+        Other filesystems keep full content reads; this does not promise to
+        detect writes outside the existing inode timestamp contract.
+        """
+        return False
+
 
 class HeldFilesystem:
     """A retained vault-root anchor with handle-relative leaf operations."""
@@ -214,6 +222,8 @@ class HeldFilesystem:
         creator can split a folder by case or Unicode form. `scratch=True` marks
         a randomly named working folder that the caller removes again: it cannot
         collide, so it skips the parent listing that the check costs.
+        `access="identity"` may provide a metadata-only complete rooted open;
+        unsupported backends refuse it rather than weaken descendant checks.
         """
         raise NotImplementedError
 
