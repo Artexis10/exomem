@@ -267,11 +267,13 @@ The concurrent and settled-state reports below bind to its corrected candidate.
   quiesces, so drift is audited against the Markdown rather than asserted by construction
   from the same code path that produced it.
   The 2026-11-06 baseline and candidate checks both ended current, with zero queued graph paths and zero drift findings.
-- [ ] 6.3 Full suite green; latency gate still green.
+- [x] 6.3 Full suite green; latency gate still green.
   The local `scripts/semantic_write_latency.py --check` passed canonical commit and public-write checks on `fc0d3d26` and `b5e6b2c9`.
   Both failed the 8,000-page immediate keyword and hybrid read p95 limits.
-  These matching local failures do not establish a new regression; full release qualification remains open.
-  Its workflow skipped the full semantic-latency gate; those skips are not qualification evidence.
+  These matching local failures did not establish a new regression, and the PR workflow skipped the full semantic-latency gate.
+  Release qualification closes the task. Full run 42295026758 on `756c6a13`, the tested parent of the v0.162.0 release commit, passed 148 jobs.
+  The run includes the required gate, the concurrent-writer graph convergence job and the 2k and 8k semantic write latency gate.
+  The release commit adds only release metadata and generated packages.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
   The repeated source inventory confirms that only the writer terminal opts into the availability check.
