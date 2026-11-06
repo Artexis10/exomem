@@ -1714,7 +1714,9 @@ def inspect_legacy_tracker(
     key = _reference_key(root, raw)
     if key is None:
         raise _spelling_reference_error(raw)
-    if not authorize(key):
+    with call_spans.span("records.inventory_legacy_authorize"):
+        allowed = authorize(key)
+    if not allowed:
         # A tracker is not a manifest, so "pass the `_collection.md` path" would
         # be wrong advice here; "no such tracker" is the honest refusal, and it
         # is what an absent one answers below.
@@ -1725,7 +1727,9 @@ def inspect_legacy_tracker(
         if _absent_leaf(root, key):
             raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found") from error
         raise
-    if not authorize(rel):
+    with call_spans.span("records.inventory_legacy_authorize"):
+        allowed = authorize(rel)
+    if not allowed:
         raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     try:
         data, _guard = vault.read_bounded_guarded_bytes(root, rel, limit=_MAX_MANIFEST_BYTES)
