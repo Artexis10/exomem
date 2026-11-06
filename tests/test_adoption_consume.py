@@ -13,6 +13,7 @@ import pytest
 
 from exomem import (
     _held_fs_posix,
+    adopt,
     adoption_consume,
     adoption_run,
     cloud_import_job,
@@ -21,6 +22,9 @@ from exomem import (
     request_budget,
     state_migration,
     state_paths,
+)
+from exomem import (
+    note as note_module,
 )
 from exomem.cli_progress import Progress
 
@@ -237,6 +241,27 @@ def test_a_text_copy_stays_when_its_source_no_longer_holds_the_text(tmp_path: Pa
     assert residual["summary"] == "1 file was not filed: 1 with a Source page that no longer holds the text."
     actions = {action["action"]: action["description"] for action in finished["next_actions"]}
     assert "review-residual" in actions and "Nothing unfiled is left to lose" not in actions["discard"]
+
+
+def test_a_note_that_cites_a_crlf_text_source_leaves_its_text_exact_so_finish_removes_the_copy(tmp_path: Path) -> None:
+    """The back-reference a note adds to its Source must not change the Source's text, or the copy could never go."""
+    vault = _vault(tmp_path)
+    crlf = b"# Plan\r\n\r\nInvented plan for the week.\r\nA second line.\r\n"
+    staged = _stage(tmp_path, vault, {"plan.md": crlf})
+    run_id, _plan_id, reply = _adopt(vault, staged["start_path"])
+    source = vault / _outcome(reply, staged, "plan.md")["target_path"]
+
+    cited = note_module.note(
+        vault, content="## Finding\n\nA conclusion drawn from the plan.\n", note_type="insight",
+        title="Plan conclusion", status="draft", sources=[source.relative_to(vault).with_suffix("").as_posix()], today=TODAY)
+
+    page = source.read_bytes().decode("utf-8")
+    assert "ingested_into" in page and cited.path.removesuffix(".md") in page
+    assert adopt.text_source_body(page).encode("utf-8") == crlf
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert not _staged(vault, staged, "plan.md").exists()
+    assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["unfiled"]["files"] == 0
 
 
 def test_a_text_item_that_still_owes_its_note_keeps_its_staged_copy_through_a_partial_finish(tmp_path: Path) -> None:
