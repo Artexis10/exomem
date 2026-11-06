@@ -648,6 +648,45 @@ def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
     assert compact["graph_sync_remediation"]
 
 
+@pytest.mark.parametrize("repair", ["settled", "queued", "withdrawn"])
+def test_a_covering_acknowledgement_does_not_hide_outstanding_graph_repair(
+    vault: Path, repair: str
+) -> None:
+    """Committed bytes stay successful while queued or withdrawn graph work stays pending."""
+    from exomem import index_sync
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    manager = LeaseManager(LeaseConfig(state_dir=vault / "state"))
+
+    def leaf(root: Path, **_kwargs: Any) -> dict[str, Any]:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(root / PAGE_A, _page("A", "An updated claim."))],
+            vault_root=root,
+            post_commit_fanout=False,
+        )
+        assert index_sync.publish_corpus_delta(root, changed=[root / PAGE_A])
+        index_sync.drain_graph_work(root)
+        committed = graph_sync.read_checkpoint(root)
+        acknowledged = graph_sync.acknowledged_checkpoint(root)
+        assert committed is not None and acknowledged is not None
+        assert acknowledged.covers(committed)
+        assert EpistemicGraphIndex(root).available()
+        if repair == "queued":
+            deferred_index.add_graph(root, [PAGE_A], generation=committed.generation)
+        elif repair == "withdrawn":
+            EpistemicGraphIndex(root).suspend_reads()
+        return {"status": "committed", "mutated": True}
+
+    compact = manager.invoke(SimpleNamespace(name="remember", read_only=False, leaf=leaf), (vault,), {})
+
+    assert compact["status"] == "committed"
+    assert compact["graph_sync"] == ("completed" if repair == "settled" else "pending")
+    if repair != "settled":
+        assert compact["graph_sync_code"] == (
+            "GRAPH_SYNC_REPAIR_QUEUED" if repair == "queued" else "GRAPH_SYNC_UNAVAILABLE"
+        )
+
+
 def test_a_settled_outcome_is_reported_rather_than_downgraded_to_pending(
     vault: Path,
 ) -> None:
