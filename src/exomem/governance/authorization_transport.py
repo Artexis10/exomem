@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import jsonrpc_message_adapter
 
 from .. import auth_sessions
+from ..command_surface import mcp_request_id
+from ..log_events import log_event
 from . import authorization_sessions, connector_boundary
 from . import principal as principal_module
 from .authorization_request import (
@@ -48,6 +51,7 @@ _REQUEST_CARRIER: ContextVar[CredentialCarrier | None] = ContextVar(
 ASGIMessage = dict[str, Any]
 Receive = Callable[[], Awaitable[ASGIMessage]]
 Send = Callable[[ASGIMessage], Awaitable[None]]
+_call_log = logging.getLogger("exomem.calls")
 
 
 class AtomicMcpBatchRefusal(RuntimeError):
@@ -708,6 +712,7 @@ class AuthorizationSessionMiddleware(Middleware):
         context: MiddlewareContext[mcp.types.CallToolRequestParams],
         call_next,
     ):
+        entry_started = time.perf_counter()
         arguments = dict(context.message.arguments or {})
         request_context = context.fastmcp_context.request_context
         protected_carrier = None
@@ -751,17 +756,32 @@ class AuthorizationSessionMiddleware(Middleware):
         sanitized_message = context.message.model_copy(
             update={"arguments": arguments}
         )
-        with principal_module.request_scope(bound):
-            result = await call_next(context.copy(message=sanitized_message))
+        entry_ms = (time.perf_counter() - entry_started) * 1000
+        post_started = None
         try:
-            # A result computed under changed admission cannot expose its old
-            # contributors. The caller retries under the current host revision.
-            changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
-            limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
-            if not await auth_sessions.origin_session_active(bound) or changed and limited:
-                raise AuthorizationContextUnavailable
-        except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
-            raise ToolError("request authority changed before result consumption") from None
+            with principal_module.request_scope(bound):
+                result = await call_next(context.copy(message=sanitized_message))
+            post_started = time.perf_counter()
+            try:
+                # A result computed under changed admission cannot expose its old
+                # contributors. The caller retries under the current host revision.
+                changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
+                limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
+                if not await auth_sessions.origin_session_active(bound) or changed and limited:
+                    raise AuthorizationContextUnavailable
+            except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
+                raise ToolError("request authority changed before result consumption") from None
+        finally:
+            # CallTrace starts inside this middleware; exclude its entire downstream call.
+            post_ms = (time.perf_counter() - post_started) * 1000 if post_started is not None else None
+            try:
+                log_event(_call_log, logging.INFO, "authorization_observation", fields={
+                    "request_id": mcp_request_id(),
+                    "entry_ms": round(entry_ms, 2),
+                    "post_ms": round(post_ms, 2) if post_ms is not None else None,
+                })
+            except Exception:  # noqa: BLE001 - observation must not change the call outcome
+                pass
         return result
 
     async def _read_content(self, context, call_next, error_type):

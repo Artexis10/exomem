@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware.middleware import Middleware
 from starlette.middleware import Middleware as ASGIMiddleware
 from starlette.testclient import TestClient
 
@@ -108,6 +113,66 @@ def test_sanitized_http_body_replays_once_then_preserves_disconnect() -> None:
     }
     assert disconnected == {"type": "http.disconnect"}
     assert calls == 1
+
+
+@pytest.mark.parametrize("downstream_failure", [False, True])
+def test_authorization_clock_excludes_tool_work_and_joins_http_request(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    downstream_failure: bool,
+) -> None:
+    clock = [0.0]
+
+    def tick() -> float:
+        clock[0] += 0.001
+        return clock[0]
+
+    monkeypatch.setattr(
+        authorization_transport, "time",
+        SimpleNamespace(time=time.time, perf_counter=tick),
+    )
+    # Supply a resolved identity; the transport cases below exercise admission refusals.
+    monkeypatch.setattr(
+        authorization_transport.principal_module, "resolve_mcp_principal",
+        lambda: authorization_transport.principal_module.owner_principal(surface="mcp"),
+    )
+    caplog.set_level(logging.INFO, logger="exomem.calls")
+    caplog.set_level(logging.INFO, logger="exomem.access")
+    mcp = server.ExomemFastMCP("authorization-clock")
+    mcp.add_middleware(authorization_transport.AuthorizationSessionMiddleware(vault))
+    if downstream_failure:
+        class Unavailable(Middleware):
+            async def on_call_tool(self, context, call_next):
+                clock[0] += 100
+                raise ToolError("downstream unavailable")
+
+        mcp.add_middleware(Unavailable())
+
+    @mcp.tool(name="ask_memory")
+    def answer() -> str:
+        clock[0] += 100
+        return "done"
+
+    with TestClient(mcp.http_app(
+        stateless_http=True, json_response=True,
+        middleware=[ASGIMiddleware(AccessLogMiddleware)],
+    )) as client:
+        response = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 45, "method": "tools/call",
+            "params": {"name": "ask_memory", "arguments": {}},
+        }, headers={"accept": "application/json, text/event-stream"})
+
+    assert response.json()["result"]["isError"] is downstream_failure, response.text
+    observations = [record.fields for record in caplog.records
+                    if getattr(record, "event", None) == "authorization_observation"]
+    [observed] = observations
+    [http] = [record.fields for record in caplog.records
+              if getattr(record, "event", None) == "http_request"]
+    assert observed["request_id"] == http["request_id"]
+    assert 0 < observed["entry_ms"] < 1000
+    if downstream_failure:
+        assert observed["post_ms"] is None
+    else:
+        assert 0 < observed["post_ms"] < 1000
 
 
 def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
