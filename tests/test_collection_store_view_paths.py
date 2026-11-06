@@ -23,7 +23,8 @@ from test_governance_egress import (
 from exomem import reserved_paths
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import authority
+from exomem.collection_store import authority, ownership
+from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
 from exomem.governance import egress
 from exomem.governance.principal import owner_principal, request_scope
@@ -168,6 +169,24 @@ def test_another_casing_of_the_knowledge_base_folder_is_refused_on_a_case_foldin
     monkeypatch.setenv("EXOMEM_CASEFOLD_PATHS", "1")
     with preview_store(vault.root, vault.handle), pytest.raises(ValueError, match="COLLECTION_VIEW_PATH"):
         authority.refuse_view_paths(vault.root, (OPEN.replace("Knowledge Base", "knowledge base"),), ValueError)
+
+
+@pytest.mark.parametrize("spell", [
+    lambda path: f"./{path}",
+    lambda path: path.replace("/", "//", 1),
+    lambda path: path.replace("/", "\\"),
+], ids=["dot-slash", "doubled-slash", "backslash"])
+def test_the_ownership_proof_names_a_withheld_view_under_every_spelling_of_its_path(vault, spell):
+    """A spelling the proof failed to fold would read as an ordinary file that any write may reach."""
+    _add_secret(vault)
+    proof = ownership.current(vault.root, conn=vault.connection, private=True)
+    assert proof.owner(vault.root, spell(SECRET))["collection_id"] == CID
+
+
+def test_the_ownership_proof_refuses_a_path_that_names_no_vault_location_under_the_records_layer(vault):
+    proof = ownership.current(vault.root, conn=vault.connection, private=True)
+    with pytest.raises(CollectionStoreError, match="invalid canonical projection path"):
+        proof.owner(vault.root, "Knowledge Base/Records/../../escape.md")
 
 
 def test_file_tools_keep_file_collections_and_open_no_store_without_a_marker(tmp_path, monkeypatch):

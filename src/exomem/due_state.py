@@ -93,7 +93,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import call_spans
 from . import promotions as promotions_module
@@ -105,6 +105,9 @@ from .collection_store.preview import (
     selected_writer,
 )
 from .planning_values import PlanningValues
+
+if TYPE_CHECKING:
+    from .structured_collections import CollectionManifest
 
 log = logging.getLogger(__name__)
 
@@ -1376,8 +1379,13 @@ def _collection_observation_coverages(
     *,
     authorize_path: Any,
     now: dt.datetime | None = None,
+    manifests: Mapping[str, CollectionManifest] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Share immutable projection data and lazy routing within one canonical read operation."""
+    """Share immutable projection data and lazy routing within one canonical read operation.
+
+    ``manifests`` are the caller's already loaded manifests by path, read under this same
+    scope; the version hash of each is compared with its claim instead of loading it again.
+    """
     paths = tuple(manifest_paths)
     if not paths:
         return {}
@@ -1391,17 +1399,23 @@ def _collection_observation_coverages(
     routing = _routing_snapshot(vault_root, payload, authorize_path)
     return {
         path: _observation_coverage(
-            vault_root, path, payload, authorize_path, routing, effective_now
+            vault_root, path, payload, authorize_path, routing, effective_now, manifests
         )
         for path in paths
     }
 
 
-def _observation_coverage(vault_root, manifest_path, payload, authorize_path, routing, effective_now):
+def _observation_coverage(
+    vault_root, manifest_path, payload, authorize_path, routing, effective_now, manifests=None
+):
     """Compose one collection using the batch's current operation and decoded projection."""
     categories = payload.get("categories")
     claims = payload.get("claims")
-    manifest = _load_manifest(Path(vault_root), manifest_path)
+    manifest = (
+        _load_manifest(Path(vault_root), manifest_path)
+        if manifests is None
+        else manifests[manifest_path]
+    )
     claim_row = claims.get(manifest_path) if isinstance(claims, Mapping) else None
     pages = (
         categories.get(_OBSERVATION_FAMILY) or {}
