@@ -8,6 +8,7 @@ evidence to reconstruct progress without a machine-local coordinator.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ from .collection_profiles import PLANNING_PROFILE
 from .kbdir import kb_dirname
 from .vault import (
     BatchWriteError,
+    ContentHashMismatchError,
     DefiniteNoEffect,
     PathGuard,
     PathGuardError,
@@ -91,9 +93,12 @@ REMOVE_RELATION_STEP_KIND: Final[str] = "remove-relation"
 #: The receipt outcomes that record a committed leaf; a `failed` receipt records none.
 # nosemgrep: ep-word-set -- the closed receipt outcomes this module writes and reconstructs.
 COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "recovered-committed"})
-#: Curation's own recovery-proof reason for a stopped store-sealed episode attempt, beside the native
-#: `DefiniteNoEffect.DESTINATION_EXISTS`. Curation owns it, so it lives here and not in `vault`.
+#: Curation's own recovery-proof reasons for a stopped episode attempt, beside the native
+#: `DefiniteNoEffect.DESTINATION_EXISTS`: a store-sealed step whose store holds no transaction, and a
+#: native preservation step whose publication record never left intent. Curation owns them, so they
+#: live here and not in `vault`.
 RECOVERY_STORE_TRANSACTION_ABSENT: Final[str] = "store_transaction_absent"
+RECOVERY_PUBLICATION_NOT_STARTED: Final[str] = "publication_not_started"
 # The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
@@ -3528,12 +3533,15 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
 def _no_effect_evidence(reason: Any, *, run: str, step: Mapping, binding: Mapping, operation: str) -> dict | None:
     """The exact evidence a no-effect terminal of this step carries for `reason`; None when it does not fit.
 
-    Each closed reason fits one step family alone: the native destination stop fits a preservation
-    step, curation's transaction-absence proof a store-sealed step.
+    Each closed reason fits one step family alone: the native destination stop and curation's
+    unstarted-publication proof fit a preservation step, the transaction-absence proof a store-sealed step.
     """
     prepared = binding.get("prepared", {})
-    if step["kind"] in PRESERVATION_STEP_KINDS and reason == DefiniteNoEffect.DESTINATION_EXISTS:
-        return DefiniteNoEffect.destination_evidence(prepared["destination"])
+    if step["kind"] in PRESERVATION_STEP_KINDS:
+        if reason == DefiniteNoEffect.DESTINATION_EXISTS:
+            return DefiniteNoEffect.destination_evidence(prepared["destination"])
+        if reason == RECOVERY_PUBLICATION_NOT_STARTED:
+            return {"destination": prepared["destination"], "publication_started": False}
     if step["kind"] in COLLECTION_STEP_KINDS and prepared.get("store") is not None and reason == RECOVERY_STORE_TRANSACTION_ABSENT:
         return {"request_id": store_request_id(run, operation)}
     return None
@@ -3550,6 +3558,21 @@ def _no_effect_receipt(
         "outcome": "definite-no-effect", "invocation_id": invocation["invocation_id"],
         "episode_attempt": invocation["episode_attempt"], "plan_id": plan_identity,
         "prepared_effect_digest": _digest(binding), "native_reason": reason, "native_evidence": dict(evidence),
+    }
+
+
+def _publication_record(
+    run: str, plan_identity: str, operation: str, invocation: Mapping, binding: Mapping, *, started: bool
+) -> dict[str, Any]:
+    """One native preservation attempt's publication record, in its intent or its started form.
+
+    `intent` and `started` are the two states that this record format fixes. Curation creates the
+    intent before dispatch, and the vault marks it started just before the attempt's first install.
+    """
+    return {
+        "version": 1, "state": "started" if started else "intent", "run_id": run, "plan_id": plan_identity,
+        "operation_id": operation, "invocation_id": invocation["invocation_id"],
+        "episode_attempt": invocation["episode_attempt"], "prepared_effect_digest": _digest(binding),
     }
 
 
@@ -3574,14 +3597,17 @@ def _valid_no_effect(receipt: Mapping, *, run: str, plan_identity: str, step: Ma
 
 
 def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate_id: str, leaf_id: str) -> None:
-    """Prove that a stopped store-sealed episode attempt published nothing, or repair the commit it left.
+    """Prove that a stopped episode attempt published nothing, or repair the commit it left.
 
     Under the held vault mutation boundary alone, for the latest attempt of a bound uncertain leaf
     with an invocation identity, and only when every receipt of its operation is an earlier
-    attempt's no-effect terminal. The step must be a Records or Planning step sealed to the store
-    that this thread serves, and the store must hold no transaction for its request id. Anything
-    else, a native preservation step included, changes nothing, so the leaf stays uncertain.
-    Episode reconciliation then reads the terminal like any other receipt.
+    attempt's no-effect terminal and no commitment is found. A Records or Planning step sealed to
+    the store that this thread serves proves that the store holds no transaction for its request
+    id. A native preservation step proves that its publication record still holds the exact intent
+    bytes, so the attempt never reached its first install; it never reads its output paths, and a
+    vault whose writer lease is coordinated across hosts gets no such proof. Anything else changes
+    nothing, so the leaf stays uncertain. Episode reconciliation then reads the terminal like any
+    other receipt.
     """
     from . import episode_model, writer_lease
     from .collection_store.preview import selected_writer
@@ -3615,21 +3641,26 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
         return
     ordinal, operation = verified["ordinal"], verified["operation_id"]
     step, sealed = plan["steps"][ordinal], plan["binding_manifest"][ordinal]
-    if step["kind"] not in COLLECTION_STEP_KINDS or sealed["prepared"].get("store") is None:
-        return
-    from .cli_ops import OpError
+    if step["kind"] in COLLECTION_STEP_KINDS and sealed["prepared"].get("store") is not None:
+        from .cli_ops import OpError
 
-    try:
-        writer = selected_writer(root, sealed["prepared"]["collection_id"])
-    except OpError:
-        return
-    if writer is None:
+        try:
+            writer = selected_writer(root, sealed["prepared"]["collection_id"])
+        except OpError:
+            return
+        if writer is None:
+            return
+        reason = RECOVERY_STORE_TRANSACTION_ABSENT
+    elif step["kind"] in PRESERVATION_STEP_KINDS and not writer_lease.active_manager().config.enabled:
+        # Another host can take the lease over before this host's `started` reaches it.
+        writer, reason = None, RECOVERY_PUBLICATION_NOT_STARTED
+    else:
         return
     receipts = [receipt for receipt in reconstructed["receipts"] if receipt.get("operation_id") == operation]
     if any(receipt.get("outcome") in COMMITTED_OUTCOMES for receipt in receipts):
         return
     try:
-        # This reads the transaction row, which can exist without its evidence file.
+        # A store step's witness is its transaction row, which can exist without its evidence file.
         witness = _committed_operation_witness(
             store, run, writer=writer, plan_identity=identity, ordinal=ordinal, step=step,
             binding=sealed, operation_identity=operation, compensation=False,
@@ -3649,17 +3680,20 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
         for receipt in receipts
     ):
         return
-    reason = RECOVERY_STORE_TRANSACTION_ABSENT
-    evidence = _no_effect_evidence(reason, run=run, step=step, binding=sealed, operation=operation)
-    if evidence is None:
-        return
+    invocation = {"invocation_id": leaf["invocation_id"], "episode_attempt": attempts}
+    if reason == RECOVERY_PUBLICATION_NOT_STARTED:
+        intent = _publication_record(run, identity, operation, invocation, sealed, started=False)
+        try:
+            recorded = store._read_bytes(store.publication_record_path(run, leaf["invocation_id"]))
+        except CurationError:
+            return
+        if recorded != canonical_json_bytes(intent):
+            return
     receipt = _no_effect_receipt(
-        store, run, ordinal=ordinal, step=step, operation=operation,
-        invocation={"invocation_id": leaf["invocation_id"], "episode_attempt": attempts},
-        plan_identity=identity, binding=sealed, reason=reason, evidence=evidence,
+        store, run, ordinal=ordinal, step=step, operation=operation, invocation=invocation,
+        plan_identity=identity, binding=sealed, reason=reason,
+        evidence=_no_effect_evidence(reason, run=run, step=step, binding=sealed, operation=operation),
     )
-    if not _valid_no_effect(receipt, run=run, plan_identity=identity, step=step, binding=sealed, operation=operation):
-        return
     writer_lease.validate_active_write_fence()
     store.create_receipt(run, ordinal, str(step["step_id"]), receipt)
     store.write_state(run, store.reconstruct(run))
@@ -3841,6 +3875,13 @@ def _execute_next(
         vault_root, step, binding
     )
     invocation = _join_episode_invocation(vault_root, plan, binding, run_identity, operation_identity)
+    before_publication = None
+    if invocation is not None and step["kind"] in PRESERVATION_STEP_KINDS:
+        # A stopped attempt may retry only while this record still reads intent (see `_record_recovery_proof`).
+        intent = _publication_record(run_identity, plan_identity, operation_identity, invocation, binding, started=False)
+        started = _publication_record(run_identity, plan_identity, operation_identity, invocation, binding, started=True)
+        record_path = store.create_publication_record(run_identity, intent)
+        before_publication = functools.partial(store.mark_publication_started, record_path, intent, started)
     prepared_state = {
         "version": 1,
         "run_id": run_identity,
@@ -3875,6 +3916,7 @@ def _execute_next(
                 finalize=lambda writes, content: _finalize_witness_batch(
                     vault_root, step, execution_binding, writes, content
                 ),
+                before_publication=before_publication,
             )
         ) as pending:
             leaf_result = _dispatch_step(
@@ -3918,8 +3960,8 @@ def _execute_next(
             store, run_identity, ordinal=ordinal, step=step, operation=operation_identity, invocation=invocation,
             plan_identity=plan_identity, binding=binding, reason=error.reason, evidence=error.evidence,
         )
-        # A preservation step validates only the native destination reason, never curation's store proof.
-        if not _valid_no_effect(
+        # A native owner stops with its own reason; the recovery reasons belong to curation alone.
+        if error.reason != DefiniteNoEffect.DESTINATION_EXISTS or not _valid_no_effect(
             receipt, run=run_identity, plan_identity=plan_identity, step=step, binding=binding, operation=operation_identity
         ):
             raise _error("CURATION_OUTCOME_UNCERTAIN", "native no-effect terminal is invalid") from error
@@ -4378,7 +4420,19 @@ class CurationStore:
     def compensation_root(self, run_identity: str) -> Path:
         return self.run_dir(run_identity) / "compensation"
 
+    def publication_record_path(self, run_identity: str, invocation_id: str) -> Path:
+        if not _HEX64.fullmatch(invocation_id):
+            raise _error("CURATION_PATH_UNSAFE", "a publication record is named by its invocation id")
+        return self.run_dir(run_identity) / "publication" / f"{invocation_id}.json"
+
     def _read_json(self, path: Path) -> Any:
+        try:
+            return json.loads(self._read_bytes(path).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+            raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable") from error
+
+    def _read_bytes(self, path: Path) -> bytes:
+        """One run artifact's exact bytes, read through retained no-follow handles."""
         self._assert_safe(path)
         relative = self._vault_relative(path)
         parent_relative = PurePosixPath(*relative.parts[:-1]).as_posix()
@@ -4415,10 +4469,10 @@ class CurationStore:
                                 "CURATION_ARTIFACT_CORRUPT",
                                 "curation artifact is not a bounded file",
                             )
-                        return json.loads(raw.decode("utf-8"))
+                        return raw
         except CurationError:
             raise
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        except OSError as error:
             raise _error("CURATION_ARTIFACT_CORRUPT", "curation artifact is unreadable") from error
 
     def _write_json(
@@ -4637,6 +4691,35 @@ class CurationStore:
         self._write_json(path, dict(evidence), create_only=True)
         return path
 
+    def create_publication_record(self, run_identity: str, intent: Mapping[str, Any]) -> Path:
+        """Create one native attempt's publication record in its intent form; it lives as long as the run."""
+        path = self.publication_record_path(run_identity, str(intent["invocation_id"]))
+        self._write_json(path, dict(intent), create_only=True)
+        return path
+
+    def mark_publication_started(
+        self, path: Path, intent: Mapping[str, Any], started: Mapping[str, Any]
+    ) -> None:
+        """Replace the exact intent record with its started form, without a commit point or fan-out."""
+        self._assert_safe(path)
+        try:
+            batch_atomic_write(
+                [
+                    PlannedWrite(
+                        path=path,
+                        content=canonical_json(started),
+                        expected_hash=text_content_hash(canonical_json(intent)),
+                    )
+                ],
+                vault_root=self.vault_root,
+                post_commit_fanout=False,
+                commit_point=False,
+            )
+        except (BatchWriteError, ContentHashMismatchError, OSError, ValueError) as error:
+            raise _error(
+                "CURATION_STORE_WRITE_FAILED", "the publication record could not be marked started"
+            ) from error
+
     def create_receipt(
         self,
         run_identity: str,
@@ -4783,7 +4866,7 @@ class CurationStore:
                     binding=plan["binding_manifest"][ordinal], operation=expected_operation,
                 ):
                     return self._blocked_reconstruction(run_identity, identity, fingerprint, receipts)
-                # A typed zero-publication terminal (native, or curation's store recovery proof) permits the same operation to retry.
+                # A typed zero-publication terminal (native, or curation's recovery proof) permits the same operation to retry.
                 failed[step_identity] = {**receipt, "retryable": True}
             elif outcome == "failed":
                 if set(receipt) != {

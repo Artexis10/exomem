@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1608,6 +1609,181 @@ def test_late_native_duplicate_proves_no_effect_and_retries_the_same_operation(v
     assert final["outcome"] == "committed" and final["attempts"] == 2
     assert final["operation_id"] == leaf["operation_id"]
     assert (vault / native["allocation"]["artifact"]).read_bytes() == b"Retained retry bytes."
+
+
+class ProcessDeath(BaseException):
+    """A killed process: the vault rolls nothing back and curation records nothing for it."""
+
+
+def _resume_through_the_dispatcher(vault: Path, journal_digest: str) -> dict:
+    """`resume` as every door runs it, under the vault mutation boundary that the dispatcher holds."""
+    from exomem import writer_lease
+
+    command = next(item for item in commands.product_commands_for("mcp") if item.name == "episode_memory")
+    return writer_lease.invoke_command(
+        command, vault, schema_module.load_source_schema(vault), episode=KEY,
+        action="resume", input_revision=1, journal_digest=journal_digest,
+    )
+
+
+def _routed_preservation(vault: Path, kind: str, filename: str) -> tuple[dict, dict, dict, dict]:
+    """A routed, unattempted `kind` leaf over one preserved original: the original, leaf, sealed native binding and disposition."""
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename=filename, content=f"Bytes of {filename}.")
+    _record(vault)
+    reference = {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]}
+    if kind == "capture-source":
+        route, args = "source", {"original": reference, "title": "Stopped account", "source_type": "session"}
+    else:
+        route, args = "evidence", {"original": reference, "scope": "study", "category": "accounts", "filename": filename}
+    prepared = _workflow(vault, action="prepare", candidate="stopped", proposal=_proposal(
+        route, [{"leaf_key": "preserve", "effect_revision": 1, "kind": kind, "args": args}], title="Stopped account"))
+    leaf = _candidate(prepared, "stopped")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="stopped", disposition="routed", reason="Retain the account.")
+    return original, leaf, native, disposed
+
+
+def _publication_record(vault: Path, leaf: dict, attempt: int) -> Path:
+    """Where curation keeps the publication record of one episode attempt of `leaf`."""
+    invocation = model.invocation_id(model.episode_id(KEY), {**leaf, "binding": {"operation_id": leaf["operation_id"]}}, attempt)
+    return curation.CurationStore(vault).publication_record_path(leaf["run_id"], invocation)
+
+
+@pytest.mark.parametrize("kind", ["capture-source", "preserve-evidence"])
+def test_moved_core_after_partial_native_publication_stays_uncertain(vault, owner, enabled, monkeypatch, kind):
+    """An original that began publishing must never publish again after someone moves its installed core file."""
+    from exomem import vault as vault_writes
+
+    original, leaf, native, disposed = _routed_preservation(vault, kind, "moved.bin")
+    core = {vault / item["path"] for item in native["core"]}
+    # A capture dies once its page, indexes and log are in; a preservation right after its first core path.
+    stop_after = {vault / "Knowledge Base/log.md"} if kind == "capture-source" else core
+    installed, published = vault_writes._after_batch_destination_published, []
+
+    def die_after_publishing(path):
+        installed(path)
+        published.append(path)
+        if path in stop_after:
+            raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_after_batch_destination_published", die_after_publishing)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    moved = next(path for path in published if path in core)
+    elsewhere = vault / "Knowledge Base/Elsewhere" / moved.name
+    elsewhere.parent.mkdir()
+    os.rename(moved, elsewhere)
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "started"
+    files = [path for path in vault.rglob("*") if path.is_file() and path != vault / original["path"]]
+    if kind == "capture-source":
+        [identity] = native["memory_ids"]
+        carriers = [path for path in files if path.suffix == ".md" and f"exomem_id: {identity}" in path.read_text(encoding="utf-8")]
+    else:
+        carriers = [path for path in files if path.read_bytes() == b"Bytes of moved.bin."]
+    assert carriers == [elsewhere]
+
+
+def test_native_attempt_stopped_before_first_install_retries_once(vault, owner, enabled, monkeypatch):
+    """A preservation killed before it began publishing must retry once at its sealed allocation, not stay stuck."""
+    from exomem import vault as vault_writes
+
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "stopped.bin")
+    log_before = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "intent"
+    retried = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    final = _candidate(retried, "stopped")["leaves"][0]
+    assert (final["outcome"], final["attempts"], final["operation_id"]) == ("committed", 2, leaf["operation_id"])
+    proof, commit = curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"]
+    assert (proof["native_reason"], proof["episode_attempt"]) == (curation.RECOVERY_PUBLICATION_NOT_STARTED, 1)
+    assert proof["native_evidence"] == {"destination": native["destination"], "publication_started": False}
+    assert commit["outcome"] == "committed"
+    assert json.loads(_publication_record(vault, leaf, 2).read_bytes())["state"] == "started"
+    artifact, companion = vault / native["allocation"]["artifact"], vault / native["destination"]
+    assert artifact.read_bytes() == b"Bytes of stopped.bin."
+    assert sorted(path.name for path in artifact.parent.iterdir()) == sorted({artifact.name, companion.name})
+    log_after = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    entry = f"preserve | {companion.relative_to(vault / 'Knowledge Base').with_suffix('').as_posix()}\n"
+    assert log_after.count(entry) - log_before.count(entry) == 1
+
+
+def test_failed_rollback_then_kill_keeps_native_attempt_uncertain(vault, owner, enabled, monkeypatch):
+    """A batch whose rollback left a core path behind must stay uncertain when its failed receipt is lost too."""
+    from exomem import vault as vault_writes
+
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "rollback.bin")
+    core = {vault / item["path"] for item in native["core"]}
+    log = vault / "Knowledge Base/log.md"
+    publish, unlink = vault_writes._before_batch_destination_published, vault_writes._BatchWorkspace.unlink_installed
+    refusals = []
+
+    def fail_at_the_log(path, *, restoring):
+        if path == log and not restoring:
+            raise OSError("the log could not be installed")
+        publish(path, restoring=restoring)
+
+    def keep_core_paths(workspace, path, *args, **kwargs):
+        if path in core:
+            raise OSError("the core path could not be removed")
+        return unlink(workspace, path, *args, **kwargs)
+
+    def die_before_the_failed_receipt(*_args, code, **_kwargs):
+        refusals.append(code)
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_before_batch_destination_published", fail_at_the_log)
+        crash.setattr(vault_writes._BatchWorkspace, "unlink_installed", keep_core_paths)
+        crash.setattr(curation, "_record_failed_attempt", die_before_the_failed_receipt)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    assert refusals == ["BATCH_ROLLBACK_INCOMPLETE"]
+    assert all(path.exists() for path in core)
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "started"
+
+
+def test_missing_publication_record_keeps_native_attempt_uncertain(vault, owner, enabled, monkeypatch):
+    """An attempt without its publication record, as one from an earlier release, must never be proved unpublished."""
+    from exomem import vault as vault_writes
+
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "unrecorded.bin")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    _publication_record(vault, leaf, 1).unlink()
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert not (vault / native["destination"]).exists()
 
 
 def test_ordinary_curation_joins_native_evidence_before_any_episode_attempt(vault, owner, disabled, monkeypatch):
