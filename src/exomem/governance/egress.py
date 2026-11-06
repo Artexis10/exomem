@@ -5978,6 +5978,12 @@ def _postfilter(
     evidence_projection = (
         result if isinstance(result, dict) and "evidence_version" in result else None
     )
+    # This operation and response marker are fixed by the episode wire contract.
+    material_projection = (
+        result if command_name == "episode_memory" and isinstance(result, dict)
+        and result.get("operation") == "episode_material"
+        and (request_kwargs or {}).get("action") == "material" else None
+    )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
         # `rotate` has already invalidated the request's prior credential by
@@ -6074,6 +6080,10 @@ def _postfilter(
             )
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
+    if material_projection is not None and isinstance(cleaned, dict):
+        from ..episode_recovery import EpisodeInputOwner
+
+        cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 
@@ -6517,6 +6527,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
     },
     ("episode_memory", "action"): {
         "record": "mutation",
+        "input": "mutation",
+        "material": "structure",
         "inspect": "structure",
         # Typed candidate operations (close-memory-loop 3.3). `candidates`
         # projects identities and outcomes of the caller's own ledger.

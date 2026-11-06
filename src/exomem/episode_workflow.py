@@ -55,7 +55,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from . import curation, episode_capture, memory_refs, origin_bindings
+from . import curation, episode_capture, episode_materials, memory_refs, origin_bindings
 from . import episode_model as model
 from .episode_reconciliation import current_coverage, reconcile_curation_leaf
 from .episode_recovery import EpisodeInputOwner
@@ -260,6 +260,8 @@ def _projection(session: _Session) -> dict[str, Any]:
         "journal_digest": session.current["journal_digest"],
         "input_revision": state["input_revisions"][-1]["revision"],
         "recovery": state["input_revisions"][-1]["recovery"],
+        **({"materials": episode_materials.handles(session.vault_root, state)}
+           if model.material_binding(state) is not None else {}),
         "candidates": candidates,
         "precommit_input_revision": precommit["input_revision"] if precommit else None,
         "reviewed_through_input_revision": state["reviewed_through_input_revision"],

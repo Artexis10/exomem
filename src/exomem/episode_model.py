@@ -126,7 +126,7 @@ def leaf_id(candidate: str, key: str) -> str:
 
 def _evidence(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or set(raw) - {
-        "reference", "excerpt", "digest", "about", "version_scheme"
+        "reference", "excerpt", "digest", "about", "version_scheme", "materials"
     }:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence has unknown fields")
     value = dict(raw)
@@ -169,6 +169,10 @@ def _evidence(raw: Any) -> dict[str, Any]:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence is empty")
     if about:
         keep["about"] = list(about)
+    if "materials" in value:
+        from .episode_materials import normalize
+
+        keep["materials"] = normalize(value["materials"], sealed=True)
     keep["recovery"] = "available" if {"reference", "excerpt"} & set(keep) else "unavailable"
     return keep
 
@@ -211,10 +215,12 @@ def append_input_revision(
     old = {
         key: value
         for key, value in result["input_revisions"][-1]["evidence"].items()
-        if key != "recovery"
+        if key not in {"recovery", "materials"}
     }
-    new = {key: value for key, value in evidence.items() if key != "recovery"}
-    if _json(old) == _json(new):
+    new = {key: value for key, value in evidence.items() if key not in {"recovery", "materials"}}
+    binding = material_binding(result)
+    inherited = binding[1] if binding is not None else None
+    if _json(old) == _json(new) and evidence.get("materials", inherited) == inherited:
         raise _fail("EPISODE_REVISION_UNCHANGED", "input evidence is byte-equivalent")
     if len(result["input_revisions"]) >= MAX_INPUT_REVISIONS:
         raise _fail("EPISODE_TOO_LARGE", "too many input revisions")
@@ -223,6 +229,18 @@ def append_input_revision(
     )
     _invalidate(result)
     return _copy(result)
+
+
+def material_binding(
+    state: Mapping[str, Any], input_revision: int | None = None,
+) -> tuple[int, dict[str, Any]] | None:
+    """Find the last explicit envelope without copying it into later recaps."""
+    for item in reversed(state["input_revisions"]):
+        if input_revision is not None and item["revision"] > input_revision:
+            continue
+        if "materials" in item["evidence"]:
+            return item["revision"], item["evidence"]["materials"]
+    return None
 
 
 def _candidate(state: dict[str, Any], identity: str) -> dict[str, Any]:

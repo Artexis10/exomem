@@ -21,6 +21,82 @@ The episode workflow SHALL accept supported unstructured and multimodal inputs w
 - **THEN** the transcript may be retained and interpreted under its existing authority with the original media explicitly unavailable
 - **AND** neither product receipts nor evaluation reports claim the original media was preserved or interpreted
 
+### Requirement: Public material bindings preserve separate original and reading identities
+
+`episode_memory` SHALL expose `input` through `record_episode` operation kind `input`
+and `material` through `read_episode` operation kind `material` on MCP, CLI and REST.
+`input` SHALL require an existing episode, current input revision, journal digest
+and a closed version-1 materials envelope. It SHALL append through the existing
+principal-bound input/CAS boundary without preserving another Source or executing effects.
+The envelope SHALL hold zero to eight uniquely keyed items, sorted deterministically,
+within 16 KiB. Keys SHALL be nonempty and at most 160 characters. Each item SHALL
+name an original whole-page canonical companion, a readable canonical page or exact
+unit, or both; references SHALL be at most 2048 characters. Optional producer and
+producer-version attribution SHALL be at most 256 and 160 characters respectively,
+and SHALL remain caller-authored rather than authenticated extractor identity.
+
+The server SHALL seal declared original SHA and size separately from the reading's
+material version and exact unit fingerprint/span. Declared identity SHALL NOT imply
+current byte availability. Pairing SHALL remain caller-authored and SHALL NOT establish
+equivalence, provenance roots or independent support. Empty items SHALL explicitly clear
+bindings. Omitted materials on later recaps SHALL inherit the last explicit envelope
+within the existing 64-revision history, without copying, refreshing or resealing it.
+Stable handles SHALL retain that envelope's original input revision and material key.
+Legacy journals without materials SHALL have no bindings; accepted legacy normalization,
+hashes, identities and absent fields SHALL remain unchanged.
+
+An optional `dataset_rows` locator SHALL hold a bounded nullable record path and
+one to 32 unique zero-based row indices below `query_data.MAX_PARSED_ROWS`.
+Verification SHALL stage the authorized original and reuse `query_data.load_rows_bytes`,
+binding exact raw SHA/size, record kind, resolved path and selected indices.
+Parser-cap failure or invalid selection SHALL NOT become successful locator proof.
+No new page, region or time locator grammar SHALL be accepted.
+
+`material` SHALL require episode, binding input revision and material key and return
+one material's independently checked original and reading states. Current original
+availability SHALL require native principal checks through `artifact_recovery` staging,
+within its existing request budget. A successfully authorized descriptor that differs
+from sealed SHA/size MAY report stale. Unified recovery refusals SHALL remain unavailable
+without distinguishing missing, changed or withheld failures. Reading SHALL use current
+retained-input release, exact-text and version checks within the existing 8192-byte budget.
+Changed reading SHALL report stale without rebinding. Missing and withheld representations
+SHALL yield identical content-free unavailable results, with no reference or attribution.
+One unavailable representation SHALL NOT suppress the other's usable result.
+Episode JSON SHALL contain no binary bytes, capabilities or persisted authority.
+Inspection and workflow projections MAY expose bounded unchecked handles without probing binaries.
+
+Writes SHALL retain the existing terminal mutation receipt; callers SHALL read
+candidates for current input state and handles. Stale guards SHALL refuse without mutation.
+Byte-equivalent replacement under current guards SHALL add no revision. After lost acknowledgement, callers
+SHALL inspect public state before another mutation; transparent lost-ack replay SHALL
+NOT be promised. Extended journals SHALL require this reader-capable release, including
+supported rollback. Older strict readers SHALL refuse them before modification.
+This increment SHALL NOT imply completed native effect adapters, proposal association,
+origin accounting, compilation coverage or ordinary mixed-journey acceptance.
+
+#### Scenario: A later recap keeps the original material handle
+
+- **WHEN** a caller binds preserved image and dataset materials, then records another recap without materials
+- **THEN** public inspection retains the original binding revision and keys, and a keyed material read recovers their current representations
+- **AND** binding and reading leave preserved original bytes unchanged
+
+#### Scenario: One representation changes or disappears
+
+- **WHEN** a selected material's original is unavailable or its reading changes
+- **THEN** the other representation can remain available under its own current checks
+- **AND** changed reading is stale, while unified original recovery refusal stays unavailable
+
+#### Scenario: Revocation reveals no material metadata
+
+- **WHEN** a selected representation becomes withheld, or the same representation is absent
+- **THEN** public reads return the same content-free unavailable state without its reference or attribution
+
+#### Scenario: Binding retries and clearing obey current guards
+
+- **WHEN** current guards accompany an equivalent replacement or an explicit empty envelope
+- **THEN** the equivalent replacement writes nothing, while clearing appends one input revision and later recaps inherit the clear
+- **AND** stale guards refuse before sealing or writing any replacement
+
 ### Requirement: Conversational correction updates knowledge without erasing provenance
 
 An authorized conversational correction SHALL revise affected episode candidates and canonical projections through current guarded writers while retaining original evidence and historical interpretation. The workflow SHALL distinguish interpretation errors, new events, disputed evidence and expressed changes of intent. It SHALL reconcile known affected effects/publications, report pending or unavailable work, and prevent a stale replay from restoring the corrected interpretation. Later query/context SHALL use current corrected knowledge or visibly qualify unavailable/pending currency. A reusable alias, schema or routing lesson SHALL be a separate scoped, evidence-bound and reversible proposal through its existing owner, not an automatic generalization from one correction. Routine permitted correction SHALL NOT require an extra confirmation or background learner.

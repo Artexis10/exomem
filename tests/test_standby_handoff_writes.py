@@ -266,15 +266,15 @@ for index in range(WRITE_COUNT):
     per_write_rebuilds.append(len(passes) - before)
 
 graph_sync.drain_active_rebuilds(timeout=60.0)
-queued_after_drain = None
 if advanced:
     service_readiness.finish_warm()
-    from exomem import deferred_index  # noqa: E402
-    from test_graph_handoff_convergence import _drain_to_empty  # noqa: E402
+from exomem import deferred_index  # noqa: E402
+from test_graph_handoff_convergence import _drain_to_empty  # noqa: E402
 
-    _drain_to_empty(root)
-    graph_sync.drain_active_rebuilds(timeout=60.0)
-    queued_after_drain = len(deferred_index.list_graph_paths(root))
+# Governed writes may leave per-path repair to the worker's drain daemon.
+_drain_to_empty(root)
+graph_sync.drain_active_rebuilds(timeout=60.0)
+queued_after_drain = len(deferred_index.list_graph_paths(root))
 print(
     json.dumps(
         {{
@@ -349,6 +349,7 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
         f"were {report['per_write_rebuilds']} for {report['acknowledgements']}"
     )
     assert report["rebuilds"] == 0
+    assert report["queued_after_drain"] == 0
     assert report["available"] is True, report
     _assert_incremental_latency(report["acknowledgements"])
 

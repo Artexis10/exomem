@@ -1375,20 +1375,14 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
     terminal proves what it can from what is on disk. Two facts are provable and
     they are *different answers*:
 
-    * the sidecar acknowledges the committed generation -- the graph is current
-      for this write, which is exactly the `completed` this field has always
-      meant;
-    * it does not, and work is still queued against it -- `pending`.
+    * the sidecar acknowledges the committed generation, has no queued repair,
+      and has not withdrawn availability -- `completed`;
+    * required repair remains queued or availability is withdrawn -- `pending`.
 
-    Reporting nothing for the first is what a queue-only probe does, and it grows
-    **more** wrong as the drain gets healthier: a write whose repair landed before
-    its response was shaped then says nothing about the graph at all, and a caller
-    cannot tell a converged graph from an unreported one. Measured at 16 of 43
-    writes in one 400-page run once the drain stopped being refused.
-
-    Both terms still matter for `pending`: an unacknowledged checkpoint with an
-    empty queue is a rebuild's business, and a queue holding later work says
-    nothing about whether *this* generation converged.
+    A covering acknowledgement alone does not prove that graph relations are
+    current. Later queued repair or a withdrawn marker still reports pending.
+    An unacknowledged checkpoint with no queued repair remains the rebuild
+    coordinator's responsibility.
 
     Never raises. This runs while shaping a terminal for canonical bytes that are
     already durable; a probe that failed loudly here would turn a successful
@@ -1400,11 +1394,13 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
         committed = graph_sync.read_checkpoint(vault_root)
         if committed is None:
             return None
-        acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
-        if acknowledged is not None and acknowledged.covers(committed):
-            return {"graph_sync": "completed"}
-        if deferred_index.list_graph_paths(vault_root):
+        state, acknowledged = graph_sync.acknowledgement_state(vault_root, require_available=True)
+        if deferred_index.list_graph_paths(vault_root, limit=1):
             return graph_sync.committed_graph_queued(committed)
+        if acknowledged is not None and acknowledged.covers(committed):
+            if state == "unavailable":
+                return graph_sync.committed_graph_unavailable(committed)
+            return {"graph_sync": "completed"}
         return None
     except Exception:  # noqa: BLE001 - a report must not fail a durable write
         logger.warning("durable graph outcome probe failed", exc_info=True)
