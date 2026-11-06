@@ -64,14 +64,15 @@ BASE_STEP_UNITS = 9
 STEP_FACTOR = 1.5
 
 #: The question the writing agent receives. One text, used by the audit finding and the
-#: write payload. It names no tool, because the tool names depend on the serving surface.
+#: write payload. It names no tool, because the tool names depend on the serving surface;
+#: the write payload appends the keep-whole call spelled for that surface.
 QUESTION = (
-    "Does this page answer more than one independent question? Name them. "
-    "If it answers one, keep the page whole however long it is: dismiss this item "
-    "with a reason that starts `intentional:` and names that question. "
-    "If several questions each have their own material, propose a split through "
-    "the curation lane and ask the user for exact confirmation. "
-    "If the page is a hub by design, add a breadth tag with a governed edit."
+    "Answer this before you reply to the user: does this page answer more than one "
+    "independent question? If it answers one, however long, keep it whole and record "
+    "that with a dismissal whose reason starts `intentional:` and names the question. "
+    "If several questions each have their own material, name them to the user and offer "
+    "a split; on the user's yes, propose it through the curation lane and get their exact "
+    "confirmation. If the page is a hub by design, add a breadth tag with a governed edit."
 )
 
 
@@ -206,5 +207,24 @@ def suggestion_for_state(vault_root: Path, state: Any) -> dict[str, Any] | None:
         "next_step_units": meta["next_step_units"],
         "ref": entry["ref"],
         "fingerprint": entry["fingerprint"],
-        "question": QUESTION,
+        "question": f"{QUESTION} Keep whole: {_keep_whole_call(entry['ref'], entry['fingerprint'])}",
     }
+
+
+def _keep_whole_call(ref: str, fingerprint: str) -> str:
+    """The dismissal that records a keep-whole answer, spelled for the serving surface.
+
+    Agents follow a call written out in a response far more reliably than a described
+    one; the outcome check showed agents ignoring the described form.
+    """
+    from . import capabilities
+
+    return capabilities.active_call_text(
+        "triage_memory",
+        {
+            "ref": ref,
+            "action": "dismiss",
+            "expected_fingerprint": fingerprint,
+            "why": "intentional: <the one question this page answers>",
+        },
+    )

@@ -85,7 +85,10 @@ def test_a_write_that_reaches_the_base_step_asks_the_one_question(vault: Path) -
     }
     assert (suggestion["kind"], suggestion["units"]) == ("note_cohesion", 9)
     assert (suggestion["step_units"], suggestion["next_step_units"]) == (9, 14)
-    assert suggestion["question"] == note_cohesion.QUESTION
+    assert suggestion["question"].startswith(note_cohesion.QUESTION)
+    # The keep-whole answer is spelled out with this item's identity, so an agent can act on it.
+    assert suggestion["ref"] in suggestion["question"]
+    assert suggestion["fingerprint"] in suggestion["question"]
     assert suggestion["ref"].startswith("exomem://review/")
 
 
