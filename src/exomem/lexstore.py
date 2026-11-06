@@ -11369,28 +11369,39 @@ class LexicalStore:
                 with self._term_frequency_cache_lock:
                     rows = self._admitted_recall_rows.get(key)
                 if rows is None:
-                    col = "in_vault" if scope == "vault" else "in_kb"
+                    other = "kb" if scope == "vault" else "vault"
                     raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
                     with call_spans.span("lexical.resolver_entries", {}) as measured:
-                        entries, candidates, outside = [], [], []
-                        parents = {}
-                        # Cache the SQL partitions, then decide visibility anew for each request.
-                        for path, title, parent, in_scope, carry in conn.execute(
-                            f"SELECT p.path, p.title, p.emitted_parent_path, p.{col}, (p.{col} = 1{raw_clause}) "
-                            "FROM pages p ORDER BY p.path", raw_params,
+                        # One pass in table order fills this scope and the other one at the same
+                        # snapshot: a request reads both, and `ORDER BY path` walked the path index
+                        # and fetched rows in random order, seconds on a cold page cache. Sorting in
+                        # Python gives the same order, because `path` uses the BINARY collation.
+                        selected = {"in_vault": ([], {}, [], []), "in_kb": ([], {}, [], [])}
+                        for path, title, parent, in_vault, in_kb, not_raw in conn.execute(
+                            "SELECT p.path, p.title, p.emitted_parent_path, p.in_vault, p.in_kb, "
+                            f"(1{raw_clause}) FROM pages p", raw_params,
                         ):
                             path = str(path)
-                            if in_scope == 1:
-                                entries.append((path, title))
-                                parents[path] = parent
-                            (candidates if carry else outside).append(path)
-                        rows = _AdmittedRecallRows(
-                            tuple(entries), frozenset(path for path, _title in entries),
-                            MappingProxyType(parents), tuple(candidates), tuple(outside),
-                        )
-                        measured["rows"] = len(entries)
+                            for column, in_scope in (("in_vault", in_vault), ("in_kb", in_kb)):
+                                entries, parents, candidates, outside = selected[column]
+                                if in_scope == 1:
+                                    entries.append((path, title))
+                                    parents[path] = parent
+                                (candidates if in_scope == 1 and not_raw else outside).append(path)
+                        filled = {}
+                        for column, (entries, parents, candidates, outside) in selected.items():
+                            entries.sort(key=lambda entry: entry[0])
+                            filled[column] = _AdmittedRecallRows(
+                                tuple(entries), frozenset(path for path, _title in entries),
+                                MappingProxyType(parents), tuple(sorted(candidates)), tuple(sorted(outside)),
+                            )
+                        rows = filled["in_vault" if scope == "vault" else "in_kb"]
+                        measured["rows"] = len(rows.entries)
                     with self._term_frequency_cache_lock:
                         self._admitted_recall_rows[key] = rows
+                        self._admitted_recall_rows.setdefault(
+                            (other, *snapshot), filled["in_vault" if other == "vault" else "in_kb"]
+                        )
                         while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
                             self._admitted_recall_rows.popitem(last=False)
                 return rows
