@@ -36,6 +36,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
@@ -240,6 +241,17 @@ def invalid_continuation() -> ValueError:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _ReleaseOrigin:
+    """Constructor provenance for a fresh native filter, never a page verdict."""
+
+    root: Path
+    principal: principal_module.RequestPrincipal
+    purpose: str | None
+    visible: Callable[[str], bool] | None
+    writer: object
+
+
 @dataclass(frozen=True, slots=True)
 class CallerView:
     """What one request may see, built once and used for every decision after it."""
@@ -257,6 +269,7 @@ class CallerView:
     carriers_admitted: bool = False
     #: Whether the caller may read the `homes` overlay. Without it no home files an entry.
     homes_admitted: bool = False
+    _release_origin: _ReleaseOrigin | None = dataclass_field(default=None, init=False, repr=False, compare=False)
 
     @property
     def restricted(self) -> bool:
@@ -264,6 +277,23 @@ class CallerView:
 
     def sees(self, path: str) -> bool:
         return self.visible is None or bool(self.visible(path))
+
+    def _native_release_matches(self, vault_root: Path) -> bool:
+        origin = self._release_origin
+        root = Path(vault_root)
+        if (origin is None or self.visible is None or not root.is_absolute()
+                or root != origin.root or self.visible is not origin.visible
+                or self.purpose != origin.purpose
+                or principal_module.effective_principal() != origin.principal):
+            return False
+        try:
+            # Alias spellings keep the old conjunction; the physical owner resolves the configured root.
+            return (root == state_paths.resolved_vault_path(root, expanduser=False)
+                    and egress.bound_writer(root) is origin.writer)
+        except TimeoutError:
+            raise
+        except OSError:
+            return False
 
     @classmethod
     def current(
@@ -282,17 +312,22 @@ class CallerView:
         who = principal if principal is not None else principal_module.effective_principal()
         # The purpose the release decision itself takes, so the filter and the binding agree.
         declared = egress._declared_purpose(root, who, purpose)  # noqa: SLF001
+        writer = egress.bound_writer(root)
         visible = egress.restricted_release_filter(root, principal=principal, purpose=declared)
         binding = _digest(json.dumps([who.audience_id, who.authorization_session_id, declared]))
         # The project registry is a vault file like any other: a restricted caller reads it only at full release.
         projects_admitted = visible is None or egress.release_level_for_path_only(
             root, project_keys.registry_relpath(), principal=principal, purpose=declared
         ) >= egress.LEVEL_FULL
-        return cls(
+        view = cls(
             visible, declared, binding, _registry_admitted(root, principal, purpose, source_taxonomy.DOMAIN_SPEC),
             projects_admitted, _registry_admitted(root, principal, purpose, topic_carriers.SPEC),
             _registry_admitted(root, principal, purpose, homes.SPEC),
         )
+        # Direct constructors and dataclasses.replace keep the legacy conjunction.
+        if root.is_absolute():
+            object.__setattr__(view, "_release_origin", _ReleaseOrigin(root, who, declared, visible, writer))
+        return view
 
 
 def _registry_admitted(

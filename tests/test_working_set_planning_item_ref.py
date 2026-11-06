@@ -76,6 +76,31 @@ def test_each_plan_anchor_is_its_own_item_page(planned: Path) -> None:
     assert {row.path for row in rows} == {MANIFEST}
 
 
+def test_native_task_admission_checks_a_planning_items_distinct_page(planned: Path) -> None:
+    """An admitted collection manifest cannot lend a task route to its withheld item ref."""
+    from test_context_catalogue import _built
+    from test_governance_egress import _external
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import context_views, find, lexstore, working_set
+    from exomem.governance import principal
+
+    item = _item_pages(planned)["Replace the lighthouse lantern"]
+    _withhold(planned, item, ceiling=0)
+    catalogue = _built(planned)
+    entries = tuple(entry for entry in catalogue.task_entries() if entry.ref == item)
+    assert entries and all(entry.path == MANIFEST for entry in entries)
+    lexstore.ensure_fresh(planned)
+    with principal.request_scope(_external()):
+        caller = context_views.CallerView.current(planned)
+        assert caller.sees(MANIFEST) and not caller.sees(item)
+        result, missing = working_set.task_candidates(
+            planned, catalogue=catalogue, caller=caller,
+            turn="Harbour works", focus="", snapshot=find.FreshnessSnapshot(planned), limit=12,
+        )
+    assert item not in {candidate["ref"] for candidate in result}
+
+
 def test_a_turn_about_one_item_serves_that_item_page(planned: Path) -> None:
     working_set_runtime.reset_caches_for_tests()
     page = _item_pages(planned)["Resurface the harbour slipway"]

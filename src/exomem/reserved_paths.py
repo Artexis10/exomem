@@ -3055,7 +3055,7 @@ def _await_baseline_flight(
     return flight.catalogue
 
 
-def _warm_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue | None:
+def _warm_baseline_identity_catalogue(vault_root: Path, *, _vault_key: str | None = None) -> IdentityCatalogue | None:
     """Return the inventory this process already holds, or nothing at all.
 
     Reads no directory and takes no coordination, so an interactive caller can
@@ -3063,7 +3063,7 @@ def _warm_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue | N
     """
 
     with _PUBLISHED_IDENTITY_LOCK:
-        return _BASELINE_IDENTITY_CATALOGUES.get(_vault_identity_key(vault_root))
+        return _BASELINE_IDENTITY_CATALOGUES.get(_vault_key if _vault_key is not None else _vault_identity_key(vault_root))
 
 
 def identity_catalogue_ready(vault_root: Path) -> bool:
@@ -3406,7 +3406,7 @@ def _publish_owner_identities(
         owners[descriptor_id] = published
 
 
-def _published_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
+def _published_identity_catalogue(vault_root: Path, *, _vault_key: str | None = None) -> IdentityCatalogue:
     """Return currently reachable identities from process-local publications.
 
     WAL/SHM and rebuild files can disappear when their last owner handle closes,
@@ -3416,7 +3416,7 @@ def _published_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     unrelated later file.
     """
 
-    vault_key = _vault_identity_key(vault_root)
+    vault_key = _vault_key if _vault_key is not None else _vault_identity_key(vault_root)
     with _PUBLISHED_IDENTITY_LOCK:
         by_descriptor = {
             descriptor_id: dict(identities)
@@ -3555,9 +3555,14 @@ def _generic_identity_catalogue_scope(
 
     needs_fresh = _needs_fresh_physical_catalogue(values)
     if identities is None and not needs_fresh:
+        vault_key = _vault_identity_key(vault_root)
+        baseline = _warm_baseline_identity_catalogue(vault_root, _vault_key=vault_key)
+        # Cold construction retains its own coordination, flight and publication lookups.
+        published = (_published_identity_catalogue(vault_root, _vault_key=vault_key)
+                     if baseline is not None else None)
         yield _merge_identity_catalogues(
-            _baseline_identity_catalogue(vault_root),
-            _published_identity_catalogue(vault_root),
+            baseline if baseline is not None else _baseline_identity_catalogue(vault_root),
+            published if published is not None else _published_identity_catalogue(vault_root),
         )
         return
 

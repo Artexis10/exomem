@@ -147,6 +147,27 @@ def _warm_catalogue(monkeypatch: pytest.MonkeyPatch, *, unlisted: bool = False) 
     monkeypatch.setattr(cc, "ensure_unlisted", lambda root, freshness_stamp="", **_reader: (cc.READY, cc.ContextCatalogue(root), unlisted))
 
 
+def test_native_filter_provenance_cannot_cross_verified_context_generations(vault: Path) -> None:
+    """An equal audience/session binding cannot lend one verified credential context's native filter to another."""
+    from test_governance_egress import _verified_external_session
+
+    who, context = _verified_external_session()
+    with principal.request_scope(who):
+        caller = cv.CallerView.current(vault, purpose="support")
+        assert caller._native_release_matches(vault)
+        legacy = cv.CallerView(caller.visible, caller.purpose, caller.binding, caller.domains_admitted,
+                               caller.projects_admitted, caller.carriers_admitted, caller.homes_admitted)
+        assert legacy == caller and hash(legacy) == hash(caller)
+        assert not legacy._native_release_matches(vault)
+        assert not dataclasses.replace(caller)._native_release_matches(vault)
+    changed = dataclasses.replace(who, verified_authorization_session=dataclasses.replace(
+        context, credential_generation=context.credential_generation + 1,
+    ))
+    with principal.request_scope(changed):
+        assert not caller._native_release_matches(vault)
+    assert context.session_id not in repr(caller) and context.keyring_id not in repr(caller)
+
+
 # --------------------------------------------------------------------------- #
 # Counterfactual twins
 # --------------------------------------------------------------------------- #

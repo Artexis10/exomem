@@ -97,6 +97,18 @@ An invalid or unsupported proof ends the borrow and enters canonical preparation
 Mark owned state changed before discarding a proof, and refresh accounting after any owned mutation.
 Advance the postings memory revision before insertion or eviction; equal slot counts do not establish unchanged memory.
 
+Each task phase owns a fresh canonical entry-admission predicate in the existing publication-admission scope.
+A native caller view may replace its duplicate predicate only when constructor provenance matches the current release source.
+The selector compares absolute root spelling, the complete current principal, declared purpose, and original predicate and writer identities.
+It preserves the distinct Planning reference check.
+Custom, replaced, relative-root and different-principal views retain the existing conjunction.
+Provenance is request-local constructor data and carries no admission verdict.
+
+Each warm generic catalogue acquisition computes its vault key once for baseline and publication lookup.
+Cold acquisition, supplied identities and alternate-spelling rules retain their existing paths.
+Closing acquisition computes its own key and reads current publications.
+No opening snapshot supplies closing authority.
+
 Ordinary-page custody classification may reuse a compact fact that the canonical parser found no container-member claim.
 Store only the full-file digest and version witness in the existing page-cache owner.
 Retain no body, parent binding, permission or caller in that fact.

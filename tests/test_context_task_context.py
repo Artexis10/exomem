@@ -59,6 +59,110 @@ def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pyt
     assert refreshed["task_context"]["methods"]["items"] == []
 
 
+def test_task_phase_rechecks_native_visibility_after_the_map(vault: Path) -> None:
+    """A page admitted by the map cannot enter task recall after its live scope becomes withheld."""
+    from exomem import context_views, find, published_admission, working_set
+
+    path = _page(vault, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    _withhold(vault, "absent.md", ceiling=0)
+    catalogue = _built(vault)
+    lexstore.ensure_fresh(vault)
+    with principal.request_scope(_external()), published_admission.deciding():
+        caller = context_views.CallerView.current(vault)
+        assert caller.sees(path)
+        _withhold(vault, path, ceiling=0)
+        result, missing = working_set.task_candidates(
+            vault, catalogue=catalogue, caller=caller, turn="Compare spectral alignment", focus="",
+            snapshot=find.FreshnessSnapshot(vault), limit=12,
+        )
+    assert path not in {candidate["source_ref"] for candidate in result}
+
+
+@pytest.mark.parametrize("changed", [False, True], ids=["custom", "replaced"])
+def test_custom_task_visibility_keeps_its_extra_denial(vault: Path, changed: bool) -> None:
+    """A fresh canonical release cannot remove an additional restriction from a supplied view."""
+    from dataclasses import replace
+
+    from exomem import context_views, find, working_set
+
+    path = _page(vault, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    catalogue = _built(vault)
+    lexstore.ensure_fresh(vault)
+    with principal.request_scope(_external()):
+        native = context_views.CallerView.current(vault)
+        caller = (replace(native, visible=lambda _path: False) if changed else
+                  context_views.CallerView(lambda _path: False, native.purpose, native.binding, False, False))
+        result, missing = working_set.task_candidates(
+            vault, catalogue=catalogue, caller=caller, turn="Compare spectral alignment", focus="",
+            snapshot=find.FreshnessSnapshot(vault), limit=12,
+        )
+    assert path not in {candidate["source_ref"] for candidate in result}
+
+
+def test_task_phase_preserves_an_unequal_explicit_principal_restriction(vault: Path) -> None:
+    """The same audience cannot make an unresolved explicit view borrow the ambient principal's admission."""
+    from dataclasses import replace
+
+    from exomem import context_views, find, working_set
+
+    path = _page(vault, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    _withhold(vault, "absent.md", ceiling=0)
+    catalogue = _built(vault)
+    lexstore.ensure_fresh(vault)
+    who = _external()
+    with principal.request_scope(who):
+        caller = context_views.CallerView.current(vault, principal=replace(who, resolved=False))
+        assert not caller.sees(path)
+        assert context_views.egress.release_walk_filter(vault, purpose=caller.purpose)(path)
+        result, missing = working_set.task_candidates(
+            vault, catalogue=catalogue, caller=caller, turn="Compare spectral alignment", focus="",
+            snapshot=find.FreshnessSnapshot(vault), limit=12,
+        )
+    assert path not in {candidate["source_ref"] for candidate in result}
+
+
+def test_owner_view_without_a_filter_still_takes_fresh_task_admission(vault: Path) -> None:
+    """The owner's None predicate cannot bypass a current task-phase file rule."""
+    from exomem import context_views, find, working_set
+
+    path = _page(vault, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    _withhold(vault, path, ceiling=0)
+    who = principal.owner_principal(surface="library")
+    write_rule(vault, ceiling=0, audience=who.audience_id)
+    catalogue = _built(vault)
+    lexstore.ensure_fresh(vault)
+    with principal.request_scope(who):
+        caller = context_views.CallerView.current(vault)
+        assert caller.visible is None
+        result, missing = working_set.task_candidates(
+            vault, catalogue=catalogue, caller=caller, turn="Compare spectral alignment", focus="",
+            snapshot=find.FreshnessSnapshot(vault), limit=12,
+        )
+    assert path not in {candidate["source_ref"] for candidate in result}
+
+
+def test_relative_view_keeps_its_original_restriction_after_a_cwd_change(vault: Path, tmp_path: Path, monkeypatch) -> None:
+    """A relative root spelling cannot turn a view of the first vault into native provenance for the second."""
+    from exomem import context_views, find, working_set
+
+    path = _page(vault, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    _withhold(vault, path, ceiling=0)
+    peer = _second_vault(tmp_path)
+    _page(peer, "phase-source", body="Compare spectral alignment for the current specimen.\n")
+    catalogue = _built(peer)
+    lexstore.ensure_fresh(peer)
+    with principal.request_scope(_external()):
+        monkeypatch.chdir(vault)
+        caller = context_views.CallerView.current(Path("."))
+        assert not caller.sees(path)
+        monkeypatch.chdir(peer)
+        result, missing = working_set.task_candidates(
+            Path("."), catalogue=catalogue, caller=caller, turn="Compare spectral alignment", focus="",
+            snapshot=find.FreshnessSnapshot(Path(".")), limit=12,
+        )
+    assert path not in {candidate["source_ref"] for candidate in result}
+
+
 def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An independently authored exclusion changes while the selected procedure stays identical."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")

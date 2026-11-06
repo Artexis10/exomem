@@ -42,6 +42,7 @@ from . import (
     context_intents,
     context_roles,
     lifecycle_statuses,
+    published_admission,
     recap_folder,
     request_budget,
     semantic_units,
@@ -1338,6 +1339,7 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
 
 
 @governance_policy.request_policy_snapshot()
+@published_admission.deciding(own=True)
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
     snapshot: Any, limit: int,
@@ -1355,10 +1357,17 @@ def task_candidates(
     )
     from .governance import egress
 
+    candidates = catalogue.task_entries()
+    published_admission.announce(entry.path for entry in candidates if entry.path)
     page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-    entries = [entry for entry in catalogue.task_entries() if entry.path
-               and context_views._admits(entry, caller.visible)
-               and (page_visible is None or page_visible(entry.path))]
+    native = type(caller) is context_views.CallerView and caller._native_release_matches(vault_root)
+    if native:
+        entries = [entry for entry in candidates if entry.path and context_views._admits(entry, page_visible)]
+    else:
+        entries = [entry for entry in candidates if entry.path
+                   and context_views._admits(entry, caller.visible)
+                   and (page_visible is None or page_visible(entry.path))]
+    del candidates
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 

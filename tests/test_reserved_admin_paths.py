@@ -537,7 +537,7 @@ def test_published_private_identity_is_implicitly_consumed_by_generic_leaf(
     monkeypatch.setattr(
         reserved_paths,
         "_published_identity_catalogue",
-        lambda _vault_root: reserved_paths.IdentityCatalogue(
+        lambda _vault_root, **_kwargs: reserved_paths.IdentityCatalogue(
             {(identity.device, identity.inode, identity.kind): "embeddings-store"}
         ),
     )
@@ -847,7 +847,7 @@ def test_published_private_directory_identity_is_checked_before_enumeration(
     monkeypatch.setattr(
         reserved_paths,
         "_published_identity_catalogue",
-        lambda _vault_root: reserved_paths.IdentityCatalogue(
+        lambda _vault_root, **_kwargs: reserved_paths.IdentityCatalogue(
             {(identity.device, identity.inode, identity.kind): "governance-tree"}
         ),
     )
@@ -876,7 +876,7 @@ def test_create_directory_refuses_published_private_parent_identity(
     monkeypatch.setattr(
         reserved_paths,
         "_published_identity_catalogue",
-        lambda _vault_root: catalogue,
+        lambda _vault_root, **_kwargs: catalogue,
     )
 
     with pytest.raises(CreateDirectoryError) as error:

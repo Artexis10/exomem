@@ -409,7 +409,7 @@ def test_unavailable_metadata_close_keeps_the_canonical_bytes_without_a_version(
     close = reserved_paths._require_current_generic_version
     def newly_private(*args, **kwargs):
         with monkeypatch.context() as patch:
-            patch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root: reserved_paths.IdentityCatalogue(
+            patch.setattr(reserved_paths, "_published_identity_catalogue", lambda _root, **_kwargs: reserved_paths.IdentityCatalogue(
                 {(identity.device, identity.inode, identity.kind): "embeddings-store"},
             ))
             return close(*args, **kwargs)
