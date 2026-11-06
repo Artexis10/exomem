@@ -3549,7 +3549,7 @@ def _malformed_notes(vault: Path, count: int) -> list[str]:
 def test_an_unknown_allowance_names_the_unreadable_notes_in_the_status_and_in_the_refusal(
         vault: Path, selected_store, monkeypatch):
     """Catches an unknown media usage that tells the owner nothing to repair: no note, no reason, no count."""
-    from exomem import media_store
+    from exomem import media_jobs, media_store
 
     _recorded_by_a_batch(vault)
     damaged = _malformed_notes(vault, 7)
@@ -3558,13 +3558,13 @@ def test_an_unknown_allowance_names_the_unreadable_notes_in_the_status_and_in_th
     with pytest.raises(media_store.MediaStoreError) as refused:
         media_store.offload(vault, member, batch=media_store.OffloadBatch(vault))
     allowance = _window_status(vault)["media_allowance"]
+    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
 
-    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
-    assert allowance["blocked_total"] == 7
-    assert [item["path"] for item in allowance["blocked_by"]] == damaged[:5]  # Bounded, in path order.
-    assert all(item["reason"] for item in allowance["blocked_by"])
-    for text in (str(refused.value), allowance["unknown"]):
-        assert all(path in text for path in damaged[:5]) and damaged[5] not in text and "7 notes" in text
+    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN" and refusal["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    for named in (allowance, refusal):
+        assert named["blocked_total"] == 7
+        assert [item["path"] for item in named["blocked_by"]] == damaged[:5]  # Bounded, in path order.
+        assert all(item["reason"] for item in named["blocked_by"])
     assert "used_bytes" not in allowance
 
 
@@ -3577,6 +3577,42 @@ def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, 
     census = media_store.take_census(vault)
 
     assert census.used_bytes is None and census.blockers == () and census.blockers_total == 0
+
+
+def test_a_restricted_caller_learns_no_path_of_a_restricted_note_that_stops_the_census(vault: Path, selected_store):
+    """Catches a refusal or a status text that names a note the caller may not see, beside a refusal it can see."""
+    import os
+
+    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+
+    from exomem import commands, media_worker, writer_lease
+    from exomem.governance.principal import request_scope
+
+    visible = _preserved(vault, category="visible").relative_to(vault).as_posix()
+    damaged = vault / "Knowledge Base/Evidence/Test/restricted/damaged.md"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_bytes(b"---\nvalue: [\n---\n")
+    hidden = damaged.relative_to(vault).as_posix()
+    write_scope(vault, paths="Evidence/Test/restricted/**")
+    write_rule(vault, ceiling=0)
+    _reset_governance_caches()
+    # The worker's offload takes the census, which the damaged note makes unknown, and records the refused job.
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    def statuses() -> str:
+        replies = [writer_lease.invoke_command(next(command for command in commands.PRODUCT_COMMANDS if command.name == name),
+                                               vault, **arguments)
+                   for name, arguments in (("process_media", {"operation": "status"}), ("adoption_studio", {"action": "status"}))]
+        return json.dumps(replies, default=str)
+
+    with library_scope():
+        owner = statuses()
+    with request_scope(_external()):
+        restricted = statuses()
+
+    assert hidden in owner  # The owner is told which note to repair.
+    assert visible in restricted  # The refusal that the restricted caller may see is still there.
+    assert "restricted/damaged" not in restricted
 
 
 def test_the_status_reports_the_two_meters_without_counting_a_cached_original_twice(

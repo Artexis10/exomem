@@ -92,8 +92,6 @@ class AllowanceDecision:
     allowance_bytes: int | None
     observed_at: str
     code: str | None
-    blockers: tuple[Blocker, ...] = ()
-    blockers_total: int = 0
 
 
 def admission(
@@ -111,18 +109,7 @@ def admission(
         code = MEDIA_ALLOWANCE_UNKNOWN
     elif projected > allowance:
         code = MEDIA_ALLOWANCE_EXCEEDED
-    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code,
-                             usage.blockers, usage.blockers_total)
-
-
-def describe_blockers(blockers: tuple[Blocker, ...] | list[Blocker], total: int) -> str:
-    """The unreadable notes in one sentence for a refusal or a status: each path and reason, then what is left over."""
-    if not blockers:
-        return ""
-    shown = "; ".join(f"{blocker.path} ({blocker.reason})" for blocker in blockers)
-    more = f"; and {total - len(blockers)} more" if total > len(blockers) else ""
-    noun = "note" if total == 1 else "notes"
-    return f"{total} {noun} could not be read: {shown}{more}"
+    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code)
 
 
 def _binding(

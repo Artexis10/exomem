@@ -21,7 +21,6 @@ from . import (
     adoption_run,
     cloud_import,
     import_stage,
-    media_allowance,
     media_capacity,
     media_store,
     originals,
@@ -265,9 +264,9 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     if counted is None:
         return {"allowance_bytes": allowance, "unknown": "no owner census is recorded yet; the next offload records one"}
     if counted.used_bytes is None:
-        why = media_allowance.describe_blockers(counted.blockers, counted.blockers_total)
         unknown: dict = {"allowance_bytes": allowance, "observed_at": counted.observed_at,
-                         "unknown": "the stored versions could not be counted" + (f": {why}" if why else "")}
+                         "unknown": "the stored versions could not be counted"}
+        # The notes stay out of the text: each is its own entry with a path, which egress filters one by one.
         if counted.blockers:  # The same bounded shape as the retained census: the first few by path, and the total.
             unknown["blocked_by"] = [{"path": item.path, "reason": item.reason} for item in counted.blockers]
             unknown["blocked_total"] = counted.blockers_total

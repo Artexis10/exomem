@@ -833,14 +833,11 @@ def _refusal_code(
     return row["code"]
 
 
-def _require_allowance(
-    ledger: MediaJobStore, snapshot: OriginalSnapshot, code: str | None,
-    blockers: tuple[media_allowance.Blocker, ...] = (), blockers_total: int = 0,
-) -> None:
+def _require_allowance(ledger: MediaJobStore, snapshot: OriginalSnapshot, code: str | None) -> None:
     if code is not None:
-        why = media_allowance.describe_blockers(blockers, blockers_total)
-        refusal = MediaStoreError(code, "the current media allowance does not admit this original"
-                                  + (f": {why}" if why else ""))
+        # The worker logs this text and a status returns it whole, so it names no note: the notes behind an
+        # unknown census are only in the status's structured `blocked_by`, which egress filters entry by entry.
+        refusal = MediaStoreError(code, "the current media allowance does not admit this original")
         _refuse(ledger, snapshot, refusal, None)
         raise refusal
 
@@ -954,9 +951,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
         refusal = _refused(ledger, snapshot, config, usage=census())
         if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
-            # `_refused` has already admitted this original once; the second reading shares the batch's census.
-            decision, _reuse = _offload_admission(vault, snapshot, usage=census())
-            _require_allowance(ledger, snapshot, refusal, decision.blockers, decision.blockers_total)
+            _require_allowance(ledger, snapshot, refusal)
         if refusal is not None:
             return None
         if not snapshot.offloadable:
@@ -991,7 +986,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
         decision, reuse = _offload_admission(vault, snapshot, usage=census())
-        _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
+        _require_allowance(ledger, snapshot, decision.code)
         name_key = Path(str(config["name_key_path"])).read_bytes()
         if len(name_key) < 32:
             raise ValueError("the media name key requires at least 32 bytes")
@@ -1014,7 +1009,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
                     usage=census(),
                 )
-                _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
+                _require_allowance(ledger, snapshot, decision.code)
                 _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
             if reuse is not None:
                 reference = reuse.reference
@@ -1055,7 +1050,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reference, select_reuse=False, usage=census(),
                 )
-                _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
+                _require_allowance(ledger, snapshot, decision.code)
                 if batch is not None:
                     # Charged before the write: a failed write leaves the batch over-counting, never under.
                     batch.charge(ledger, snapshot, reference)
