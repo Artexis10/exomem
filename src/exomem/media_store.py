@@ -7,6 +7,7 @@ media ledger; protection records outlive those jobs.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -15,7 +16,6 @@ import os
 import shutil
 import sqlite3
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -1494,21 +1494,58 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
 
 
 def cached_bytes(vault: Path) -> int:
-    """The bytes on the volume of originals that the store also holds (D12): the ledger's cached rows, each read from the volume.
+    """The bytes that the volume allocates to cached copies of stored originals (D10, D12).
 
     One source for "cached": a row that is not evicted is a stored original that a hydration or a confirm left
-    on the volume. Raises `MediaStoreError` when the ledger cannot be read; a missing ledger caches nothing.
+    on the volume. A row counts only while the file there is the one that it recorded; an original rewritten
+    since is the vault's own bytes. Each file counts its allocated blocks, the unit of the volume's used bytes.
+    Raises `MediaStoreError` when the ledger or a cached file cannot be read; a missing ledger caches nothing.
     """
     vault = Path(vault).resolve()
     ledger = MediaJobStore(vault, create=False)
     if not ledger.path.exists():
         return 0
+    acquired = held_fs.acquire(vault)
+    if not acquired.ok:
+        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"the volume cannot be read: {acquired.error}")
+    total = 0
     try:
-        with closing(ledger._connect(readonly=True)) as conn:
-            return _volume_bytes(vault, (row[0] for row in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 0")),
-                                 sys.maxsize)[1]
+        with acquired.require() as filesystem, closing(ledger._connect(readonly=True)) as conn:
+            for relative, identity in conn.execute("SELECT binary_rel, identity FROM media_cache WHERE evicted = 0"):
+                total += _cached_allocation(vault, filesystem, relative, identity)
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
+    return total
+
+
+def _cached_allocation(vault: Path, filesystem: held_fs.HeldFilesystem, relative: str, identity: str) -> int:
+    """The bytes that the volume allocates to one cached row's file, or 0 when the file there is not the recorded one."""
+    # Status shows this text, so it names no path: a held refusal is content-free, an OSError is not.
+    unreadable = "a cached original cannot be read"
+    leaf = PurePosixPath(relative)
+    found = filesystem.parent(leaf.parent.as_posix())
+    if not found.ok:
+        if found.error is not None and found.error.code == "MISSING":
+            return 0  # A moved or deleted original holds no byte on the volume.
+        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {found.error}")
+    with found.require() as parent:
+        held = filesystem.file(parent, leaf.name, access="identity")
+        if not held.ok:
+            if held.error is not None and held.error.code == "MISSING":
+                return 0
+            raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {held.error}")
+        with held.require() as file:
+            try:
+                version = file.version()
+                info = os.lstat(vault / relative)
+            except OSError as error:
+                raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {errno.errorcode.get(error.errno, 'OSError')}") from None
+    if _version_identity(version) != identity or (info.st_dev, info.st_ino) != (version.identity.device, version.identity.inode):
+        return 0  # Rewritten or replaced since the row was recorded: these are the vault's own bytes now.
+    blocks = getattr(info, "st_blocks", None)  # POSIX reports allocation in 512-byte units; Windows reports none.
+    if blocks is None:
+        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", "this platform reports no allocated size for a file")
+    return blocks * 512
 
 
 def evicted_bytes(vault: Path) -> int:

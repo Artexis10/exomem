@@ -333,14 +333,17 @@ def _storage_figures(root: Path, volume: _Reading, allowance: dict) -> dict:
             cached = media_store.cached_bytes(root)
         except media_store.MediaStoreError as error:
             raise _Unknown(str(error)) from error
+        if cached > used:  # A volume holds at least its cached copies, so one of the two readings is wrong.
+            raise _Unknown("the cached originals exceed the bytes that the volume reports in use")
         return {"bytes": used - cached, "cached_bytes": cached, "volume_bytes": total}
 
     try:
         vault = vault_bytes()
     except _Unknown as why:
         vault = {"unknown": str(why)}
-    kept = ("used_bytes", "allowance_bytes", "unknown", "observed_at", "blocked_by", "blocked_total")
-    return {"vault_storage": vault, "media_storage": {key: allowance[key] for key in kept if key in allowance}}
+    # The figure and its limit only: `media_allowance` keeps the census's time and the notes behind an unknown one.
+    media = {key: allowance[key] for key in ("used_bytes", "allowance_bytes", "unknown") if key in allowance}
+    return {"vault_storage": vault, "media_storage": media}
 
 
 def _volume_section(volume: _Reading) -> dict:

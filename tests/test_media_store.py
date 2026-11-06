@@ -3618,22 +3618,46 @@ def test_a_restricted_caller_learns_no_path_of_a_restricted_note_that_stops_the_
 def test_the_status_reports_the_two_meters_without_counting_a_cached_original_twice(
         vault: Path, selected_store, monkeypatch):
     """Catches a vault figure that charges the volume for cached copies, or a media figure that leaves them out."""
+    from types import SimpleNamespace
+
     _window_policy(selected_store, monkeypatch)
     cached = _stored(vault, "cached", 300)
     evicted = _stored(vault, "evicted", 500)
     from exomem import media_store
 
     assert media_store.evict(vault, evicted)
-    size = cached.stat().st_size
-    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 10_000, cached))
+    allocated = cached.stat().st_blocks * 512  # The volume's figure counts allocated blocks, not file lengths.
+    used = 10_000 + allocated
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=_WINDOW_VOLUME, used=used, free=_WINDOW_VOLUME - used))
     both = _stored_census(vault)
 
     status = _window_status(vault, series_id="series-a", next_window_bytes=1)
 
-    assert status["vault_storage"] == {"bytes": 10_000, "cached_bytes": size, "volume_bytes": _WINDOW_VOLUME}
-    assert status["media_storage"]["used_bytes"] == both  # Both stored originals, once each.
-    assert status["media_storage"]["allowance_bytes"] == 10_000_000
-    assert both > size
+    assert status["vault_storage"] == {"bytes": 10_000, "cached_bytes": allocated, "volume_bytes": _WINDOW_VOLUME}
+    assert status["media_storage"] == {"used_bytes": both, "allowance_bytes": 10_000_000}  # Each stored original once.
+    assert both > cached.stat().st_size
+
+
+def test_an_original_rewritten_since_its_cache_record_counts_as_vault_storage(vault: Path, selected_store):
+    """Catches a vault figure that leaves out an original the owner rewrote, because its old row still says cached."""
+    from exomem import media_store
+
+    kept = _stored(vault, "kept", 300)
+    rewritten = _stored(vault, "rewritten", 300)
+    rewritten.write_bytes(b"x" * 300 + b" and the owner's new bytes")
+
+    assert media_store.cached_bytes(vault) == kept.stat().st_blocks * 512
+
+
+def test_a_volume_reading_below_its_cached_copies_makes_vault_storage_unknown(vault: Path, selected_store, monkeypatch):
+    """Catches a negative vault figure shown as a number when the volume reads less than the cached copies on it."""
+    _window_policy(selected_store, monkeypatch)
+    _stored(vault, "cached", 300)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 0))
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert "bytes" not in status["vault_storage"] and status["vault_storage"]["unknown"]
 
 
 def _stored_census(vault: Path) -> int:
