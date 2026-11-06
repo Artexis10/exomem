@@ -78,6 +78,28 @@ def test_task_phase_rechecks_native_visibility_after_the_map(vault: Path) -> Non
     assert path not in {candidate["source_ref"] for candidate in result}
 
 
+def test_terminal_task_guard_does_not_inherit_the_compilation_policy(vault: Path, monkeypatch) -> None:
+    """A task compiled before a policy change must lose its route at the terminal guard."""
+    from exomem.governance import egress, policy
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    path = _page(vault, "alignment-visit", body="Inspect optical alignment before the calibration appointment.\n")
+    _withhold(vault, path, ceiling=6)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    with principal.request_scope(_external()), principal.invocation_scope(), policy.request_policy_snapshot():
+        assert egress.release_level_for_path_only(vault, path) == 6
+        packet = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
+        assert "task_context" in packet, (packet.get("abstention"), packet.get("missing"))
+        assert path in {candidate["source_ref"] for candidate in packet["task_context"]["candidates"]}
+        write_rule(vault, ceiling=0)
+        with policy.outside_request_policy_snapshot():
+            assert egress.release_level_for_path_only(vault, path) == 0
+        guarded = egress.guard_working_set(vault, packet, egress.AnnotatedHits(hits=[]))
+    assert guarded is not None
+    assert path not in {candidate["source_ref"] for candidate in guarded["task_context"]["candidates"]}
+
+
 @pytest.mark.parametrize("changed", [False, True], ids=["custom", "replaced"])
 def test_custom_task_visibility_keeps_its_extra_denial(vault: Path, changed: bool) -> None:
     """A fresh canonical release cannot remove an additional restriction from a supplied view."""

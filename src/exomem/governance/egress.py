@@ -3833,6 +3833,9 @@ def classify_units(
     return [_unit_verdict(unit, ctx)[1] for unit in units]
 
 
+# The terminal packet starts a fresh policy read, independent of compilation.
+@policy_module.outside_request_policy_snapshot()
+@policy_module.request_policy_snapshot()
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],
