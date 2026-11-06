@@ -46,7 +46,7 @@ _EMBEDDINGS_SPACE_RE = re.compile(
 )
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
 _DUE_TEMP_RE = re.compile(
-    r"^\.\.due-state(?:-emission)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
+    r"^\.\.due-state(?:-emission|-candidates)?\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
 )
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
@@ -606,7 +606,11 @@ _REGISTRY = (
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
-        exact=(".due-state.json", ".due-state-emission.json"),
+        exact=(
+            ".due-state.json",
+            ".due-state-emission.json",
+            ".due-state-candidates.json",
+        ),
         patterns=(_DUE_TEMP_RE,),
         migrates_from_vault=True,
     ),
