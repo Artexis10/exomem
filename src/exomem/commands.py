@@ -11583,7 +11583,7 @@ def op_maintain_memory(
     if mode == "collections-store":
         if (
             categories is not None
-            or dry_run is False  # it has no write path: an omitted dry_run is the preflight
+            or dry_run not in (None, True)  # it has no write path: an omitted dry_run is the preflight
             or rebuild_embeddings
             or detail != "actionable"
             or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT

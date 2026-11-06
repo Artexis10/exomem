@@ -186,7 +186,7 @@ Lists tags that differ only by case, separator or plural, grouped with visible p
 
 ### collections-store
 
-Reports whether each file Records and Planning collection would move into the collection store cleanly. It runs only with `dry_run=true`, is owner-only, and writes nothing. Each collection reports its rows, legacy audit status, round-trip proof and any blocker. A blocker names its code and, for a failed proof, the check letter. Datasets are skipped, and every copy of a duplicated collection identity is blocked.
+Reports whether each file Records and Planning collection would move into the collection store cleanly. Call it with `kind` alone: it takes no other field, is owner-only, and writes nothing. Each collection reports its rows, legacy audit status, round-trip proof and any blocker. A blocker names its code and, for a failed proof, the check letter. Datasets are skipped, and every copy of a duplicated collection identity is blocked.
 
 The report separates vault setup in `coordinator` and, when needed, a vault-level `blocker`. Without configured writer-lease coordination, a vault with collections to migrate stays `blocked` even when every collection passes. The vault verdict is `migratable`, `blocked` or `nothing_to_migrate`. Moving a vault is a separate offline upgrade step.
 

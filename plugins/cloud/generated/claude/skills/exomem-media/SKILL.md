@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: 09c3c878d8a26995205fc46e7bdea133177d6872021a636fa7412fc35c5321a6
+  skill_contract: 307c782700901bc5b5efbaedbb4898665c7515501714108eeb75894f55d674af
   version: "0.1.0"
 ---
 
