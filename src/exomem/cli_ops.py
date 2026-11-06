@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from . import guards
+from . import capabilities, guards
 
 if TYPE_CHECKING:
     from .commands import Param
@@ -35,11 +35,36 @@ _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 # This closed envelope code is shared by rendering validation and client accounting.
 INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
 
-RELATION_REVIEW_STABLE_ID_REMEDIATION = (
-    'For reviewed-none, preview maintain_memory(mode="backfill-ids"). '
-    "Resolve reported identity issues before confirmation, then backfill with its "
-    "plan_id and a why; re-read and validate."
-)
+
+def backfill_ids_route() -> tuple[str, str]:
+    """The backfill preview call and its apply tool, spelled for the surface serving this call.
+
+    A typed surface lists `check_memory` and `repair_memory`, not `maintain_memory`, so
+    a fixed spelling would name a tool that the client cannot call.
+    """
+    return (
+        capabilities.active_call_text("maintain_memory", {"mode": "backfill-ids"}),
+        capabilities.active_tools_text("maintain_memory", "write"),
+    )
+
+
+def relation_review_stable_id_remediation() -> str:
+    preview, apply = backfill_ids_route()
+    return (
+        f"Preview {preview}; resolve identity issues before confirmation, then run "
+        f"{apply} with dry_run=false, its plan_id and a why; re-read and validate."
+    )
+
+
+def _not_found_remediation() -> str:
+    return f"Check the path; try `{capabilities.active_tools_text('ask_memory')}` to locate it."
+
+
+# Remediations that name a tool are spelled when the error renders, inside the call.
+_SPELLED_REMEDIATION: dict[str, Callable[[], str]] = {
+    "NOT_FOUND": _not_found_remediation,
+    "RELATION_REVIEW_STABLE_ID_REQUIRED": relation_review_stable_id_remediation,
+}
 
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
 # pointer are listed; everything else carries `remediation: null`.
@@ -53,7 +78,6 @@ _REMEDIATION: dict[str, str] = {
     "BAD_BOOL": "Pass a boolean (true/false).",
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
-    "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
     "ENTITY_AMBIGUOUS": (
         "Review the returned active candidates and reconcile the identity before creating."
     ),
@@ -62,7 +86,6 @@ _REMEDIATION: dict[str, str] = {
         "Re-read the exact unit and retry with its current reference/fingerprint."
     ),
     "AMBIGUOUS_UNIT_REFERENCE": ("Re-read the parent and select one exact current unit reference."),
-    "RELATION_REVIEW_STABLE_ID_REQUIRED": RELATION_REVIEW_STABLE_ID_REMEDIATION,
     "PATH_GUARD_UNSAFE": (
         "A vault file failed a safety check. Retry once shortly. If it repeats, ask the vault "
         "owner to check the server log, which names the file."
@@ -238,6 +261,12 @@ _CONFLICT_CODES = frozenset(
 )
 
 
+def remediation_for(code: str) -> str | None:
+    """The one-line remediation for a stable error code, or None."""
+    spelled = _SPELLED_REMEDIATION.get(code)
+    return spelled() if spelled is not None else _REMEDIATION.get(code)
+
+
 class OpError(Exception):
     """A structured operation error carrying a stable code + remediation.
 
@@ -255,7 +284,7 @@ class OpError(Exception):
     ):
         self.code = code
         self.message = message
-        self.remediation = remediation or _REMEDIATION.get(code)
+        self.remediation = remediation or remediation_for(code)
         self.details = dict(details or {})
         super().__init__(f"{code}: {message}")
 
@@ -391,7 +420,7 @@ def error_dict(exc: Exception) -> dict:
         m = _CODE_PREFIX.match(text)
         if m:
             code, message = m.group(1), m.group(2).strip()
-            return {"code": code, "message": message, "remediation": _REMEDIATION.get(code)}
+            return {"code": code, "message": message, "remediation": remediation_for(code)}
         return {"code": "OP_ERROR", "message": text, "remediation": None}
     return {"code": "INTERNAL", "message": text, "remediation": None}
 
