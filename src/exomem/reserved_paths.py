@@ -138,9 +138,11 @@ class InternalStateDescriptor:
     owning_command: str | None = None
     authority_enabled: bool = True
     #: Whether the family once lived inside the vault. Only such a family has legacy state for the
-    #: one-time migration to move, so only its id joins the migration manifest's descriptor set. A
-    #: family born external adds no migration: an upgrade stays seamless and an older reader accepts it.
-    migrates_from_vault: bool = True
+    #: one-time migration to move, so only its id joins the migration manifest's descriptor set.
+    #: A new family is born external, so the default is False: it adds no migration, an upgrade
+    #: stays seamless and an older reader accepts it. Only the families that the relocation moved
+    #: set True, and that set is closed.
+    migrates_from_vault: bool = False
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -425,7 +427,6 @@ def _sqlite_family(name: str) -> tuple[str, ...]:
 _REGISTRY = (
     InternalStateDescriptor(
         "served-context", "served_context", StatePlacement.EXTERNAL_STATE,
-        migrates_from_vault=False,
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
@@ -461,6 +462,7 @@ _REGISTRY = (
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".governance.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "embeddings-store",
@@ -468,30 +470,35 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(*_sqlite_family(".embeddings.sqlite"), ".embeddings.active"),
         patterns=(_EMBEDDINGS_SPACE_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "clip-store",
         "clip_index",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".clip.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "lexical-store",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".lexical.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-store",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".graph.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "claims-store",
         "claims",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".claims.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "references-store",
@@ -499,12 +506,14 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         authority_enabled=False,
         exact=_sqlite_family(".references.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "refs-store",
         "memory_refs",
         StatePlacement.EXTERNAL_STATE,
         exact=_sqlite_family(".refs.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "freshness-store",
@@ -512,6 +521,7 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         authority_enabled=False,
         exact=_sqlite_family(".freshness.sqlite"),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "deferred-index-store",
@@ -522,6 +532,7 @@ _REGISTRY = (
             *_sqlite_family(".deferred_index.sqlite"),
             ".deferred-index.json",
         ),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "media-jobs-store",
@@ -533,12 +544,12 @@ _REGISTRY = (
             ".media-jobs.json",
             ".media-worker.lock",
         ),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "maintenance-jobs-store",
         "maintenance_jobs",
         StatePlacement.EXTERNAL_STATE,
-        migrates_from_vault=False,
         exact=_sqlite_family(".maintenance-jobs.sqlite"),
     ),
     InternalStateDescriptor(
@@ -550,12 +561,14 @@ _REGISTRY = (
             ".idempotency.json",
             ".idempotency.jsonl",
         ),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "voice-profile-store",
         "voice_profiles",
         StatePlacement.EXTERNAL_STATE,
         exact=(".voice_profiles.json",),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-handoff",
@@ -570,12 +583,14 @@ _REGISTRY = (
             # rather than written in place.
             ".graph-sync-recovery.json",
         ),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-receipts",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
         trees=(".graph-commit-receipts",),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "review-state",
@@ -583,6 +598,7 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".review-state.json",),
         patterns=(_REVIEW_TEMP_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "due-state",
@@ -590,42 +606,49 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".due-state.json", ".due-state-emission.json"),
         patterns=(_DUE_TEMP_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "lexical-rebuild",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
         patterns=(_LEXICAL_REBUILD_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "lexical-quarantine",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
         patterns=(_LEXICAL_QUARANTINE_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-rebuild",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
         patterns=(_GRAPH_REBUILD_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-reset",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
         tree_patterns=(_GRAPH_RESET_RE,),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "graph-coordination",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
         trees=(".graph-coordination",),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "authorization-projections",
         "governance.projections",
         StatePlacement.EXTERNAL_STATE,
         trees=(".authorization-projections",),
+        migrates_from_vault=True,
     ),
     InternalStateDescriptor(
         "collection-store",
@@ -841,9 +864,10 @@ def internal_state_registry() -> tuple[InternalStateDescriptor, ...]:
 def external_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
     """The families whose canonical home is the external per-vault state root.
 
-    This classification — not a hand-copied name list — is what the one-time
-    migration moves and what the doctor leftover scan walks, so a new family
-    is placed correctly (or flagged) the moment it is registered.
+    This classification, not a hand-copied name list, places a new family under
+    the state root the moment it is registered. The one-time migration and the
+    doctor leftover scan cover only the families that set ``migrates_from_vault``,
+    because only those families ever lived inside the vault.
     """
 
     return tuple(

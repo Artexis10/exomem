@@ -1278,8 +1278,8 @@ def test_the_migration_descriptor_set_changes_only_with_a_state_migration() -> N
     declared = set(state_migration.declared_descriptor_ids())
     assert declared == released, (
         f"added {sorted(declared - released)}, removed {sorted(released - declared)}: this forces a "
-        "state migration. Set migrates_from_vault=False on a family born under the state root, or "
-        "change this set only together with a migration that moves vault state"
+        "state migration. Keep the default migrates_from_vault=False on a family born under the "
+        "state root, or change this set only together with a migration that moves vault state"
     )
 
 

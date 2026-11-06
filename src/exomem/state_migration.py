@@ -399,7 +399,7 @@ def _store_owned_ids() -> frozenset[str]:
 
 
 def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:
-    """Return top-level legacy members for every external-state descriptor."""
+    """Return top-level legacy members of each external family that once lived inside the vault."""
 
     from . import reserved_paths
 
