@@ -170,7 +170,7 @@ The no-effect terminal SHALL NOT inherit a nonretryable failed_step dead end.
 A crash without terminal proof SHALL remain uncertain.
 
 Recovery SHALL inspect same-operation commitment and repair missing terminal receipts through
-curation before reacquiring original custody. Historical commitment SHALL survive missing input.
+curation before reacquiring original custody. Historical commitment SHALL survive missing input and changed or missing output.
 Current readback/coverage SHALL separately require current authorized output and exact binary bytes.
 Legacy receipts/journals SHALL retain normalization and absent fields without synthetic invocation defaults.
 Unsupported strict readers SHALL refuse new extensions before modification.
@@ -506,16 +506,17 @@ Candidate identity SHALL remain stable across destination re-resolution, proposa
 #### Scenario: A leaf result is reconciled from stored evidence
 
 - **WHEN** an owner-held episode leaf has an uncertain attempted outcome
-- **THEN** the recovery adapter verifies its exact stored plan, approval, operation, receipt, atomic witness and applicable current readback before recording a verified committed outcome
+- **THEN** the recovery adapter verifies its exact stored plan, approval, operation, receipt and atomic witness as historical evidence, without its live postimage, before recording a verified committed outcome
 - **AND** caller-supplied success flags, mutable progress projections and unmatched evidence cannot substitute for that proof
 - **AND** reconciliation itself performs no canonical write or leaf execution
 - **AND** the existing consistency boundary excludes canonical mutations throughout the evidence read without granting writer authority
 
 #### Scenario: A missing or historical result cannot authorize a retry
 
-- **WHEN** a terminal receipt is missing, a committed postimage has changed, or only an earlier failed attempt is evidenced
+- **WHEN** a terminal receipt is missing or only an earlier failed attempt is evidenced
 - **THEN** the episode remains uncertain until the existing execution owner and appropriate evidence contract reconcile the result
 - **AND** absence, failure or stale readback is never treated as proof that the current attempt did not commit
+- **AND** a postimage that changed after a verified historical commitment is a current-coverage finding, never a retry authorization
 
 ### Requirement: Typed episode operations execute only existing leaves and only when enabled
 

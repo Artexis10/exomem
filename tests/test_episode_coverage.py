@@ -947,7 +947,7 @@ def test_an_uncertain_leaf_whose_page_is_withheld_resumes_like_a_deleted_one(
     vault: Path, enabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A crash after the writer committed leaves the leaf uncertain; its page
-    withheld afterwards must not reconcile where a deleted one would not."""
+    withheld afterwards must reconcile exactly as a deleted one does."""
     slugs = {"withheld": "withheld-crash-note", "deleted": "gone-crash-note"}
     keys = {"withheld": "ep-" + "a9" * 16, "deleted": "ep-" + "b9" * 16}
     client = RequestPrincipal(audience_id="client-a", surface="mcp")
@@ -997,9 +997,8 @@ def test_an_uncertain_leaf_whose_page_is_withheld_resumes_like_a_deleted_one(
     assert json.dumps(_shape(outcomes["withheld"]), sort_keys=True) == json.dumps(
         _shape(outcomes["deleted"]), sort_keys=True
     )
-    assert [item["code"] for item in outcomes["withheld"]["blocked"]] == [
-        "EPISODE_OUTCOME_UNCERTAIN"
-    ]
+    # The commit is history: neither a withheld nor a deleted page keeps it uncertain.
+    assert [item["outcome"] for item in outcomes["withheld"]["reconciled"]] == ["committed"]
 
 
 # --------------------------------------------------------------------------- #

@@ -5273,9 +5273,21 @@ class _NativePrepared(Exception):
 class DefiniteNoEffect(Exception):
     """A native owner stopped this invocation before its publication path."""
 
+    #: The native no-effect protocol's one reason: the sealed destination already exists.
+    DESTINATION_EXISTS = "destination_exists"
+
     def __init__(self, reason: str, evidence: dict):
         super().__init__(reason)
         self.reason, self.evidence = reason, evidence
+
+    @staticmethod
+    def destination_evidence(destination: str) -> dict:
+        """The exact evidence a `DESTINATION_EXISTS` stop carries and its terminal must repeat."""
+        return {"destination": destination, "publication_started": False}
+
+    @classmethod
+    def destination_exists(cls, destination: str) -> DefiniteNoEffect:
+        return cls(cls.DESTINATION_EXISTS, cls.destination_evidence(destination))
 
 
 def batch_atomic_write(

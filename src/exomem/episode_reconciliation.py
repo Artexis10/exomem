@@ -33,19 +33,22 @@ def reconcile_curation_leaf(
     state: Mapping[str, Any],
     candidate_id: str,
     leaf_id: str,
+    *,
+    live: bool = False,
 ) -> dict[str, Any]:
     """Verify an internal uncertain leaf under the existing vault read boundary.
 
     The consistency guard excludes canonical writers throughout the evidence
     read, including multi-path postimages, without acquiring writer authority.
     It is reentrant when the future episode owner already holds that boundary.
+    `live=True` is for a read-only trial alone; see `_reconcile_held`.
     """
     from .writer_lease import active_manager
 
     with active_manager().consistency_guard(
         vault_root, operation="episode-reconciliation", holder_kind="command"
     ):
-        return _reconcile_held(vault_root, state, candidate_id, leaf_id)
+        return _reconcile_held(vault_root, state, candidate_id, leaf_id, live=live)
 
 
 def _reconcile_held(
@@ -54,20 +57,21 @@ def _reconcile_held(
     candidate_id: str,
     leaf_id: str,
     *,
-    live: bool = True,
+    live: bool = False,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return a reconciled copy only for an evidenced, currently verified commit.
+    """Return a reconciled copy only for an evidenced historical commit.
 
-    `live=False` verifies the historical commitment alone -- plan, approval,
-    receipt and atomic witness -- and leaves the live postimage to the caller;
+    The commitment is verified from plan, approval, receipt and atomic witness
+    alone, so a later change to its output, or the output's loss, never makes
+    it uncertain; current coverage reports that change separately. `live=True`
+    also requires the live postimage: only the read-only trial that reports a
+    plan committed elsewhere as `diverged` uses it, and it records nothing.
     `evidence`, when given, receives the verified witness, step and binding.
 
     All receipt, approval, plan and witness bytes come from the existing canonical
     curation store.  A receipt gap stays uncertain until that store's executor
-    recovers it. With `live=True`, a changed postimage also stays uncertain;
-    historical coverage uses `live=False` and verifies the chain tip separately.
-    Neither case becomes permission to retry.
+    recovers it, and never becomes permission to retry.
 
     A failed receipt cannot prove noncommit for this episode attempt: the current
     binding does not identify a curation attempt, and an older failure may predate

@@ -634,7 +634,7 @@ def preserve(
 
     if artifact_path.exists():
         if _allocation is not None:
-            raise DefiniteNoEffect("destination_exists", {"destination": _allocation["destination"], "publication_started": False})
+            raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
             "ARTIFACT_EXISTS",
             ["filename"],

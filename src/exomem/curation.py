@@ -18,9 +18,11 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
 from . import capabilities, held_fs
+from .collection_profiles import PLANNING_PROFILE
 from .kbdir import kb_dirname
 from .vault import (
     BatchWriteError,
@@ -69,9 +71,16 @@ RECORDS_STEP_KIND: Final[str] = "append-record"
 RECORDS_STEP_KINDS: Final[frozenset[str]] = frozenset({RECORDS_STEP_KIND, "update-record"})
 # These are closed native operation tokens, never business vocabulary.
 PRESERVATION_STEP_KINDS: Final[frozenset[str]] = frozenset({"capture-source", "preserve-evidence"})
-# nosemgrep: ep-word-set -- the closed curation step kinds of the Planning leaves.
-PLANNING_STEP_KINDS: Final[frozenset[str]] = frozenset({"add-plan", "update-plan", "triage-plan"})
+# nosemgrep: ep-word-set -- the closed curation step kinds of the Planning leaves and the native
+# Planning action each one runs.
+PLANNING_STEP_ACTIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}
+)
+PLANNING_STEP_KINDS: Final[frozenset[str]] = frozenset(PLANNING_STEP_ACTIONS)
 COLLECTION_STEP_KINDS = RECORDS_STEP_KINDS | PLANNING_STEP_KINDS
+#: Native kinds whose atomic witness alone proves the commit: their missing receipt is repaired from
+#: history even after the output changed or disappeared, which current coverage reports on its own.
+_NATIVE_STEP_KINDS = PRESERVATION_STEP_KINDS | PLANNING_STEP_KINDS
 OBSERVE_UNIT_STEP_KIND: Final[str] = "observe-unit"
 #: The revert leaf of `recent_promotions` (promote-referents-without-nudges 2.6):
 #: remove the bullets of one typed edge, keyed by subject page, predicate and
@@ -444,7 +453,7 @@ def _folded_segment(part: str) -> str:
 
 
 def normalize_target_path(
-    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, _owner_tree: str | None = None, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
 ) -> str:
     """A confined governed path. `allow_records` is the Records leaf's alone:
     it admits the Records tree, spelled exactly as the Records layer is, and
@@ -475,9 +484,9 @@ def normalize_target_path(
     parts = relative.split("/")
     first = _folded_segment(parts[0])
     compact = "/".join(_folded_segment(part) for part in parts).replace("_", "-")
-    if _owner_tree is not None:
-        # Native leaf dispatch fixes these owner layers; public curation never supplies one.
-        if _owner_tree not in {"Sources", "Evidence", "Planning"} or parts[0] != _owner_tree or len(parts) < 2:
+    if _planning_tree:
+        # Native Planning dispatch fixes this owner layer; public curation never supplies it.
+        if parts[0] != PLANNING_PROFILE.placement_layer or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside its native owner tree")
         return raw
     if allow_records:
@@ -1674,7 +1683,7 @@ def _prepare_step(
         elif kind in PLANNING_STEP_KINDS:
             from . import planning
 
-            action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+            action = PLANNING_STEP_ACTIONS[kind]
             native = planning.prepare(vault_root, action, args)
             path = native["path"]
             prepared = {**native, "destination": path}
@@ -1682,8 +1691,8 @@ def _prepare_step(
             if native.get("store") is not None:
                 effect_before = []
             else:
-                path = normalize_target_path(path, _owner_tree="Planning")
-                manifest_path = normalize_target_path(native["manifest_path"], _owner_tree="Planning")
+                path = normalize_target_path(path, _planning_tree=True)
+                manifest_path = normalize_target_path(native["manifest_path"], _planning_tree=True)
                 _text, manifest_hash = _read_target(vault_root, manifest_path)
                 if kind == "add-plan":
                     expected_absent = True
@@ -2439,7 +2448,7 @@ def _witness_basis(
         OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
         REMOVE_RELATION_STEP_KIND: "edit_memory:remove-relation",
         "capture-source": "capture_memory:source", "preserve-evidence": "preserve_memory:evidence",
-        "add-plan": "plan_memory:add", "update-plan": "plan_memory:update", "triage-plan": "plan_memory:triage",
+        **{kind: f"{PLANNING_PROFILE.tool}:{action}" for kind, action in PLANNING_STEP_ACTIONS.items()},
     }[step["kind"]]
     return {
         "version": 1,
@@ -2639,7 +2648,7 @@ def _validate_witness(
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
                 allow_records=kind in RECORDS_STEP_KINDS,
-                _owner_tree=({"capture-source": "Sources", "preserve-evidence": "Evidence"}.get(kind) or ("Planning" if kind in PLANNING_STEP_KINDS else None)),
+                _planning_tree=kind in PLANNING_STEP_KINDS,
                 _planning_identity=(binding["prepared"]["collection_id"], binding["prepared"]["item_key"]) if kind in PLANNING_STEP_KINDS and binding["prepared"].get("store") is not None else None,
                 _native_paths=frozenset(item["path"] for item in binding["prepared"]["core"]) if kind in PRESERVATION_STEP_KINDS else None,
             )
@@ -2763,7 +2772,7 @@ def _committed_operation_witness(
     """The validated witness of a step that committed, or None when it did not.
 
     A store step that committed leaves its row before its evidence file, so the file is derived
-    first when the row is there.
+    first when the row is there. A native step's witness is checked as history alone.
     """
     if writer is not None:
         _publish_store_witness(
@@ -2785,6 +2794,7 @@ def _committed_operation_witness(
         binding=binding,
         operation_identity=operation_identity,
         compensation=compensation,
+        live=step["kind"] not in _NATIVE_STEP_KINDS,
     )
 
 
@@ -2843,7 +2853,7 @@ def _verify_records_receipt(
     if kind in PLANNING_STEP_KINDS:
         from . import planning
 
-        action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+        action = PLANNING_STEP_ACTIONS[kind]
         if writer is not None:
             if not planning.store_receipt(writer, store_request_id(str(witness["run_id"]), str(witness["operation_id"])), prepared=prepared, after=after[0], action=action):
                 raise _error("CURATION_OUTCOME_UNCERTAIN", "Planning transaction does not corroborate")
@@ -3063,7 +3073,7 @@ def _dispatch_step(
         from . import plan_memory
         from .collection_store.preview import selected_writer
 
-        action = {"add-plan": "add", "update-plan": "update", "triage-plan": "triage"}[kind]
+        action = PLANNING_STEP_ACTIONS[kind]
         args = dict(prepared["normalized_native_args"])
         intent = prepared.get("source_intent")
         def validate_intent() -> None:
@@ -3487,7 +3497,7 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
     if leaf["effect_digest"] != metadata["effect_digest"] or leaf["binding"] is None or (
         leaf["binding"]["run_id"], leaf["binding"]["operation_id"]
     ) != (run, operation):
-        # Checked before any write: this run is not the episode's bound invocation, so nothing ran.
+        # Checked before any knowledge write (no step runs): this run is not the episode's bound invocation.
         raise _error("CURATION_BINDING_STALE", "the episode binds this leaf to another run or effect")
     episode_model._binding({**leaf["binding"], "sealed_plan": plan}, leaf)  # noqa: SLF001
     active = _ACTIVE_EPISODE_INVOCATION.get()
@@ -3502,7 +3512,10 @@ def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, 
         session.transition("reconcile_curation_leaf", commit_point=False, candidate=candidate, leaf=leaf_id)
         leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
         if leaf["outcome"] != "proven_uncommitted":
-            raise _error("CURATION_OUTCOME_UNCERTAIN", "episode invocation requires native recovery")
+            raise _error(
+                "CURATION_OUTCOME_UNCERTAIN",
+                "the earlier episode attempt is not proven uncommitted, so this leaf cannot run again automatically",
+            )
     session.transition("mark_curation_invocation", commit_point=False, candidate=candidate, leaf=leaf_id)
     leaf = episode_model._owned(session.state, candidate, leaf_id)  # noqa: SLF001
     return {"invocation_id": leaf["invocation_id"], "episode_attempt": leaf["attempts"]}
@@ -3512,11 +3525,11 @@ def _valid_no_effect(receipt: Mapping, *, plan_identity: str, binding: Mapping, 
     from . import episode_model
 
     metadata = binding.get("prepared", {}).get("episode")
-    # The terminal fields and reason token are fixed by the native no-effect protocol.
+    # The terminal fields are fixed by the native no-effect protocol, which owns its reason token.
     if not isinstance(metadata, Mapping) or set(receipt) != {
         "version", "attempt", "ordinal", "step_id", "operation_id", "outcome", "invocation_id",
         "episode_attempt", "plan_id", "prepared_effect_digest", "native_reason", "native_evidence",
-    } or receipt.get("outcome") != "definite-no-effect" or receipt.get("native_reason") != "destination_exists":
+    } or receipt.get("outcome") != "definite-no-effect" or receipt.get("native_reason") != DefiniteNoEffect.DESTINATION_EXISTS:
         return False
     attempt = receipt.get("episode_attempt")
     if type(attempt) is not int or attempt < 1 or receipt.get("plan_id") != plan_identity or receipt.get("prepared_effect_digest") != _digest(binding):
@@ -3524,9 +3537,9 @@ def _valid_no_effect(receipt: Mapping, *, plan_identity: str, binding: Mapping, 
     identity = episode_model._hash(  # noqa: SLF001
         "exomem-episode-invocation-v1", episode_model.episode_id(metadata["key"]), metadata["leaf_id"], metadata["effect_digest"], operation, attempt
     )
-    return receipt.get("invocation_id") == identity and receipt.get("native_evidence") == {
-        "destination": binding["prepared"]["destination"], "publication_started": False,
-    }
+    return receipt.get("invocation_id") == identity and receipt.get(
+        "native_evidence"
+    ) == DefiniteNoEffect.destination_evidence(binding["prepared"]["destination"])
 
 
 def _execute_next(
@@ -4042,6 +4055,7 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 binding=binding,
                 operation_identity=operation_identity,
                 compensation=compensation,
+                live=step["kind"] not in _NATIVE_STEP_KINDS,
             )
         except CurationError:
             return {

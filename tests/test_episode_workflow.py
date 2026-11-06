@@ -1342,7 +1342,7 @@ def test_a_reseal_onto_changed_content_withdraws_the_disposition(
     assert page.read_bytes() == edited
 
 
-def test_an_ordinary_curation_commit_with_changed_output_remains_uncertain(
+def test_a_leaf_committed_elsewhere_then_edited_reports_changed_coverage(
     vault: Path, owner, enabled
 ) -> None:
     _record(vault)
@@ -1361,6 +1361,7 @@ def test_an_ordinary_curation_commit_with_changed_output_remains_uncertain(
     note.write_text(
         note.read_text(encoding="utf-8") + "\nEdited after it was written.\n", encoding="utf-8"
     )
+    edited = note.read_bytes()
 
     resumed = _workflow(
         vault,
@@ -1369,23 +1370,28 @@ def test_an_ordinary_curation_commit_with_changed_output_remains_uncertain(
         journal_digest=_reviewed(vault),
     )
 
-    assert resumed["status"] == "blocked"
-    assert resumed["blocked"] == [
-        {"leaf_id": leaf["leaf_id"], "code": "EPISODE_OUTCOME_UNCERTAIN"}
-    ]
-    assert resumed["executed"] == resumed["replayed"] == resumed["diverged"] == []
+    # The later edit does not undo the proven commitment, and nothing runs again.
+    assert resumed["status"] == "ok"
+    assert resumed["reconciled"] == [{"leaf_id": leaf["leaf_id"], "outcome": "committed"}]
+    assert resumed["executed"] == resumed["replayed"] == resumed["blocked"] == []
     current = _candidate(resumed, "alpha")["leaves"][0]
-    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert (current["outcome"], current["attempts"]) == ("committed", 1)
+    # Current coverage reports the edit, so the owner can settle the candidate again.
+    covered = _workflow(vault, action="coverage")
+    assert [item["readback"] for item in covered["receipts"]] == ["changed"]
+    assert covered["coverage_current"] == "changed"
 
-    # Changing disposition cannot erase the tracked attempt or prove its effect absent.
-    edited = note.read_bytes()
-    with pytest.raises(ValueError, match="EPISODE_ATTEMPT_UNCERTAIN"):
-        _workflow(vault, action="disposition", candidate="alpha", disposition="rejected",
-                  reason="The page moved on after it was written.")
-    with pytest.raises(ValueError, match="EPISODE_ATTEMPT_UNCERTAIN"):
-        _workflow(vault, action="prepare", candidate="alpha",
-                  proposal=_note_proposal("another-note", "A replacement must not retry this attempt."))
-    assert _reviewed(vault) == resumed["journal_digest"]
+    disposed = _workflow(
+        vault,
+        action="disposition",
+        candidate="alpha",
+        disposition="rejected",
+        reason="The page moved on after it was written.",
+    )
+    again = _workflow(
+        vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
+    )
+    assert again["status"] == "ok"
     assert note.read_bytes() == edited
 
 
@@ -1450,6 +1456,46 @@ def test_native_source_commit_recovers_after_lost_ack_and_input_deletion(vault, 
     assert _candidate(current, "transfer")["leaves"][0]["operation_id"] == leaf["operation_id"]
     assert _candidate(current, "transfer")["leaves"][0]["outcome"] == "committed"
     assert current["executed"] == []
+
+
+def test_native_source_commit_recovers_after_lost_ack_and_output_deletion(vault, owner, enabled, monkeypatch):
+    """A witnessed commit must keep its history after its preserved original disappears."""
+    original = commands.op_preserve_evidence(
+        vault, scope="incoming", category="samples", filename="account.bin",
+        content="The exact preserved account.", description="A retained original.",
+    )
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="transfer", proposal=_proposal(
+        "source", [{"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "title": "Transferred account", "source_type": "session",
+        }}], title="Transferred account",
+    ))
+    leaf = _candidate(prepared, "transfer")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="transfer", disposition="routed", reason="Keep the original in the source family.")
+    real_barrier = curation._fault_barrier
+
+    def lose_ack(phase):
+        if phase == "after-leaf-witness":
+            raise curation.CurationFault("lost acknowledgement")
+        real_barrier(phase)
+
+    monkeypatch.setattr(curation, "_fault_barrier", lose_ack)
+    with pytest.raises(curation.CurationFault):
+        _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    monkeypatch.setattr(curation, "_fault_barrier", real_barrier)
+    (vault / native["allocation"]["artifact"]).unlink()
+
+    identity, _fingerprint = curation.CurationStore(vault).identities(leaf["run_id"])
+    recovered = curation.resume(vault, run_id=leaf["run_id"], plan_id=identity)
+    assert recovered["step"]["outcome"] == "recovered-committed"
+    current = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+    assert current["reconciled"] == [{"leaf_id": leaf["leaf_id"], "outcome": "committed"}]
+    assert current["executed"] == []
+    assert not (vault / native["allocation"]["artifact"]).exists()
+    covered = _workflow(vault, action="coverage")
+    assert [item["readback"] for item in covered["receipts"]] == ["unavailable"]
 
 
 @pytest.mark.parametrize("route", ["source", "evidence"])

@@ -636,7 +636,7 @@ def add(
         if source_path.parent != folder_path or (artifact_path is not None and artifact_path.parent != folder_path):
             raise ValueError("native capture destination changed")
         if os.path.lexists(source_path) or artifact_path is not None and os.path.lexists(artifact_path):
-            raise DefiniteNoEffect("destination_exists", {"destination": _allocation["destination"], "publication_started": False})
+            raise DefiniteNoEffect.destination_exists(_allocation["destination"])
     allocation = {
         "captured": stamp_iso, "destination": source_path.relative_to(vault_root).as_posix(),
         "artifact": artifact_path.relative_to(vault_root).as_posix() if artifact_path else None,

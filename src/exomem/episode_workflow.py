@@ -315,6 +315,9 @@ def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str, keep
     commit, so its file may not exist yet. Its leaf is there when the vault routes the item's
     collection to the store: the leaf's witness is then checked against the store's transaction
     (`_tip_is_live`), and the file is not the evidence.
+
+    A preservation leaf's subject is its page and the originals it preserved, so a leaf whose
+    preserved original is gone is unavailable, like one whose page is gone.
     """
     try:
         item = curation.CurationStore(vault_root).load_plan(binding["run_id"])["binding_manifest"][
@@ -323,7 +326,11 @@ def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str, keep
         visible = curation._records_item_visible(vault_root, item, path)  # noqa: SLF001
         if visible is not None:
             return visible
-        return (vault_root / path).is_file() and (keep is None or keep(path))
+        if not ((vault_root / path).is_file() and (keep is None or keep(path))):
+            return False
+        return item.get("kind") not in curation.PRESERVATION_STEP_KINDS or all(
+            (vault_root / entry["path"]).is_file() for entry in item["prepared"]["core"] if "size" in entry
+        )
     except (curation.CurationError, KeyError, IndexError, TypeError):
         return False
 
@@ -628,12 +635,14 @@ def _stale_destinations(session: _Session, candidate_ids: set[str]) -> set[str]:
 def _unverifiable(session: _Session, candidate_id: str, leaf_id: str) -> str | None:
     """Why reconciling this leaf would fail now, from a read-only trial on a copy.
 
-    The copy marks the attempt the pure model would mark and runs the same
-    receipt and postimage verification its reconcile runs; nothing is recorded.
+    The copy marks the attempt the pure model would mark and runs its reconcile's
+    receipt verification plus the live postimage check, so a plan committed
+    elsewhere whose page has since changed is reported, not attempted; nothing
+    is recorded.
     """
     trial = model.mark_attempt_started(session.state, candidate_id, leaf_id)
     try:
-        reconcile_curation_leaf(session.vault_root, trial, candidate_id, leaf_id)
+        reconcile_curation_leaf(session.vault_root, trial, candidate_id, leaf_id, live=True)
     except model.EpisodeError as error:
         if error.code != "EPISODE_OUTCOME_UNCERTAIN":
             raise
@@ -882,14 +891,14 @@ def _order(state: Mapping[str, Any], order: Sequence[str] | None) -> list[tuple[
 
 
 def _reconcile_uncertain(session: _Session) -> tuple[list[dict], list[dict]]:
-    """Reconcile every uncertain leaf from the existing curation receipts only."""
+    """Reconcile every uncertain leaf from the existing curation receipts only.
+
+    The reconcile reads curation evidence alone, never the page, so a page
+    withheld from this caller reconciles exactly as a deleted one does.
+    """
     reconciled, blocked = [], []
     for candidate_id, leaf in _leaves(session.state):
         if leaf["outcome"] != "uncertain":
-            continue
-        if _refused_for_caller(session.vault_root, leaf["binding"]):
-            # What a reconcile of a missing page gives: still uncertain.
-            blocked.append({"leaf_id": leaf["leaf_id"], "code": "EPISODE_OUTCOME_UNCERTAIN"})
             continue
         try:
             session.transition(
