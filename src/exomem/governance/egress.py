@@ -2059,24 +2059,34 @@ def _independent_content_permits(vault_root: Path, path: str, who: RequestPrinci
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
-def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
-                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
-    """Apply current container dependencies and independent content floors to a real path."""
+def _container_parents_permit(vault_root: Path, path: str, who: RequestPrincipal, *,
+                              snapshot: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    """A container member's current parents meet every content floor before the member does."""
     from .. import document_containers
 
     try:
         dependency = document_containers.parent_for_path(vault_root, path, content=snapshot, artifact_copy=artifact_copy)
     except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
         return False
-    if dependency is not None and any(not content_permits(vault_root, parent, who) for parent in dependency):
-        return False
-    return _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy)
+    return dependency is None or all(content_permits(vault_root, parent, who) for parent in dependency)
 
+
+def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    """Apply current container dependencies and independent content floors to a real path."""
+    return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy)
+            and _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
 def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
-    """Apply all content floors once per path, using their shared request memos."""
-    return lambda path: content_permits(vault_root, path, who)
+    """`content_permits` for each path of one walk.
+
+    Inside a request scope the connector snapshot is read once for the walk;
+    see `connector_boundary.permits_filter`.
+    """
+    boundary = connector_boundary.permits_filter(vault_root, who)
+    return lambda path: (_container_parents_permit(vault_root, path, who)
+                         and boundary(path) and raw_protection.permits(vault_root, path, who))
 
 
 def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:

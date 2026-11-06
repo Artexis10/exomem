@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import stat
+import time
 import zipfile
 from pathlib import Path
 
@@ -858,12 +859,16 @@ def test_unrelated_malformed_frontmatter_keeps_path_only_reading(vault):
 
 
 def _warm_unclaimed_note(vault, monkeypatch):
-    """An ordinary note decided once, with the racy window off so the decision is remembered."""
+    """An ordinary note decided once, aged past a shortened racy window so the decision is remembered.
+
+    The window stays longer than a filesystem timestamp tick: a rewrite inside the same tick as the remembered
+    version keeps its (size, mtime, ctime), which is the case the real window exists to exclude.
+    """
     from exomem import vault as vault_module
     from exomem.governance import policy
     from exomem.governance.principal import RequestPrincipal
 
-    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 50_000_000)
     stored = _capture(vault, container_bytes([('one.pdf', b'pdf')]))
     child = stored.document_container['payloads'][0]
     rules = vault / 'Knowledge Base' / '_Governance'
@@ -874,6 +879,7 @@ def _warm_unclaimed_note(vault, monkeypatch):
     (rules / 'rules' / 'external.yaml').write_text(f'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: ["{sid}"]\naudience: external\nceiling: 0\n')
     note = "Knowledge Base/plain-note.md"
     (vault / note).write_text("---\ntitle: Plain note\ntype: note\n---\n" + "x" * 80 + "\n")
+    time.sleep(0.1)
     who = RequestPrincipal(audience_id='external')
     compiled = policy.load(vault)
     document_containers.clear_unclaimed_notes()
