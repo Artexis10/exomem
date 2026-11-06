@@ -211,7 +211,8 @@ def _required_field_rule(location: tuple[object, ...], item: dict[str, Any]) -> 
 
     A required field's description says what to send; that helps more than "missing".
     """
-    if len(location) < 2 or not (item.get("type") == "missing" or item.get("input") is None):
+    # Only a top-level field of an operation: a deeper error belongs to its own location.
+    if len(location) != 2 or not (item.get("type") == "missing" or item.get("input") is None):
         return None
     model = _OPERATION_MODELS.get(location[0])
     field = model.model_fields.get(str(location[1])) if model is not None else None
