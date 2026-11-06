@@ -1548,6 +1548,62 @@ def test_candidate_audit_projects_subject_metadata_and_resolves_by_claims(
     ]
 
 
+def test_a_write_delta_saves_the_projection_without_rewriting_its_candidates(
+    tmp_path: Path,
+) -> None:
+    # Candidates were 97% of a large vault's projection, and every write delta that
+    # saved the projection rewrote and fsynced them although only reconcile changes them.
+    manifest = collections.load_manifest(
+        tmp_path,
+        _write_manifest(tmp_path, claims="claims:\n  terms: [account, subscriptions]\n"),
+    )
+    _write_candidate_pages(tmp_path)
+    path, page_ref = _write_observation(tmp_path)
+    reconciled = due_state.reconcile(tmp_path, today=dt.date(2026, 9, 1))
+    assert reconciled["categories"]["collection_candidate"]
+    candidates = due_state.side_path(tmp_path)
+    main = due_state.state_path(tmp_path)
+    side_before, main_before = candidates.stat(), main.stat()
+
+    due_state.apply_observation_write_delta(
+        tmp_path,
+        path=path,
+        observation_ref=page_ref,
+        terms=["account", "subscriptions", "cancelled"],
+        routing={
+            "collection": manifest.path,
+            "title": manifest.title,
+            "matched_terms": ["account", "subscriptions"],
+            "natural_key": list(manifest.schema.natural_key),
+            "strength": "moderate",
+        },
+        observed_at=dt.datetime(2026, 9, 1, 15, 30, tzinfo=dt.UTC),
+    )
+
+    assert main.stat().st_ino != main_before.st_ino
+    side_after = candidates.stat()
+    assert (side_after.st_ino, side_after.st_mtime_ns) == (
+        side_before.st_ino,
+        side_before.st_mtime_ns,
+    )
+    due_state.reset_serve_cache()
+    reread = due_state.load(tmp_path)["categories"]
+    assert reread["collection_candidate"] == reconciled["categories"]["collection_candidate"]
+    assert reread["unreflected_observations"][path]["pending"]
+
+
+def test_a_projection_whose_candidates_file_is_missing_is_rebuilt_not_read_as_empty(
+    tmp_path: Path,
+) -> None:
+    _write_candidate_pages(tmp_path)
+    assert due_state.reconcile(tmp_path)["categories"]["collection_candidate"]
+
+    due_state.side_path(tmp_path).unlink()
+    due_state.reset_serve_cache()
+
+    assert due_state.load(tmp_path) is None
+
+
 def test_candidate_is_opt_in_for_attention_but_registered_for_due_state(tmp_path: Path) -> None:
     from exomem import attention, review_state
 

@@ -113,9 +113,21 @@ log = logging.getLogger(__name__)
 
 # 3 adds `SOURCE_BACKLOG`: a stored projection without it would read as "no Source is
 # outstanding" until the next reconcile, so the version change forces the rebuild.
-# 4 adds `EPISODE_BACKLOG` for the same reason.
-SCHEMA_VERSION = 4
+# 4 moves `SIDE_FAMILY` to its own file. v3 code would read a v4 main file as
+# "no candidates", so the bump makes a rolled-back runtime rebuild instead.
+# 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
+SCHEMA_VERSION = 5
 STATE_FILENAME = ".due-state.json"
+
+#: The family persisted beside the projection rather than in it. Only `reconcile`
+#: changes it, and it was 97% of a large vault's projection, so every write delta
+#: that saved the projection rewrote and fsynced tens of megabytes it never
+#: touched. In memory the payload keeps one shape; only `save` and `load` split it.
+SIDE_FAMILY = "collection_candidate"
+SIDE_FILENAME = ".due-state-candidates.json"
+#: Set in the main file by `save`, so `load` can tell a missing side file (unknown:
+#: rebuild) from a projection that never had the family (a hand-written fixture).
+_SIDE_KEY = "side_files"
 
 #: The one backlog family: captured Sources that no live note compiles, due from their capture
 #: date. A write settles it through the Sources the written page cites, not through the page
@@ -270,6 +282,25 @@ def state_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
+def side_path(vault_root: Path) -> Path:
+    """Where `SIDE_FAMILY` is persisted, beside the projection."""
+    return state_path(vault_root).with_name(SIDE_FILENAME)
+
+
+def _projection_token(vault_root: Path) -> tuple[Any, Any] | None:
+    """Identity of the projection's bytes across both files, or None when it is absent."""
+    main = _file_token(state_path(vault_root))
+    if main is None:
+        return None
+    return (main, _file_token(side_path(vault_root)))
+
+
+def _read_json(path: Path) -> Any:
+    from . import vault
+
+    return json.loads(vault.read_bytes_without_pinning(path).decode("utf-8"))
+
+
 @call_spans.timed("due_state.load")
 def load(vault_root: Path) -> dict[str, Any] | None:
     """Return the persisted projection, or None when it is missing or unusable.
@@ -281,22 +312,29 @@ def load(vault_root: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        from . import vault
-
-        payload = json.loads(vault.read_bytes_without_pinning(path).decode("utf-8"))
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
+            return None
+        categories = payload.get("categories")
+        if not isinstance(categories, dict):
+            return None
+        if SIDE_FAMILY in (payload.pop(_SIDE_KEY, None) or ()):
+            side = _read_json(side_path(vault_root))
+            if (
+                not isinstance(side, dict)
+                or side.get("version") != SCHEMA_VERSION
+                or not isinstance(side.get("entries"), dict)
+            ):
+                return None
+            categories[SIDE_FAMILY] = side["entries"]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         log.debug("due-state projection unreadable at %s; recomputing", path)
-        return None
-    if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
-        return None
-    categories = payload.get("categories")
-    if not isinstance(categories, dict):
         return None
     return payload
 
 
 #: The last parsed projection per vault, beside the file token it was read under.
-_SHARED: dict[str, tuple[tuple[int, int, int], dict[str, Any]]] = {}
+_SHARED: dict[str, tuple[tuple[Any, Any], dict[str, Any]]] = {}
 _SHARED_LOCK = threading.Lock()
 _SHARED_CAP = 8
 
@@ -310,7 +348,7 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
     between is parsed again on the next call, never served stale. Callers never
     change the result; a writer copies the branches its delta changes.
     """
-    token = _file_token(state_path(vault_root))
+    token = _projection_token(vault_root)
     if token is None:
         return None
     key = str(vault_root)
@@ -330,8 +368,8 @@ def _load_shared(vault_root: Path) -> dict[str, Any] | None:
 
 def _remember_written(
     vault_root: Path,
-    written: tuple[int, int, int],
-    on_disk: tuple[int, int, int] | None,
+    written: tuple[Any, Any],
+    on_disk: tuple[Any, Any] | None,
     payload: dict[str, Any],
 ) -> None:
     key = str(vault_root)
@@ -344,6 +382,42 @@ def _remember_written(
         _SHARED[key] = (written, payload)
 
 
+def _replace_json(path: Path, payload: Any) -> tuple[tuple[int, int, int], int]:
+    """Atomically replace `path` with `payload`; return the written token and size."""
+    from . import vault
+
+    handle_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
+            # Compact separators, sorted keys: the main file is rewritten and
+            # fsynced on every governed write that changes it, so its size is
+            # a per-write cost.
+            # Indentation cost ~2.5x for a machine-read file nobody diffs;
+            # `sort_keys` stays for determinism.
+            # Stream the payload to avoid allocating another full-size string.
+            json.dump(
+                payload,
+                handle,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            info = os.fstat(handle.fileno())
+        vault.replace_tolerating_transient_sharing(lambda: os.replace(temp_name, path))
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return (info.st_ino, info.st_mtime_ns, info.st_size), info.st_size
+
+
 @call_spans.timed("due_state.save")
 def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises.
@@ -351,56 +425,65 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     The saved payload becomes the shared parse-cache entry every reader gets,
     so a caller never edits it, or anything `reconcile` or a delta returns,
     after this call.
+
+    `SIDE_FAMILY` goes to its own file, first, and only when it is not the
+    branch the shared entry already holds for that file: a write delta copies
+    `categories` shallowly and carries the branch by reference, so the identity
+    check is exact. A reader in another process may pair a new side file with
+    the old main file for one rename. Two writers can also leave a torn pair: a
+    delta's whole save landing between `reconcile`'s side and main writes keeps
+    the old candidates beside the new main file until the next reconcile, since
+    `reconcile` does not hold `_LOCK`. Each half is the last-replace-wins lost
+    update the projection already accepts, and the families are independent.
     """
     call_spans.measure(call_spans.PROJECTION_SAVE_ATTEMPTS)
     path = state_path(vault_root)
+    key = str(vault_root)
     try:
-        from . import state_paths, vault
+        from . import state_paths
 
         state_paths.ensure_vault_state_dir(vault_root)
-        handle_fd, temp_name = tempfile.mkstemp(
-            prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(handle_fd, "w", encoding="utf-8", newline="\n") as handle:
-                # Compact separators, sorted keys: this file is rewritten and
-                # fsynced on every governed write that changes it, so its size is
-                # a per-write cost.
-                # Indentation cost ~2.5x for a machine-read file nobody diffs;
-                # `sort_keys` stays for determinism.
-                # Stream the payload to avoid allocating another full-size string.
-                json.dump(
-                    payload,
-                    handle,
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        categories = payload.get("categories") or {}
+        main = dict(payload)
+        side_written: tuple[int, int, int] | None = None
+        saved_bytes = 0
+        if SIDE_FAMILY in categories:
+            main["categories"] = {
+                name: entries for name, entries in categories.items() if name != SIDE_FAMILY
+            }
+            main[_SIDE_KEY] = [SIDE_FAMILY]
+            with _SHARED_LOCK:
+                hit = _SHARED.get(key)
+            on_disk_side = _file_token(side_path(vault_root))
+            if (
+                hit is not None
+                and on_disk_side is not None
+                and hit[0][1] == on_disk_side
+                and (hit[1].get("categories") or {}).get(SIDE_FAMILY)
+                is categories[SIDE_FAMILY]
+            ):
+                side_written = on_disk_side
+            else:
+                side_written, size = _replace_json(
+                    side_path(vault_root),
+                    {"version": SCHEMA_VERSION, "entries": categories[SIDE_FAMILY]},
                 )
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-                info = os.fstat(handle.fileno())
-            written = (info.st_ino, info.st_mtime_ns, info.st_size)
-            vault.replace_tolerating_transient_sharing(
-                lambda: os.replace(temp_name, path)
-            )
-            call_spans.measure(call_spans.PROJECTION_SAVES)
-            call_spans.measure(call_spans.PROJECTION_SAVED_BYTES, info.st_size)
-            # Write-through: the next read would otherwise re-parse the whole
-            # file this call just serialised. Bind the entry to the temp file's
-            # identity and keep it only if the destination still shows that
-            # identity; a concurrent replace between the two leaves a different
-            # token, so the entry is dropped and the next read parses the disk.
-            _remember_written(vault_root, written, _file_token(path), payload)
-        except BaseException:
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
-            raise
+                saved_bytes += size
+        main_written, size = _replace_json(path, main)
+        saved_bytes += size
+        call_spans.measure(call_spans.PROJECTION_SAVES)
+        call_spans.measure(call_spans.PROJECTION_SAVED_BYTES, saved_bytes)
+        # Write-through: the next read would otherwise re-parse the files this
+        # call just serialised. Bind the entry to the written identities and keep
+        # it only if the destinations still show them; a concurrent replace
+        # between the two leaves a different token, so the entry is dropped and
+        # the next read parses the disk.
+        _remember_written(
+            vault_root, (main_written, side_written), _projection_token(vault_root), payload
+        )
     except Exception:  # noqa: BLE001 — a projection write never breaks a caller
         with _SHARED_LOCK:
-            _SHARED.pop(str(vault_root), None)
+            _SHARED.pop(key, None)
         log.debug("could not persist the due-state projection", exc_info=True)
 
 
@@ -3698,14 +3781,19 @@ def _served_content_token(vault_root: Path) -> str | None:
     reading invalidates by default.
     """
     return _content_token(
-        state_path(vault_root), lambda: _load_shared(vault_root), _BOOKKEEPING_KEY
+        str(state_path(vault_root)),
+        lambda: _projection_token(vault_root),
+        lambda: _load_shared(vault_root),
+        _BOOKKEEPING_KEY,
     )
 
 
 def _review_content_token(vault_root: Path) -> str | None:
     try:
+        path = review_state_module.state_path(vault_root)
         return _content_token(
-            review_state_module.state_path(vault_root),
+            str(path),
+            lambda: _file_token(path),
             lambda: review_state_module.ReviewStateStore(vault_root).load(),
             "surfaced",
         )
@@ -3727,10 +3815,13 @@ def _payload_content_token(payload: dict[str, Any], omitted: str) -> str:
 
 
 def _content_token(
-    path: Path, load_payload: Callable[[], dict[str, Any] | None], omitted: str
+    name: str,
+    token_of: Callable[[], Any],
+    load_payload: Callable[[], dict[str, Any] | None],
+    omitted: str,
 ) -> str | None:
-    token = _file_token(path)
-    key = (str(path), token) if token is not None else None
+    token = token_of()
+    key = (name, token) if token is not None else None
     if key is not None:
         with _SERVE_LOCK:
             known = _CONTENT_TOKENS.get(key)
@@ -3740,7 +3831,7 @@ def _content_token(
     if payload is None:
         return None
     digest = _payload_content_token(payload, omitted)
-    if key is not None and _file_token(path) == token:
+    if key is not None and token_of() == token:
         with _SERVE_LOCK:
             if len(_CONTENT_TOKENS) >= _SERVE_CACHE_CAP:
                 _CONTENT_TOKENS.pop(next(iter(_CONTENT_TOKENS)), None)
@@ -3752,7 +3843,7 @@ def _content_token(
 #: file, review-state file); see `served_entries`.
 _SERVE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 #: Served-content identity per projection or review file version.
-_CONTENT_TOKENS: dict[tuple[str, tuple[int, int, int]], str] = {}
+_CONTENT_TOKENS: dict[tuple[str, Any], str] = {}
 _SERVE_LOCK = threading.Lock()
 _SERVE_CACHE_CAP = 64
 _SERVE_CACHE_TTL_SECONDS = 300.0
@@ -4171,7 +4262,7 @@ def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> 
 
 
 #: `ref -> (fingerprint, category, path)` per vault, valid for one projection file identity.
-_FINGERPRINTS: dict[str, tuple[tuple[int, int, int], dict[str, tuple[str, str, str]]]] = {}
+_FINGERPRINTS: dict[str, tuple[Any, dict[str, tuple[str, str, str]]]] = {}
 _FINGERPRINTS_LOCK = threading.Lock()
 _FINGERPRINTS_CAP = 8
 
@@ -4184,7 +4275,7 @@ def _fingerprints_for(vault_root: Path) -> dict[str, tuple[str, str, str]]:
     that carried a block. The index only changes when the projection file
     does, so it is kept beside the file's identity.
     """
-    token = _file_token(state_path(vault_root))
+    token = _projection_token(vault_root)
     key = str(vault_root)
     if token is not None:
         with _FINGERPRINTS_LOCK:
