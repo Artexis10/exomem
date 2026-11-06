@@ -452,7 +452,7 @@ async def import_samples(journey: Journey) -> None:
             journey.member_receipt = uploaded.json()
             expect(journey.member_receipt["archive"]["sha256"] == hashlib.sha256(archive.getvalue()).hexdigest(),
                    "the member receipt does not identify the uploaded bytes", journey.member_receipt)
-        async with journey.service("member-import") as service:
+        async with journey.service("member-import", measure_memory=True) as service:
             await service.mutate("record_memory", action="create", manifest_path=SAMPLES_PATH,
                                  manifest_text=sample_manifest(), why="import the invented nested samples")
             preview = await service.import_job(SAMPLES_ID, mode="preview", **sample_import(journey))
@@ -467,6 +467,7 @@ async def import_samples(journey: Journey) -> None:
             await service.mutate("record_memory", action="revise", collection=SAMPLES_ID,
                                  manifest_text="---\n" + yaml.safe_dump(manifest, sort_keys=False) + "---\n",
                                  why="declare daily sample totals", **inspected["lifecycle_guards"])
+            baseline = service.memory_snapshot()
             job = await service.import_job(SAMPLES_ID, mode="start", **sample_import(journey))
 
             async def advanced():
@@ -478,8 +479,13 @@ async def import_samples(journey: Journey) -> None:
             expect(stopped["next_position"]["member"] == 0 and stopped["source_bytes"]["consumed"] == 0
                    and stopped["rows"]["imported"] < len(journey.sample_reference),
                    "the member import did not stop inside a member", stopped)
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="warm derived import start through the observed interrupted batch",
+                progress=stopped["rows"]))
     with journey.step("3b. resume nested import and prove every October instant and daily result"):
-        async with journey.service("member-resume") as service:
+        async with journey.service("member-resume", measure_memory=True) as service:
+            baseline = service.memory_snapshot(startup=True)
+
             async def finished():
                 status = await service.import_job(SAMPLES_ID, mode="status", continuation=job["continuation"])
                 expect(status["state"] in ("running", "complete"), "the member import stopped", status)
@@ -490,6 +496,9 @@ async def import_samples(journey: Journey) -> None:
                    and done["rows"]["rejected"] == done["rows"]["duplicates"] == 0
                    and done["source_bytes"]["consumed"] == sum(map(len, journey.documents.values())),
                    "the resumed member import has incorrect counts", done)
+            journey.measurements.setdefault("import_memory", []).append(memory_window(
+                service, baseline, scope="before installed entry point through resumed derived import completion",
+                progress=done["rows"]))
             await compare_samples(journey, service)
             # Re-reading protected members stays an owner operation; cancel exercises the
             # public continuation without changing the source or broadening its release.
