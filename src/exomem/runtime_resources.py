@@ -701,9 +701,11 @@ def parser_preparation(
         bulk = source_bytes > 1024 or _MODEL_WORK.get()[0] == "bulk"
     preparation = SemanticPreparation(source_bytes, bulk=bulk, limit_bytes=limit_bytes, check=check, owner=owner)
     token = None
+    entered = False
     try:
         token = _ACTIVE_PREPARATION.set(weakref.ref(preparation))
         preparation._scope_active = True
+        entered = True
         yield preparation
     finally:
         preparation._scope_active = False
@@ -711,10 +713,16 @@ def parser_preparation(
             if token is not None:
                 _ACTIVE_PREPARATION.reset(token)
         finally:
-            if keep_open and owner is not None:
+            if entered and keep_open and owner is not None:
                 owner._completed.append(preparation)
             else:
-                preparation.release()
+                try:
+                    preparation.release()
+                finally:
+                    if not entered:
+                        # Failed entry has no caller to detach these after accounting.
+                        preparation.owner = preparation.check = None
+                        preparation = owner = check = None
 
 
 @contextlib.contextmanager

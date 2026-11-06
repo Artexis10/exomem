@@ -237,3 +237,65 @@ def test_native_closing_preserves_the_parent_deadline_and_does_not_retain_its_ow
     assert reference() is None
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == before
     _no_open_files(tmp_path)
+
+
+@pytest.mark.parametrize("stage", ["callback", "native_scope_entry", "kept_scope_entry"])
+def test_retained_scope_entry_failure_cannot_keep_the_released_source_owner(tmp_path, monkeypatch, stage):
+    """An unentered preparation must release its owner even while its allocation failure traceback remains live."""
+    import json
+
+    from exomem import _held_fs_posix
+
+    (tmp_path / "ordinary.bin").write_bytes(b"ordinary")
+    before = runtime_resources.semantic_preparation_status()["reserved_bytes"]
+
+    def capture_failure():
+        failure = MemoryError("synthetic scope allocation refusal")
+        retained = None
+        cuts = []
+        with runtime_resources.parser_preparation(0) as parent:
+            parent.reserve(256 * 1024)
+            parent.source = "synthetic source text " * 4096
+            reference = weakref.ref(parent)
+            with held_fs.read_version_probe(tmp_path, ".", "ordinary.bin", admit_identity=lambda value: cuts.append(value.kind)) as control:
+                assert isinstance(control, _held_fs_posix.NativeVersionProbe)
+                control.require_current(admit_identity=lambda value: cuts.append(value.kind))
+            with monkeypatch.context() as patch:
+                if stage != "callback":
+                    original = runtime_resources._ACTIVE_PREPARATION
+                    class RefusingSet:
+                        def get(self):
+                            return original.get()
+                        def set(self, _value):
+                            raise failure
+                    patch.setattr(runtime_resources, "_ACTIVE_PREPARATION", RefusingSet())
+                def admit(value):
+                    if value.kind == "file":
+                        raise failure
+                def check(owner=parent):
+                    owner.reserve(256 * 1024)
+                try:
+                    if stage == "kept_scope_entry":
+                        with runtime_resources.parser_preparation(0, owner=parent, check=check, keep_open=True):
+                            pytest.fail("failed scope entry cannot yield a preparation")
+                    else:
+                        with held_fs.read_version_probe(tmp_path, ".", "ordinary.bin", admit_identity=admit):
+                            pytest.fail("the injected failure must prevent a returned probe")
+                except MemoryError as error:
+                    retained = error
+                finally:
+                    check = None
+            kept_unentered = bool(parent._completed)
+            assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == before + 256 * 1024
+        parent = None
+        return reference, retained, kept_unentered, cuts
+
+    reference, retained, kept_unentered, cuts = capture_failure()
+    gc.collect()
+    after = runtime_resources.semantic_preparation_status()["reserved_bytes"]
+    print(json.dumps({"stage": stage, "native_control_cuts": cuts, "parent_retained": reference() is not None,
+                      "kept_unentered": kept_unentered, "reserved_before": before, "reserved_after": after}, sort_keys=True))
+    assert retained is not None and after == before
+    assert not kept_unentered
+    assert reference() is None
+    _no_open_files(tmp_path)
