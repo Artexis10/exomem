@@ -17,7 +17,7 @@ The durable decision is to extend that observer with selectable configured bars 
 - Keep the wider sandbox programme open: frozen source truth, nine operation families, matched pairs, layer profiles, and a configurable CI gate.
 - Reduce repeated link projection in eligible store queries while preserving eager query results, metadata, response bounds, and disclosure outcomes.
 
-The configured private-sandbox target is p95 below 100 ms for the six collection-store read groups. It is an acceptance bar for the sandbox copy only and never gates a shared runner. Paired allowances stay provisional until matched runs of identical code establish them.
+The configured private-sandbox targets are p95 below 100 ms for Records and Planning query and read, below 300 ms for Records list, and below 150 ms for Planning list. It is an acceptance bar for the sandbox copy only and never gates a shared runner. Paired allowances stay provisional until matched runs of identical code establish them.
 
 ## Capabilities
 

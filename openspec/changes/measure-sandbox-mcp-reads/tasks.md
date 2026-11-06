@@ -23,7 +23,7 @@ The evidence stays outside the repository. It proves the trusted reader protocol
 
 - [ ] 3.1 Run matched cases on frozen arms; report per-case differences and confidence intervals with unchanged source keys.
 - [ ] 3.2 Attribute transport, authentication, governance, egress, rendering, store, and serialization costs; report unavailable layers explicitly.
-- [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 target of 100 ms for the six collection-store groups.
+- [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 targets for the six collection-store groups.
 - [ ] 3.4 Repair the largest measured costs without weakening governance; verify each correction through the same instrument and boundary.
 - [ ] 3.5 Stage projection for eligible store queries through the existing evaluator; prove eager parity for metadata, selection, response bounds, source versions, continuations, and disclosure outcomes.
 - [ ] 3.6 Verify eager fallbacks for unsupported shaping, schema collisions, malformed inputs, and file adapters; measure the candidate through unchanged source cases before claiming a gain.
