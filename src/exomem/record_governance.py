@@ -1826,10 +1826,6 @@ def _diagnostics_summary(diagnostics: Sequence[Mapping[str, Any]]) -> str:
     return f"{summary} (+{remaining} more)" if remaining > 0 else summary
 
 
-#: Marks a writer the caller did not resolve; `None` is a resolved answer ("a file collection").
-_WRITER_UNRESOLVED = object()
-
-
 @call_spans.timed("records.inventory_coverage")
 def _inventory_coverage(
     root: Path,
@@ -1837,7 +1833,7 @@ def _inventory_coverage(
     authorize: Callable[[str], bool],
     *,
     observations: Mapping[str, Any] | None = None,
-    writer: Any = _WRITER_UNRESOLVED,
+    writer: Any,
 ) -> tuple[dict[str, Any], Any, frozenset[str]]:
     """Inventory-grade coverage: counts only, and `None` when items are unreadable.
 
@@ -1845,13 +1841,11 @@ def _inventory_coverage(
     would claim one. Absent is not an option here because every row carries the
     same keys, so the hole is named rather than filled.
 
-    ``writer`` is the collection's selected store writer when the caller already resolved it.
+    ``writer`` is the collection's selected store writer, already resolved by the caller; `None` means a file collection.
     The third value is the vault-relative files that the markdown-items adapter accepted as
     items in this read. It is empty for every other strategy and for a read that failed.
     """
     from . import due_state
-    if writer is _WRITER_UNRESOLVED:
-        writer = selected_writer(root, manifest)
     if writer is not None:
         # One snapshot and the caller's authorization for this collection's counts.
         with writer.read_snapshot():

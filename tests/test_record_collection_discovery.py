@@ -498,6 +498,22 @@ def test_inventory_inspects_a_non_item_page_beside_a_collections_items_for_legac
     assert opened == [index_path]
 
 
+def test_inventory_still_lists_a_tracker_typed_log_source_as_a_legacy_tracker(tmp_path: Path) -> None:
+    from record_fixtures import copy_x3_fixture
+
+    from exomem.commands import op_record_memory
+
+    _empty_vault(tmp_path)
+    log_collection = copy_x3_fixture(tmp_path)
+    source = (log_collection / "Training Log.md").relative_to(tmp_path).as_posix()
+
+    inventory = op_record_memory(tmp_path, action="inspect")
+
+    # Only markdown-items item files are skipped; a log's source file stays a legacy tracker.
+    row = next(r for r in inventory["collections"] if r["storage_strategy"] == "markdown-log")
+    assert row["committed"]
+    assert source in [tracker["path"] for tracker in inventory["legacy_trackers"]]
+
 def test_denied_manifests_do_not_trip_authorized_discovery_limit(tmp_path: Path) -> None:
     from exomem.structured_collections import discover_collections
 
