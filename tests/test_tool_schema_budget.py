@@ -52,8 +52,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # A required `expected_hash` on replace_body, with its one-line instruction, adds 99 B:
 # edit_note measures 7,210 B and its ceiling rounds to 7,250 B. The total budget is unchanged.
 # The `create_missing` flag on edit_section adds 52 B: edit_note measures 7,262 B and its ceiling rounds
-# to 7,300 B. The total budget rises 100 B, because the whole-body hash rule left it little headroom.
-TOTAL_BUDGET = 168_100
+# to 7,300 B. The complete local wire measures 167,841 B, inside the total budget, which is unchanged.
+TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
