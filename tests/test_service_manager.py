@@ -927,18 +927,33 @@ def test_record_failure_before_stop_reopens_old_admission(tmp_path, monkeypatch)
 
 
 def test_global_deadline_bounds_standalone_stream_detach(tmp_path, monkeypatch):
+    module = _manager()
+    deadline = module.Deadline
+    # Record persistence must not exhaust the budget before detachment starts.
+    monkeypatch.setattr(module, "Deadline", lambda seconds: deadline(seconds, clock=lambda: 0.0))
+
     async def scenario():
         manager, ingress, runtime, target = _supervisor(tmp_path)
         manager.transition_timeout = 0.05
+        detachment = []
 
         async def stuck():
-            await asyncio.Event().wait()
+            detachment.append("entered")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                detachment.append("cancelled")
+                raise
 
         monkeypatch.setattr(ingress, "detach_streams", stuck)
         result = await asyncio.wait_for(manager.upgrade(target), 0.5)
-        assert not result["ok"]
-        assert manager.phase == "recovery-required"
+        assert detachment == ["entered", "cancelled"], result
+        assert not result["ok"], result
+        assert manager.phase == "recovery-required", result
+        assert ingress.events[-1] == "unavailable"
         assert runtime.events == ["inspect", "stop"]
+        assert manager.records.pending()["phase"] == "failed"
+        assert manager.records.pending()["worker_pid"] == 0
 
     asyncio.run(scenario())
 
