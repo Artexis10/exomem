@@ -88,7 +88,7 @@ that have no request-bound remote surface descriptor. Those callers SHALL NOT
 need a `plan_id`.
 
 #### Scenario: Remote maintenance inspection remains callable
-- **WHEN** an MCP or REST caller requests audit or an explicitly read-only maintenance preview
+- **WHEN** an MCP, REST, or hosted caller requests audit or an explicitly read-only maintenance preview
 - **THEN** the canonical maintenance leaf executes through the ordinary read-only admission path
 
 #### Scenario: Local operator repair remains callable

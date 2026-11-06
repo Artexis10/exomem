@@ -34,7 +34,7 @@
 - [x] 6.2 Measure run time and boundary hold time of `fix`, `backfill-ids` and `reconcile` on a disposable copy of a real-sized vault and record them on the PR.
 - [x] 6.3 Run Ruff, the privacy gate, the semgrep gate, the scaffold leak test, `scripts/cloud-plugin.py check`, `openspec validate --all --strict` and the full suite.
 - [x] 6.4 Obtain an independent security-lensed review of the exact head, post its note on the PR, and merge after CI passes.
-- [ ] 6.5 After the release and the personal service upgrade, preview and run `backfill-ids` remotely on the personal vault, retry the `edit_note` that needed it, and preview `reconcile` remotely.
+- [x] 6.5 After the release and the personal service upgrade, preview and run `backfill-ids` remotely on the personal vault, retry the `edit_note` that needed it, and preview `reconcile` remotely.
 
 ## 7. Remote previews as jobs
 
@@ -42,6 +42,6 @@
 - [x] 7.2 Keep the preview report and its `plan_id` in the receipt, and page the planned pages by cursor.
 - [x] 7.3 Prove preview, poll, receipt and start with the receipt's `plan_id` for each mode through the in-process MCP client.
 - [x] 7.4 Teach the preview job in the guidance, then regenerate the tool surfaces.
-- [ ] 7.5 Repeat task 6.5 on the personal vault after the release.
+- [x] 7.5 Repeat task 6.5 on the personal vault after the release.
 
-Real-sized source timing evidence: [three-mode measurement](https://github.com/Artexis10/exomem/pull/2233#issuecomment-6649526677). Reconcile retained a 409.95-second whole-run boundary. Personal live acceptance in tasks 6.5 and 7.5 remains separate.
+Real-sized source timing evidence: [three-mode measurement](https://github.com/Artexis10/exomem/pull/2233#issuecomment-6649526677). Reconcile retained a 409.95-second whole-run boundary. Personal live acceptance (tasks 6.5 and 7.5) ran on 2026-11-06 over remote MCP against the personal service on v0.161.1. The `backfill-ids` preview job planned 1,400 pages with no identity issues in 91 seconds. The write job with that `plan_id` committed 1,400 pages in 350 chunks, with no `skipped_changed` and no `outcome_unknown`. A validate-only `edit_note` on a backfilled page no longer returns `RELATION_REVIEW_STABLE_ID_REQUIRED`. The `reconcile` preview job completed in 34 minutes 55 seconds and returned its `plan_id`; it was not applied.
