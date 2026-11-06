@@ -1221,9 +1221,12 @@ def discover_collections_with_errors(
     if proof is None:
         proof = ownership.current(root, conn=None if writer is None else writer.connection,
                                   private=writer is not None and not production_bound(root))
-    stored, store_errors = ((), ()) if writer is None else writer.discover_collections(
-        authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
-        semantic_profile=semantic_profile)
+    stored, store_errors = (), ()
+    if writer is not None:
+        with call_spans.span("records.inventory_store_discovery"):
+            stored, store_errors = writer.discover_collections(
+                authorize_path=authorize_path, max_candidates=max_candidates, max_raw_candidates=max_raw_candidates,
+                semantic_profile=semantic_profile)
     kb = vault.kb_root(root)
     if not kb.is_dir():
         return stored, store_errors
