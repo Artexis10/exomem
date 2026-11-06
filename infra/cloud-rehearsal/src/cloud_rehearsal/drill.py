@@ -44,7 +44,7 @@ import boto3
 import yaml
 from botocore.config import Config
 from cellctl.alerts import GROWTH_ALERT
-from cellctl.control_test_contract import control_test_sql, export_test_sql, import_test_sql
+from cellctl.control_test_contract import control_database_sql
 from cellctl.k8s_client import (
     DELETION_SECRET_NAME_ANNOTATION,
     DELETION_SECRET_NAMESPACE_ANNOTATION,
@@ -1485,12 +1485,9 @@ async def control_database(stack: infra.Stack) -> None:
     owner = await asyncpg.connect(stack.postgres.dsn("substrate_owner", from_host=True))
     try:
         await owner.execute(TENANTS_STANDIN_SQL)
-        schema_sql, grants_sql = control_test_sql(FIXTURES)
-        await owner.execute(schema_sql)
-        # cellctl reads a cell's open import and open exports on every pass.
-        await owner.execute(import_test_sql(FIXTURES))
-        await owner.execute(export_test_sql(FIXTURES))
-        await owner.execute(grants_sql)
+        # The same scripts, in the same order, as cellctl's own live suite.
+        for script in control_database_sql(FIXTURES):
+            await owner.execute(script)
     finally:
         await owner.close()
 
