@@ -328,12 +328,15 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
 
 
 # Remembers ordinary notes that were read and carry no container claim, so a restricted path
-# decision need not re-read and re-parse the note each time. It stores no bytes, only the file
-# version it saw, and a hit re-checks that version with one lstat. Bounded; `clear_unclaimed_notes`
-# empties it.
+# decision need not re-read and re-parse the note each time. It stores no bytes. A read from disk is
+# kept by the file version it saw, and a hit re-checks that version with one lstat. Bytes the caller
+# supplied are kept by their SHA-256, as `(root, path, sha256)` with no value, because a claim is a
+# function of the path and those bytes alone. Bounded; `clear_unclaimed_notes` empties it.
 _UNCLAIMED_MAX = 65_536
 _UNCLAIMED_LOCK = threading.Lock()
-_UNCLAIMED: OrderedDict[tuple[Path, str], tuple[str, tuple[int, int], tuple[int, int, int]]] = OrderedDict()
+_UNCLAIMED: OrderedDict[
+    tuple[Path, str] | tuple[Path, str, str], tuple[str, tuple[int, int], tuple[int, int, int]] | None
+] = OrderedDict()
 
 
 def clear_unclaimed_notes() -> int:
@@ -385,15 +388,34 @@ def _remember_unclaimed(
         return
     if started_ns - max(read.generation[1], read.generation[2]) <= vault.GENERATION_RACY_WINDOW_NS:
         return
+    _store_unclaimed((root, path), (page, (read.identity.device, read.identity.inode), read.generation))
+
+
+def _store_unclaimed(key: tuple[Path, str] | tuple[Path, str, str], entry: tuple[str, tuple[int, int], tuple[int, int, int]] | None) -> None:
     with _UNCLAIMED_LOCK:
-        _UNCLAIMED[(root, path)] = (page, (read.identity.device, read.identity.inode), read.generation)
-        _UNCLAIMED.move_to_end((root, path))
+        _UNCLAIMED[key] = entry
+        _UNCLAIMED.move_to_end(key)
         while len(_UNCLAIMED) > _UNCLAIMED_MAX:
             _UNCLAIMED.popitem(last=False)
 
 
-def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
-    """Resolve direct pages, binary originals and extraction parts through one binding validator."""
+def _remembered_unclaimed_bytes(root: Path, path: str, content_sha256: str) -> bool:
+    key = (root, path, content_sha256)
+    with _UNCLAIMED_LOCK:
+        if key not in _UNCLAIMED:
+            return False
+        _UNCLAIMED.move_to_end(key)
+    return True
+
+
+def parent_binding_for_path(
+    root: Path, path: str, *, content: bytes | None = None, content_sha256: str | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+) -> originals.BinaryBinding | None:
+    """Resolve direct pages, binary originals and extraction parts through one binding validator.
+
+    `content_sha256` is the SHA-256 of `content` and lets the caller's bytes be remembered as claim-free.
+    """
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
     root = state_paths.resolved_vault_path(root, expanduser=False)
@@ -402,6 +424,10 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     # A hit proves only that this file version makes no claim; the read that serves the page re-proves path
     # safety. Supplied or staged bytes decide instead.
     if content is None and not _OVERLAY.get() and _remembered_unclaimed(root, path):
+        return None
+    # Supplied bytes decide the answer, never the disk, so the same path with the same bytes always answers
+    # the same and no file version or racy window is involved. A changed note has a new hash and misses.
+    if content is not None and content_sha256 is not None and not _OVERLAY.get() and _remembered_unclaimed_bytes(root, path, content_sha256):
         return None
     spelling = path
     page_path = path if path.lower().endswith(".md") else path + ".md"
@@ -461,6 +487,9 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
         if "container_member" not in fm:
             if remembered_read is not None:
                 _remember_unclaimed(root, spelling, str(root / page_path), *remembered_read)
+            elif (content_sha256 is not None and raw is content and not _OVERLAY.get()
+                    and classified.disposition is reserved_paths.PathDisposition.ORDINARY):
+                _store_unclaimed((root, spelling, content_sha256), None)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:

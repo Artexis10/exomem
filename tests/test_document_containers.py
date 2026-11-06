@@ -948,3 +948,29 @@ def test_a_claim_written_during_a_slow_read_is_never_remembered_as_unclaimed(vau
     assert not document_containers._UNCLAIMED, "the unclaimed bytes were bound to the claimed version"
     monkeypatch.setattr(reserved_paths, "read_generic_bytes", real_read)
     assert _refused_everywhere(vault, note, who, compiled)
+
+
+def test_bytes_remembered_as_unclaimed_are_not_reused_for_a_rewritten_claim(vault, monkeypatch):
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    _, note, _, compiled = _warm_unclaimed_note(vault, monkeypatch)
+    page = vault / note
+    document_containers.clear_unclaimed_notes()
+
+    def decide_bytes_on_disk():
+        data = page.read_bytes()
+        return egress.container_parent_allows(
+            vault, note, policy=compiled, principal=owner_principal(), purpose=None,
+            content=data, content_sha256=hashlib.sha256(data).hexdigest(),
+        )
+
+    plain = page.read_bytes()
+    assert decide_bytes_on_disk()
+    assert document_containers._UNCLAIMED, "the unclaimed bytes were not remembered"
+    forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
+    page.write_bytes(forged + b"x" * (len(plain) - len(forged)))
+    assert page.stat().st_size == len(plain)
+    assert not decide_bytes_on_disk()
+    page.write_bytes(plain)
+    assert decide_bytes_on_disk()

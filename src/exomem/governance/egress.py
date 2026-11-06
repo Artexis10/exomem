@@ -2190,14 +2190,19 @@ _DECIDE_PATH_BATCH = Batch(
 
 def container_parent_allows(
     vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
-    purpose: str | None, content: bytes | None = None,
+    purpose: str | None, content: bytes | None = None, content_sha256: str | None = None,
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
 ) -> bool:
-    """Meet current parent authority before any cached child disclosure or model scoring."""
+    """Meet current parent authority before any cached child disclosure or model scoring.
+
+    `content_sha256` is the SHA-256 of `content`, when the caller already holds it.
+    """
     from .. import document_containers
 
     try:
-        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        parent = document_containers.parent_binding_for_path(
+            vault_root, rel_path, content=content, content_sha256=content_sha256, artifact_copy=artifact_copy,
+        )
         if parent is None:
             return True
         # Recheck the validated binding before using its fingerprint without a local inode.
@@ -2292,7 +2297,9 @@ def _decide_path(
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
     if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
-                                   purpose=purpose, content=raw, artifact_copy=artifact_copy):
+                                   purpose=purpose, content=raw,
+                                   content_sha256=live_content_hash if raw is not None else None,
+                                   artifact_copy=artifact_copy):
         return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
