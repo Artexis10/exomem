@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import curation, episode_capture, note_types, provenance, retained_inputs
+from . import curation, episode_capture, episode_materials, note_types, provenance, retained_inputs
 from . import episode_model as model
 from .collection_store.ownership import read_scope
 from .episode_store import EpisodeStore
@@ -351,6 +351,80 @@ class EpisodeInputOwner:
             raise
         return self._projection(current)
 
+    def bind_materials(
+        self, key: str, *, input_revision: int, journal_digest: str, materials: Any,
+    ) -> dict[str, Any]:
+        store = self._store()
+        identity = model.episode_id(key)
+        try:
+            with store._guard():
+                current = store.read(identity)
+                latest = current["state"]["input_revisions"][-1]
+                if (
+                    type(input_revision) is not int or input_revision != latest["revision"]
+                    or journal_digest != current["journal_digest"]
+                ):
+                    raise _error("EPISODE_REVISION_CONFLICT", "reload the episode input revision and journal digest")
+                evidence = {name: value for name, value in latest["evidence"].items() if name != "recovery"}
+                evidence["materials"] = episode_materials.seal(self.vault_root, materials)
+                unchanged = False
+                try:
+                    current = store.transition(
+                        identity, expected_revision=current["revision"],
+                        expected_digest=current["journal_digest"], action="append_input_revision",
+                        args={"input_evidence": evidence},
+                    )
+                except model.EpisodeError as error:
+                    if error.code != "EPISODE_REVISION_UNCHANGED":
+                        raise
+                    unchanged = True
+        except curation.CurationError as error:
+            if error.code == "CURATION_RUN_NOT_FOUND":
+                raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
+            raise
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
+        return {
+            "summary": "Material references are unchanged." if unchanged else "Bound the preserved material references.",
+            "operation": "episode_input", "episode": key, **self._projection(current),
+            "unchanged": unchanged,
+            "materials": episode_materials.handles(self.vault_root, current["state"]),
+        }
+
+    def recover_material(self, key: str, *, input_revision: int, material_key: str) -> dict[str, Any]:
+        if type(input_revision) is not int or input_revision < 1:
+            raise _error("EPISODE_INPUT_INVALID", "input revision must be a positive integer")
+        if not isinstance(material_key, str) or not material_key.strip() or len(material_key) > 160:
+            raise _error("EPISODE_MATERIAL_INVALID", "material_key must be nonempty and at most 160 characters")
+        try:
+            current = self._store().read(model.episode_id(key))
+        except curation.CurationError as error:
+            if error.code == "CURATION_RUN_NOT_FOUND":
+                raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
+            raise
+        binding = model.material_binding(current["state"], input_revision)
+        item = next((
+            row for row in binding[1]["items"] if row["key"] == material_key
+        ), None) if binding is not None and binding[0] == input_revision else None
+        result = {
+            "summary": "Original unavailable; reading unavailable.",
+            "operation": "episode_material", "episode": key,
+            "input_revision": input_revision, "material_key": material_key,
+            "original": {"status": "unavailable"}, "reading": {"status": "unavailable"},
+        }
+        if item is not None:
+            result["original"] = episode_materials.recover_original(self.vault_root, item)
+            result["reading"] = episode_materials.recover_reading(
+                self.vault_root, item, max_bytes=_MAX_RESPONSE_BYTES,
+            )
+            if all(result[field]["status"] == "available" for field in ("original", "reading") if field in item):
+                result["attribution"] = {
+                    "basis": "caller_authored",
+                    **{field: item[field] for field in ("producer", "producer_version") if field in item},
+                }
+        result["summary"] = f"Original {result['original']['status']}; reading {result['reading']['status']}."
+        return result
+
     def inspect(self, episode_id: str) -> dict[str, Any]:
         store = self._store()
         try:
@@ -382,6 +456,8 @@ class EpisodeInputOwner:
                 for item in revisions
             ],
             "latest_reference": revisions[-1]["evidence"].get("reference"),
+            **({"materials": episode_materials.handles(self.vault_root, current["state"])}
+               if model.material_binding(current["state"]) is not None else {}),
         }
 
     def recover_input(

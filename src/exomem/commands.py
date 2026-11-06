@@ -73,6 +73,7 @@ from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
+from . import episode_materials as episode_materials_module
 from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
@@ -8863,11 +8864,17 @@ _EpisodeProposalArgument = Annotated[
 
 
 
+_EpisodeMaterialsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema({"anyOf": [episode_materials_module.ARGUMENT_SCHEMA, {"type": "null"}]}),
+]
+
+
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
     action: Literal[
-        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+        "record", "input", "material", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
     ],
     episode: str | None = None,
     subject: str | None = None,
@@ -8887,6 +8894,8 @@ def op_episode_memory(
     reason: str | None = None,
     input_revision: int | None = None,
     journal_digest: str | None = None,
+    materials: _EpisodeMaterialsArgument = None,
+    material_key: str | None = None,
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
@@ -8904,7 +8913,7 @@ def op_episode_memory(
     Help: references/operations.md.
 
     Args:
-        action: `record` writes; `inspect`, `candidates`, `coverage` read.
+        action: `record` and `input` write; `material`, `inspect`, `candidates`, `coverage` read.
         episode: The `ep-` key a record returned; omit on a conversation's
             first record, required otherwise.
         subject: One line, max 120 characters.
@@ -8921,6 +8930,14 @@ def op_episode_memory(
         input_revision: For `resume`: the revision your coverage covered.
         journal_digest: For `resume`: from your last candidates/prepare/
             disposition result; stale refuses with EPISODE_REVISION_CONFLICT.
+        materials: For `input`: version 1 with up to 8 uniquely keyed original/
+            reading references, within 16 KiB. Empty items clears; later recaps
+            inherit without refreshing. Requires current input_revision and
+            journal_digest. Equivalent current replacement writes nothing.
+            After a lost reply inspect public state before another mutation;
+            stale guards refuse unchanged, never transparently reseal a retry.
+        material_key: For `material`: key with its original binding input_revision.
+            Original and reading recover independently under current authority.
         max_leaves: For `resume`: 1 to 16.
         postcommit: For `resume`: true attests review instead of executing.
 
@@ -8944,6 +8961,8 @@ def op_episode_memory(
         "reason": reason,
         "input_revision": input_revision,
         "journal_digest": journal_digest,
+        "materials": materials,
+        "material_key": material_key,
         "order": order,
         "max_leaves": max_leaves,
         "postcommit": postcommit,
@@ -8953,6 +8972,11 @@ def op_episode_memory(
         "inspect": (set(), set()),
         "candidates": (set(), set()),
         "coverage": (set(), set()),
+        "input": (
+            {"materials", "input_revision", "journal_digest"},
+            {"materials", "input_revision", "journal_digest"},
+        ),
+        "material": ({"input_revision", "material_key"}, {"input_revision", "material_key"}),
         "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
         "disposition": (
             {"candidate", "disposition", "reason"},
@@ -8965,7 +8989,7 @@ def op_episode_memory(
     }.get(action, (None, None))
     if allowed is None:
         raise ValueError(
-            "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
+            "EPISODE_INVALID: action must be record, input, material, inspect, candidates, prepare, "
             "disposition, resume or coverage"
         )
     supplied = {**recap, **workflow}
@@ -8991,6 +9015,16 @@ def op_episode_memory(
             about=about,
             client=client,
         )
+    if action in {"input", "material"}:
+        from .episode_recovery import EpisodeInputOwner
+
+        key = episode_workflow_module._key(episode)  # noqa: SLF001 - share the public episode-key contract.
+        owner = EpisodeInputOwner(vault_root)
+        if action == "input":
+            return owner.bind_materials(
+                key, input_revision=input_revision, journal_digest=journal_digest, materials=materials,
+            )
+        return owner.recover_material(key, input_revision=input_revision, material_key=material_key)
     if action == "candidates":
         return episode_workflow_module.inspect(vault_root, episode=episode)
     if action == "coverage":

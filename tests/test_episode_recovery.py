@@ -69,7 +69,9 @@ def _owner_store(vault: Path):
     return EpisodeInputOwner(vault)
 
 
-def _write_source_rule(vault: Path, *, ceiling: int, audience: str = "client-a") -> None:
+def _write_source_rule(
+    vault: Path, *, ceiling: int, audience: str = "client-a", paths: str = "Sources/**",
+) -> None:
     root = vault / "Knowledge Base" / "_Governance"
     (root / "scopes").mkdir(parents=True, exist_ok=True)
     (root / "rules").mkdir(parents=True, exist_ok=True)
@@ -77,7 +79,7 @@ def _write_source_rule(vault: Path, *, ceiling: int, audience: str = "client-a")
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAA\n"
         "name: Episode source\n"
-        'paths: ["Sources/**"]\n',
+        f'paths: ["{paths}"]\n',
         encoding="utf-8",
     )
     (root / "rules" / "episode-source-client-a.yaml").write_text(
@@ -118,6 +120,108 @@ def test_recover_page_input_across_sessions_for_same_audience(vault: Path) -> No
     assert len(recovered["digest"]) == 64
     assert recovered["representation"] == "page_body"
     assert recovered["body"] == "Original authorized source body.\n"
+
+
+def test_material_original_requires_current_bytes_and_reports_only_proved_staleness(vault) -> None:
+    reading = _write_page(vault, "A separate readable interpretation.\n")
+    key = "ep-" + "d2" * 16
+    with request_scope(owner_principal(surface="mcp")):
+        original = commands.op_preserve_evidence(
+            vault, scope="Synthetic", category="Inputs", filename="original.txt",
+            content="first original", description="Original evidence.",
+        )
+        companion = vault / original["sidecar_path"]
+        reference = memory_refs.ref_from_markdown(companion.read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "evidence", "original_reference": reference, "reading_reference": reading,
+            }]})
+        raw = vault / original["path"]
+        raw.write_text("other original")  # The byte count stays the same; the native hash must decide.
+        unavailable = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert unavailable["original"] == {"status": "unavailable"}
+        assert unavailable["reading"]["status"] == "available"
+        companion.write_text(companion.read_text().replace(
+            hashlib.sha256(b"first original").hexdigest(), hashlib.sha256(b"other original").hexdigest(),
+        ))
+        stale = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert stale["original"] == {"status": "stale"}
+        assert stale["reading"]["status"] == "available"
+
+
+def test_withheld_and_absent_material_representations_disclose_the_same_result(vault) -> None:
+    reading = _write_page(vault, "The independently released reading.\n")
+    key = "ep-" + "d3" * 16
+    with request_scope(_owner("client-a")):
+        original = commands.op_preserve_evidence(vault, scope="Synthetic", category="Inputs",
+            filename="original.txt", content="Exact original", description="Preserved input.")
+        companion = vault / original["sidecar_path"]
+        reference = memory_refs.ref_from_markdown(companion.read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "evidence", "original_reference": reference, "reading_reference": reading,
+                "producer": "Authored attribution",
+            }]})
+    _write_source_rule(vault, ceiling=0, paths="Evidence/**")
+    with request_scope(_owner("client-a")):
+        withheld = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert withheld["original"] == {"status": "unavailable"}
+        assert withheld["reading"]["status"] == "available"
+        assert "attribution" not in withheld
+        companion.unlink()
+        absent = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert absent == withheld
+    _write_source_rule(vault, ceiling=0, paths="Sources/**")
+    with request_scope(_owner("client-a")):
+        hidden_reading = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="evidence")
+        assert hidden_reading["reading"] == {"status": "unavailable"}
+        (vault / _REL).unlink()
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="evidence") == hidden_reading
+        unknown = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="unknown")
+        assert {k: v for k, v in unknown.items() if k != "material_key"} == {
+            k: v for k, v in hidden_reading.items() if k != "material_key"
+        }
+        assert commands.op_episode_memory(vault, None, action="candidates", episode=key)["materials"] == []
+
+
+def test_material_reading_releases_only_its_exact_unit_and_preserves_the_response_bound(vault) -> None:
+    reference = _write_page(vault, "Unreturned context. " * 500 + "\n- [finding] Exact reading ^exact\n")
+    key = "ep-" + "d4" * 16
+    with request_scope(_owner("client-a")):
+        current = _owner_store(vault).create(key, reference=reference)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [
+                {"key": "unit", "reading_reference": reference + "#exact"},
+                {"key": "whole", "reading_reference": reference},
+            ]})
+        unit = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="unit")
+        assert unit["reading"]["text"] == "- [finding] Exact reading ^exact"
+        assert unit["reading"]["unit_fingerprint"]
+        assert unit["reading"]["span"]["end_offset"] > unit["reading"]["span"]["start_offset"]
+        assert "Unreturned context" not in json.dumps(unit)
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="whole")["reading"] == {"status": "unavailable"}
+        _write_page(vault, "\n- [finding] A changed reading ^exact\n")
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="unit")["reading"] == {"status": "stale"}
+        current = commands.op_episode_memory(vault, None, action="candidates", episode=key)
+        refreshed = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=2, journal_digest=current["journal_digest"], materials={"version": 1, "items": [
+                {"key": "unit", "reading_reference": reference + "#exact"},
+            ]})
+        assert refreshed["input_revision"] == 3
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=3, material_key="unit")["reading"]["text"] == "- [finding] A changed reading ^exact"
 
 
 def test_compiling_a_source_does_not_invalidate_retained_episode_input(vault: Path) -> None:
