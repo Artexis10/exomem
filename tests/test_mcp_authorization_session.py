@@ -168,6 +168,7 @@ def test_authorization_clock_excludes_tool_work_and_joins_http_request(
     [http] = [record.fields for record in caplog.records
               if getattr(record, "event", None) == "http_request"]
     assert observed["request_id"] == http["request_id"]
+    assert observed["phase"] == ("downstream" if downstream_failure else "complete")
     assert 0 < observed["entry_ms"] < 1000
     if downstream_failure:
         assert observed["post_ms"] is None
@@ -350,7 +351,7 @@ def test_mcp_duplicate_arguments_objects_cannot_hide_a_bearer(
 
 
 @pytest.mark.parametrize("connect", ["legacy", "auto"])
-def test_actual_stdio_refuses_before_validation_without_logging_bearer(
+def test_actual_stdio_refuses_and_correlates_without_logging_bearer(
     vault, tmp_path: Path, connect: str
 ) -> None:
     from fastmcp import Client
@@ -401,7 +402,7 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
         )
         async with Client(transport, timeout=30, init_timeout=30, mode=connect) as client:
             assert (client.protocol_version == "2026-07-28") == (connect == "auto")
-            return await client.call_tool(
+            refused = await client.call_tool(
                 "ask_memory",
                 {
                     "authorization_session_credential": presented,
@@ -409,8 +410,13 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
                 },
                 raise_on_error=False,
             )
+            successful = await client.call_tool(
+                "bootstrap", {"operation": {"kind": "instructions", "profile": "compact"}},
+                raise_on_error=False,
+            )
+            return refused, successful
 
-    result = asyncio.run(exercise())
+    result, successful = asyncio.run(exercise())
     rendered_result = repr(result)
     rendered_logs = transport_log.read_text(encoding="utf-8", errors="replace")
     rendered_logs += (exomem_log_dir / "exomem.log").read_text(
@@ -422,3 +428,12 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
     assert "limit" not in rendered_result
     assert presented not in rendered_result
     assert presented not in rendered_logs
+    assert successful.is_error is False, successful
+    records = [json.loads(line) for line in (exomem_log_dir / "exomem.log").read_text().splitlines()]
+    observations = [row["fields"] for row in records if row.get("event") == "authorization_observation"]
+    [refusal] = [row for row in observations if row["phase"] == "entry"]
+    assert refusal["entry_ms"] >= 0 and refusal["post_ms"] is None
+    [complete] = [row for row in observations if row["phase"] == "complete"]
+    ledger = [json.loads(line) for line in (exomem_log_dir / "ledger.jsonl").read_text().splitlines()]
+    [successful_call] = [row for row in ledger if row["tool"] == "bootstrap"]
+    assert complete["request_id"] == successful_call["request_id"]
