@@ -1915,13 +1915,16 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
 
 def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, Any]:
     """Read every inventory path under the caller's single authorization pass."""
+    from .governance import artifact_census
 
     def authorize(path: str) -> bool:
         return _authorize(root, path, receipt=True)
 
     with call_spans.span("records.inventory_discovery"):
+        # One fresh proposal set per inventory; both sweeps still guard and authorize the disk paths.
+        listing = artifact_census.vault_listing(root)
         discovered, unreadable = collections.discover_collections_with_errors(
-            root, authorize_path=authorize, semantic_profile=semantic_profile
+            root, authorize_path=authorize, semantic_profile=semantic_profile, listing=listing
         )
     manifests = [
         manifest
@@ -1952,7 +1955,7 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
                 owned_views = owned_view_paths(writer._operation)
         with call_spans.span("records.inventory_legacy"):
             legacy, legacy_truncated = collections.discover_legacy_trackers(
-                root, authorize_path=authorize, owned_views=owned_views
+                root, authorize_path=authorize, owned_views=owned_views, listing=listing
             )
     from . import due_state
 

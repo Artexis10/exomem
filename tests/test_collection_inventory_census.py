@@ -94,3 +94,32 @@ def test_a_manifest_outside_the_knowledge_base_is_neither_listed_nor_reported(tm
 
     assert [row["manifest_path"] for row in inventory["collections"]] == [released]
     assert inventory["unreadable_manifests"] == []
+
+
+@pytest.mark.parametrize("relative", [_UNPARSEABLE_PATH, _TRACKER], ids=["manifest", "tracker"])
+def test_a_listed_file_replaced_with_a_symlink_is_not_released(tmp_path, monkeypatch, relative):
+    """A shared proposal must not make a replaced path authoritative for either sweep."""
+    released = _seed_records_collection(tmp_path)
+    candidate = tmp_path / _write_manifest(tmp_path, relative, _TRACKER_BYTES)
+    target = tmp_path / "Attachments" / "hidden.md"
+    target.parent.mkdir()
+    target.write_text(_TRACKER_BYTES, encoding="utf-8")
+    real = artifact_census.vault_listing
+
+    def list_then_replace(root, directory=None):
+        listing = real(root, directory)
+        if candidate.is_file() and not candidate.is_symlink():
+            candidate.unlink()
+            try:
+                candidate.symlink_to(target)
+            except OSError:
+                pytest.skip("symlinks unavailable")
+        return listing
+
+    monkeypatch.setattr(artifact_census, "vault_listing", list_then_replace)
+
+    inventory = record_memory(tmp_path, "inspect")
+
+    assert [row["manifest_path"] for row in inventory["collections"]] == [released]
+    assert inventory["unreadable_manifests"] == []
+    assert inventory["legacy_trackers"] == []

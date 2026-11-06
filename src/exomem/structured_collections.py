@@ -17,12 +17,15 @@ from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
 from . import item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
+
+if TYPE_CHECKING:
+    from .governance.artifact_census import VaultListing
 
 COLLECTION_VERSION = 1
 #: The file that defines a Records collection: structure, not a saved record.
@@ -1172,6 +1175,7 @@ def discover_collections_with_errors(
     reject_duplicates: bool = True,
     ownership_proof=None,
     semantic_profile: str | None = None,
+    listing: VaultListing | None = None,
 ) -> tuple[tuple[CollectionManifest, ...], tuple[UnreadableManifest, ...]]:
     """Discover releasable manifests AND the ones this sweep could not read.
 
@@ -1245,7 +1249,8 @@ def discover_collections_with_errors(
     candidates = []
     # The Knowledge Base's listing only proposes: `_declared_candidate_rel` still drops whatever lies
     # outside the Knowledge Base first, and the later guards read the disk. Sorted before the bound.
-    proposed = sorted(root / rel for rel in artifact_census.vault_listing(root).files_named(MANIFEST_FILENAME))
+    listing = artifact_census.vault_listing(root) if listing is None else listing
+    proposed = sorted(root / rel for rel in listing.files_named(MANIFEST_FILENAME))
     for candidate in proposed:
         rel = _declared_candidate_rel(root, candidate)
         # Recoverable trash retains bytes but declares no live collection ownership.
@@ -1291,6 +1296,7 @@ def discover_legacy_trackers(
     authorize_path: Callable[[str], bool] | None = None,
     max_raw_candidates: int = 4_096,
     owned_views: Container[str] = frozenset(),
+    listing: VaultListing | None = None,
 ) -> tuple[tuple[LegacyCollection, ...], bool]:
     """Discover bounded exact-Records-layer tracker manifests without parsing items.
 
@@ -1312,8 +1318,9 @@ def discover_legacy_trackers(
     candidates = []
     # The listing only proposes; the guards below read the disk and decide. Sorted before the bound applies.
     records_rel = records_root.relative_to(root).as_posix()
+    listing = artifact_census.vault_listing(root, records_rel) if listing is None else listing
     proposed = sorted(
-        root / rel for rel in artifact_census.vault_listing(root, records_rel).files_under(records_rel)
+        root / rel for rel in listing.files_under(records_rel)
         # Like `rglob("*.md")`: the extension compares by the platform's case rule.
         if os.path.normcase(rel).endswith(".md") and rel not in owned_views
     )
