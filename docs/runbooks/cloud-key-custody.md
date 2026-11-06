@@ -43,6 +43,7 @@ the key, so run the script for both accounts.
    `export CELL_CLEANUP_B2_KEY_ID=<key id> CELL_CLEANUP_B2_APPLICATION_KEY=<application key>`
 4. Run the dry run for `founder`. It changes nothing and prints counts only. Take the old cloud bucket's ID
    from the `cloud_backup_bucket_id` output of `infra/terraform/durability`.
+   Check the corresponding `cloud_backup_bucket_name` output to confirm the intended bucket; pass its ID to `--bucket-id`.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account founder --bucket-id <old cloud bucket id>`
 5. Export the operator key for the `cell-data` account, then run its dry run.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id>`
@@ -66,6 +67,8 @@ The script deletes only keys that the provider lists with the exact prefix `cell
 For `cell-data` it hides the cell's current backup files and never deletes a file version: the bucket's
 compliance lock keeps every version until its retention ends. For `founder` it deletes only versions that the
 provider lists under that prefix. Every step is safe to repeat.
+For unfinished large files, the provider's [delete-file-version API](https://www.backblaze.com/apidocs/b2-delete-file-version)
+cancels the upload, so the same command also removes their uploaded parts.
 If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
 
 ## Staging objects of a deleted cell

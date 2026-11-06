@@ -5,7 +5,7 @@
 ## Preconditions
 
 The repository retires Hosted code and secret destinations. It does not revoke provider keys or delete manually managed Kubernetes Secrets.
-The inventory contains 29 original secret records with 34 destinations, plus eight collector destinations: 42 destination records in total.
+The inventory lists original, collector and key-custody secret destinations.
 Every row remains pending. No provider credential value or account identifier belongs in disposal evidence.
 
 Use explicit operator approval for each destructive live action. Keep Cloud control, scheduler, artifact broker, CSI, volume encryption and alert delivery intact.
