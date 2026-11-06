@@ -32,9 +32,9 @@ If another import is open, inspect its progress through MCP and agree whether to
 3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
 5. While a `start` or later reply carries `next_after`, call `start` again with only `after` set to it, then repeat step 4. Pages file in order and share one collection.
-6. Review the residual with the person. The last page's `finish` reports `residual`: the files still staged, by reason, with counts and bytes.
+6. Read the `residual` that the last page's `finish` reports: the files still staged, by reason, with counts and bytes. Its `summary` says in plain words how many files were not filed. Review those files with the person when `unfiled.files` is above 0. When it is 0, say that every file is filed and nothing needs review.
 7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
-8. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
+8. Discard the stage. When `unfiled.files` is 0, no unfiled file is lost: give the discard as the next step and ask nothing about the files. Otherwise discard only after the person agrees. For a series of windows, ask once for the series.
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
    - A discard keeps a residual record of each member that adoption did not file. Status lists those members as "discarded, not filed".
@@ -86,7 +86,8 @@ Recovery confirms filing and custody; `finish` must still report recall coverage
 
 ## What adoption leaves staged
 - Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
-- A text file stays staged until the discard. Adoption does not consume it.
+- A text file loses its staged copy at `finish`, once its Source page holds the exact text. A text file keeps its copy while its note is owed, until a later `apply` files it, and when its Source page no longer holds the exact text.
+- `finish` removes only the text of its own page. When its time budget runs low it keeps the rest and reports them as filed copies, not as unfiled.
 - A folder made by hand under `_Imports/` is never consumed.
 
 Report the `coverage` from `finish`, including what was refused or is pending, and then the residual.
