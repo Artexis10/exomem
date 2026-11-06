@@ -164,8 +164,13 @@ terminal in its existing receipt path, binding invocation, plan, operation, prep
 Curation SHALL write a recovery proof only while it holds the vault mutation boundary and a current write fence.
 A recovery proof SHALL cover only the latest attempt of a bound uncertain leaf with an invocation identity.
 Every same-operation receipt SHALL be an earlier attempt's no-effect terminal. No same-operation file witness SHALL exist.
-The step SHALL be a store-sealed Records or Planning step, read through the serving store, which SHALL hold no transaction for its request id.
-Other steps, native preservation steps included, SHALL NOT receive a recovery proof.
+The step SHALL be a store-sealed Records or Planning step, read through the serving store, which SHALL hold no transaction for its request id,
+or a native preservation step that holds an unstarted publication record for its attempt.
+Before dispatch, curation SHALL create that record once in the run, bound to invocation, operation, episode attempt and prepared effect digest.
+Before the attempt's witnessed batch installs its first destination, the vault SHALL mark the record started in its own write, which rollback SHALL NOT revert.
+For a native step, the recovery proof SHALL NOT read the step's output paths.
+A missing, changed or started record SHALL leave the attempt uncertain, and so SHALL writer-lease coordination across hosts.
+Other steps SHALL NOT receive a recovery proof.
 Generic failures, absent receipts or file witnesses alone, matching bytes and mutable progress SHALL NOT prove no effect.
 Reconciliation SHALL validate exact original plan/approval and invocation, exclude conflicting
 unresolved invocation or commitment, then use the typed proven_uncommitted transition.
@@ -215,10 +220,11 @@ Recovery SHALL NOT reseal historical plans. Rollback SHALL require a release tha
 - **THEN** curation records a recovery proof and the next attempt commits once with the same operation and request id
 - **AND** a transaction found for that request id repairs the committed receipt instead of recording a proof
 
-#### Scenario: A stopped native preservation attempt stays uncertain
+#### Scenario: A native attempt retries only when it never began publication
 
-- **WHEN** a native preservation attempt stops without a native no-effect terminal, whatever its core paths show
-- **THEN** curation records no recovery proof and the leaf stays uncertain
+- **WHEN** a native preservation attempt stops after it installed a core path, and someone then moves that path
+- **THEN** its publication record shows started, curation records no recovery proof and the leaf stays uncertain
+- **AND** an attempt that stopped before its first install receives a recovery proof and retries once with its sealed allocation
 
 ### Requirement: Leaf support preserves immutable original and reading provenance
 

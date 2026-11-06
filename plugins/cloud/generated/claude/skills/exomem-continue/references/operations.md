@@ -1002,7 +1002,7 @@ Original and reading inputs may share one source without proving independent ori
 
 Ordinary curation apply and resume also record the episode invocation before dispatch.
 After a lost reply, inspect and reconcile the same operation before retrying.
-Only an exact typed no-effect terminal permits a same-operation retry: the native one, or curation's recovery proof for a stopped Records or Planning attempt on the collection store.
+Only an exact typed no-effect terminal permits a same-operation retry: the native one, or curation's recovery proof that a stopped attempt published nothing.
 A generic error remains uncertain.
 Historical commitment can recover after input loss, while current coverage still requires authorized output and exact original bytes.
 New episode-bound plans require a reader that understands their invocation marker, including after rollback.

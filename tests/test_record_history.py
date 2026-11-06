@@ -248,7 +248,9 @@ def test_a_deep_history_reads_one_bounded_page_and_reports_truncation(
 ) -> None:
     _collection(vault)
     key = _append(vault)
-    for revision in range(200):
+    # Enough corrections to pass one default page and one maximum page, with history left over.
+    corrections = record_history.PAGE_DEFAULT + record_history.PAGE_MAX + 10
+    for revision in range(corrections):
         _correct(vault, key, revision, f"Correction {revision}.")
     opened: list[str] = []
     read_kept = registry_history.read_kept
@@ -260,15 +262,17 @@ def test_a_deep_history_reads_one_bounded_page_and_reports_truncation(
 
     first = _history(vault, key)
     assert len(opened) == first["returned"] == record_history.PAGE_DEFAULT
-    assert first["retained"] == 200 and first["truncated"] is True
+    assert first["retained"] == corrections and first["truncated"] is True
     assert first["status"] == "complete"
-    assert _temperatures(first) == list(range(198, 178, -1))
+    newest = corrections - 2
+    assert _temperatures(first) == list(range(newest, newest - record_history.PAGE_DEFAULT, -1))
     second = _history(vault, key, limit=record_history.PAGE_MAX, continuation=first["continuation"])
-    assert _temperatures(second) == list(range(178, 128, -1))
+    after_first = newest - record_history.PAGE_DEFAULT
+    assert _temperatures(second) == list(range(after_first, after_first - record_history.PAGE_MAX, -1))
     assert len(opened) == record_history.PAGE_DEFAULT + record_history.PAGE_MAX
 
     kept = vault / record_history.history_dir(_collection_id(vault), key)
-    per_correction = sum(path.stat().st_size for path in kept.iterdir()) / 200
+    per_correction = sum(path.stat().st_size for path in kept.iterdir()) / corrections
     assert per_correction < 2048  # one row's payload and attribution, not a file snapshot
 
 
