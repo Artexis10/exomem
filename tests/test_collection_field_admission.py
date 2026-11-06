@@ -156,6 +156,9 @@ def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
     create(store)
     raw = {"select": ["count"], "order_by": [{"field": "count"}], "page": {"limit": 1}}
     first = query(store, raw)
+    grouped = {"group_by": [{"field": "label"}], "aggregates": {"n": {"op": "count"}}}
+    with pytest.raises(route.Refusal, match="QUERY_FIELD_UNAVAILABLE"):
+        query(store, grouped)
     basis = tool(store, "record_memory", action="inspect", collection=CID)["field_release_basis"]
     proposal = govern(store, operation="propose", intent="Release reviewed invented location",
                    documents={"grants/collection-location.yaml": release_document(basis)},
@@ -163,6 +166,7 @@ def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
     assert "proposal_id" in proposal, proposal
     govern(store, operation="commit", proposal_id=proposal["proposal_id"])
     assert query(store, {"select": ["place", "label"]})["rows"][0]["place"]["label"] == "invented-place"
+    assert query(store, grouped)["groups"] == [{"label": "invented-place", "n": 2}]
     assert query(store, {**raw, "page": {"limit": 1, "after": first["next_cursor"]}})["rows"] == [{"count": 2}]
     location_query = {"select": ["label"], "order_by": [{"field": "count"}], "page": {"limit": 1}}
     location = query(store, location_query)
@@ -171,7 +175,49 @@ def test_public_owner_release_and_revoke_leave_metric_continuation_valid(store):
         query(store, {**location_query, "page": {"limit": 1, "after": location["next_cursor"]}})
     with pytest.raises(route.Refusal, match="QUERY_FIELD_UNAVAILABLE"):
         query(store, {"select": ["place"]})
+    with pytest.raises(route.Refusal, match="QUERY_FIELD_UNAVAILABLE"):
+        query(store, grouped)
     assert query(store, {**raw, "page": {"limit": 1, "after": first["next_cursor"]}})["rows"] == [{"count": 2}]
+
+
+@pytest.mark.parametrize("place", ["corrected", None], ids=["update", "removal"])
+def test_hidden_location_change_preserves_daily_rollups_before_and_after_publication(store, place):
+    """A private location edit that changes daily metrics or invalidates their preview or continuation."""
+    from test_collection_rollups import THIRD
+    from test_collection_rollups import manifest as rollup_manifest
+
+    fields = {"title": "{type: string, required: true}", "day": "{type: date}",
+              "count": "{type: integer}", "place": "{type: string, classification: location}"}
+    rollups = {"daily": {"bucket": "day", "timestamp": "day", "values": {"count": ["count", "sum", "avg"]}}}
+    store.create_collection(manifest_path(), rollup_manifest(fields=fields, natural_key="title", rollups=rollups),
+                            why="declare daily metric and private location", scaffold=False)
+    for key, day, count in ((KEY, "2026-03-01", 1), (OTHER, "2026-03-01", 2), (THIRD, "2026-03-02", 6)):
+        receipt = store.append_record(CID, item={"title": key, "day": day, "count": count, "place": "private"},
+                                      item_key=key, why="record invented daily metric")
+        if key == OTHER:
+            item_version = receipt["after_item_hash"]
+    store.reconcile_views()
+    raw = {"group_by": [{"field": "day", "bucket": "day"}],
+           "aggregates": {op: {"op": op, "field": "count"} for op in ("count", "sum", "avg")},
+           "page": {"limit": 1}}
+    first = query(store, raw)
+    assert first["plan"]["strategy"] == "rollup"
+    assert first["groups"] == [{"day": "2026-03-01", "count": 2, "sum": 3, "avg": 1.5}]
+    assert first["next_cursor"]
+    changed = store.update_record(CID, item_key=OTHER, changes={"place": place}, why="correct private location",
+        expected_item_version=item_version, expected_container_hash=receipt["after_container_hash"])
+    assert changed["outcome"] == "committed"
+    for published in (False, True):
+        if published:
+            store.reconcile_views()
+        preview = query(store, {**raw, "mode": "preview"})
+        assert preview["plan"]["strategy"] == "rollup" and preview["rollup_buckets"] == 2
+        assert query(store, raw)["groups"] == first["groups"]
+        second = query(store, {**raw, "page": {"limit": 1, "after": first["next_cursor"]}})
+        assert second["groups"] == [{"day": "2026-03-02", "count": 1, "sum": 6, "avg": 6}]
+        assert second["next_cursor"] is None
+        with pytest.raises(route.Refusal, match="QUERY_FIELD_UNAVAILABLE"):
+            query(store, {"select": ["place"]})
 
 
 def test_full_fields_require_verified_owner(store):
