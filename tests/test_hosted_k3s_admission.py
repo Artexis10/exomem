@@ -175,6 +175,69 @@ def _kubectl(
     )
 
 
+def _wait_for_admission_policy(
+    k3s: str,
+    name: str,
+    arguments: list[str],
+    *,
+    documents: list[dict[str, Any]] | None = None,
+) -> None:
+    deadline = time.monotonic() + 60
+    response = "not attempted; policy type checking is incomplete"
+    while True:
+        state = _kubectl(
+            k3s,
+            [
+                "get",
+                f"validatingadmissionpolicy/{name}",
+                f"validatingadmissionpolicybinding/{name}",
+                "--output=json",
+                "--request-timeout=5s",
+            ],
+            check=False,
+        )
+        if state.returncode == 0:
+            policy = next(
+                item
+                for item in json.loads(state.stdout)["items"]
+                if item["kind"] == "ValidatingAdmissionPolicy"
+            )
+            status = policy.get("status", {})
+            type_checking = status.get("typeChecking")
+            if type_checking is not None:
+                assert not type_checking.get("expressionWarnings"), (
+                    f"{name} has expression warnings:\n{state.stdout}"
+                )
+            if (
+                type_checking is not None
+                and status.get("observedGeneration") == policy["metadata"]["generation"]
+            ):
+                result = _kubectl(
+                    k3s,
+                    [*arguments, "--dry-run=server", "--request-timeout=5s"],
+                    documents=documents,
+                    check=False,
+                )
+                response = f"returncode={result.returncode}\n{result.stdout}{result.stderr}"
+                # Match Kubernetes' policy and binding identifiers and the rendered message.
+                denial = (
+                    f"ValidatingAdmissionPolicy '{name}' with binding '{name}' denied request: "
+                    + policy["spec"]["validations"][0]["message"]
+                )
+                if result.returncode != 0 and denial in result.stderr:
+                    return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(1, remaining))
+    raise AssertionError(
+        f"{name} did not become ready within 60s.\n"
+        f"Final policy and binding state (returncode={state.returncode}):\n"
+        f"{state.stdout}{state.stderr}\n"
+        f"Last server dry-run response:\n{response}"
+    )
+
+
 def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
     k3s: str,
 ) -> None:
@@ -254,6 +317,7 @@ def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
     assert "audience" in rejected_status.get("error", "").lower()
 
 
+@pytest.mark.timeout(180)
 def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k3s: str) -> None:
     """A deploy cannot inject a command; offline Job admission trusts only its cell StatefulSet."""
     import copy
@@ -283,14 +347,6 @@ def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k
         and doc["metadata"]["name"] in names
     ]
     _kubectl(k3s, ["apply", "-f", "-"], documents=policies)
-    policy_state = json.loads(
-        _kubectl(k3s, ["get", "validatingadmissionpolicies", "-o", "json"]).stdout
-    )
-    for policy in policy_state["items"]:
-        if policy["metadata"]["name"] in names:
-            assert not policy.get("status", {}).get("typeChecking", {}).get("expressionWarnings"), (
-                policy
-            )
     namespace = "deploy-proof"
     _kubectl(k3s, ["create", "namespace", namespace])
     deployment = {
@@ -325,6 +381,21 @@ def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k
         ],
     )
     actor = ["--as=deploy-proof", "--as-group=exomem:deploy", "--as-group=system:authenticated"]
+    metadata_patch = [{"op": "add", "path": "/metadata/annotations", "value": {"escape": "yes"}}]
+    _wait_for_admission_policy(
+        k3s,
+        "exomem-image-only-deploy",
+        [
+            *actor,
+            "patch",
+            "deployment/controller",
+            "-n",
+            namespace,
+            "--type=json",
+            "-p",
+            json.dumps(metadata_patch),
+        ],
+    )
     image_only = _kubectl(
         k3s,
         [
@@ -357,7 +428,7 @@ def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k
             }
         ],
         [{"op": "add", "path": "/spec/template/spec/serviceAccountName", "value": "privileged"}],
-        [{"op": "add", "path": "/metadata/annotations", "value": {"escape": "yes"}}],
+        metadata_patch,
         [
             {
                 "op": "add",
@@ -380,7 +451,9 @@ def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k
             ],
             check=False,
         )
-        assert refused.returncode != 0 and "container images only" in refused.stderr, refused.stderr
+        assert refused.returncode != 0 and "container images only" in refused.stderr, (
+            f"patch={patch!r}\n{refused.stdout}{refused.stderr}"
+        )
     cell_namespace = "exo-cell-aaaaaaaaaaaaaaaa"
     _kubectl(
         k3s,
@@ -427,20 +500,27 @@ def test_deploy_cannot_change_commands_or_metadata_and_jobs_use_admitted_image(k
             }
         },
     }
+    wrong_image = "unreachable.example/wrong@sha256:" + "d" * 64
+    wrong = copy.deepcopy(job)
+    wrong["spec"]["template"]["spec"]["containers"][0]["image"] = wrong_image
+    _wait_for_admission_policy(
+        k3s,
+        "exomem-cell-job-image",
+        [*actor, "create", "-f", "-"],
+        documents=[wrong],
+    )
     allowed = _kubectl(
         k3s, [*actor, "create", "--dry-run=server", "-f", "-"], documents=[job], check=False
     )
     assert allowed.returncode == 0, allowed.stderr
     for key in ("containers", "initContainers"):
         wrong = copy.deepcopy(job)
-        wrong["spec"]["template"]["spec"][key][0]["image"] = (
-            "unreachable.example/wrong@sha256:" + "d" * 64
-        )
+        wrong["spec"]["template"]["spec"][key][0]["image"] = wrong_image
         denied = _kubectl(
             k3s, [*actor, "create", "--dry-run=server", "-f", "-"], documents=[wrong], check=False
         )
         assert denied.returncode != 0 and "admitted cell StatefulSet" in denied.stderr, (
-            denied.stderr
+            f"image field={key}\n{denied.stdout}{denied.stderr}"
         )
     missing = copy.deepcopy(job)
     missing["metadata"]["namespace"] = namespace
