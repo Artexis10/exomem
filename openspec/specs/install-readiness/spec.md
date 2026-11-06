@@ -843,7 +843,7 @@ relay-throttling rationale, not deleted.
 
 Local health surfaces SHALL distinguish process/transport liveness from retrieval admission. Retrieval SHALL be reported ready only when both required recall projections are live and both maintained catalogue checkpoints are proven exactly equal to those projections. A previously ready bit SHALL be revoked when that equality no longer holds. A process whose transport responds but whose projection/catalogue is warming or unavailable MUST NOT be reported as fully ready.
 
-Once a managed process has itself proved that equality since its warm began, a catalogue that later trails a live projection SHALL be reported as retrieval state `lagging`, and the serving status SHALL stay ready, while per-request recall can still serve the published catalogue. That holds only when the warm has finished, because recall refuses with a warming outcome until then; event indexes are enabled; and, for both scopes, a live projection and a published catalogue checkpoint exist and keep the access-policy and semantic-catalogue identity of the vault. `lagging` SHALL report the lagging scopes and the seconds this process has seen the published catalogue checkpoints unchanged. It SHALL NOT report `admitted=true` and SHALL NOT add a reason code. A process that has not proved that equality since its managed warm began, whose warm is still running, whose live or published projection is lost, or whose identity changed SHALL NOT report `lagging`.
+Once a managed process has itself proved that equality since its warm began, a catalogue that later trails a live projection SHALL be reported as retrieval state `lagging`, and the serving status SHALL stay ready, while per-request recall can still serve the published catalogue. That holds from the proof on, whether or not the rest of the warm has finished, because recall serves the published catalogue from then on. It also requires that event indexes are enabled and that, for both scopes, a live projection and a published catalogue checkpoint exist and keep the access-policy and semantic-catalogue identity of the vault. `lagging` SHALL report the lagging scopes and the seconds this process has seen the published catalogue checkpoints unchanged. It SHALL NOT report `admitted=true` and SHALL NOT add a reason code. Each probe that finds the catalogue lagging SHALL prove again on the next probe, and a strict proof that holds SHALL restore `admitted=true`, during the warm as after it. A process that has not proved that equality since its managed warm began, whose live or published projection is lost, or whose identity changed SHALL NOT report `lagging`.
 
 The readiness surface MAY answer from a ready proof for at most 30 seconds. It SHALL NOT reuse a not-ready or failed proof, a proof that reports `lagging`, or a standby's proof. A reused proof SHALL be void once the process records a retrieval admission change or promotes a standby. Nothing else voids it, so the other fields of a reused answer, such as the coordination role, the session-store state and the observability block, may be up to 30 seconds old. The answer SHALL report the proof's age, counted from when its measurement began.
 
@@ -879,15 +879,22 @@ The readiness surface MAY answer from a ready proof for at most 30 seconds. It S
 - **THEN** health reports retrieval as warming or unavailable with `admitted=false` and status not ready, at once when this process recorded the change and within 30 seconds otherwise
 - **AND** background repair must prove the new equality before readiness returns
 
+#### Scenario: A warm that proved its catalogue serves a later lag
+
+- **WHEN** a managed process has proved both catalogues exactly equal to the live projections in its current warm, and a live projection then advances beyond the maintained catalogue while the graph handoff, the semantic corpus or an optional preload still runs
+- **THEN** health answers with status ready and reports retrieval as `lagging` with `admitted=false` and no reason code
+- **AND** recall serves the published catalogue with the projection lag disclosed, and skips and names in its `warming` object the lanes that are not ready
+- **AND** retrieval returns to ready with `admitted=true` once a later proof holds, without waiting for the warm to finish
+
 #### Scenario: A running warm withholds the served lag
 
-- **WHEN** a proven process begins a new warm and a live projection is ahead of the maintained catalogue
-- **THEN** health reports retrieval as warming with `admitted=false` and status not ready until the whole warm, including its optional preloads, has finished
+- **WHEN** a proven process begins a new warm and a live projection is ahead of the maintained catalogue before that warm proves it
+- **THEN** health reports retrieval as warming with `admitted=false` and status not ready while that warm runs
 - **AND** recall refuses with its warming outcome over the same period
 
 #### Scenario: A fresh process waits for a strict proof
 
-- **WHEN** a process begins a managed warm, or holds only a proof made while it was unmanaged, and a live projection is ahead of the maintained catalogue
+- **WHEN** a process begins a managed warm, or holds only a proof made while it was unmanaged or before its managed warm began, and a live projection is ahead of the maintained catalogue
 - **THEN** health reports retrieval as warming or unavailable with `admitted=false` and status not ready
 - **AND** only a strict proof made by that managed process allows `lagging` afterwards
 
