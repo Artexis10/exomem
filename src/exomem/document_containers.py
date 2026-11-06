@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import stat
 import tempfile
+import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -16,7 +21,7 @@ from typing import BinaryIO
 
 import yaml
 
-from . import archive_members, originals, reserved_paths, state_paths
+from . import archive_members, originals, reserved_paths, state_paths, vault
 from .vault import (
     MISSING_CONTENT_HASH,
     FrontmatterError,
@@ -322,11 +327,109 @@ def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_cop
     return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
 
 
+# Remembers ordinary notes that were read and carry no container claim, so a restricted path
+# decision need not re-read and re-parse the note each time. It stores no bytes. A read from disk is
+# kept by the file version it saw, and a hit re-checks that version with one lstat. Bytes the caller
+# supplied are kept by their SHA-256, as `(root, path, sha256)` with no value, because a claim is a
+# function of the path and those bytes alone. Bounded; `clear_unclaimed_notes` empties it.
+_UNCLAIMED_MAX = 65_536
+_UNCLAIMED_LOCK = threading.Lock()
+_UNCLAIMED: OrderedDict[
+    tuple[Path, str] | tuple[Path, str, str], tuple[str, tuple[int, int], tuple[int, int, int]] | None
+] = OrderedDict()
+
+
+def clear_unclaimed_notes() -> int:
+    """Forget every remembered note; the idle RAM release calls this. Returns how many entries it dropped."""
+    with _UNCLAIMED_LOCK:
+        dropped = len(_UNCLAIMED)
+        _UNCLAIMED.clear()
+    return dropped
+
+
+def _page_version(page: str) -> tuple[tuple[int, int], tuple[int, int, int], os.stat_result] | None:
+    """Identity and stat generation of one regular, singly linked page at an absolute path, or None."""
+    try:
+        info = os.lstat(page)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return None
+    return (info.st_dev, info.st_ino), vault.stat_generation(info), info
+
+
+def _remembered_unclaimed(root: Path, path: str) -> bool:
+    key = (root, path)
+    with _UNCLAIMED_LOCK:
+        entry = _UNCLAIMED.get(key)
+        if entry is None:
+            return False
+        _UNCLAIMED.move_to_end(key)
+    version = _page_version(entry[0])
+    if version is None or version[:2] != entry[1:]:
+        # A changed note is read again; forget it so later checks do not stat a version that cannot match.
+        with _UNCLAIMED_LOCK:
+            if _UNCLAIMED.get(key) == entry:
+                del _UNCLAIMED[key]
+        return False
+    return True
+
+
+def _remember_unclaimed(
+    root: Path, path: str, page: str, read: reserved_paths.GenericFileSnapshot, started_ns: int,
+) -> None:
+    # The read's generation comes from its own held handle after the bytes were read. It binds those bytes
+    # only when both timestamps were already older than the racy window when the read started: a write during
+    # the read, however long the read takes, carries a later timestamp, and a same-tick rewrite keeps
+    # (size, mtime, ctime). Recording costs no stat; the next hit's lstat proves the path still names this
+    # inode and version. A claim, an in-tree path or a missing file is never remembered, so the memo can only
+    # skip a read that found no claim; it never feeds a byte observation.
+    if read.generation is None or read.identity.kind != "file" or read.identity.link_count != 1:
+        return
+    if started_ns - max(read.generation[1], read.generation[2]) <= vault.GENERATION_RACY_WINDOW_NS:
+        return
+    _store_unclaimed((root, path), (page, (read.identity.device, read.identity.inode), read.generation))
+
+
+def _store_unclaimed(key: tuple[Path, str] | tuple[Path, str, str], entry: tuple[str, tuple[int, int], tuple[int, int, int]] | None) -> None:
+    with _UNCLAIMED_LOCK:
+        _UNCLAIMED[key] = entry
+        _UNCLAIMED.move_to_end(key)
+        while len(_UNCLAIMED) > _UNCLAIMED_MAX:
+            _UNCLAIMED.popitem(last=False)
+
+
+def _remembered_unclaimed_bytes(root: Path, path: str, content_sha256: str) -> bool:
+    key = (root, path, content_sha256)
+    with _UNCLAIMED_LOCK:
+        if key not in _UNCLAIMED:
+            return False
+        _UNCLAIMED.move_to_end(key)
+    return True
+
+
 def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
     """Resolve direct pages, binary originals and extraction parts through one binding validator."""
     if not isinstance(path, str):
         raise ValueError("container member path must be a string")
     root = state_paths.resolved_vault_path(root, expanduser=False)
+    # Only an ORDINARY spelling outside a payload tree is ever remembered. Its classification depends on the
+    # spelling and the process's fixed knowledge-base directory, so a hit needs none of the normalization below.
+    # A hit proves only that this file version makes no claim; the read that serves the page re-proves path
+    # safety. Supplied or staged bytes decide instead.
+    if content is None and not _OVERLAY.get() and _remembered_unclaimed(root, path):
+        return None
+    # Supplied bytes for a page spelling are the bytes parsed below, never the disk, so the same path with
+    # the same bytes always answers the same and no file version or racy window is involved. The digest is
+    # taken here, from the bytes themselves, so no caller can vouch for bytes it did not pass.
+    supplied_digest = (
+        hashlib.sha256(content).hexdigest()
+        if content is not None and path.lower().endswith(".md") and not _OVERLAY.get()
+        else None
+    )
+    if supplied_digest is not None and _remembered_unclaimed_bytes(root, path, supplied_digest):
+        return None
+    spelling = path
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
     raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
@@ -341,11 +444,14 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if raw is None:
         raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
     in_subtree = in_payload_tree(path)
+    remembered_read = None
     if raw is None:
         if classified.disposition is not reserved_paths.PathDisposition.ORDINARY:
             if in_subtree:
                 raise ValueError("container member path is invalid")
             return None
+        # Reaching here means no supplied bytes and no staged overlay, so this is a disk read.
+        memoable = content is None and not _OVERLAY.get() and not in_subtree and vault.STAT_GENERATION_TRUSTED
         # A cold inventory cannot classify an absent ordinary companion.
         if not in_subtree and not reserved_paths.identity_catalogue_ready(root):
             try:
@@ -353,7 +459,10 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
             except FileNotFoundError:
                 return None
         try:
-            raw = reserved_paths.read_generic_bytes(root, page_path).data
+            started_ns = time.time_ns()
+            read = reserved_paths.read_generic_bytes(root, page_path)
+            raw = read.data
+            remembered_read = (read, started_ns) if memoable else None
         except (reserved_paths.ReservedPathLeafError, RuntimeError):
             # Inventory loss can precede a typed read error; only physical absence clears an ordinary claim.
             if not in_subtree:
@@ -376,6 +485,10 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if not in_subtree:
         # Ordinary malformed notes keep path-only handling; a parsed custody claim requires strict validation.
         if "container_member" not in fm:
+            if remembered_read is not None:
+                _remember_unclaimed(root, spelling, str(root / page_path), *remembered_read)
+            elif supplied_digest is not None and classified.disposition is reserved_paths.PathDisposition.ORDINARY:
+                _store_unclaimed((root, spelling, supplied_digest), None)
             return None
         fm, _, _ = parse_frontmatter(decoded, strict=True)
     if "part_of" in fm:
