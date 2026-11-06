@@ -2,7 +2,7 @@
 
 Batch A implements the code and disposable-sandbox portion of this group.
 The task boxes remain open until their stated live evidence and delivery evidence exist.
-The real CSI drill, fleet migration, node-policy observations and live canary inspection remain operator-run evidence.
+The real CSI drill passed on 2026-11-06 (design D1). Fleet migration, node-policy observations and live canary inspection remain operator-run evidence.
 The media producer and tenant-lock crash recovery remain deferred to their owning implementation groups.
 
 - [x] 1.1 Early check: on a disposable cluster with the pinned hcloud CSI driver, a StorageClass that names a per-namespace node-publish Secret through the provisioner's templates creates, mounts and remounts an encrypted volume. Record the LUKS version that the driver formats. Evidence: the drill output and `cryptsetup luksDump` header version, recorded in design D1.
