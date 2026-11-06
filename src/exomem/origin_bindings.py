@@ -302,9 +302,8 @@ def release_origin_response(vault_root: Path, value):
     if not has_carrier(value):
         return value
     # A false refusal removes only the selected attribution, keeping the row's usable prose.
-    # This final input proof must not reuse a request's earlier release snapshot. It opens one
-    # fresh snapshot of its own, so every carrier in the response is decided on one live policy.
-    with policy.outside_request_policy_snapshot(), policy.request_policy_snapshot():
+    # This final input proof must not reuse a request's earlier release snapshot.
+    with policy.outside_request_policy_snapshot():
         if not egress.projects_origin_for_caller(vault_root):
             return value
         return walk(value)
