@@ -52,6 +52,8 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
     if not _COLLECT_PART or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
         return None
     part, parts = (int(value) for value in _COLLECT_PART.split("/"))
+    if not 0 <= part < parts:
+        raise pytest.UsageError(f"EXOMEM_COLLECT_PART={_COLLECT_PART!r} names no share; use <part>/<parts>, 0 <= part < parts")
     # A module outside this share is ignored; inside it, the ordinary rules decide.
     return True if zlib.crc32(collection_path.name.encode()) % parts != part else None
 

@@ -20,15 +20,17 @@ unset PYTHONDONTWRITEBYTECODE
 
 run=(uv run --frozen --python "$1")
 
-# Interpreter, dependencies and project sources, in parallel processes.
-"${run[@]}" python - <<'EOF'
+# Interpreter, dependencies and project sources, in parallel processes. The code
+# goes through -c, not stdin: from 3.12 compileall's process pool re-imports
+# __main__ from its file, and stdin has none.
+"${run[@]}" python -c '
 import compileall
 import sysconfig
 
 paths = sysconfig.get_paths()
 for root in (paths["stdlib"], paths["purelib"], "src", "benchmarks"):
     compileall.compile_dir(root, quiet=2, workers=0)
-EOF
+'
 
 # Test modules with pytest's assertion rewriting: one disjoint share per CPU.
 # The tier (EXOMEM_TEST_TIER) and ignores match the test step's collection.
