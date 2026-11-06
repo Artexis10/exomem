@@ -1298,14 +1298,15 @@ def discover_legacy_trackers(
     *,
     authorize_path: Callable[[str], bool] | None = None,
     max_raw_candidates: int = 4_096,
-    owned_views: Container[str] = frozenset(),
+    accounted_paths: Container[str] = frozenset(),
     listing: VaultListing | None = None,
 ) -> tuple[tuple[LegacyCollection, ...], bool]:
     """Discover bounded exact-Records-layer tracker manifests without parsing items.
 
-    ``owned_views`` are the exact vault-relative files a collection store publishes as
-    views. The store wrote them, so none is a legacy tracker, and the sweep skips them
-    before authorizing or parsing. Every other file, even beside a view, is still swept.
+    ``accounted_paths`` are the exact vault-relative files that a collection already accounts
+    for: the views a collection store publishes, and the items that a file collection's
+    adapter read as items in the same call. None is a legacy tracker, so the sweep skips them
+    before authorizing or parsing. Every other file, even beside one, is still swept.
     """
     if type(max_raw_candidates) is not int or not 1 <= max_raw_candidates <= 16_384:
         raise CollectionError(
@@ -1325,7 +1326,7 @@ def discover_legacy_trackers(
     proposed = sorted(
         root / rel for rel in listing.files_under(records_rel)
         # Like `rglob("*.md")`: the extension compares by the platform's case rule.
-        if os.path.normcase(rel).endswith(".md") and rel not in owned_views
+        if os.path.normcase(rel).endswith(".md") and rel not in accounted_paths
     )
     for candidate in proposed:
         safe = _safe_candidate_rel(root, candidate)

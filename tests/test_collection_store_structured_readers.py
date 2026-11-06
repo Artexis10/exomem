@@ -372,6 +372,37 @@ def test_write_delta_keeps_hidden_log_rows_but_serve_matches_rows_absent(store, 
                     if entry["category"] == "unreflected_outcomes"]
 
 
+def test_inventory_counts_observations_only_for_a_claim_matching_the_current_manifest(store):
+    """A claim recorded against another manifest version covers nothing, whichever collection is listed first."""
+    from test_collection_claims import _write_observation
+
+    _write_observation(store.root)
+    garden = store.root / "Knowledge Base/Notes/Insights/garden-observation.md"
+    garden.write_text(
+        "---\ntype: insight\nexomem_id: 55555555-5555-4555-8555-555555555555\ntitle: Garden lease renewed\n"
+        "created: 2026-09-01\nupdated: 2026-09-01\nstatus: active\ntags: [garden, lease]\nsources: []\n---\n\n"
+        "## Observations\n\n- [garden] Lease renewed #lease ^renewal\n", encoding="utf-8")
+    other_cid = "33333333-3333-4333-8333-333333333333"
+    other_path = manifest_path().replace("Work", "Other")
+    for cid, path, terms in ((CID, manifest_path(), "account, subscriptions"), (other_cid, other_path, "garden, lease")):
+        text = manifest_text().replace(CID, cid).replace(
+            "lifecycle: active\n", f"lifecycle: active\nclaims:\n  terms: [{terms}]\n")
+        store.create_collection(path, text, why="create", scaffold=False)
+
+    def unreflected():
+        with preview_store(store.root, store.handle), request_scope(owner_principal()):
+            rows = record_governance.inventory_collections(store.root)["collections"]
+        return {row["collection_id"]: row["unreflected"] for row in rows}
+
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        due_state.reconcile(store.root, now=dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC))
+    assert unreflected() == {CID: 1, other_cid: 1}
+    projection = due_state.load(store.root)
+    projection["claims"][other_path]["manifest_hash"] = "0" * 64
+    due_state.save(store.root, projection)
+    assert unreflected() == {CID: 1, other_cid: 0}
+
+
 def test_hidden_log_sibling_does_not_reopen_a_reflected_observation(store):
     from test_collection_claims import _write_observation
 

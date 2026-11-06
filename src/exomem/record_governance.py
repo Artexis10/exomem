@@ -1826,6 +1826,10 @@ def _diagnostics_summary(diagnostics: Sequence[Mapping[str, Any]]) -> str:
     return f"{summary} (+{remaining} more)" if remaining > 0 else summary
 
 
+#: Marks a writer the caller did not resolve; `None` is a resolved answer ("a file collection").
+_WRITER_UNRESOLVED = object()
+
+
 @call_spans.timed("records.inventory_coverage")
 def _inventory_coverage(
     root: Path,
@@ -1833,15 +1837,21 @@ def _inventory_coverage(
     authorize: Callable[[str], bool],
     *,
     observations: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, Any], Any]:
+    writer: Any = _WRITER_UNRESOLVED,
+) -> tuple[dict[str, Any], Any, frozenset[str]]:
     """Inventory-grade coverage: counts only, and `None` when items are unreadable.
 
     A collection this sweep cannot read has no honest committed count, and zero
     would claim one. Absent is not an option here because every row carries the
     same keys, so the hole is named rather than filled.
+
+    ``writer`` is the collection's selected store writer when the caller already resolved it.
+    The third value is the vault-relative files that the markdown-items adapter accepted as
+    items in this read. It is empty for every other strategy and for a read that failed.
     """
     from . import due_state
-    writer = selected_writer(root, manifest)
+    if writer is _WRITER_UNRESOLVED:
+        writer = selected_writer(root, manifest)
     if writer is not None:
         # One snapshot and the caller's authorization for this collection's counts.
         with writer.read_snapshot():
@@ -1851,7 +1861,8 @@ def _inventory_coverage(
                 root, str(manifest.path), authorize_path=authorize
             )
         return {"committed": committed, "held": held,
-                "unreflected": len(observations["unreflected"])}, selection
+                "unreflected": len(observations["unreflected"])}, selection, frozenset()
+    snapshot = None
     try:
         snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
         committed: int | None = len(snapshot.records)
@@ -1861,9 +1872,17 @@ def _inventory_coverage(
         root, manifest, committed=committed, authorize=authorize, references=False,
         observations=observations,
     )
+    # "markdown-items" is a storage strategy the adapters implement, not a vocabulary entry:
+    # only there is one record one file, so only there do the item paths name files the legacy
+    # sweep need not open again.
+    accounted = (
+        frozenset(record.source.path for record in snapshot.records)
+        if snapshot is not None and manifest.storage.strategy == "markdown-items"
+        else frozenset()
+    )
     return {
         key: coverage[key] for key in ("committed", "held", "unreflected")
-    }, None
+    }, None, accounted
 
 
 def _presentation_inspection(
@@ -1926,47 +1945,42 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         discovered, unreadable = collections.discover_collections_with_errors(
             root, authorize_path=authorize, semantic_profile=semantic_profile, listing=listing
         )
-    manifests = [
-        manifest
-        for manifest in discovered
-        if manifest.semantic_profile == semantic_profile
-        and (selected_writer(root, manifest) is not None or authorize(manifest.storage.source))
-    ]
+    # Each manifest keeps the writer that selected it, so coverage does not resolve ownership again.
+    # `selected_writer` raises for an unadmitted collection, so it runs before any authorization.
+    released: list[tuple[collections.CollectionManifest, Any]] = []
+    for manifest in discovered:
+        if manifest.semantic_profile != semantic_profile:
+            continue
+        store_writer = selected_writer(root, manifest)
+        if store_writer is not None or authorize(manifest.storage.source):
+            released.append((manifest, store_writer))
     unreadable = tuple(row for row in unreadable if row.semantic_profile in (None, semantic_profile))
     if production_bound(root) and not capability.records_summary_enabled(root):
         # A summary collection is records-summary-v1: while the release keeps it off,
         # the inventory names it as unavailable rather than reading its counts.
-        dark = [m for m in manifests if m.view_mode == "summary" and selected_writer(root, m) is not None]
-        manifests = [m for m in manifests if m not in dark]
+        dark = [m for m, store_writer in released if m.view_mode == "summary" and store_writer is not None]
+        released = [(m, store_writer) for m, store_writer in released if m not in dark]
         unreadable = (*unreadable, *(
             collections.UnreadableManifest(m.path, capability.UNAVAILABLE,
                                            f"this release has not enabled {capability.RECORDS_SUMMARY_V1}",
                                            m.semantic_profile)
             for m in dark))
-    legacy: tuple[collections.LegacyCollection, ...] = ()
-    legacy_truncated = False
-    if semantic_profile == "records":
-        from .collection_store.views import owned_view_paths
-
-        owned_views = frozenset()
-        writer = bound_writer(root)
-        if writer is not None:
-            with writer.read_snapshot():
-                owned_views = owned_view_paths(writer._operation)
-        with call_spans.span("records.inventory_legacy"):
-            legacy, legacy_truncated = collections.discover_legacy_trackers(
-                root, authorize_path=authorize, owned_views=owned_views, listing=listing
-            )
     from . import due_state
 
     with call_spans.span("records.inventory_observations"):
+        # Discovery loaded these manifests under this same read, so observations compare their
+        # version hashes instead of loading each manifest again.
         observations = due_state._collection_observation_coverages(
-            root, (str(manifest.path) for manifest in manifests), authorize_path=authorize
+            root, (str(manifest.path) for manifest, _ in released), authorize_path=authorize,
+            manifests={str(manifest.path): manifest for manifest, _ in released},
         )
     inventory, selections = [], []
-    for manifest in manifests:
-        coverage, selection = _inventory_coverage(
-            root, manifest, authorize, observations=observations[str(manifest.path)])
+    accounted: set[str] = set()
+    for manifest, store_writer in released:
+        coverage, selection, items = _inventory_coverage(
+            root, manifest, authorize, observations=observations[str(manifest.path)],
+            writer=store_writer)
+        accounted |= items
         inventory.append({
             "collection_id": manifest.collection_id,
             "title": manifest.title,
@@ -1979,6 +1993,22 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         })
         if selection is not None:
             selections.append(selection)
+    legacy: tuple[collections.LegacyCollection, ...] = ()
+    legacy_truncated = False
+    if semantic_profile == "records":
+        from .collection_store.views import owned_view_paths
+
+        owned_views = frozenset()
+        writer = bound_writer(root)
+        if writer is not None:
+            with writer.read_snapshot():
+                owned_views = owned_view_paths(writer._operation)
+        with call_spans.span("records.inventory_legacy"):
+            # The sweep runs after coverage so it can skip the files a collection's adapter
+            # already read as items in this call; a non-item page beside them is still inspected.
+            legacy, legacy_truncated = collections.discover_legacy_trackers(
+                root, authorize_path=authorize, accounted_paths=owned_views | accounted, listing=listing
+            )
     describe_route = capabilities.active_call_route("record_memory", {"action": "describe"})
     payload = {
         "kind": f"{semantic_profile}_inventory",
