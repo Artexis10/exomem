@@ -9,6 +9,7 @@ import shutil
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,19 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(RepositoryDocsReads(), "repository-docs-reads")
+
+
+#: Set only by scripts/ci-prepare-bytecode.sh: "<part>/<parts>" collects one disjoint share of the
+#: test modules, so parallel collect-only passes rewrite each module once into the shared cache.
+_COLLECT_PART = os.environ.get("EXOMEM_COLLECT_PART", "").strip()
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    if not _COLLECT_PART or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    part, parts = (int(value) for value in _COLLECT_PART.split("/"))
+    # A module outside this share is ignored; inside it, the ordinary rules decide.
+    return True if zlib.crc32(collection_path.name.encode()) % parts != part else None
 
 
 def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:

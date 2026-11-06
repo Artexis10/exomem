@@ -90,7 +90,7 @@ jobs:
         env:
           EXOMEM_DURATIONS_PATH: &duration-snapshot-path ${{ runner.temp }}/test-durations.json
         run: cp .test_durations.json "$EXOMEM_DURATIONS_PATH"
-      - name: Run tests (serial timing checks)
+      - name: Prepare shared bytecode
         if: steps.scope.outputs.docs_only != 'true'
         env: &core-test-env
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -98,9 +98,15 @@ jobs:
           # Pytest workers own CPU parallelism; avoid a native math pool per interpreter.
           OPENBLAS_NUM_THREADS: &native-math-threads "1"
           EXOMEM_DURATIONS_PATH: *duration-snapshot-path
+          # Tests read bytecode from scripts/ci-prepare-bytecode.sh's cache, outside the checkout.
+          PYTHONPYCACHEPREFIX: &pycache-prefix ${{ runner.temp }}/pycache
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+        run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
+      - name: Run tests (serial timing checks)
+        if: steps.scope.outputs.docs_only != 'true'
+        env: *core-test-env
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
           "$EXOMEM_SERIAL_CORE_MODULE"
@@ -201,6 +207,9 @@ jobs:
           uv run --no-project --python 3.13 scripts/ci_install_release.py "$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION" \
             "$RUNNER_TEMP/previous-schema" "$EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256" EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON
       - *prepare-duration-snapshot
+      - name: Prepare shared bytecode
+        env: *core-test-env
+        run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
@@ -338,15 +347,19 @@ jobs:
           uv run --frozen --compile-bytecode --python ${{ matrix.python-version }}
           python -m compileall -q src/exomem
       - *prepare-duration-snapshot
-      - name: Run tests (harness tier — benchmark-importing modules)
-        env:
+      - name: Prepare shared bytecode
+        env: &harness-test-env
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
           OPENBLAS_NUM_THREADS: *native-math-threads
           EXOMEM_DURATIONS_PATH: *duration-snapshot-path
+          PYTHONPYCACHEPREFIX: *pycache-prefix
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: harness
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+        run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
+      - name: Run tests (harness tier — benchmark-importing modules)
+        env: *harness-test-env
         # Contiguous chunks keep most cached fixture consumers on one runner.
         # Six chunks retain 1.5x predicted headroom within the 900-second cap.
         run: >-
