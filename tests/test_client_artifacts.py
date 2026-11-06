@@ -2049,6 +2049,7 @@ def test_a_fresh_image_is_one_canonical_commit_with_its_media_job_queued(
         assert frontmatter["processing_state"] == "pending"
         assert frontmatter["extracted_by"] == "pending"
         assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+        assert frontmatter["binary_mtime_ns"] is None
         stored = page.read_text()
         # A later explicit reconcile finds the page current: no further commit.
         result = media_processing_module.reconcile_media(vault, binary)

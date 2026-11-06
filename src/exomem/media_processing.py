@@ -148,8 +148,9 @@ class _BinaryProvenance:
     original_filename: str
     sha256: str
     size: int
-    mtime_ns: int
-    ctime_ns: int
+    # None only in the facts `render_pending_page` renders from: "not read yet".
+    mtime_ns: int | None
+    ctime_ns: int | None
     device: int
     inode: int
 
@@ -956,8 +957,10 @@ def _is_pending_sidecar_shape(
         and frontmatter.get("processing_state") == "pending"
         and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
         and _is_nonnegative_int(frontmatter.get("binary_size"))
-        and _is_nonnegative_int(frontmatter.get("binary_mtime_ns"))
-        and _is_nonnegative_int(frontmatter.get("binary_ctime_ns"))
+        and (
+            _hints_unread(frontmatter)
+            or all(_is_nonnegative_int(frontmatter.get(field)) for field in _TIMESTAMP_FIELDS)
+        )
     )
 
 
@@ -1651,7 +1654,7 @@ def _render_pending_sidecar(
                 # A page committed with its original (`render_pending_page`) is current as it
                 # is: its hints are not identity (`_TIMESTAMP_FIELDS`), and a second commit
                 # for them is what that page exists to avoid. Changed bytes are not current.
-                unread = render(replace(provenance, mtime_ns=0, ctime_ns=0))
+                unread = render(replace(provenance, mtime_ns=None, ctime_ns=None))
                 if unread == original:
                     return unread
             return render(provenance)
@@ -1745,12 +1748,13 @@ def render_pending_page(
     For a caller that commits the original and its stub together and reconciles straight
     after: that reconcile finds the page current and only queues the job, instead of
     committing the page a second time. The original is not on disk yet, and renaming it into
-    place moves its ctime, so no timestamp read beforehand can be exact. Both hints are 0,
+    place moves its ctime, so no timestamp read beforehand can be exact. Both hints are null,
     "not read yet" (`_hints_unread`), and reconciliation leaves them so.
     """
     # device and inode serve `_verify_binary_identity` only, which this page never reaches.
     facts = _BinaryProvenance(
-        relative_path, original_filename, sha256, size, mtime_ns=0, ctime_ns=0, device=0, inode=0
+        relative_path, original_filename, sha256, size,
+        mtime_ns=None, ctime_ns=None, device=0, inode=0,
     )
     return _set_fields(stub, _pending_fields(facts))
 
@@ -1763,11 +1767,15 @@ def _set_fields(content: str, fields: tuple[tuple[str, object], ...]) -> str:
 
 
 def _hints_unread(frontmatter: dict[str, object]) -> bool:
-    """Whether the page records 0 for both timestamp hints, as `render_pending_page` leaves them."""
-    return all(
-        _is_nonnegative_int(frontmatter.get(field)) and frontmatter[field] == 0
-        for field in _TIMESTAMP_FIELDS
-    )
+    """Whether the page holds both timestamp hints as null, as `render_pending_page` leaves them.
+
+    A missing hint is not unread: it stays a malformed page, as before.
+    """
+    return all(field in frontmatter and frontmatter[field] is None for field in _TIMESTAMP_FIELDS)
+
+
+def _hint_value(hint: int | None) -> int | str:
+    return "null" if hint is None else hint
 
 
 def _pending_fields(
@@ -1779,8 +1787,8 @@ def _pending_fields(
         ("original_filename", yaml_scalar(_original_filename(frontmatter, provenance.original_filename))),
         ("binary_sha256", provenance.sha256),
         ("binary_size", provenance.size),
-        ("binary_mtime_ns", provenance.mtime_ns),
-        ("binary_ctime_ns", provenance.ctime_ns),
+        ("binary_mtime_ns", _hint_value(provenance.mtime_ns)),
+        ("binary_ctime_ns", _hint_value(provenance.ctime_ns)),
     )
 
 
