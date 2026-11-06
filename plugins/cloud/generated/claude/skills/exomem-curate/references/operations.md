@@ -945,6 +945,37 @@ this is how you query their values.
 
 Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
 
+### Preserved materials
+
+`record_episode` with `operation.kind="input"` binds already-preserved material to an existing episode; it creates no Source or destination effect.
+Supply the current `input_revision` and `journal_digest` from `read_episode` with `operation.kind="candidates"`.
+Supply `materials: {version: 1, items: [...]}` within 16 KiB, with at most eight uniquely keyed items.
+Each item has `key` (160 characters), `original_reference`, `reading_reference`, or both (canonical references, 2048 characters each).
+An original reference names its whole companion page; a reading reference may select an exact semantic unit.
+Optional `producer` (256 characters) and `producer_version` (160 characters) are authored attribution, never authenticated extractor identity.
+Optional `locator: {kind: "dataset_rows", record_path: null, row_indices: [0]}` selects one to 32 unique zero-based records.
+`record_path` may name a nested JSON array and is at most 2048 characters; the existing dataset parser verifies the selection.
+Other locator kinds and unknown fields are refused.
+
+Empty `items` explicitly clears bindings.
+Later recaps inherit the latest explicit envelope without copying it or refreshing its versions.
+The write returns the existing terminal mutation receipt.
+Read `candidates` after the write for stable handles with the original binding `input_revision` and `material_key`.
+A byte-equivalent replacement under current guards adds no revision.
+After a lost reply, inspect public state before another mutation; stale guards refuse without writing or transparently resealing a retry.
+
+`read_episode` with `operation.kind="material"`, `episode`, binding `input_revision` and `material_key` reads one material.
+It reports original and reading states independently: `available`, `stale` or content-free `unavailable`.
+Original availability requires current authorized bytes; a readable companion or an old preservation receipt is insufficient.
+A changed reading is stale and never silently rebound; an unavailable original does not suppress a usable reading.
+The read returns at most 8192 bytes of exact reading text, with no binary bytes or download capability.
+Unchecked handles in inspection do not prove byte availability.
+Pairing and producer attribution remain caller-authored; they establish neither equivalent content, independent origins nor compilation coverage.
+
+Journals with material bindings require a reader-capable release, including on rollback.
+Older strict readers refuse those journals before changing them; no migration rewrites legacy journals.
+Native Source, Evidence and Planning effect adapters and the ordinary mixed-media journey remain pending.
+
 ### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
 - `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.
 - A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Never a free-form effect.

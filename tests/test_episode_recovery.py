@@ -8,6 +8,7 @@ import pytest
 
 from exomem import (
     commands,
+    episode_materials,
     freshness,
     memory_refs,
     semantic_index,
@@ -191,6 +192,52 @@ def test_withheld_and_absent_material_representations_disclose_the_same_result(v
             k: v for k, v in hidden_reading.items() if k != "material_key"
         }
         assert commands.op_episode_memory(vault, None, action="candidates", episode=key)["materials"] == []
+
+
+@pytest.mark.parametrize("representation,revoked_paths", [
+    ("original", "Evidence/**"),
+    ("reading", "Sources/**"),
+    ("original", None),
+], ids=["revoke-original", "revoke-reading", "delete-original"])
+def test_material_terminal_release_rechecks_each_representation(
+    vault, monkeypatch, representation, revoked_paths,
+) -> None:
+    from exomem.writer_lease import invoke_command
+
+    reading = _write_page(vault, "An independent reading.\n")
+    key = "ep-" + "fe" * 16
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "episode_memory")
+    with request_scope(_owner("client-a")):
+        saved = commands.op_preserve_evidence(vault, scope="Synthetic", category="Inputs",
+            filename="proof.txt", content="Original bytes", description="Synthetic proof.")
+        original = memory_refs.ref_from_markdown((vault / saved["sidecar_path"]).read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "selected", "original_reference": original, "reading_reference": reading,
+                "producer": "Caller attribution",
+            }]})
+        recover = episode_materials.recover_reading
+
+        def change_after_recovery(*args, **kwargs):
+            value = recover(*args, **kwargs)
+            if revoked_paths is not None:
+                _write_source_rule(vault, ceiling=0, paths=revoked_paths)
+            else:
+                (vault / saved["path"]).unlink()
+            return value
+
+        monkeypatch.setattr(episode_materials, "recover_reading", change_after_recovery)
+        result = invoke_command(command, vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="selected")
+        monkeypatch.setattr(episode_materials, "recover_reading", recover)
+        current = invoke_command(command, vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="selected")
+        assert result == current
+        assert result[representation] == {"status": "unavailable"}
+        peer = "reading" if representation == "original" else "original"
+        assert result[peer]["status"] == "available"
+        assert "attribution" not in result
 
 
 def test_material_reading_releases_only_its_exact_unit_and_preserves_the_response_bound(vault) -> None:

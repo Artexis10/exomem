@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from . import artifact_recovery, originals, provenance, query_data, reserved_paths, retained_inputs
 from . import episode_model as model
-from .governance import egress
+from .governance import egress, policy
 from .governance.principal import effective_principal
 
 MAX_BYTES = 16 * 1024
@@ -216,53 +217,101 @@ def handles(vault_root: Path, state: dict) -> list[dict]:
     ]
 
 
-def recover_original(vault_root: Path, item: dict) -> dict:
+def _stage_original(vault_root: Path, item: dict, stack: ExitStack) -> tuple[dict, Any]:
     original = item.get("original")
     if original is None:
-        return {"status": "unavailable"}
+        return {"status": "unavailable"}, None
     try:
         snapshot = retained_inputs._read_snapshot(vault_root, original["reference"])  # noqa: SLF001
         who = replace(effective_principal(), administrative_ingress=False)
-        with artifact_recovery.stage(vault_root, snapshot.page.path, who) as (held, descriptor):
-            if any(descriptor[field] != original[field] for field in _BINARY):
-                return {"status": "stale"}
-            result = {"status": "available", "reference": original["reference"], **descriptor}
-            if "locator" in item:
-                locator = _dataset(held, descriptor, item["locator"])
-                if locator != item["locator"]:
-                    return {"status": "stale"}
-                result["locator"] = locator
-            artifact_recovery.require_current(vault_root, held, who)
-            return result
+        held, descriptor = stack.enter_context(artifact_recovery.stage(vault_root, snapshot.page.path, who))
+        if any(descriptor[field] != original[field] for field in _BINARY):
+            return {"status": "stale"}, held
+        result = {"status": "available", "reference": original["reference"], **descriptor}
+        if "locator" in item:
+            locator = _dataset(held, descriptor, item["locator"])
+            if locator != item["locator"]:
+                return {"status": "stale"}, held
+            result["locator"] = locator
+        return result, held
     except (artifact_recovery.RecoveryUnavailable, retained_inputs.RetainedInputError,
             query_data.QueryDataError, reserved_paths.ReservedPathLeafError, model.EpisodeError):
-        return {"status": "unavailable"}
+        return {"status": "unavailable"}, None
 
 
-def recover_reading(vault_root: Path, item: dict, *, max_bytes: int) -> dict:
+def _check_original(vault_root: Path, original: dict, held: Any) -> dict:
+    if held is not None:
+        try:
+            who = replace(effective_principal(), administrative_ingress=False)
+            artifact_recovery.require_current(vault_root, held, who)
+        except artifact_recovery.RecoveryUnavailable:
+            return {"status": "unavailable"}
+    return original
+
+
+def recover_original(vault_root: Path, item: dict) -> dict:
+    with ExitStack() as stack:
+        original, held = _stage_original(vault_root, item, stack)
+        return _check_original(vault_root, original, held)
+
+
+def _read_current(vault_root: Path, item: dict, *, max_bytes: int) -> tuple[dict, Any]:
     reading = item.get("reading")
     if reading is None:
-        return {"status": "unavailable"}
+        return {"status": "unavailable"}, None
     try:
         canonical, unit_ref = retained_inputs.parse_reference(reading["reference"])
         snapshot = retained_inputs.resolve_retained_input(vault_root, canonical)
         if snapshot.released is None or snapshot.released.get("frontmatter") != snapshot.page.frontmatter:
-            return {"status": "unavailable"}
+            return {"status": "unavailable"}, None
         if provenance.evidence_version(snapshot.page.content) != reading["version"]:
-            return {"status": "stale"}
+            return {"status": "stale"}, (snapshot, "")
         if unit_ref is not None:
             snapshot = retained_inputs._release_snapshot(vault_root, replace(snapshot, unit_ref=unit_ref))  # noqa: SLF001
         if _reading(snapshot) != reading:
-            return {"status": "stale"}
+            return {"status": "stale"}, (snapshot, "")
         value = snapshot.unit.span.text if snapshot.unit is not None else snapshot.page.body
         if len(value.encode("utf-8")) > max_bytes or not retained_inputs.exact_text_visible(vault_root, value):
-            return {"status": "unavailable"}
+            return {"status": "unavailable"}, None
         retained_inputs.recheck_retained_inputs(vault_root, ((snapshot, value),))
         field, representation = ("text", "semantic_unit_span") if snapshot.unit is not None else ("body", "page_body")
-        egress.record_direct_text_release(
-            value, stable_ref=reading["reference"], representation=representation,
-            principal=effective_principal(), authorization=snapshot.authorization,
-        )
-        return {"status": "available", **reading, "representation": representation, field: value}
+        return {"status": "available", **reading, "representation": representation, field: value}, (snapshot, value)
     except (retained_inputs.RetainedInputError, ValueError, OSError):
-        return {"status": "unavailable"}
+        return {"status": "unavailable"}, None
+
+
+def recover_reading(vault_root: Path, item: dict, *, max_bytes: int) -> dict:
+    return _read_current(vault_root, item, max_bytes=max_bytes)[0]
+
+
+def release_material(vault_root: Path, item: dict | None, filtered: dict, *, max_bytes: int) -> dict:
+    """Admit the selected representations again at the shared terminal boundary."""
+    # Only this response refreshes policy; ordinary request snapshot semantics stay intact.
+    with policy.outside_request_policy_snapshot(), ExitStack() as stack:
+        original, held = _stage_original(vault_root, item or {}, stack)
+        reading, selection = _read_current(vault_root, item or {}, max_bytes=max_bytes)
+        if selection is not None:
+            try:
+                retained_inputs.recheck_retained_inputs(vault_root, (selection,))
+            except (retained_inputs.RetainedInputError, ValueError, OSError):
+                reading = {"status": "unavailable"}
+        original = _check_original(vault_root, original, held)
+        # A fresh admission cannot undo the terminal scrubber or reference filter.
+        if original["status"] == "available" and original != filtered.get("original"):
+            original = {"status": "unavailable"}
+        if reading["status"] == "available" and reading != filtered.get("reading"):
+            reading = {"status": "unavailable"}
+        result = {**filtered, "original": original, "reading": reading}
+        result.pop("attribution", None)
+        if item is not None and all(
+            result[field]["status"] == "available" for field in ("original", "reading") if field in item
+        ) and "attribution" in filtered:
+            result["attribution"] = filtered["attribution"]
+        result["summary"] = f"Original {original['status']}; reading {reading['status']}."
+        if reading["status"] == "available" and selection is not None:
+            snapshot, value = selection
+            egress.record_direct_text_release(
+                value, stable_ref=reading["reference"], representation=reading["representation"],
+                principal=effective_principal(), authorization=snapshot.authorization,
+            )
+        return result

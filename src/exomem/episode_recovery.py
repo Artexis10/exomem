@@ -391,7 +391,7 @@ class EpisodeInputOwner:
             "materials": episode_materials.handles(self.vault_root, current["state"]),
         }
 
-    def recover_material(self, key: str, *, input_revision: int, material_key: str) -> dict[str, Any]:
+    def _material_item(self, key: str, *, input_revision: int, material_key: str) -> dict | None:
         if type(input_revision) is not int or input_revision < 1:
             raise _error("EPISODE_INPUT_INVALID", "input revision must be a positive integer")
         if not isinstance(material_key, str) or not material_key.strip() or len(material_key) > 160:
@@ -403,9 +403,18 @@ class EpisodeInputOwner:
                 raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
             raise
         binding = model.material_binding(current["state"], input_revision)
-        item = next((
+        return next((
             row for row in binding[1]["items"] if row["key"] == material_key
         ), None) if binding is not None and binding[0] == input_revision else None
+
+    def release_material(self, original: dict, filtered: dict) -> dict[str, Any]:
+        item = self._material_item(
+            original["episode"], input_revision=original["input_revision"], material_key=original["material_key"],
+        )
+        return episode_materials.release_material(self.vault_root, item, filtered, max_bytes=_MAX_RESPONSE_BYTES)
+
+    def recover_material(self, key: str, *, input_revision: int, material_key: str) -> dict[str, Any]:
+        item = self._material_item(key, input_revision=input_revision, material_key=material_key)
         result = {
             "summary": "Original unavailable; reading unavailable.",
             "operation": "episode_material", "episode": key,
