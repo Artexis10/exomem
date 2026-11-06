@@ -1311,7 +1311,7 @@ The item SHALL carry the episode key, the live revision ref, `captured`, `due_si
 
 ### Requirement: The uncompiled-episode family ships off and is outside the attention union
 
-The family `uncompiled_episode` SHALL ship with the disposition `off`, declared once with a reason where families are registered, and SHALL NOT add a setting. The owner SHALL turn it on through the existing disposition setting. The dispositions view SHALL list a shipped default as a row until the owner sets a disposition. The family SHALL NOT belong to the default attention categories. While the family is `off`, no due-state block, carrier or default attention view SHALL list it. After the owner sets it to `normal`, an explicit category review SHALL list it. The due-state schema version SHALL change with the new category, so that each install rebuilds its projection once.
+The family `uncompiled_episode` SHALL ship with the disposition `off`, declared once with a reason where families are registered, and SHALL NOT add a setting. The owner SHALL turn it on through the existing disposition setting. The dispositions view SHALL list a shipped default as a row until the owner sets a disposition. The family SHALL NOT belong to the default attention categories. It SHALL be optional and absent from the default audit sweep, so that the recaps written before an upgrade do not each surface; an audit that names the family SHALL run it whatever its disposition. While the family is `off`, no due-state block, carrier or default attention view SHALL list it. After the owner sets it to `normal`, an explicit category review SHALL list it. The due-state schema version SHALL change with the new category, so that each install rebuilds its projection once.
 
 #### Scenario: The family ships off, outside attention, and lists once set to normal
 
@@ -1320,6 +1320,13 @@ The family `uncompiled_episode` SHALL ship with the disposition `off`, declared 
 - **AND** the default attention view and every due-state block omit it
 - **WHEN** the owner sets the family to `normal`
 - **THEN** an explicit review of the category lists the episode
+
+#### Scenario: A default audit omits the family
+
+- **WHEN** a vault holds an uncited recap and an audit runs without categories
+- **THEN** the audit returns no finding of the family
+- **WHEN** the audit names the family among its categories
+- **THEN** it lists the episode
 
 #### Scenario: A restricted caller is not served the stored rows
 

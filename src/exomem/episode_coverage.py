@@ -27,6 +27,7 @@ from . import (
     lifecycle_statuses,
     memory_refs,
     note_types,
+    request_budget,
     source_coverage,
     source_taxonomy,
     vault,
@@ -192,13 +193,15 @@ def survey(
 
             return find.writer_resolver_snapshot(root)
 
-    found = (
-        evaluate(
+    found: list[Coverage] = []
+    for revisions in episodes(pages):
+        request_budget.checkpoint()
+        coverage = evaluate(
             root, revisions, lookup=lookup, resolver=resolver, status_basis=status_basis, type_basis=type_basis
         )
-        for revisions in episodes(pages)
-    )
-    return [coverage for coverage in found if coverage is not None]
+        if coverage is not None:
+            found.append(coverage)
+    return found
 
 
 def revision_paths(vault_root: Path, paths: Iterable[str]) -> set[str]:

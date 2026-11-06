@@ -11,8 +11,9 @@ Checks (all read-only; no writes ever):
   anywhere in `Knowledge Base/`
 - `unprocessed_source`: `type: source` page that no live note compiles: no page
   its `ingested_into:` names is live and cites it in its own `sources:`
-- `uncompiled_episode`: conversation recap whose live revision has a Decided
-  line that no recap cited by a live page holds (citation only; items unassessed)
+- `uncompiled_episode` (optional): conversation recap whose live revision has a
+  Decided line that no recap cited by a live page holds (citation only; items
+  unassessed)
 - `unresolved_source_citation`: compiled page whose explicit `sources:` claim
   does not resolve to authorized governed Source or Evidence material
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
@@ -152,7 +153,6 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "forward_reference",
     "orphan_entity",
     "unprocessed_source",
-    review_state_module.EPISODE_BACKLOG,
     "unresolved_source_citation",
     "index_drift",
     "tag_inconsistency",
@@ -194,6 +194,9 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
     "path_variants",
+    # Every past recap with a Decided line is uncited after an upgrade, so a default
+    # audit would list each one with a compile instruction. Run it only on request.
+    review_state_module.EPISODE_BACKLOG,
 )
 TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
     "semantic_malformed_unit",

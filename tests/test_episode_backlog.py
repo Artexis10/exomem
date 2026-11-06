@@ -18,7 +18,7 @@ from test_episode_memory_command import (
     _withhold_notes_from,
 )
 
-from exomem import commands, due_state, find, review_state
+from exomem import audit, commands, due_state, find, review_state
 from exomem.governance.principal import owner_principal, request_scope
 
 FAMILY = due_state.EPISODE_BACKLOG
@@ -93,6 +93,17 @@ def test_the_family_ships_off_is_not_in_attention_and_lists_once_set_to_normal(v
     assert recap not in listed(), "the default attention union never carries the family"
     assert due_state.served(vault)["categories"][FAMILY] == 1
     assert FAMILY not in {row["family"] for row in commands.op_review_memory(vault, mode="dispositions")["dispositions"]}
+
+
+def test_a_default_audit_leaves_recaps_out_and_an_explicit_request_lists_them(vault: Path) -> None:
+    """After an upgrade every past recap with a Decided line is uncited. A default audit
+    that listed each one would tell the agent to compile the whole conversation history."""
+    _record(vault, decided=["Buy the brass lamp"])
+    recap = _episodes(vault)[0].relative_to(vault).as_posix()
+    find.clear_cache()
+
+    assert FAMILY not in {finding.category for finding in audit.audit(vault).findings}
+    assert [finding.path for finding in audit.audit(vault, categories=[FAMILY]).findings] == [recap]
 
 
 def test_a_restricted_caller_is_not_served_the_stored_rows_and_its_audit_item_ignores_the_withheld_citer(
