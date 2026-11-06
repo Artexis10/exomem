@@ -362,38 +362,31 @@ The residue tests compare every edge after the drain with a fresh whole-vault re
 That covers a created page gaining incoming links, a stem made ambiguous, a rename, a
 removal and a retitle, with a negative control that disables the drain's widening.
 
-**A drain records the resolver topology its rows account for, and no other.** A
-per-path drain under a moving vault lands its rows and withholds the marker, lineage and
-acknowledgement. It used to withhold the stored resolver topology fingerprint as well,
-so a page it created had rows the fingerprint did not know, and the next adoption proof
-declined a snapshot that matched the disk. The published branch had the opposite hole:
-it always wrote the fingerprint of the resolver it derived under, including topology
-changes this batch never widened, such as a retitled page outside the indexed corpus.
-That page has no rows and can never be residue, so the next adoption matched, accepted a
-sidecar missing the link it re-targets, and promotion retired the whole-vault marker
-that was the only repair. Both branches now write the fingerprint only when reverting
-the queued pages' resolver entries to the pre-pass rows reproduces the stored
-fingerprint, decided before the pass while those rows are still readable. Pages the pass
-rewrites only as affected do not count: widening follows the queued pages' keys, so an
-affected page's own retitle was never widened (task 8.9 records the related serving-graph
-limit). A change split across drains -- `DRAIN_LIMIT` truncation, or a page landing
-between the queue snapshot and the drain -- would leave no single drain able to explain
-it, so the fingerprint would stick until a whole-vault publication. A drain that may not
-record the topology therefore carries its queued indexed pages' pre-pass resolver
-entries forward in `graph_meta` (`recall_resolver_topology_carry`, first entry per page
-kept, at most `TOPOLOGY_CARRY_LIMIT` = 256 pages). The next drain and the adoption proof
-revert those entries too, and a carried page whose row no longer matches the resolver
-explains nothing. Recording a fingerprint clears the record, and a whole-vault
-publication starts without one. Past the bound the record is dropped and repair takes
-the whole-vault path, as before. Affected pages and pages outside the indexed corpus
-never enter it. A drain records or extends the record only when reverting its batch,
-the record, and every indexed page whose stored row disagrees with the resolver
-reproduces the stored fingerprint. Otherwise its resolver holds a change outside the
-indexed corpus under which it rewrote affected pages; if that change were later
-reverted, a kept record would explain the fingerprint again over those rows. The
-record is dropped instead, and the whole-vault path stays in charge. Otherwise the stored
-fingerprint stays, the proof keeps failing closed, and the whole-vault marker stays the
-repair. Nothing in the publication or availability contract moves.
+**A drain accounts for its complete resolver topology before rewriting rows.**
+A scoped drain can rewrite a source whose links depend on another outstanding retitle.
+That rewrite must first widen the retitled page's own dependencies.
+Otherwise the pass overwrites the old title and loses links that become resolvable when an ambiguity disappears.
+Every root with a changed resolver entry widens through its lookup keys and stored incoming edges.
+A root without a stored row also widens because target existence can change an edge.
+An unchanged entry needs only fragment repair, since this invariant excludes rows from an unrecorded intermediate topology.
+
+When the selected roots do not explain the resolver topology, the drain adds every differing indexed page.
+It proves those roots explain the complete topology, then widens them together.
+The drain proves the complete batch against the registry before deriving rows and again before committing.
+If those roots still cannot explain the topology, the drain lands no rows and records the existing full-rebuild marker.
+A changed title outside the indexed corpus is one such case.
+
+Every admitted pass commits its resolver fingerprint atomically with the repaired rows.
+Unrelated movement or queued content repair may still withhold public availability and the acknowledgement.
+An ordinary owned drain avoids the scan for differing file rows.
+A scoped or truncated drain can expand beyond its selected receipts when correctness requires other topology changes.
+Topology repair follows dependency fan-out; body edits avoid unrelated direct linkers.
+
+This replaces the earlier carry record, which preserved old entries after partial topology repair.
+The carry could explain an unqueued page and later disappear while leaving stale edges.
+Schema version 15 therefore requires a full rebuild of older sidecars.
+A partial drain cannot relabel old rows with the new version.
+The rebuild costs one recovery pass; it prevents reuse of damage that source hashes alone cannot detect.
 
 Steady-state convergence under writes, meaning catch-up publication of a pass whose
 movement was all recorded, is 7.2. It is not reopened here. It was built and measured on

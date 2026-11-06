@@ -1107,12 +1107,15 @@ def test_a_split_checkpoint_converges_through_one_covering_drain_not_a_whole_vau
     committed checkpoint finishes.
     """
     # No page links to either of these, so neither drain widens to the other.
+    (vault / PAGE_C).write_text(_page("C", "C is a plain claim."), encoding="utf-8")
+    freshness.rebaseline(vault)
+    EpistemicGraphIndex(vault).rebuild_all()
     committed = _write_without_graph_repair(
         vault,
         monkeypatch,
         {
             PAGE_A: _page("A", "A is revised against [[queue-b]]."),
-            PAGE_C: _page("C", "C is a new plain claim."),
+            PAGE_C: _page("C", "C is a revised plain claim."),
         },
     )
     index_sync.drain_graph_work(vault, limit=1)
@@ -1717,18 +1720,42 @@ AFFECTED_LINKER = "Knowledge Base/Notes/Insights/queue-affected-linker.md"
 TARGET = "Knowledge Base/Notes/Insights/queue-target.md"
 
 
-def test_a_late_refresh_does_not_trust_a_drain_that_left_the_topology_unowned(
-    vault: Path,
+def test_a_scoped_drain_preserves_a_retitled_dependants_old_title_links(
+    vault: Path, whole_vault_passes: list[str]
 ) -> None:
-    """An acknowledged generation is not enough when the drain did not own its topology.
+    """A retitle removes an ambiguity even when an earlier drain rewrote its title."""
+    _publish_with_a_resident_resolver(
+        vault,
+        {
+            AFFECTED: _titled("Old X", "Cites [[Y Title]]."),
+            RETITLED: _titled("Old X", "The other page with the same title."),
+            AFFECTED_LINKER: _titled("X Linker", "Cites [[Old X]]."),
+            NEW_LINKER: _titled("New Linker", "Cites [[New X]]."),
+        },
+    )
+    whole_vault_passes.clear()
+    _commit_before_its_fanout(
+        vault,
+        {
+            TARGET: _titled("Y Title", "A new target."),
+            AFFECTED: _titled("New X", "Cites [[Y Title]]."),
+        },
+    )
+    assert index_sync.publish_corpus_delta(vault, changed=[vault / TARGET, vault / AFFECTED])
 
-    The write creates a target and retitles a page that cites it. A drain of
-    the target alone rewrites that page as affected, stores its new title and
-    acknowledges the generation, but never widens on the old title, so the
-    old title's linker keeps an edge a rebuild drops. The stale stored
-    topology is meant to fail closed at the next topology-changing write,
-    which is this write's own late refresh.
-    """
+    index_sync.drain_graph_work(vault, paths={TARGET})
+    index_sync.drain_graph_work(vault)
+
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_late_refresh_after_a_scoped_retitle_drain_matches_a_rebuild(
+    vault: Path, whole_vault_passes: list[str],
+) -> None:
+    """A late refresh must preserve the old-title repair already covered by a scoped drain."""
     _publish_with_a_resident_resolver(
         vault,
         {
@@ -1736,6 +1763,7 @@ def test_a_late_refresh_does_not_trust_a_drain_that_left_the_topology_unowned(
             AFFECTED_LINKER: _titled("X Linker", "Cites [[Old X]]."),
         },
     )
+    whole_vault_passes.clear()
     _commit_before_its_fanout(
         vault,
         {
@@ -1754,6 +1782,34 @@ def test_a_late_refresh_does_not_trust_a_drain_that_left_the_topology_unowned(
     )
     index_sync.drain_graph_work(vault)
 
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    assert whole_vault_passes == []
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_an_old_sidecar_cannot_acquire_the_new_version_through_a_partial_drain(
+    vault: Path,
+) -> None:
+    """Old derived rows can hide stale edges; only rebuilding may certify the new invariant."""
+    index = EpistemicGraphIndex(vault)
+    with sqlite3.connect(index.path) as conn:
+        conn.execute(
+            "UPDATE graph_meta SET value = ? WHERE key = 'schema_version'",
+            (str(epistemic_graph.SCHEMA_VERSION - 1),),
+        )
+    deferred_index.add_graph(vault, [PAGE_B])
+
+    assert index_sync.drain_graph_work(vault) == 0
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_B]
+    assert deferred_index.graph_full_rebuild_pending(vault) is not None
+    with sqlite3.connect(index.path) as conn:
+        assert conn.execute(
+            "SELECT value FROM graph_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == str(epistemic_graph.SCHEMA_VERSION - 1)
+
+    index_sync.drain_graph_work(vault)
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
     _assert_matches_a_fresh_rebuild(vault)

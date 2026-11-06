@@ -1270,15 +1270,28 @@ def _is_sqlite_contention(error: BaseException) -> bool:
     return "locked" in text or "busy" in text
 
 
-def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | None]:
+def acknowledgement_state(
+    vault_root: Path, *, require_available: bool = False
+) -> tuple[str, GraphBuildOutcome | None]:
     """Return whether the live sidecar has no, valid, malformed, or busy graph ack.
 
     `busy` is deliberately *not* `malformed`. Contention says nothing about the
     lineage: the reader simply could not look. Folding the two together is what
     made a concurrent write project `GRAPH_SYNC_LINEAGE_CONFLICT` and told the
     caller to reconcile a graph that was perfectly intact.
+
+    Reporting callers may require the publication marker in the same snapshot.
+    That adds `unavailable` while preserving the acknowledgement for maintenance.
+    It never waits for a publication hold or runs the source proof.
     """
-    from .epistemic_graph import _connect_existing_owner_target, sidecar_path
+    from . import freshness
+    from .epistemic_graph import (
+        _AVAILABILITY_FRESHNESS_KEY,
+        _READ_BARRIER_KEY,
+        SCHEMA_VERSION,
+        _connect_existing_owner_target,
+        sidecar_path,
+    )
 
     path = sidecar_path(vault_root)
     try:
@@ -1298,9 +1311,14 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
             values = dict(
                 conn.execute(
                     "SELECT key, value FROM graph_meta WHERE key IN "
-                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint')"
+                    "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint', "
+                    "'schema_version', ?, ?)",
+                    (_AVAILABILITY_FRESHNESS_KEY, _READ_BARRIER_KEY),
                 )
             )
+        marker = values.pop(_AVAILABILITY_FRESHNESS_KEY, None)
+        barrier = values.pop(_READ_BARRIER_KEY, None)
+        schema_version = values.pop("schema_version", None)
         if not values:
             return "absent", None
         if set(values) != {
@@ -1329,7 +1347,15 @@ def acknowledgement_state(vault_root: Path) -> tuple[str, GraphBuildOutcome | No
             or checkpoint.checkpoint_sha256 != digest
         ):
             return "malformed", None
-        return "valid", GraphBuildOutcome.covering(checkpoint)
+        outcome = GraphBuildOutcome.covering(checkpoint)
+        if require_available and (
+            marker is None
+            or barrier is not None
+            or schema_version != str(SCHEMA_VERSION)
+            or freshness.external_pending(vault_root)
+        ):
+            return "unavailable", outcome
+        return "valid", outcome
     except FileNotFoundError:
         return "absent", None
     except (KeyError, OSError, RuntimeError, sqlite3.Error, ValueError) as error:
@@ -4081,6 +4107,20 @@ def committed_graph_pending(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
         "graph_sync_checkpoint": checkpoint.checkpoint_sha256,
         "graph_sync_remediation": (
             "The write is durable. Derived graph relations are still rebuilding. "
+            "Continue independent work; retry a graph-dependent query only if it "
+            "reports warming. Pending graph work alone does not require rereading "
+            "the written note or running maintenance."
+        ),
+    }
+
+
+def committed_graph_unavailable(checkpoint: GraphSyncCheckpoint) -> dict[str, str]:
+    """The canonical bytes committed, but the graph withdrew its availability."""
+    return {
+        **committed_graph_pending(checkpoint),
+        "graph_sync_code": "GRAPH_SYNC_UNAVAILABLE",
+        "graph_sync_remediation": (
+            "The write is durable. Derived graph relations are not current. "
             "Continue independent work; retry a graph-dependent query only if it "
             "reports warming. Pending graph work alone does not require rereading "
             "the written note or running maintenance."

@@ -117,17 +117,16 @@ def _built(vault: Path, whole_vault_passes: list[str]) -> Path:
 def _publish_past_a_stale_row(root: Path) -> None:
     """Leave `retitled.md` with a stale row under a checkpoint that already includes it.
 
-    The 7.6 shape: the registry records the retitle, and a drain of another page
-    publishes the marker at the registry's checkpoint, so the retitle is behind
-    the stored checkpoint -- outside the recall delta -- while its own receipt
-    has not drained.
+    Seed a retained checkpoint whose graph receipt still awaits replay. A
+    current drain repairs every visible topology change, so it cannot produce
+    this delayed-row state as a side effect of draining an unrelated page.
     """
     (root / RETITLED).write_text(_titled("New Title", ""), encoding="utf-8")
-    other = root / GENERATED / "generated-note-0007.md"
-    other.write_text(other.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
     freshness.rebaseline(root)
-    report = EpistemicGraphIndex(root).drain_paths([other])
-    assert report["published"] is True
+    EpistemicGraphIndex(root)._publish_available_marker(
+        epistemic_graph._incremental_projection_identity(root),
+        checkpoint=freshness.recall_checkpoint(root, "vault"),
+    )
 
 
 def test_a_replayed_path_the_graph_already_reflects_rebuilds_nothing(
@@ -413,7 +412,7 @@ def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_topology_affected_sources",
-        lambda self, conn, rels, *, resolver, owns_topology=False: set(),
+        lambda self, conn, rels, *, resolver: set(),
         raising=True,
     )
 
