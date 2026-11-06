@@ -258,7 +258,7 @@ def test_a_text_copy_edited_after_it_was_planned_stays_and_is_reported_as_change
     residual = finished["finish"]["residual"]
     assert residual["by_reason"] == {"copy_changed": {"files": 1, "bytes": len(edited)}}
     assert residual["unfiled"] == {"files": 1, "bytes": len(edited)}
-    assert residual["summary"] == "1 file needs review: 1 whose staged copy changed after it was planned."
+    assert residual["summary"] == "1 file needs review: 1 whose staged copy finish could not safely remove."
     assert "review-residual" in {action["action"] for action in finished["next_actions"]}
 
 
@@ -650,5 +650,9 @@ def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false
     assert _staged(vault, staged, "plan.md").read_bytes() == note
     assert residual["by_reason"] == {"kept": {"files": 1, "bytes": len(IMAGE)}, "text": {"files": 1, "bytes": len(note)}}
     assert residual["removed_empty_folders"] == 0 and finished["finish"]["consumed"] == 0
+    # finish checked neither copy, so the sentence the person reads before a discard must not vouch for them.
+    assert residual["summary"] == (
+        "2 files stay staged (1 artifact, 1 text): adoption filed them, but finish did not check these copies against the Knowledge Base."
+    )
     actions = {action["action"]: action["description"] for action in finished["next_actions"]}
     assert "review-residual" in actions and "agrees" in actions["discard"]

@@ -25,12 +25,12 @@ OUTSIDE_RUN = "outside_run"
 STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- the closed result keys that `_page_classifier` returns, a protocol of this report and not vocabulary.
     "failed": (False, "{n} failed"),
     "over_ceiling": (False, "{n} over the size limit"),
-    "pending": (False, "{n} waiting to be applied"),
+    "pending": (False, "{n} not yet applied"),
     "unselected": (False, "{n} not selected"),
     "ineligible": (False, "{n} of a kind that adoption does not import"),
     OUTSIDE_RUN: (False, "{n} not scanned (hidden, added after the scan, or on a later page)"),
     "source_differs": (False, "{n} with a Source page that no longer holds the text"),
-    "copy_changed": (False, "{n} whose staged copy changed after it was planned"),
+    "copy_changed": (False, "{n} whose staged copy finish could not safely remove"),
     "unchecked": (False, "{n} not yet verified against their Source page"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
@@ -57,7 +57,12 @@ def _summary(by_reason: dict[str, dict[str, int]], unfiled: dict[str, int]) -> s
     if not by_reason:
         return "No file is left in the stage."
     if not unfiled["files"]:
-        return f"Every file left in the stage is already in the Knowledge Base ({groups(True)})."
+        # `finish` checks no filed copy that stays, so the sentence claims filing only, never a verified Knowledge Base copy.
+        count = sum(entry["files"] for entry in by_reason.values())
+        return (
+            f"{count} file{' stays' if count == 1 else 's stay'} staged ({groups(True)}): adoption filed "
+            f"{'it' if count == 1 else 'them'}, but finish did not check {'this copy' if count == 1 else 'these copies'} against the Knowledge Base."
+        )
     count = unfiled["files"]
     return f"{count} file{' needs' if count == 1 else 's need'} review: {groups(False)}."
 

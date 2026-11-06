@@ -88,7 +88,7 @@ Recovery confirms filing and custody; `finish` must still report recall coverage
 - Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
 - A text file loses its staged copy at `finish`, once its Source page holds the exact text.
 - A text file keeps its copy while its note is owed. `apply` is refused after `finish`, so the copy stays staged and the residual lists the file as `pending`.
-- A text file also keeps its copy when `finish` finds a difference, and the residual lists it as unfiled. `source_differs` means the Source page no longer holds the exact text, so the staged copy is the only exact one. `copy_changed` means the Source page holds the text, but the staged copy changed after it was planned. Review it with the person; do not discard it unreviewed.
+- A text file also keeps its copy when `finish` finds a difference, and the residual lists it as unfiled. `source_differs` means the Source page no longer holds the exact text, so the staged copy is the only exact one. `copy_changed` means the Source page holds the text, but `finish` could not safely remove the staged copy: it changed after the plan, the stage manifest does not list it, or the removal failed. Review it with the person; do not discard it unreviewed.
 - `finish` removes only the text of its own page. When its time budget runs low it keeps the rest and reports them as `unchecked`: not yet verified against their Source pages. Review them with the person; a finished run takes no second `finish`.
 - A folder made by hand under `_Imports/` is never consumed.
 
