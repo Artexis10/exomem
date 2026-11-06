@@ -63,6 +63,7 @@ the key, so run the script for both accounts.
    Expect `hide=due` and `files_hidden` equal to `files_found`.
 10. Run the dry run again for both accounts. The clean-up is complete when `founder` and `cell-data` each show
     `keys_found=0` and `files_found=0`. The alert does not show completion.
+11. If the cell used the media store, clean up the media bucket as well. See the next section.
 
 The grace starts from a date that you pass, not from a state file. The date is one value that you
 already keep with the deletion record. A file would need a path, a place that survives between sessions,
@@ -75,6 +76,33 @@ provider lists under that prefix. Every step is safe to repeat.
 For unfinished large files, the provider's [delete-file-version API](https://www.backblaze.com/apidocs/b2-delete-file-version)
 cancels the upload, so the same command also removes their uploaded parts.
 If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
+
+## Media bucket of a deleted cell
+
+The media bucket stays in the founder account. Its only writer is the media edge, and no service holds
+`deleteFiles` on it. `cellctl` removes the cell from the edge's active set and reports `deleted` only after the
+edge shows that exact set (`add-cloud-media-store` D6, D9). So the alert for a cell that used the media store
+means the edge no longer admits that cell. The alert is still an input that a compromised `cellctl` controls:
+do the database check in steps 1 and 2 first. The bucket has no lock and its objects are the only copy,
+so the same 7-day grace applies, counted from your own first dry run.
+
+1. Export an operator key for the founder account that is limited to the media bucket, with `listFiles`, `deleteFiles`
+   and `writeFiles` (cancelling an upload is a write). It needs no key capability.
+   `export CELL_CLEANUP_B2_KEY_ID=<key id> CELL_CLEANUP_B2_APPLICATION_KEY=<application key>`
+2. Run the dry run. Take the media bucket's ID from the `cloud_media_bucket_id` output of `infra/terraform/durability`; check `cloud_media_bucket_name` for the intended bucket.
+   `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id>`
+3. Write down the date that the dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
+4. Rerun the command with `--first-dry-run <date>` on every later run. Add `--apply` on or after the date in `grace_ends`.
+   Expect `delete=waiting` before that date, and no change.
+   `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id> --first-dry-run <date> --apply`
+5. Expect `delete=due`, `files_deleted` equal to `files_found` and `unfinished_cancelled` equal to `unfinished_found`.
+   The script deletes every file version under `cells/<cell_id>/`, hidden versions included. It cancels each unfinished
+   large file with the provider's cancel call, because the delete call does not replace it for an upload that never finished.
+6. Run the dry run again. The clean-up is complete when it shows `files_found=0` and `unfinished_found=0`.
+
+Every step is safe to repeat. An upload that the edge started for this cell before its revocation stays unfinished until
+you cancel it here or the bucket's lifecycle rule removes it. If a rerun after the grace still shows a file, stop and
+ask why: the edge should admit no upload for this cell.
 
 ## Staging objects of a deleted cell
 

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CELL_ID = "abcdefghijklmnop"
 PREFIX = f"cells/{CELL_ID}/"
 BUCKET_ID = "fixture-locked-bucket"
+MEDIA_BUCKET_ID = "fixture-media-bucket"
 ENV = {"CELL_CLEANUP_B2_KEY_ID": "fixture-id", "CELL_CLEANUP_B2_APPLICATION_KEY": "fixture-key"}
 FIRST_DRY_RUN = date(2026, 11, 1)
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
@@ -115,12 +116,49 @@ class FakeB2:
         return _Response({})
 
     def changes(self) -> list[tuple[str, dict[str, Any]]]:
-        changing = {"b2_delete_key", "b2_hide_file", "b2_delete_file_version"}
+        changing = {"b2_delete_key", "b2_hide_file", "b2_delete_file_version", "b2_cancel_large_file"}
         return [(endpoint, body) for endpoint, body in self.posts if endpoint in changing]
 
 
-def _run(argv: list[str], *, now: datetime = NOW, env: dict[str, str] = ENV) -> tuple[int, str, FakeB2]:
-    b2, out = FakeB2(), io.StringIO()
+class FakeMediaB2(FakeB2):
+    """The media bucket's versions as state, three to a page. A removal changes what the next listing shows,
+    so a final dry run proves absence. The provider's delete call leaves an unfinished large file in place,
+    as the ruling assumes; only the cancel call removes it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.versions = [
+            {"fileName": PREFIX + "image-1", "fileId": "image-1-hidden", "action": "hide"},
+            {"fileName": PREFIX + "image-1", "fileId": "image-1-live", "action": "upload"},
+            {"fileName": PREFIX + "image-2", "fileId": "image-2-live", "action": "upload"},
+            {"fileName": PREFIX + "video-1", "fileId": "video-1-unfinished", "action": "start"},
+            {"fileName": PREFIX + "video-2", "fileId": "video-2-live", "action": "upload"},
+        ]
+
+    def open(self, request: Any, /, *, timeout: float) -> _Response:
+        endpoint = request.full_url.rsplit("/", 1)[-1]
+        if endpoint == "b2_list_file_versions":
+            body = json.loads(request.data)
+            self.posts.append((endpoint, body))
+            assert body["bucketId"] == MEDIA_BUCKET_ID and body["prefix"] == PREFIX, body
+            ids = [entry["fileId"] for entry in self.versions]
+            start = ids.index(body["startFileId"]) if "startFileId" in body else 0
+            page, rest = self.versions[start:start + 3], self.versions[start + 3:]
+            return _Response({"files": page, "nextFileName": rest[0]["fileName"] if rest else None,
+                              "nextFileId": rest[0]["fileId"] if rest else None})
+        response = super().open(request, timeout=timeout)
+        body = json.loads(request.data) if request.data else {}
+        if endpoint == "b2_cancel_large_file":
+            self.versions = [entry for entry in self.versions if entry["fileId"] != body["fileId"]]
+        if endpoint == "b2_delete_file_version":
+            self.versions = [entry for entry in self.versions
+                             if entry["fileId"] != body["fileId"] or entry["action"] == "start"]
+        return response
+
+
+def _run(argv: list[str], *, now: datetime = NOW, env: dict[str, str] = ENV, b2: FakeB2 | None = None,
+         ) -> tuple[int, str, FakeB2]:
+    b2, out = b2 or FakeB2(), io.StringIO()
     status = cleanup.main(argv, env, opener=b2, now=now, out=out)
     return status, out.getvalue(), b2
 
@@ -178,6 +216,43 @@ def test_backups_stay_visible_through_the_grace_and_only_current_files_are_hidde
     assert "files_found=2 files_hidden=2 hide=due" in output
 
 
+MEDIA = [CELL_ID, "--account", "media", "--bucket-id", MEDIA_BUCKET_ID]
+
+
+def test_a_media_dry_run_counts_versions_and_unfinished_files_apart_and_changes_nothing() -> None:
+    """Defect: a count that folds unfinished uploads into versions, or leaves them out, lets the final dry run
+    report an empty prefix while uploaded parts still occupy and bill the bucket."""
+    status, output, b2 = _run(MEDIA, b2=FakeMediaB2())
+
+    assert (status, b2.changes()) == (0, [])
+    assert "files_found=4 files_deleted=0 unfinished_found=1 unfinished_cancelled=0 delete=waiting" in output
+    assert "first_dry_run=2026-11-01 grace_ends=2026-11-08" in output
+    assert "b2_list_keys" not in [endpoint for endpoint, _ in b2.posts]  # the media bucket has no per-cell key
+
+
+def test_media_versions_stay_through_the_grace_then_go_and_unfinished_uploads_are_cancelled() -> None:
+    """Defect: deleting at once removes the owner's chance to ask for the only copy; deleting an unfinished
+    upload instead of cancelling it leaves its parts in the bucket, which only a later dry run shows."""
+    argv = [*MEDIA, "--apply", "--first-dry-run", FIRST_DRY_RUN.isoformat()]
+    b2 = FakeMediaB2()
+    _, output, b2 = _run(argv, now=NOW + timedelta(days=5, hours=23), b2=b2)
+    assert (b2.changes(), "delete=waiting" in output) == ([], True)
+
+    status, output, b2 = _run(argv, now=NOW + timedelta(days=6, hours=12), b2=b2)
+    assert status == 0
+    assert b2.changes() == [
+        ("b2_cancel_large_file", {"fileId": "video-1-unfinished"}),
+        ("b2_delete_file_version", {"fileName": PREFIX + "image-1", "fileId": "image-1-hidden"}),
+        ("b2_delete_file_version", {"fileName": PREFIX + "image-1", "fileId": "image-1-live"}),
+        ("b2_delete_file_version", {"fileName": PREFIX + "image-2", "fileId": "image-2-live"}),
+        ("b2_delete_file_version", {"fileName": PREFIX + "video-2", "fileId": "video-2-live"}),
+    ]
+    assert "files_found=4 files_deleted=4 unfinished_found=1 unfinished_cancelled=1 delete=due" in output
+
+    _, output, _ = _run(MEDIA, now=NOW + timedelta(days=6, hours=13), b2=b2)
+    assert "files_found=0 files_deleted=0 unfinished_found=0" in output
+
+
 def test_bad_input_stops_before_any_provider_call() -> None:
     cell_data = [CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID]
     for argv, env in (
@@ -187,6 +262,8 @@ def test_bad_input_stops_before_any_provider_call() -> None:
         ([*cell_data, "--first-dry-run", "2026-11-02"], ENV),  # a date after today starts no grace
         ([*cell_data, "--first-dry-run", "1 November"], ENV),
         ([CELL_ID, "--account", "cell-data", "--first-dry-run", "2026-11-01"], ENV),
+        ([*MEDIA, "--apply"], ENV),  # the media grace starts from the operator's own date too
+        ([CELL_ID, "--account", "media"], ENV),  # the media bucket's ID is not guessed
         (FOUNDER, {}),
     ):
         status, output, b2 = _run(argv, env=env)

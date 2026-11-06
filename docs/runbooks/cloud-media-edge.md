@@ -148,6 +148,15 @@ Expected result: the upgrade succeeds, and no cell has `8769` in its egress. The
 volume `exomem-media-edge-state` stays after `mediaEdge.enabled=false`. Delete it by hand
 only after `/v1/pending` on the edge reported `0` before you turned it off.
 
+## Delete a cell that used the media store
+
+`cellctl` retires the cell's content keys first, then drops the cell from the active set. It reports the cell
+`deleted` only after the edge shows that exact set (`GET /v1/generation`), so the alert
+`cell-storage-cleanup-pending-<cell_id>` means the edge no longer admits the cell. A cell that stays `deleting`
+with the edge up means the edge has not loaded the new set: read the active set and the edge's evidence as in
+"Turn the edge off". Then delete the cell's objects with the media mode of the clean-up script. See
+"Media bucket of a deleted cell" in `cloud-key-custody.md`.
+
 ## Roll back the chart
 
 `helm rollback` skips the active-set check of "Turn the edge off". Check the target
