@@ -32,7 +32,12 @@ Packets P2, P3, P6 and P7 of the paired Substrate change `admit-cloud-imports-ag
 
 ## 4. Adopted count support (P7)
 
-- [ ] 4.1 Add `source_root` to compact rows and a scoped `adopted_files` aggregate using distinct original paths across successful outcomes. Verify: repeated runs, overlapping subtrees and incomplete run state produce the specified count or unknown result.
+- [x] 4.1 Add `source_root` to compact rows and a scoped `adopted_files` aggregate using distinct original paths across successful outcomes. Verify: repeated runs, overlapping subtrees and incomplete run state produce the specified count or unknown result.
+  - Delivered in [#2124](https://github.com/Artexis10/exomem/pull/2124), merge `8aa0a40e0`.
+    `AdoptionRunStore.listing` counts distinct successful original paths; `_compact_row` retains `source_root`.
+    `tests/test_adoption_run.py` covers repeated and intersecting runs, subtree selection, incomplete history, malformed paths and a complete zero before adoption.
+    `tests/test_adoption_studio_surface.py` checks the scoped count in the default MCP reply and the REST workflow.
+    The Home acceptance remains separate in 4.2.
 - [ ] 4.2 The Home side is task 5.1 of the Substrate change. Verify: Home shows the adopted count against a cell that runs this version.
 
 ## 5. Delivery
@@ -42,6 +47,9 @@ Packets P2, P3, P6 and P7 of the paired Substrate change `admit-cloud-imports-ag
     The report records claim conditions, four runtime pod identities, `key_ready`, `done`, and one staged file containing 1,376,256 bytes.
     Peak use remains unqualified: `volume_use.status` is `lower_bound`, with four samples and one failed sample; the report explicitly says samples can miss the peak.
     Keep this task open for that gap and the real Hetzner rehearsal, under the Cloud rollout programme.
-- [ ] 5.2 Deliver P2, P3 and P6 as one pull request, and P7 later. Verify: independent review with the C4 and C6 verdicts, the privacy gate and the required checks pass.
+- [x] 5.2 Deliver P2, P3 and P6 as one pull request, and P7 later. Verify: independent review with the C4 and C6 verdicts, the privacy gate and the required checks pass.
+  - P2, P3 and P6 shipped in [#2121](https://github.com/Artexis10/exomem/pull/2121), merge `dd74a41cd`; Exomem P7 followed in #2124.
+    Both merged heads have independent approval, C4/C6 verdicts, privacy evidence and successful required checks.
+    This closes the Exomem source batches; 4.2, 5.1 and 5.3 retain Home acceptance, real-volume qualification and rollout.
 - [ ] 5.3 Roll out in this order, outside the 02:00–05:00 UTC window: 1. Substrate migration 0079 and grants; 2. this controller and image; 3. Substrate admission and Home; 4. the CLI. Undo: leave the columns; return to the previous controller and set `import_limits` to NULL; roll the Substrate deployment back, because grown volumes stay grown; pin the earlier CLI.
 - [ ] 5.4 Archive `add-exomem-cloud-vault-import` first. Then synchronize this change into the canonical specs and archive it with `openspec archive`. Verify: `openspec validate --all --strict` passes before and after the archive.
