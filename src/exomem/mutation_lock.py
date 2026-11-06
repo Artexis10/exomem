@@ -2332,6 +2332,16 @@ class VaultMutationCoordinator:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
+    def held_by_another_thread(self) -> bool:
+        """Whether another thread of this process holds this boundary now, observed without waiting.
+
+        A scheduling hint, not a guard: it never waits on the boundary and leaves
+        no contention record, and the answer may change at once. A holder in
+        another process is not seen here.
+        """
+        owner = _state_for(self.lock_path).owner_thread
+        return owner is not None and owner != threading.get_ident()
+
     def defer_optional_after_release(self, key: object, work: Callable[[], None]) -> bool:
         """Run the latest keyed optional work after this thread's outer real release.
 
