@@ -21,11 +21,11 @@ When an artifact item's staged copy is missing in a recorded stage, `apply` SHAL
 - the Source page holds the text between its fences, byte for byte, as the plan's `original_sha256` and `original_bytes` describe;
 - the staged file still matches the manifest entry and the plan.
 
-A page of a paged collection SHALL remove only the text that it filed. When the call budget runs low, `finish` SHALL stop starting removals; the copies that remain are unchecked and count as unfiled. A repeat `finish` of a finished run that still owes a check SHALL check and remove those copies, and SHALL change nothing else of its record.
+A page of a paged collection SHALL remove only the text that it filed. When the call budget runs low, `finish` SHALL stop starting removals; the copies that remain are `unchecked`, not yet verified against their Source pages, and count as unfiled. A finished run takes no second `finish`.
 
-When a text item's staged copy is missing in a recorded stage, the run SHALL treat the item as consumed when its Source page verifies in the same way.
+When a text item's staged copy is missing in a recorded stage, the run SHALL treat the item as consumed when the run recorded the item as `applied` or `already-applied` and its Source page verifies in the same way. An item that still owes its note SHALL stay open and read as stale.
 
-`finish` SHALL report the residual still in the stage with counts and bytes. The residual SHALL separate the files that adoption did not file (`unfiled`, with its files and bytes) from the filed copies that remain. It SHALL carry a `summary` sentence that names the unfiled files and the reason for each group. It SHALL name the discard route. It SHALL offer a review only while unfiled files remain.
+`finish` SHALL report the residual still in the stage with counts and bytes. The residual SHALL separate the files that adoption did not file or `finish` did not verify (`unfiled`, with its files and bytes) from the filed copies that remain. It SHALL carry a `summary` sentence that names the files that need review and the reason for each group. It SHALL name the discard route. While any file remains, it SHALL offer the review and a discard that needs the person's agreement, and it SHALL NOT offer a discard as a plain next action, because `finish` does not verify every filed copy that remains.
 
 #### Scenario: Filing a recorded stage keeps about one copy of its artifacts
 
@@ -52,20 +52,25 @@ When a text item's staged copy is missing in a recorded stage, the run SHALL tre
 
 - **WHEN** a run files text items from a recorded stage and `finish` runs
 - **THEN** each filed text item's staged copy is gone, and `consumed` counts it
-- **AND** the residual reports no unfiled file and `finish` offers no review
+- **AND** the stage holds no file, the residual lists none, and `finish` offers no review
 
 #### Scenario: Finish keeps a text copy it cannot vouch for
 
 - **WHEN** the Source page of a filed text item no longer holds the planned text between its fences, or the item still owes its note, or the item failed
 - **THEN** its staged copy remains, and the residual reports it as unfiled
-- **AND** a text item whose Source page no longer holds its text is reported as `source_differs`, so `finish` offers the review and never the close-the-import action
-- **AND** a copy that `finish` did not reach is reported as `unchecked`, with the same effect
+- **AND** a text item whose Source page no longer holds its text is reported as `source_differs`
+- **AND** a text item whose Source page holds its text but whose staged copy changed after the plan is reported as `copy_changed`
 
-#### Scenario: A repeat finish checks the copies the first one did not reach
+#### Scenario: Finish reports the copies it did not reach as not yet verified
 
-- **WHEN** `finish` runs out of its call budget before it checks every filed text copy, and the run is then finished again
-- **THEN** the first `finish` reports the copies it did not reach as `unchecked` and offers no close-the-import action
-- **AND** the repeat `finish` removes the copies whose Source page holds the text, and reports no unchecked copy
+- **WHEN** `finish` runs out of its call budget before it checks every filed text copy
+- **THEN** the copies it did not reach stay staged and the residual reports them as `unchecked`, not yet verified against their Source pages
+- **AND** `finish` offers the review and a discard that needs the person's agreement, and no further `finish`
+
+#### Scenario: Every file left needs the person before a discard
+
+- **WHEN** every file left in the stage is one that the residual counts as filed, such as the staged copies of a run that started with `consume=false`
+- **THEN** `finish` offers the review, and the discard states that it needs the person's agreement
 
 #### Scenario: Opted-out runs keep their staged copies
 

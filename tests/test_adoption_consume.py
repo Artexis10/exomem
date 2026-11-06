@@ -216,7 +216,7 @@ def test_finish_removes_the_text_it_filed_and_offers_no_review_when_nothing_is_u
 
     residual = finished["finish"]["residual"]
     assert not _staged(vault, staged, "plan.md").exists()
-    assert finished["finish"]["consumed"] == 2
+    assert finished["consumed"] == finished["finish"]["consumed"] == 2
     assert (residual["files"], residual["unfiled"]) == (0, {"files": 0, "bytes": 0})
     assert "review-residual" not in {action["action"] for action in finished["next_actions"]}
 
@@ -238,9 +238,28 @@ def test_a_text_copy_stays_when_its_source_no_longer_holds_the_text(tmp_path: Pa
     residual = finished["finish"]["residual"]
     assert residual["by_reason"] == {"source_differs": {"files": 1, "bytes": len(kept)}}
     assert residual["unfiled"] == {"files": 1, "bytes": len(kept)}
-    assert residual["summary"] == "1 file was not filed: 1 with a Source page that no longer holds the text."
-    actions = {action["action"]: action["description"] for action in finished["next_actions"]}
-    assert "review-residual" in actions and "Nothing unfiled is left to lose" not in actions["discard"]
+    assert residual["summary"] == "1 file needs review: 1 with a Source page that no longer holds the text."
+    assert "review-residual" in {action["action"] for action in finished["next_actions"]}
+
+
+def test_a_text_copy_edited_after_it_was_planned_stays_and_is_reported_as_changed(tmp_path: Path) -> None:
+    """The Source holds the planned text, but the staged copy no longer is the file the manifest lists."""
+    vault = _vault(tmp_path)
+    kept, removed = b"# Plan\n\nInvented plan for the week.\n", b"# Menu\n\nInvented menu for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": kept, "menu.md": removed})
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+    edited = kept + b"A line the person added later.\n"
+    _staged(vault, staged, "plan.md").write_bytes(edited)
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert _staged(vault, staged, "plan.md").read_bytes() == edited
+    assert not _staged(vault, staged, "menu.md").exists() and finished["finish"]["consumed"] == 1
+    residual = finished["finish"]["residual"]
+    assert residual["by_reason"] == {"copy_changed": {"files": 1, "bytes": len(edited)}}
+    assert residual["unfiled"] == {"files": 1, "bytes": len(edited)}
+    assert residual["summary"] == "1 file needs review: 1 whose staged copy changed after it was planned."
+    assert "review-residual" in {action["action"] for action in finished["next_actions"]}
 
 
 def test_a_note_that_cites_a_crlf_text_source_leaves_its_text_exact_so_finish_removes_the_copy(tmp_path: Path) -> None:
@@ -284,6 +303,27 @@ def test_a_text_item_that_still_owes_its_note_keeps_its_staged_copy_through_a_pa
     assert residual["unfiled"] == {"files": 1, "bytes": len(owed)}
 
 
+def test_a_text_item_that_owes_its_note_does_not_read_as_filed_when_its_staged_copy_goes_missing(tmp_path: Path) -> None:
+    """Only an item whose run already recorded it as filed may be settled through its Source page."""
+    vault = _vault(tmp_path)
+    owed = b"# Plan\n\nInvented plan for the week.\n"
+    staged = _stage(tmp_path, vault, {"plan.md": owed})
+    run_id, plan_id, _reply = _adopt(vault, staged["start_path"])
+    store = adoption_run.AdoptionRunStore(vault)
+    run = store.load(run_id)
+    path = f"{staged['start_path']}/Field Notes/plan.md"
+    run["outcomes"][path]["status"] = "source-applied"
+    run["phase"] = "partial"
+    store.save(run)
+    _staged(vault, staged, "plan.md").unlink()
+
+    assert adoption_run.probe_staleness(vault, store.load(run_id)) == [path]
+    with pytest.raises(adoption_run.AdoptionRunError, match="ADOPTION_SOURCE_CHANGED"):
+        _apply(vault, run_id, plan_id)
+
+    assert store.load(run_id)["outcomes"][path]["status"] == "source-applied"
+
+
 def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_repeat(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
@@ -310,7 +350,7 @@ def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_rep
     assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["files"] == 0
 
 
-def test_finish_stops_starting_removals_when_its_budget_runs_low_and_a_repeat_finish_checks_the_rest(
+def test_finish_stops_starting_removals_when_its_budget_runs_low_and_reports_the_rest_as_not_yet_verified(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
@@ -324,26 +364,17 @@ def test_finish_stops_starting_removals_when_its_budget_runs_low_and_a_repeat_fi
             self.affordable -= 1
             return self.affordable >= 0
 
-    with monkeypatch.context() as short_budget:
-        short_budget.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
-        finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    monkeypatch.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
+
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
     left = [name for name in notes if _staged(vault, staged, name).exists()]
     residual = finished["finish"]["residual"]
     assert len(left) == 2 and finished["finish"]["consumed"] == 1
-    unchecked = {"files": 2, "bytes": sum(len(notes[name]) for name in left)}
-    assert residual["by_reason"] == {"unchecked": unchecked}
-    assert residual["unfiled"] == unchecked
-    assert "call finish again" in residual["summary"]
+    assert residual["by_reason"] == {"unchecked": {"files": 2, "bytes": sum(len(notes[name]) for name in left)}}
+    assert residual["summary"] == "2 files need review: 2 not yet verified against their Source page."
     actions = {action["action"]: action["description"] for action in finished["next_actions"]}
-    assert {"finish", "review-residual"} <= set(actions) and "Nothing unfiled is left to lose" not in actions["discard"]
-
-    repeated = adoption_run.finish(vault, run_id=run_id, today=TODAY)
-
-    assert not any(_staged(vault, staged, name).exists() for name in notes)
-    assert repeated["finish"]["consumed"] == 3
-    assert repeated["finish"]["residual"]["files"] == 0 and repeated["finish"]["residual"]["unfiled"]["files"] == 0
-    assert [action["action"] for action in repeated["next_actions"]] == ["work-item"]
+    assert set(actions) == {"work-item", "review-residual", "discard"} and "agrees" in actions["discard"]
 
 
 def test_a_run_started_with_consume_false_keeps_every_staged_copy(tmp_path: Path) -> None:
@@ -369,11 +400,14 @@ def test_nothing_is_removed_from_a_folder_under_imports_that_has_no_manifest(tmp
     (folder / "plan.md").write_bytes(note)
 
     run_id, _plan_id, reply = _adopt(vault, str(folder.parent.relative_to(vault)))
-    adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
     assert {o["status"] for o in reply["outcomes"].values()} == {"applied"} and reply["consumed"] == 0
     assert (folder / "paper.pdf").read_bytes() == PDF
     assert (folder / "plan.md").read_bytes() == note
+    # With no recorded stage finish has nothing to check, remove, review or discard.
+    assert finished["finish"]["residual"] is None
+    assert [action["action"] for action in finished["next_actions"]] == ["work-item"]
 
 
 def test_a_file_a_manifest_does_not_describe_is_never_removed(tmp_path: Path) -> None:
@@ -572,7 +606,7 @@ def test_finish_removes_the_folders_consuming_emptied_and_reports_what_still_sit
         "failed": {"files": 1, "bytes": len(changed)}, "ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
     assert residual["files"] == 3 and residual["removed_empty_folders"] >= 1
     assert residual["unfiled"] == {"files": 3, "bytes": len(PDF + b"left") + len(changed) + len(b"hidden bytes")}
-    assert residual["summary"].startswith("3 files were not filed: ")
+    assert residual["summary"].startswith("3 files need review: ")
     assert {action["action"] for action in finished["next_actions"]} >= {"review-residual", "discard"}
     assert staged["start_path"] in residual["discard"]
     assert not _staged(vault, staged, "plan.md").exists()
@@ -616,18 +650,5 @@ def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false
     assert _staged(vault, staged, "plan.md").read_bytes() == note
     assert residual["by_reason"] == {"kept": {"files": 1, "bytes": len(IMAGE)}, "text": {"files": 1, "bytes": len(note)}}
     assert residual["removed_empty_folders"] == 0 and finished["finish"]["consumed"] == 0
-
-
-def test_when_every_file_left_in_the_stage_is_filed_finish_closes_the_import_with_no_question_to_the_person(
-        tmp_path: Path) -> None:
-    vault = _vault(tmp_path)
-    staged = _stage(tmp_path, vault, {"paper.pdf": PDF})
-    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"], consume=False)
-
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
-
-    residual = finished["finish"]["residual"]
     actions = {action["action"]: action["description"] for action in finished["next_actions"]}
-    assert residual["unfiled"]["files"] == 0 and "already in the Knowledge Base" in residual["summary"]
-    assert "review-residual" not in actions
-    assert "delete the folder" in actions["discard"] and "agrees" not in actions["discard"]
+    assert "review-residual" in actions and "agrees" in actions["discard"]

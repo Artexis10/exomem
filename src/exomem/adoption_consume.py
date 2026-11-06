@@ -19,9 +19,9 @@ from . import adoption_plan, held_fs, import_stage
 FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
 #: Why a staged file no scan of the run covers stays.
 OUTSIDE_RUN = "outside_run"
-#: Each result key of `_page_classifier` (and `OUTSIDE_RUN`) as (whether the member is in the Knowledge Base although its
-#: staged copy stays, how the residual summary counts such files; `{n}` is their number). The residual record, `unfiled`
-#: and `summary` all read this table.
+#: Each result key of `_page_classifier` (and `OUTSIDE_RUN`) as (whether the report counts the member as in the Knowledge
+#: Base although its staged copy stays, which a file that `finish` could not verify is not; how the residual summary
+#: counts such files, with `{n}` as their number). The residual record, `unfiled` and `summary` all read this table.
 STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- the closed result keys that `_page_classifier` returns, a protocol of this report and not vocabulary.
     "failed": (False, "{n} failed"),
     "over_ceiling": (False, "{n} over the size limit"),
@@ -30,7 +30,8 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "ineligible": (False, "{n} of a kind that adoption does not import"),
     OUTSIDE_RUN: (False, "{n} not scanned (hidden, added after the scan, or on a later page)"),
     "source_differs": (False, "{n} with a Source page that no longer holds the text"),
-    "unchecked": (False, "{n} not yet checked against their Source page; call finish again to check them"),
+    "copy_changed": (False, "{n} whose staged copy changed after it was planned"),
+    "unchecked": (False, "{n} not yet verified against their Source page"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
 })
@@ -58,7 +59,7 @@ def _summary(by_reason: dict[str, dict[str, int]], unfiled: dict[str, int]) -> s
     if not unfiled["files"]:
         return f"Every file left in the stage is already in the Knowledge Base ({groups(True)})."
     count = unfiled["files"]
-    return f"{count} file{' was' if count == 1 else 's were'} not filed: {groups(False)}."
+    return f"{count} file{' needs' if count == 1 else 's need'} review: {groups(False)}."
 
 
 def recorded(root: Path, run: dict) -> import_stage.Stage | None:
@@ -169,10 +170,10 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
-                if outcome.get("source_differs"):
-                    return "source_differs"
+                if outcome.get("stays"):
+                    return outcome["stays"]  # `finish` recorded why it kept this copy: a result key of `STAYS`
                 if item["form"] == "text" and removes_copies and not outcome.get("consumed"):
-                    return "unchecked"  # `finish` has not yet checked this copy against its Source page, nor removed it
+                    return "unchecked"  # `finish` did not reach this copy, so no one has compared it with its Source page
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:
@@ -217,18 +218,19 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
     the earlier pages of a paged scan, nearest first; each file is classified by the page that scanned it, so
     the last page's report covers the whole stage. The reasons are a closed set of result keys that this
-    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `unchecked`,
+    report defines, not vocabulary (see `STAYS`): `failed`, `text`, `kept`, `source_differs`, `copy_changed`, `unchecked`,
     `pending`, `unselected`, `ineligible`, `over_ceiling` (above the adoption ceiling, which `ceiling_bytes`
     then reports) and `outside_run` (hidden or added after the scan, or on a later page not yet scanned). `text`
     and `kept` are in the Knowledge Base and only their staged copy stays. Every other reason is a file that
-    adoption did not file. `source_differs` is a filed text whose Source page no longer holds its text, so that
-    the staged copy is the only exact one. `unchecked` is a filed text that `finish` has not yet checked against
-    its Source page (its call budget ran out, for example); a repeat `finish` checks it. A run that opted out of
-    consuming never checks, so its filed text stays `text`. `unfiled` counts those, and `summary` says in one
-    sentence what needs the person. The Cloud route discards a stage with `transfer_memory`; a local import has no Exomem command,
-    so its stage goes by hand. Both name the whole stage folder, which holds the residual and nothing else. A
-    page that later pages follow names no discard route, because the folder still holds their files:
-    `more_pages` says so.
+    adoption did not file, or that `finish` has not verified. `source_differs` is a filed text whose Source page no
+    longer holds its text, so that the staged copy is the only exact one. `copy_changed` is a filed text whose
+    Source page holds its text but whose staged copy is no longer the file that the manifest lists. `unchecked` is a
+    filed text that `finish` did not reach before its call budget ran out, so no one has compared it with its
+    Source page. A run that opted out of consuming never checks, so its filed text stays `text`. `unfiled` counts
+    the files of those reasons, and `summary` says in one sentence what needs review. The Cloud route discards a
+    stage with `transfer_memory`; a local import has no Exomem command, so its stage goes by hand. Both name the
+    whole stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
+    route, because the folder still holds their files: `more_pages` says so.
     """
     recorded_stage = run.get("stage")
     if not isinstance(recorded_stage, dict):

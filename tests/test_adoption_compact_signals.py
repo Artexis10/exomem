@@ -117,7 +117,7 @@ def test_a_compact_finish_reply_reports_what_stays_staged_and_how_it_is_discarde
     residual = reply["finish"]["residual"]
     assert (residual["files"], residual["bytes"]) == (1, len(b"hidden bytes"))
     assert residual["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
-    assert residual["unfiled"] == {"files": 1, "bytes": len(b"hidden bytes")} and "not filed" in residual["summary"]
+    assert residual["unfiled"] == {"files": 1, "bytes": len(b"hidden bytes")} and "needs review" in residual["summary"]
     assert stage.removeprefix("_Imports/") in residual["discard"]
     assert {"review-residual", "discard"} <= {action["action"] for action in reply["next_actions"]}
 
