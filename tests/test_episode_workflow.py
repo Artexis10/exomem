@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
+from test_managed_collections_migration import coordinator_url as coordinator_url
 
 from exomem import commands, curation, episode_store, episode_workflow, server
 from exomem import episode_model as model
@@ -1156,7 +1158,7 @@ def test_a_stale_unattempted_binding_is_resealed_by_the_same_proposal(
     assert [item["leaf_id"] for item in again["executed"]] == [first["leaf_id"]]
 
 
-def test_a_leaf_already_applied_elsewhere_is_reported_replayed(vault: Path, owner, enabled) -> None:
+def test_a_leaf_applied_through_ordinary_curation_reconciles_its_invocation(vault: Path, owner, enabled) -> None:
     _record(vault)
     routed = _routed(vault, "alpha", "alpha-dye-note")
     leaf = _candidate(routed["prepared"], "alpha")["leaves"][0]
@@ -1176,12 +1178,12 @@ def test_a_leaf_already_applied_elsewhere_is_reported_replayed(vault: Path, owne
         vault,
         action="resume",
         input_revision=1,
-        journal_digest=routed["disposed"]["journal_digest"],
+        journal_digest=_reviewed(vault),
     )
 
     assert resumed["status"] == "ok"
     assert resumed["executed"] == []
-    assert [item["leaf_id"] for item in resumed["replayed"]] == [leaf["leaf_id"]]
+    assert [item["leaf_id"] for item in resumed["reconciled"]] == [leaf["leaf_id"]]
     assert resumed["publication"] == "unchanged"
     assert _candidate(resumed, "alpha")["leaves"][0]["outcome"] == "committed"
 
@@ -1342,7 +1344,7 @@ def test_a_reseal_onto_changed_content_withdraws_the_disposition(
     assert page.read_bytes() == edited
 
 
-def test_a_leaf_committed_elsewhere_then_edited_is_reported_diverged(
+def test_a_leaf_committed_elsewhere_then_edited_reports_changed_coverage(
     vault: Path, owner, enabled
 ) -> None:
     _record(vault)
@@ -1361,23 +1363,26 @@ def test_a_leaf_committed_elsewhere_then_edited_is_reported_diverged(
     note.write_text(
         note.read_text(encoding="utf-8") + "\nEdited after it was written.\n", encoding="utf-8"
     )
+    edited = note.read_bytes()
 
     resumed = _workflow(
         vault,
         action="resume",
         input_revision=1,
-        journal_digest=routed["disposed"]["journal_digest"],
+        journal_digest=_reviewed(vault),
     )
 
-    assert resumed["status"] == "diverged"
-    assert resumed["diverged"] == [
-        {"leaf_id": leaf["leaf_id"], "code": "EPISODE_OUTCOME_UNCERTAIN"}
-    ]
+    # The later edit does not undo the proven commitment, and nothing runs again.
+    assert resumed["status"] == "ok"
+    assert resumed["reconciled"] == [{"leaf_id": leaf["leaf_id"], "outcome": "committed"}]
     assert resumed["executed"] == resumed["replayed"] == resumed["blocked"] == []
     current = _candidate(resumed, "alpha")["leaves"][0]
-    assert (current["outcome"], current["attempts"]) == ("pending", 0)
+    assert (current["outcome"], current["attempts"]) == ("committed", 1)
+    # Current coverage reports the edit, so the owner can settle the candidate again.
+    covered = _workflow(vault, action="coverage")
+    assert [item["readback"] for item in covered["receipts"]] == ["changed"]
+    assert covered["coverage_current"] == "changed"
 
-    # No attempt froze the candidate: the owner settles it and the episode goes on.
     disposed = _workflow(
         vault,
         action="disposition",
@@ -1389,6 +1394,7 @@ def test_a_leaf_committed_elsewhere_then_edited_is_reported_diverged(
         vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"]
     )
     assert again["status"] == "ok"
+    assert note.read_bytes() == edited
 
 
 def test_prepare_without_journal_bytes_seals_no_plan(
@@ -1409,3 +1415,653 @@ def test_prepare_without_journal_bytes_seals_no_plan(
 
     assert _journal(vault) == before
     assert _runs(vault) == runs
+
+
+def test_native_source_commit_recovers_after_lost_ack_and_input_deletion(vault, owner, enabled, monkeypatch):
+    """A committed transfer must recover its same operation after input custody disappears."""
+    original = commands.op_preserve_evidence(
+        vault, scope="incoming", category="samples", filename="account.bin",
+        content="The exact preserved account.", description="A retained original.",
+    )
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="transfer", proposal=_proposal(
+        "source", [{"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "title": "Transferred account", "source_type": "session",
+        }}], title="Transferred account",
+    ))
+    leaf = _candidate(prepared, "transfer")["leaves"][0]
+    sealed = curation.CurationStore(vault).load_plan(leaf["run_id"])
+    native = sealed["binding_manifest"][0]["prepared"]
+    assert not (vault / native["destination"]).exists()
+    disposed = _workflow(vault, action="disposition", candidate="transfer", disposition="routed", reason="Keep the original in the source family.")
+    real_barrier = curation._fault_barrier
+
+    def lose_ack(phase):
+        if phase == "after-leaf-witness":
+            raise curation.CurationFault("lost acknowledgement")
+        real_barrier(phase)
+
+    monkeypatch.setattr(curation, "_fault_barrier", lose_ack)
+    with pytest.raises(curation.CurationFault):
+        _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert (vault / native["allocation"]["artifact"]).read_bytes() == b"The exact preserved account."
+    uncertain = _candidate(_workflow(vault, action="candidates"), "transfer")["leaves"][0]
+    assert uncertain["outcome"] == "uncertain" and uncertain["attempts"] == 1
+    (vault / original["path"]).unlink()
+    (vault / original["sidecar_path"]).unlink()
+    monkeypatch.setattr(curation, "_fault_barrier", real_barrier)
+    identity, _fingerprint = curation.CurationStore(vault).identities(leaf["run_id"])
+    recovered = curation.resume(vault, run_id=leaf["run_id"], plan_id=identity)
+    assert recovered["step"]["outcome"] == "recovered-committed"
+    current = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+    assert _candidate(current, "transfer")["leaves"][0]["operation_id"] == leaf["operation_id"]
+    assert _candidate(current, "transfer")["leaves"][0]["outcome"] == "committed"
+    assert current["executed"] == []
+
+
+def test_native_source_commit_recovers_after_lost_ack_and_output_deletion(vault, owner, enabled, monkeypatch):
+    """A witnessed commit must keep its history after its preserved original disappears."""
+    original = commands.op_preserve_evidence(
+        vault, scope="incoming", category="samples", filename="account.bin",
+        content="The exact preserved account.", description="A retained original.",
+    )
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="transfer", proposal=_proposal(
+        "source", [{"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "title": "Transferred account", "source_type": "session",
+        }}], title="Transferred account",
+    ))
+    leaf = _candidate(prepared, "transfer")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="transfer", disposition="routed", reason="Keep the original in the source family.")
+    real_barrier = curation._fault_barrier
+
+    def lose_ack(phase):
+        if phase == "after-leaf-witness":
+            raise curation.CurationFault("lost acknowledgement")
+        real_barrier(phase)
+
+    monkeypatch.setattr(curation, "_fault_barrier", lose_ack)
+    with pytest.raises(curation.CurationFault):
+        _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    monkeypatch.setattr(curation, "_fault_barrier", real_barrier)
+    (vault / native["allocation"]["artifact"]).unlink()
+
+    identity, _fingerprint = curation.CurationStore(vault).identities(leaf["run_id"])
+    recovered = curation.resume(vault, run_id=leaf["run_id"], plan_id=identity)
+    assert recovered["step"]["outcome"] == "recovered-committed"
+    current = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+    assert current["reconciled"] == [{"leaf_id": leaf["leaf_id"], "outcome": "committed"}]
+    assert current["executed"] == []
+    assert not (vault / native["allocation"]["artifact"]).exists()
+    covered = _workflow(vault, action="coverage")
+    assert [item["readback"] for item in covered["receipts"]] == ["unavailable"]
+
+
+def test_a_withheld_preserved_original_reads_back_exactly_like_a_deleted_one(vault, enabled):
+    """Coverage must not tell a caller that an original withheld from it still exists."""
+    from exomem.governance import egress, membership, policy
+
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    originals = {}
+    with request_scope(client):
+        _record(vault)
+        for key in ("hidden", "gone"):
+            preserved = commands.op_preserve_evidence(
+                vault, scope="incoming", category="samples", filename=f"{key}-account.bin",
+                content=f"The {key} account.", description="A retained original.",
+            )
+            prepared = _workflow(vault, action="prepare", candidate=key, proposal=_proposal(
+                "source", [{"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+                    "original": {"representation": "original", "reference": preserved["ref"],
+                                 "version": preserved["hash"], "size": preserved["size"]},
+                    "title": f"The {key} account", "source_type": "session",
+                }}], title=f"The {key} account",
+            ))
+            leaf = _candidate(prepared, key)["leaves"][0]
+            plan = curation.CurationStore(vault).load_plan(leaf["run_id"])
+            originals[key] = plan["binding_manifest"][0]["prepared"]["allocation"]["artifact"]
+            _workflow(vault, action="disposition", candidate=key, disposition="routed", reason="Keep the original.")
+        executed = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+        assert [item["outcome"] for item in executed["executed"]] == ["committed", "committed"]
+
+    (vault / originals["gone"]).unlink()
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "withheld-original.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAE\nname: Withheld original\n"
+        f'paths: ["{originals["hidden"]}"]\n', encoding="utf-8")
+    (governance / "rules" / "withheld-original.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAF\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAE"]\naudience: client-a\nceiling: 0\n', encoding="utf-8")
+    egress.clear_decision_memo()
+    membership.clear_memo()
+    policy._CACHE.clear()  # noqa: SLF001
+
+    with request_scope(client):
+        covered = _workflow(vault, action="coverage")
+
+    by_key = {item["candidate_key"]: item for item in covered["receipts"]}
+    shape = {key: {k: v for k, v in item.items() if k in {"path", "readback"}} for key, item in by_key.items()}
+    assert shape["hidden"] == shape["gone"] == {"path": None, "readback": "unavailable"}
+    assert Path(originals["hidden"]).name not in json.dumps(covered)
+
+
+@pytest.mark.parametrize("route", ["source", "evidence"])
+def test_known_native_preservation_does_not_seal_an_inert_leaf(vault, owner, route):
+    from exomem import add
+
+    original = commands.op_preserve_evidence(
+        vault, scope="study", category="accounts", filename="known.bin", content="Already retained bytes."
+    )
+    selector = {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]}
+    if route == "source":
+        add.add(vault, schema_module.load_source_schema(vault), content="", title="Known account", source_type="session",
+                artifact=add.SourceArtifact(vault / original["path"], "known.bin", "application/octet-stream"))
+        kind, args, code = "capture-source", {"title": "Known account", "source_type": "session"}, "SOURCE_ALREADY_PRESERVED"
+    else:
+        kind, args, code = "preserve-evidence", {"scope": "study", "category": "accounts", "filename": "another.bin"}, "EPISODE_PRIOR_PRESERVATION"
+    _record(vault)
+    journal, runs = _journal(vault), _runs(vault)
+    before = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*") if path.is_file()}
+
+    with pytest.raises(ValueError, match=code):
+        _workflow(vault, action="prepare", candidate="known", proposal=_proposal(route, [
+            {"leaf_key": "retain", "effect_revision": 1, "kind": kind, "args": {"original": selector, **args}}
+        ], title="Known account"))
+
+    assert _journal(vault) == journal and _runs(vault) == runs
+    assert {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*") if path.is_file()} == before
+
+
+def test_late_native_duplicate_proves_no_effect_and_retries_the_same_operation(vault, owner, enabled, monkeypatch):
+    """A collision after admission must not strand a verified zero-publication attempt."""
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename="retry.bin", content="Retained retry bytes.")
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="retry", proposal=_proposal("source", [
+        {"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "title": "Retry account", "source_type": "session",
+        }}], title="Retry account"))
+    leaf = _candidate(prepared, "retry")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    destination = vault / native["destination"]
+    disposed = _workflow(vault, action="disposition", candidate="retry", disposition="routed", reason="Retain this account.")
+    dispatch = curation._dispatch_step
+
+    def concurrent_capture(*args, **kwargs):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("A different capture arrived after admission.")
+        return dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", concurrent_capture)
+    refused = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert _candidate(refused, "retry")["leaves"][0]["outcome"] == "proven_uncommitted"
+    terminal = curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"][0]
+    assert terminal["outcome"] == "definite-no-effect"
+    assert not (vault / native["allocation"]["artifact"]).exists()
+    destination.unlink()
+    monkeypatch.setattr(curation, "_dispatch_step", dispatch)
+    retried = _workflow(vault, action="resume", input_revision=1, journal_digest=refused["journal_digest"])
+    final = _candidate(retried, "retry")["leaves"][0]
+    assert final["outcome"] == "committed" and final["attempts"] == 2
+    assert final["operation_id"] == leaf["operation_id"]
+    assert (vault / native["allocation"]["artifact"]).read_bytes() == b"Retained retry bytes."
+
+
+class ProcessDeath(BaseException):
+    """A killed process: the vault rolls nothing back and curation records nothing for it."""
+
+
+def _resume_through_the_dispatcher(vault: Path, journal_digest: str) -> dict:
+    """`resume` as every door runs it, under the vault mutation boundary that the dispatcher holds."""
+    from exomem import writer_lease
+
+    command = next(item for item in commands.product_commands_for("mcp") if item.name == "episode_memory")
+    return writer_lease.invoke_command(
+        command, vault, schema_module.load_source_schema(vault), episode=KEY,
+        action="resume", input_revision=1, journal_digest=journal_digest,
+    )
+
+
+def _routed_preservation(vault: Path, kind: str, filename: str) -> tuple[dict, dict, dict, dict]:
+    """A routed, unattempted `kind` leaf over one preserved original: the original, leaf, sealed native binding and disposition."""
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename=filename, content=f"Bytes of {filename}.")
+    _record(vault)
+    reference = {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]}
+    if kind == "capture-source":
+        route, args = "source", {"original": reference, "title": "Stopped account", "source_type": "session"}
+    else:
+        route, args = "evidence", {"original": reference, "scope": "study", "category": "accounts", "filename": filename}
+    prepared = _workflow(vault, action="prepare", candidate="stopped", proposal=_proposal(
+        route, [{"leaf_key": "preserve", "effect_revision": 1, "kind": kind, "args": args}], title="Stopped account"))
+    leaf = _candidate(prepared, "stopped")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="stopped", disposition="routed", reason="Retain the account.")
+    return original, leaf, native, disposed
+
+
+def _coordinate_writes(monkeypatch: pytest.MonkeyPatch, url: str, topology: str) -> None:
+    """Take the vault's writer lease from the coordinator at `url`, in a `topology` deployment."""
+    for name, value in {
+        "EXOMEM_WRITER_LEASE_URL": url, "EXOMEM_WRITER_LEASE_TOPOLOGY": topology,
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "episode", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
+        "EXOMEM_WRITER_LEASE_TOKEN": "lease",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+
+def _publication_record(vault: Path, leaf: dict, attempt: int) -> Path:
+    """Where curation keeps the publication record of one episode attempt of `leaf`."""
+    invocation = model.invocation_id(model.episode_id(KEY), {**leaf, "binding": {"operation_id": leaf["operation_id"]}}, attempt)
+    return curation.CurationStore(vault).publication_record_path(leaf["run_id"], invocation)
+
+
+@pytest.mark.parametrize("kind", ["capture-source", "preserve-evidence"])
+def test_moved_core_after_partial_native_publication_stays_uncertain(vault, owner, enabled, monkeypatch, kind):
+    """An original that began publishing must never publish again after someone moves its installed core file."""
+    from exomem import vault as vault_writes
+
+    original, leaf, native, disposed = _routed_preservation(vault, kind, "moved.bin")
+    core = {vault / item["path"] for item in native["core"]}
+    # A capture dies once its page, indexes and log are in; a preservation right after its first core path.
+    stop_after = {vault / "Knowledge Base/log.md"} if kind == "capture-source" else core
+    installed, published = vault_writes._after_batch_destination_published, []
+
+    def die_after_publishing(path):
+        installed(path)
+        published.append(path)
+        if path in stop_after:
+            raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_after_batch_destination_published", die_after_publishing)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    moved = next(path for path in published if path in core)
+    elsewhere = vault / "Knowledge Base/Elsewhere" / moved.name
+    elsewhere.parent.mkdir()
+    os.rename(moved, elsewhere)
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "started"
+    files = [path for path in vault.rglob("*") if path.is_file() and path != vault / original["path"]]
+    if kind == "capture-source":
+        [identity] = native["memory_ids"]
+        carriers = [path for path in files if path.suffix == ".md" and f"exomem_id: {identity}" in path.read_text(encoding="utf-8")]
+    else:
+        carriers = [path for path in files if path.read_bytes() == b"Bytes of moved.bin."]
+    assert carriers == [elsewhere]
+
+
+@pytest.mark.parametrize("lease", ["uncoordinated", "single-host"])
+def test_native_attempt_stopped_before_first_install_retries_once(vault, owner, enabled, monkeypatch, request, lease):
+    """A preservation killed before it began publishing must retry once at its sealed allocation, not stay stuck.
+
+    A single-host coordinator keeps writer authority on this host, so it proves as much as no coordinator.
+    """
+    from exomem import vault as vault_writes
+
+    if lease == "single-host":
+        _coordinate_writes(monkeypatch, request.getfixturevalue("coordinator_url"), lease)
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "stopped.bin")
+    log_before = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "intent"
+    retried = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    final = _candidate(retried, "stopped")["leaves"][0]
+    assert (final["outcome"], final["attempts"], final["operation_id"]) == ("committed", 2, leaf["operation_id"])
+    proof, commit = curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"]
+    assert (proof["native_reason"], proof["episode_attempt"]) == (curation.RECOVERY_PUBLICATION_NOT_STARTED, 1)
+    assert proof["native_evidence"] == {"destination": native["destination"], "publication_started": False}
+    assert commit["outcome"] == "committed"
+    assert json.loads(_publication_record(vault, leaf, 2).read_bytes())["state"] == "started"
+    artifact, companion = vault / native["allocation"]["artifact"], vault / native["destination"]
+    assert artifact.read_bytes() == b"Bytes of stopped.bin."
+    assert sorted(path.name for path in artifact.parent.iterdir()) == sorted({artifact.name, companion.name})
+    log_after = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    entry = f"preserve | {companion.relative_to(vault / 'Knowledge Base').with_suffix('').as_posix()}\n"
+    assert log_after.count(entry) - log_before.count(entry) == 1
+
+
+def test_failed_rollback_then_kill_keeps_native_attempt_uncertain(vault, owner, enabled, monkeypatch):
+    """A batch whose rollback left a core path behind must stay uncertain when its failed receipt is lost too."""
+    from exomem import vault as vault_writes
+
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "rollback.bin")
+    core = {vault / item["path"] for item in native["core"]}
+    log = vault / "Knowledge Base/log.md"
+    publish, unlink = vault_writes._before_batch_destination_published, vault_writes._BatchWorkspace.unlink_installed
+    refusals = []
+
+    def fail_at_the_log(path, *, restoring):
+        if path == log and not restoring:
+            raise OSError("the log could not be installed")
+        publish(path, restoring=restoring)
+
+    def keep_core_paths(workspace, path, *args, **kwargs):
+        if path in core:
+            raise OSError("the core path could not be removed")
+        return unlink(workspace, path, *args, **kwargs)
+
+    def die_before_the_failed_receipt(*_args, code, **_kwargs):
+        refusals.append(code)
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes, "_before_batch_destination_published", fail_at_the_log)
+        crash.setattr(vault_writes._BatchWorkspace, "unlink_installed", keep_core_paths)
+        crash.setattr(curation, "_record_failed_attempt", die_before_the_failed_receipt)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    assert refusals == ["BATCH_ROLLBACK_INCOMPLETE"]
+    assert all(path.exists() for path in core)
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "started"
+
+
+def test_native_attempt_under_a_multi_host_lease_stays_uncertain(vault, owner, enabled, monkeypatch, coordinator_url):
+    """An unstarted record proves nothing when another host can take writer authority before `started` reaches it."""
+    from exomem import vault as vault_writes
+
+    _coordinate_writes(monkeypatch, coordinator_url, "multi-host")
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "elsewhere.bin")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert json.loads(_publication_record(vault, leaf, 1).read_bytes())["state"] == "intent"
+    assert not (vault / native["destination"]).exists()
+
+
+def test_missing_publication_record_keeps_native_attempt_uncertain(vault, owner, enabled, monkeypatch):
+    """An attempt without its publication record, as one from an earlier release, must never be proved unpublished."""
+    from exomem import vault as vault_writes
+
+    _original, leaf, native, disposed = _routed_preservation(vault, "preserve-evidence", "unrecorded.bin")
+
+    def die_while_staging(*_args, **_kwargs):
+        raise ProcessDeath
+
+    with monkeypatch.context() as crash:
+        crash.setattr(vault_writes._BatchWorkspace, "create_stream_artifact", die_while_staging)
+        with pytest.raises(ProcessDeath):
+            _resume_through_the_dispatcher(vault, disposed["journal_digest"])
+    _publication_record(vault, leaf, 1).unlink()
+    resumed = _resume_through_the_dispatcher(vault, _reviewed(vault))
+
+    assert [item["leaf_id"] for item in resumed["blocked"]] == [leaf["leaf_id"]], resumed
+    current = _candidate(_workflow(vault, action="candidates"), "stopped")["leaves"][0]
+    assert (current["outcome"], current["attempts"]) == ("uncertain", 1)
+    assert curation.CurationStore(vault).reconstruct(leaf["run_id"])["receipts"] == []
+    assert not (vault / native["destination"]).exists()
+
+
+def test_ordinary_curation_joins_native_evidence_before_any_episode_attempt(vault, owner, disabled, monkeypatch):
+    """The ordinary curation door must track a native invocation without requiring episode enablement."""
+    original = commands.op_preserve_evidence(vault, scope="incoming", category="samples", filename="transfer.bin", content="Retained transfer bytes.")
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="evidence", proposal=_proposal("evidence", [
+        {"leaf_key": "preserve", "effect_revision": 1, "kind": "preserve-evidence", "args": {
+            "original": {"representation": "original", "reference": original["ref"], "version": original["hash"], "size": original["size"]},
+            "scope": "study", "category": "accounts", "filename": "transferred.bin",
+        }}], title="Preserved account"))
+    leaf = _candidate(prepared, "evidence")["leaves"][0]
+    dispatch = curation._dispatch_step
+
+    def tracked(*args, **kwargs):
+        current = _candidate(_workflow(vault, action="candidates"), "evidence")["leaves"][0]
+        assert current["outcome"] == "uncertain" and current["attempts"] == 1
+        return dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", tracked)
+    identity, fingerprint = curation.CurationStore(vault).identities(leaf["run_id"])
+    result = curation.apply(vault, run_id=leaf["run_id"], plan_id=identity, expected_plan_fingerprint=fingerprint, why="Preserve through the ordinary door.")
+    assert result["step"]["outcome"] == "committed"
+    assert (vault / "Knowledge Base/Evidence/study/accounts/transferred.bin").read_bytes() == b"Retained transfer bytes."
+
+
+def test_native_planning_add_update_and_triage_keep_exact_owner_history(vault, owner, enabled):
+    """Episode Planning effects must use native defaults, guarded corrections and triage history."""
+    from test_planning_mutation import _manifest
+
+    from exomem import plan_memory
+
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    plan_memory.plan_memory(vault, "create", manifest_path=collection, manifest_text=_manifest(), why="Retain intended work.")
+    _record(vault)
+    snapshot = plan_memory.plan_memory(vault, "query", collection=collection)
+    plan_id = "991acdd4-16b9-4396-8220-2cb37b7e8516"
+    prepared = _workflow(vault, action="prepare", candidate="plan-add", proposal=_proposal("planning", [
+        {"leaf_key": "add", "effect_revision": 1, "kind": "add-plan", "args": {
+            "collection": collection, "plan_id": plan_id, "item": {"title": "Review the account"},
+            "expected_container_hash": snapshot["snapshot"], "why": "Capture this intended work.",
+        }}], title="Review the account"))
+    disposed = _workflow(vault, action="disposition", candidate="plan-add", disposition="routed", reason="Capture the intended work.")
+    result = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert _candidate(result, "plan-add")["leaves"][0]["outcome"] == "committed", result
+    for action, payload in (("update", {"changes": {"title": "Review the corrected account"}}), ("triage", {"transition": {"priority": "high"}})):
+        snapshot = plan_memory.plan_memory(vault, "query", collection=collection)
+        row = snapshot["rows"][0]
+        candidate = "plan-" + action
+        _workflow(vault, action="prepare", candidate=candidate, proposal=_proposal("planning", [
+            {"leaf_key": action, "effect_revision": 1, "kind": action + "-plan", "args": {
+                "collection": collection, "plan_id": plan_id, **payload,
+                "expected_container_hash": snapshot["snapshot"], "expected_item_version": row["item_version"], "why": "Correct the intended work.",
+            }}], title="Correct the intended work"))
+        disposed = _workflow(vault, action="disposition", candidate=candidate, disposition="routed", reason="Keep this explicit correction.")
+        result = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+        assert _candidate(result, candidate)["leaves"][0]["outcome"] == "committed", result
+    history = plan_memory.plan_memory(vault, "history", collection=collection, plan_id=plan_id)
+    assert history["status"] == "complete"
+    assert {revision["operation"] for revision in history["revisions"]} == {"update", "triage"}
+    assert history["revisions"][-1]["prior"]["values"]["title"] == "Review the account"
+    assert _candidate(prepared, "plan-add")["leaves"][0]["operation_id"] == _candidate(result, "plan-add")["leaves"][0]["operation_id"]
+
+
+def test_native_store_planning_recovers_canonical_commit_without_item_files(vault, tmp_path, owner, enabled, monkeypatch):
+    """A lost store acknowledgement must recover from the canonical transaction before any file view exists."""
+    from test_planning_mutation import _manifest
+
+    from exomem import plan_memory
+    from exomem.collection_store import connection
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance.principal import library_scope
+
+    class PowerLoss(BaseException):
+        pass
+
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    with connection.open_writer(tmp_path / "native.sqlite", lease_check=lambda: True) as handle, library_scope(), preview_store(vault, handle) as writer:
+        plan_memory.plan_memory(vault, "create", manifest_path=collection, manifest_text=_manifest(), why="Retain intended work.")
+        _record(vault)
+        snapshot = plan_memory.plan_memory(vault, "query", collection=collection)
+        prepared = _workflow(vault, action="prepare", candidate="store-plan", proposal=_proposal("planning", [
+            {"leaf_key": "add", "effect_revision": 1, "kind": "add-plan", "args": {
+                "collection": collection, "plan_id": "991acdd4-16b9-4396-8220-2cb37b7e8516",
+                "item": {"title": "Review the stored account"}, "expected_container_hash": snapshot["snapshot"], "why": "Capture intended work.",
+            }}], title="Review the stored account"))
+        leaf = _candidate(prepared, "store-plan")["leaves"][0]
+        disposed = _workflow(vault, action="disposition", candidate="store-plan", disposition="routed", reason="Retain this intended work.")
+        publish = curation._publish_store_witness
+
+        def lose_after_sql(store, run, **kwargs):
+            request = curation.store_request_id(run, kwargs["operation_identity"])
+            with kwargs["writer"].read_snapshot():
+                found = kwargs["writer"].request_receipt(request)
+            if found is not None:
+                raise PowerLoss
+            return publish(store, run, **kwargs)
+
+        monkeypatch.setattr(curation, "_publish_store_witness", lose_after_sql)
+        with pytest.raises(PowerLoss):
+            _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+        assert writer.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+        item_paths = list((vault / "Knowledge Base/Planning/Work/Items").glob("*.md"))
+        assert item_paths == []
+        monkeypatch.setattr(curation, "_publish_store_witness", publish)
+        identity, _fingerprint = curation.CurationStore(vault).identities(leaf["run_id"])
+        recovered = curation.resume(vault, run_id=leaf["run_id"], plan_id=identity)
+        assert recovered["step"]["outcome"] == "recovered-committed"
+        result = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+        assert _candidate(result, "store-plan")["leaves"][0]["outcome"] == "committed"
+        assert writer.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+        covered = _workflow(vault, action="coverage")
+        assert covered["coverage_current"] == "verified", covered
+        assert covered["receipts"][0]["path"].startswith("exomem://plan/")
+
+
+def test_material_support_changes_do_not_mint_an_attempted_effect(vault, owner, enabled):
+    """Changing a support label must not disguise an already-attempted mutation as new work."""
+    original = commands.op_preserve_evidence(vault, scope="study", category="accounts", filename="support.bin", content="Retained support.")
+    _record(vault)
+    bound = _workflow(vault, action="input", input_revision=1, journal_digest=_reviewed(vault), materials={"version": 1, "items": [
+        {"key": "account", "original_reference": original["ref"], "reading_reference": original["ref"]},
+    ]})
+    leaf = {**_note_leaf("supported-account", "The retained account supports this observation."), "support": {
+        "binding_input_revision": bound["input_revision"], "material_key": "account", "representation": "original", "reviewed_input_revision": bound["input_revision"],
+    }}
+    prepared = _workflow(vault, action="prepare", candidate="supported", proposal=_proposal("focused_note", [leaf], title="Supported account"))
+    before = _candidate(prepared, "supported")["leaves"][0]
+    relabelled = {**leaf, "support": {**leaf["support"], "representation": "reading"}}
+    changed = _workflow(vault, action="prepare", candidate="supported", proposal=_proposal("focused_note", [relabelled], title="Supported account"))
+    current = _candidate(changed, "supported")["leaves"][0]
+    assert current["effect_digest"] == before["effect_digest"]
+    assert current["run_id"] != before["run_id"]
+    disposed = _workflow(vault, action="disposition", candidate="supported", disposition="routed", reason="Retain this observation.")
+    executed = _workflow(vault, action="resume", input_revision=bound["input_revision"], journal_digest=disposed["journal_digest"])
+    assert _candidate(executed, "supported")["leaves"][0]["support"] == relabelled["support"]
+    with pytest.raises(ValueError, match="EPISODE_ATTEMPTED_LEAF"):
+        _workflow(vault, action="prepare", candidate="supported", proposal=_proposal("focused_note", [leaf], title="Supported account"))
+
+
+def test_planning_source_intent_rechecks_at_the_native_publication_boundary(vault, owner, enabled, monkeypatch):
+    """A changed intent input during Planning audit preparation must prevent the canonical item write."""
+    from test_planning_mutation import _manifest
+
+    from exomem import plan_memory, provenance, records
+
+    original = commands.op_preserve_evidence(vault, scope="study", category="accounts", filename="intent.bin", content="Retained intent input.")
+    source = vault / original["sidecar_path"]
+    intent = {"reference": original["ref"], "version": provenance.evidence_version(source.read_text())}
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    plan_memory.plan_memory(vault, "create", manifest_path=collection, manifest_text=_manifest(), why="Retain intended work.")
+    _record(vault)
+    snapshot = plan_memory.plan_memory(vault, "query", collection=collection)
+    proposal = _proposal("planning", [{"leaf_key": "add", "effect_revision": 1, "kind": "add-plan", "source_intent": intent, "args": {
+        "collection": collection, "plan_id": "991acdd4-16b9-4396-8220-2cb37b7e8516", "item": {"title": "Review intended work"},
+        "expected_container_hash": snapshot["snapshot"], "why": "The active agent identified expressed intent.",
+    }}], title="Review intended work")
+    prepared = _workflow(vault, action="prepare", candidate="intent", proposal=proposal)
+    leaf = _candidate(prepared, "intent")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    assert native["source_intent"] == intent
+    disposed = _workflow(vault, action="disposition", candidate="intent", disposition="routed", reason="Capture the intended work.")
+    audit = records._plan_required_audit
+
+    def edit_during_audit(*args, **kwargs):
+        plan = audit(*args, **kwargs)
+        source.write_text(source.read_text() + "\nChanged intent input.\n")
+        return plan
+
+    monkeypatch.setattr(records, "_plan_required_audit", edit_during_audit)
+    refused = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert refused["executed"] == []
+    assert not (vault / native["destination"]).exists()
+    assert plan_memory.plan_memory(vault, "query", collection=collection)["rows"] == []
+
+
+def test_native_container_coverage_requires_every_preserved_payload(vault, owner, enabled):
+    """Companion edits must preserve coverage, while one missing original member must break it."""
+    import io
+
+    from test_document_containers import container_bytes
+
+    from exomem import preserve
+
+    data = container_bytes([("account.pdf", b"first retained payload"), ("appendix.docx", b"second retained payload")])
+    original = preserve.preserve_stream(vault, scope="incoming", category="bundles", filename="account.asice", stream=io.BytesIO(data))
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="bundle", proposal=_proposal("source", [
+        {"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original.ref, "version": original.hash, "size": original.size},
+            "title": "Transferred bundle", "source_type": "session",
+        }}], title="Transferred bundle"))
+    leaf = _candidate(prepared, "bundle")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    assert len(native["memory_ids"]) == 3
+    disposed = _workflow(vault, action="disposition", candidate="bundle", disposition="routed", reason="Retain the container and its document originals.")
+    result = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert _candidate(result, "bundle")["leaves"][0]["outcome"] == "committed", result
+    assert _workflow(vault, action="coverage")["coverage_current"] == "verified"
+    parent = native["allocation"]["artifact"]
+    payload = next(item["path"] for item in native["core"] if "size" in item and item["path"] != parent)
+    companion = vault / (payload + ".md")
+    companion.write_text(companion.read_text() + "\nA revised extracted reading.\n")
+    assert _workflow(vault, action="coverage")["coverage_current"] == "verified"
+    (vault / payload).unlink()
+    assert _workflow(vault, action="coverage")["coverage_current"] == "changed"
+
+
+def test_native_container_rebuild_cannot_swap_sealed_member_identities(vault, owner, enabled, monkeypatch):
+    """A changed child allocation order must fail before any original or companion is published."""
+    import io
+    from contextlib import contextmanager
+
+    from test_document_containers import container_bytes
+
+    from exomem import document_containers, preserve
+
+    data = container_bytes([("account.pdf", b"first retained payload"), ("appendix.docx", b"second retained payload")])
+    original = preserve.preserve_stream(vault, scope="incoming", category="bundles", filename="account.asice", stream=io.BytesIO(data))
+    _record(vault)
+    prepared = _workflow(vault, action="prepare", candidate="bundle-order", proposal=_proposal("source", [
+        {"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+            "original": {"representation": "original", "reference": original.ref, "version": original.hash, "size": original.size},
+            "title": "Ordered bundle", "source_type": "session",
+        }}], title="Ordered bundle"))
+    leaf = _candidate(prepared, "bundle-order")["leaves"][0]
+    native = curation.CurationStore(vault).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+    disposed = _workflow(vault, action="disposition", candidate="bundle-order", disposition="routed", reason="Retain these exact member identities.")
+    inspect = document_containers.inspect
+
+    @contextmanager
+    def changed_order(stream):
+        with inspect(stream) as inspected:
+            inspected.members.reverse()
+            yield inspected
+
+    monkeypatch.setattr(document_containers, "inspect", changed_order)
+    refused = _workflow(vault, action="resume", input_revision=1, journal_digest=disposed["journal_digest"])
+    assert refused["executed"] == []
+    assert all(not (vault / item["path"]).exists() for item in native["core"])

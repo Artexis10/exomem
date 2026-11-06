@@ -33,6 +33,7 @@ from ctypes import (
 )
 from pathlib import Path
 
+from . import request_budget
 from .held_fs import (
     FILE_ACCESS_MODES,
     Capabilities,
@@ -785,6 +786,7 @@ class WindowsHeldFilesystem(HeldFilesystem):
             os.lseek(checked.descriptor, 0, os.SEEK_SET)
             chunks, size = [], 0
             while chunk := os.read(checked.descriptor, 65536):
+                request_budget.checkpoint()
                 size += len(chunk)
                 if max_bytes is not None and size > max_bytes:
                     return HeldResult(error=HeldFsError("INPUT_TOO_LARGE", "held input exceeds the parser byte bound"))

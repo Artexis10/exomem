@@ -1160,9 +1160,9 @@ def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
 def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     """Machine-local state placement: external root, marker, in-vault leftovers.
 
-    The registry's explicit external-state placement drives the leftover scan,
-    so a consumer that keeps writing a flagged family into the vault surfaces
-    here without this check learning any names. Dual state — in-vault copies
+    The registry's external families that once lived inside the vault drive the
+    leftover scan, so a consumer that keeps writing one of them into the vault
+    surfaces here without this check learning any names. Dual state — in-vault copies
     beside an external root — is a FAIL that names both paths and the explicit
     remediation; nothing is ever preferred or deleted from a diagnosis path.
     """

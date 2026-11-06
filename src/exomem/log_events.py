@@ -42,6 +42,8 @@ class EventSpec:
 EVENT_CATALOG: dict[str, EventSpec] = {
     "tool_start": EventSpec(),
     "tool_success": EventSpec(),
+    "call_observation": EventSpec(),
+    "authorization_observation": EventSpec(),
     "tool_failure": EventSpec(content_fields=frozenset({"message"})),
     "rest_failure": EventSpec(content_fields=frozenset({"message"})),
     "hosted_call": EventSpec(),

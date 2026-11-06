@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware.middleware import Middleware
 from starlette.middleware import Middleware as ASGIMiddleware
 from starlette.testclient import TestClient
 
@@ -108,6 +113,67 @@ def test_sanitized_http_body_replays_once_then_preserves_disconnect() -> None:
     }
     assert disconnected == {"type": "http.disconnect"}
     assert calls == 1
+
+
+@pytest.mark.parametrize("downstream_failure", [False, True])
+def test_authorization_clock_excludes_tool_work_and_joins_http_request(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    downstream_failure: bool,
+) -> None:
+    clock = [0.0]
+
+    def tick() -> float:
+        clock[0] += 0.001
+        return clock[0]
+
+    monkeypatch.setattr(
+        authorization_transport, "time",
+        SimpleNamespace(time=time.time, perf_counter=tick),
+    )
+    # Supply a resolved identity; the transport cases below exercise admission refusals.
+    monkeypatch.setattr(
+        authorization_transport.principal_module, "resolve_mcp_principal",
+        lambda: authorization_transport.principal_module.owner_principal(surface="mcp"),
+    )
+    caplog.set_level(logging.INFO, logger="exomem.calls")
+    caplog.set_level(logging.INFO, logger="exomem.access")
+    mcp = server.ExomemFastMCP("authorization-clock")
+    mcp.add_middleware(authorization_transport.AuthorizationSessionMiddleware(vault))
+    if downstream_failure:
+        class Unavailable(Middleware):
+            async def on_call_tool(self, context, call_next):
+                clock[0] += 100
+                raise ToolError("downstream unavailable")
+
+        mcp.add_middleware(Unavailable())
+
+    @mcp.tool(name="ask_memory")
+    def answer() -> str:
+        clock[0] += 100
+        return "done"
+
+    with TestClient(mcp.http_app(
+        stateless_http=True, json_response=True,
+        middleware=[ASGIMiddleware(AccessLogMiddleware)],
+    )) as client:
+        response = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 45, "method": "tools/call",
+            "params": {"name": "ask_memory", "arguments": {}},
+        }, headers={"accept": "application/json, text/event-stream"})
+
+    assert response.json()["result"]["isError"] is downstream_failure, response.text
+    observations = [record.fields for record in caplog.records
+                    if getattr(record, "event", None) == "authorization_observation"]
+    [observed] = observations
+    [http] = [record.fields for record in caplog.records
+              if getattr(record, "event", None) == "http_request"]
+    assert observed["request_id"] == http["request_id"]
+    assert observed["phase"] == ("downstream" if downstream_failure else "complete")
+    assert 0 < observed["entry_ms"] < 1000
+    if downstream_failure:
+        assert observed["post_ms"] is None
+    else:
+        assert 0 < observed["post_ms"] < 1000
 
 
 def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
@@ -285,7 +351,7 @@ def test_mcp_duplicate_arguments_objects_cannot_hide_a_bearer(
 
 
 @pytest.mark.parametrize("connect", ["legacy", "auto"])
-def test_actual_stdio_refuses_before_validation_without_logging_bearer(
+def test_actual_stdio_refuses_and_correlates_without_logging_bearer(
     vault, tmp_path: Path, connect: str
 ) -> None:
     from fastmcp import Client
@@ -336,7 +402,7 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
         )
         async with Client(transport, timeout=30, init_timeout=30, mode=connect) as client:
             assert (client.protocol_version == "2026-07-28") == (connect == "auto")
-            return await client.call_tool(
+            refused = await client.call_tool(
                 "ask_memory",
                 {
                     "authorization_session_credential": presented,
@@ -344,8 +410,13 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
                 },
                 raise_on_error=False,
             )
+            successful = await client.call_tool(
+                "bootstrap", {"operation": {"kind": "instructions", "profile": "compact"}},
+                raise_on_error=False,
+            )
+            return refused, successful
 
-    result = asyncio.run(exercise())
+    result, successful = asyncio.run(exercise())
     rendered_result = repr(result)
     rendered_logs = transport_log.read_text(encoding="utf-8", errors="replace")
     rendered_logs += (exomem_log_dir / "exomem.log").read_text(
@@ -357,3 +428,12 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
     assert "limit" not in rendered_result
     assert presented not in rendered_result
     assert presented not in rendered_logs
+    assert successful.is_error is False, successful
+    records = [json.loads(line) for line in (exomem_log_dir / "exomem.log").read_text().splitlines()]
+    observations = [row["fields"] for row in records if row.get("event") == "authorization_observation"]
+    [refusal] = [row for row in observations if row["phase"] == "entry"]
+    assert refusal["entry_ms"] >= 0 and refusal["post_ms"] is None
+    [complete] = [row for row in observations if row["phase"] == "complete"]
+    ledger = [json.loads(line) for line in (exomem_log_dir / "ledger.jsonl").read_text().splitlines()]
+    [successful_call] = [row for row in ledger if row["tool"] == "bootstrap"]
+    assert complete["request_id"] == successful_call["request_id"]

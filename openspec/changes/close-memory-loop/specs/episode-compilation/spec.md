@@ -21,6 +21,245 @@ The episode workflow SHALL accept supported unstructured and multimodal inputs w
 - **THEN** the transcript may be retained and interpreted under its existing authority with the original media explicitly unavailable
 - **AND** neither product receipts nor evaluation reports claim the original media was preserved or interpreted
 
+### Requirement: Public material bindings preserve separate original and reading identities
+
+`episode_memory` SHALL expose `input` through `record_episode` operation kind `input`
+and `material` through `read_episode` operation kind `material` on MCP, CLI and REST.
+`input` SHALL require an existing episode, current input revision, journal digest
+and a closed version-1 materials envelope. It SHALL append through the existing
+principal-bound input/CAS boundary without preserving another Source or executing effects.
+The envelope SHALL hold zero to eight uniquely keyed items, sorted deterministically,
+within 16 KiB. Keys SHALL be nonempty and at most 160 characters. Each item SHALL
+name an original whole-page canonical companion, a readable canonical page or exact
+unit, or both; references SHALL be at most 2048 characters. Optional producer and
+producer-version attribution SHALL be at most 256 and 160 characters respectively,
+and SHALL remain caller-authored rather than authenticated extractor identity.
+
+The server SHALL seal declared original SHA and size separately from the reading's
+material version and exact unit fingerprint/span. Declared identity SHALL NOT imply
+current byte availability. Pairing SHALL remain caller-authored and SHALL NOT establish
+equivalence, provenance roots or independent support. Empty items SHALL explicitly clear
+bindings. Omitted materials on later recaps SHALL inherit the last explicit envelope
+within the existing 64-revision history, without copying, refreshing or resealing it.
+Stable handles SHALL retain that envelope's original input revision and material key.
+Legacy journals without materials SHALL have no bindings; accepted legacy normalization,
+hashes, identities and absent fields SHALL remain unchanged.
+
+An optional `dataset_rows` locator SHALL hold a bounded nullable record path and
+one to 32 unique zero-based row indices below `query_data.MAX_PARSED_ROWS`.
+Verification SHALL stage the authorized original and reuse `query_data.load_rows_bytes`,
+binding exact raw SHA/size, record kind, resolved path and selected indices.
+Parser-cap failure or invalid selection SHALL NOT become successful locator proof.
+No new page, region or time locator grammar SHALL be accepted.
+
+`material` SHALL require episode, binding input revision and material key and return
+one material's independently checked original and reading states. Current original
+availability SHALL require native principal checks through `artifact_recovery` staging,
+within its existing request budget. A successfully authorized descriptor that differs
+from sealed SHA/size MAY report stale. Unified recovery refusals SHALL remain unavailable
+without distinguishing missing, changed or withheld failures. Reading SHALL use current
+retained-input release, exact-text and version checks within the existing 8192-byte budget.
+Changed reading SHALL report stale without rebinding. Missing and withheld representations
+SHALL yield identical content-free unavailable results, with no reference or attribution.
+One unavailable representation SHALL NOT suppress the other's usable result.
+Episode JSON SHALL contain no binary bytes, capabilities or persisted authority.
+Inspection and workflow projections MAY expose bounded unchecked handles without probing binaries.
+
+Writes SHALL retain the existing terminal mutation receipt; callers SHALL read
+candidates for current input state and handles. Stale guards SHALL refuse without mutation.
+Byte-equivalent replacement under current guards SHALL add no revision. After lost acknowledgement, callers
+SHALL inspect public state before another mutation; transparent lost-ack replay SHALL
+NOT be promised. Extended journals SHALL require this reader-capable release, including
+supported rollback. Older strict readers SHALL refuse them before modification.
+Material binding alone SHALL NOT imply native execution, compilation coverage or ordinary mixed-journey acceptance.
+The native-effect requirements below separately govern execution and its associations.
+
+#### Scenario: A later recap keeps the original material handle
+
+- **WHEN** a caller binds preserved image and dataset materials, then records another recap without materials
+- **THEN** public inspection retains the original binding revision and keys, and a keyed material read recovers their current representations
+- **AND** binding and reading leave preserved original bytes unchanged
+
+#### Scenario: One representation changes or disappears
+
+- **WHEN** a selected material's original is unavailable or its reading changes
+- **THEN** the other representation can remain available under its own current checks
+- **AND** changed reading is stale, while unified original recovery refusal stays unavailable
+
+#### Scenario: Revocation reveals no material metadata
+
+- **WHEN** a selected representation becomes withheld, or the same representation is absent
+- **THEN** public reads return the same content-free unavailable state without its reference or attribution
+
+#### Scenario: Binding retries and clearing obey current guards
+
+- **WHEN** current guards accompany an equivalent replacement or an explicit empty envelope
+- **THEN** the equivalent replacement writes nothing, while clearing appends one input revision and later recaps inherit the clear
+- **AND** stale guards refuse before sealing or writing any replacement
+
+### Requirement: Episode native effects prepare through final owner checks without publication
+
+The episode owner SHALL support closed native kinds `capture-source`, `preserve-evidence`,
+`add-plan`, `update-plan` and `triage-plan` through existing curation execution.
+General curation SHALL NOT seal these episode-only kinds; Experiment execution remains pending.
+Binary leaves SHALL select an already-preserved whole canonical original reference,
+SHA-256 and size, never a temporary path, upload handle or capability.
+Execution SHALL reacquire current authorized bytes through native artifact recovery
+with administrative ingress disabled. A reading SHALL NOT substitute for binary custody.
+
+Private preparation SHALL run actual owner normalization, hierarchy, motivation, lifecycle,
+history, source guards and complete write-set authorization. Its final snapshot SHALL follow
+all checks and precede any authoritative effect. Preparation SHALL suppress optional inference,
+canonical replacement, graph-debt enqueue, derived publication, registry commits and receipts.
+Existing cleanup SHALL remove temporary staging on every exit. Store preparation SHALL roll back
+SQL and PublicationBatch staging, including recovery-only preservation/quarantine, and return its refusal without committing preservation.
+Planning SHALL retain its hierarchy callback alongside the separate final preparation seam.
+Preparation SHALL use hold=False and create no held candidate. Ordinary operations SHALL retain existing behavior.
+Public callers SHALL NOT supply internal preparation flags, callbacks, allocations or proof objects.
+
+Vocabulary preparation SHALL use existing databases read-only with the current protected-file, sidecar,
+marker, schema, activation and custody guards. It SHALL check complete operation identity and current
+custody generation/expiry, refreshing after waits without reservation, request, spend or execution-counter advancement.
+Only a current matching reservation SHALL remain eligible; committed operations SHALL require recovery.
+Ordinary execution SHALL retain its existing reservation and final commit guards.
+
+Preparation SHALL freeze normalized semantic payload, native destination, canonical reference,
+timestamp and core original/companion allocation. Execution SHALL reuse that allocation and
+recompute shared bookkeeping under the native lease with current registry/target/write-set guards.
+It SHALL NOT overwrite shared logs/indexes with prepared postimages.
+Known destination duplicates SHALL be reported before sealing without fabricating executed leaves.
+Source/Evidence publication SHALL consume its curation witness atomically with original and companion,
+finalizing binary SHA/size through the native verified stream. Historical commitment SHALL NOT depend on mutable extraction text.
+Where no deterministic vocabulary ID exists, preparation SHALL seal the explicit native UUID sequence.
+Before publication, execution SHALL verify consumed count and rebuilt owner-declared core paths, identities and hashes.
+
+Planning leaves SHALL invoke the Planning facade, including store dispatch and current profile,
+plan-id, hierarchy, motivation, lifecycle, history, attribution and authorization rules.
+Owner-fixed receipts SHALL authenticate the exact Planning profile and add/update/triage operation.
+Store proof SHALL bind canonical transaction/item-version identity and current rows, never generated files.
+Intent support SHALL retain runtime identity/access proof; the active agent SHALL judge expressed intent.
+
+#### Scenario: Refused preparation leaves no authoritative side effects
+
+- **WHEN** native preparation reaches graph debt, history refusal or a store recovery-only preservation path
+- **THEN** SQL/publication staging rolls back and no canonical replacement, queue entry, held candidate or receipt remains
+- **AND** ordinary non-preparation operations retain their existing behavior
+
+#### Scenario: Independently prepared captures preserve shared bookkeeping
+
+- **WHEN** two prepared captures execute against shared logs or indexes
+- **THEN** each reuses its core allocation and recomputes bookkeeping under the native lease without losing the other's entry
+
+### Requirement: Exact episode invocations authenticate no-effect retry and commitment recovery
+
+New invocation-bearing attempts SHALL privately derive invocation_id from episode_id,
+leaf_id, effect_digest, operation_id and episode attempt. The journal SHALL record uncertainty before dispatch.
+Every entry to an episode-sealed plan, including ordinary curation apply/resume before an
+episode attempt, SHALL join the same journal-tracked invocation. Dispatch and terminal persistence
+SHALL serialize under the existing writer lease. Invocation correlation SHALL NOT replace stable mutation identity.
+
+Only a typed no-effect proof SHALL authenticate no authoritative publication: a native DefiniteNoEffect
+or a curation recovery proof for a stopped attempt. Curation SHALL persist either as a closed distinguishable
+terminal in its existing receipt path, binding invocation, plan, operation, prepared effect digest and closed reason/evidence.
+Curation SHALL write a recovery proof only while it holds the vault mutation boundary and a current write fence.
+A recovery proof SHALL cover only the latest attempt of a bound uncertain leaf with an invocation identity.
+Every same-operation receipt SHALL be an earlier attempt's no-effect terminal. No same-operation file witness SHALL exist.
+The step SHALL be a store-sealed Records or Planning step, read through the serving store, which SHALL hold no transaction for its request id,
+or a native preservation step that holds an unstarted publication record for its attempt.
+Before dispatch, curation SHALL create that record once in the run, bound to invocation, operation, episode attempt and prepared effect digest.
+Before the attempt's witnessed batch installs its first destination, the vault SHALL mark the record started in its own write, which rollback SHALL NOT revert.
+For a native step, the recovery proof SHALL NOT read the step's output paths.
+A missing, changed or started record SHALL leave the attempt uncertain, and so SHALL writer-lease coordination across hosts.
+Other steps SHALL NOT receive a recovery proof.
+Generic failures, absent receipts or file witnesses alone, matching bytes and mutable progress SHALL NOT prove no effect.
+Reconciliation SHALL validate exact original plan/approval and invocation, exclude conflicting
+unresolved invocation or commitment, then use the typed proven_uncommitted transition.
+A verified same-operation commitment SHALL take precedence over earlier no-effect evidence.
+Before retry, execution SHALL check commitment again and retain allocation, operation and current guards.
+The no-effect terminal SHALL NOT inherit a nonretryable failed_step dead end.
+A stopped attempt without a native terminal or recovery proof SHALL remain uncertain.
+
+Recovery SHALL inspect same-operation commitment and repair missing terminal receipts through
+curation before reacquiring original custody. Historical commitment SHALL survive missing input. For an episode leaf with a terminal receipt, and for native preservation and Planning kinds also before receipt repair, it SHALL survive changed or missing output.
+Current readback/coverage SHALL separately require current authorized output and exact binary bytes.
+Legacy receipts/journals SHALL retain normalization and absent fields without synthetic invocation defaults.
+Unsupported strict readers SHALL refuse new extensions before modification.
+New episode-bound seals, including existing kinds, SHALL carry top-level `episode_invocation_version: 1`
+before hashing or publication. Stored normalization SHALL admit only exact integer 1 with operative episode metadata,
+and SHALL reject missing, unsupported, boolean or orphan markers.
+Creation, anchors, identities and episode binding SHALL use the same marked sealed fingerprint basis.
+Public forward grammar v1 and legacy unmarked normalized bytes and identities SHALL remain unchanged.
+Recovery SHALL NOT reseal historical plans. Rollback SHALL require a release that supports marked execution and recovery.
+
+#### Scenario: An older executor cannot bypass episode correlation through an existing kind
+
+- **WHEN** an older strict reader applies or resumes a marked episode-bound create-note plan
+- **THEN** it refuses the unknown sealed-plan marker before approval or mutation
+- **AND** an unmarked legacy plan keeps its prior normalized bytes and identities
+
+#### Scenario: Ordinary apply joins the episode before dispatch
+
+- **WHEN** ordinary curation apply or resume executes an episode-sealed plan before episode resume has attempted it
+- **THEN** the executor records the journal-bound invocation before the native effect and episode recovery recognizes its commitment
+
+#### Scenario: A late duplicate permits only proved same-operation reconsideration
+
+- **WHEN** a duplicate appears after uncertainty and the native owner proves definite no effect
+- **THEN** exact invocation reconciliation permits guarded retry of the same operation without fresh allocation or a failed-step dead end
+- **AND** a later verified commitment wins over the earlier no-effect terminal
+
+#### Scenario: Lost acknowledgement recovers without vanished input
+
+- **WHEN** a native effect commits atomically, its acknowledgement is lost and original input later disappears
+- **THEN** curation recovers historical commitment before custody checks without executing another effect
+- **AND** missing or changed output keeps current coverage unavailable independently
+
+#### Scenario: A stopped store step retries its same request
+
+- **WHEN** an episode Records or Planning attempt stops with no receipt and the serving store holds no transaction for its request id
+- **THEN** curation records a recovery proof and the next attempt commits once with the same operation and request id
+- **AND** a transaction found for that request id repairs the committed receipt instead of recording a proof
+
+#### Scenario: A native attempt retries only when it never began publication
+
+- **WHEN** a native preservation attempt stops after it installed a core path, and someone then moves that path
+- **THEN** its publication record shows started, curation records no recovery proof and the leaf stays uncertain
+- **AND** an attempt that stopped before its first install receives a recovery proof and retries once with its sealed allocation
+
+### Requirement: Leaf support preserves immutable original and reading provenance
+
+Bounded optional leaf support SHALL select binding input revision, material key,
+representation and reviewed episode input revision. Preparation SHALL resolve and seal it on the leaf.
+Attempted leaves SHALL retain support across reorder/revision. Support labels SHALL NOT alter mutation
+effect_digest or create another operation for an attempted equivalent mutation. Legacy events SHALL gain no synthetic support.
+Planning MAY retain optional source_intent through the existing origin-input grammar outside mutation arguments and effect_digest.
+Preparation SHALL seal that association and execution SHALL revalidate it at the native publication boundary.
+
+The existing origin carrier SHALL retain legacy reading normalization exactly. One explicit original
+variant SHALL contain representation=original, whole canonical reference, SHA-256 version and nonnegative size;
+it SHALL reject unit fragments and text spans. Native original byte/access proof SHALL use a distinct
+private proof type, never retained-text proof or model-visible binary content. Both representations MAY share
+one canonical source root without an inferred equivalence or independence assessment.
+
+Store values SHALL retain record_field scopes. Store body units SHALL use profile-built
+plan_ref/record_ref parser parents, exact record_identity and owner-fixed profile. Private parser-parent and
+scope matching SHALL admit only that native identity. Public input references SHALL NOT expand to arbitrary
+plan/record URLs or generated paths. Existing authored-origin handling SHALL validate only new or changed
+carriers, preserving unchanged historical carriers and unrelated rows without recertification.
+Native versions/transactions SHALL bind values/body and retain proof through final write guards.
+Current page, row and history outputs SHALL use whole-carrier origin projection at final disclosure.
+An unavailable/withheld bound input SHALL revoke the carrier's attribution together, preserving existing stale-versus-unavailable behavior.
+
+#### Scenario: Support reorder cannot mint another mutation
+
+- **WHEN** an attempted leaf's proposal is reordered or its support label is revised
+- **THEN** its immutable support and stable operation prevent an equivalent mutation from executing again
+
+#### Scenario: Store-origin input is revoked before final disclosure
+
+- **WHEN** a canonical store value or body unit has native original support that becomes unavailable or withheld
+- **THEN** row/history disclosure revokes the whole bound attribution carrier without certifying a generated item path
+
 ### Requirement: Conversational correction updates knowledge without erasing provenance
 
 An authorized conversational correction SHALL revise affected episode candidates and canonical projections through current guarded writers while retaining original evidence and historical interpretation. The workflow SHALL distinguish interpretation errors, new events, disputed evidence and expressed changes of intent. It SHALL reconcile known affected effects/publications, report pending or unavailable work, and prevent a stale replay from restoring the corrected interpretation. Later query/context SHALL use current corrected knowledge or visibly qualify unavailable/pending currency. A reusable alias, schema or routing lesson SHALL be a separate scoped, evidence-bound and reversible proposal through its existing owner, not an automatic generalization from one correction. Routine permitted correction SHALL NOT require an extra confirmation or background learner.
@@ -225,9 +464,35 @@ Episode state SHALL bind a logical episode identity, input revision and original
 
 - **WHEN** recovery resolves a stored page or exact semantic-unit reference
 - **THEN** it binds disclosure and the recorded version to the same immutable current snapshot
-- **AND** changed evidence is stale, while missing, ambiguous, withheld or superseded evidence is unavailable, without returning replacement text
+- **AND** changed evidence is stale, while missing, ambiguous, withheld or superseded evidence is unavailable, except for the exact previously bound recorder proof below
 - **AND** a response budget cannot silently truncate input and still classify it as complete recovery
 - **AND** the response excludes raw journal events, sealed execution plans and unrestricted candidate payloads
+
+#### Scenario: A newer recorder recap retires a previously bound input
+
+- **WHEN** recovery resolves a previously bound recorder recap in the current audience's journal after a newer recap supersedes it
+- **THEN** the reserved recorder format, audience-scoped filename group, episode identity and exact journal reference identify the eligible historical input
+- **AND** current release authorizes the same guarded snapshot without requiring access to the successor
+- **AND** the system first compares current evidence under the binding's recorded digest scheme
+- **AND** if necessary, it compares one in-memory candidate that removes only top-level `status`, `updated` and `superseded_by` entries through YAML parser spans
+- **AND** only an exact stored-digest match permits recovery, without changing Source bytes, journal history or global evidence hashing
+- **AND** a matching whole-parent binding supplies the same episode root before and after retirement
+
+#### Scenario: Retirement compatibility preserves scope and legacy limits
+
+- **WHEN** a retired recorder input binds an exact unit or a legacy raw-content digest
+- **THEN** recovery retains the exact unit reference, fingerprint and span, and a unit-only binding cannot prove its whole parent
+- **AND** raw-content digests remain raw while `evidence-v1` retains typed material hashing and its existing backlink exclusion
+- **AND** changed body or other bound metadata, or prior retirement-field values that cannot be reconstructed, remain stale or unavailable
+- **AND** generic Sources and compiled notes retain ordinary lifecycle refusal, including registry-reclassified statuses
+- **AND** new bindings still refuse superseded inputs, and origin bindings retain their exact version and selected-fingerprint checks
+
+#### Scenario: Inspection reports recorded recovery classes
+
+- **WHEN** a caller inspects an episode's input revisions
+- **THEN** each recovery class describes its recorded binding, and `recovery_current` is `unchecked`
+- **AND** inspection checks only the latest reference's visibility and downgrades a withheld latest input to unavailable
+- **AND** inspection does not claim current recovery of every historical input or recover their bodies to list metadata
 
 #### Scenario: Conversation input was not retained canonically
 
@@ -263,16 +528,17 @@ Candidate identity SHALL remain stable across destination re-resolution, proposa
 #### Scenario: A leaf result is reconciled from stored evidence
 
 - **WHEN** an owner-held episode leaf has an uncertain attempted outcome
-- **THEN** the recovery adapter verifies its exact stored plan, approval, operation, receipt, atomic witness and applicable current readback before recording a verified committed outcome
+- **THEN** the recovery adapter verifies its exact stored plan, approval, operation, receipt and atomic witness as historical evidence, without its live postimage, before recording a verified committed outcome
 - **AND** caller-supplied success flags, mutable progress projections and unmatched evidence cannot substitute for that proof
 - **AND** reconciliation itself performs no canonical write or leaf execution
 - **AND** the existing consistency boundary excludes canonical mutations throughout the evidence read without granting writer authority
 
 #### Scenario: A missing or historical result cannot authorize a retry
 
-- **WHEN** a terminal receipt is missing, a committed postimage has changed, or only an earlier failed attempt is evidenced
+- **WHEN** a terminal receipt is missing or only an earlier failed attempt is evidenced
 - **THEN** the episode remains uncertain until the existing execution owner and appropriate evidence contract reconcile the result
 - **AND** absence, failure or stale readback is never treated as proof that the current attempt did not commit
+- **AND** a postimage that changed after a verified historical commitment is a current-coverage finding, never a retry authorization
 
 ### Requirement: Typed episode operations execute only existing leaves and only when enabled
 
@@ -524,7 +790,7 @@ Episode work SHALL have explicit per-pass resource bounds, durable continuation 
 
 ### Requirement: An episode recap is retained canonically, bounded and attributable
 
-The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the audience's previous live revisions of the episode superseded, guarded by the content each was read with, so after any completed write one episode has one live recap per audience. Marking a revision superseded writes only system-managed frontmatter (`status`, `updated`, `superseded_by`) and leaves its body byte-identical, on the same footing as `ingested_into`. The caller's principal SHALL be resolved before any write. Each audience SHALL keep its own ledger history and its own revisions of an episode key, and SHALL NOT list, supersede or replay another audience's recap. Memory references a recap concerns SHALL be retained only in the recording audience's ledger, never on the shared page. A restricted writer's recap SHALL be written in its inbox as a Source capture is, and its revisions SHALL be listed and superseded only there.
+The active agent SHALL be able to record a bounded recap of a conversation through one typed operation on MCP, CLI and REST. The recap SHALL be retained as a canonical episode Source through the existing Source writer and SHALL be bound to the caller's episode ledger as input evidence from that writer's receipt, without walking the corpus to find the committed page. Recap fields SHALL be closed and individually bounded, and the rendered recap SHALL NOT exceed 4 KiB. Credential-shaped, oversize or malformed input SHALL be refused before any write. The server SHALL validate and render the recap and SHALL NOT summarise a conversation itself. Source bodies SHALL remain append-only: a revised recap SHALL be a new page, and the same write SHALL mark the audience's previous live revisions of the episode superseded, guarded by the content each was read with, so after any completed write one episode has one live recap per audience. Marking a revision superseded writes only system-managed frontmatter (`status`, `updated`, `superseded_by`) and leaves its body byte-identical. Historical recovery SHALL admit that bookkeeping only through the exact previously bound recorder proof above; global material hashing SHALL continue excluding only `ingested_into`. The caller's principal SHALL be resolved before any write. Each audience SHALL keep its own ledger history and its own revisions of an episode key, and SHALL NOT list, supersede or replay another audience's recap. Memory references a recap concerns SHALL be retained only in the recording audience's ledger, never on the shared page. A restricted writer's recap SHALL be written in its inbox as a Source capture is, and its revisions SHALL be listed and superseded only there.
 
 #### Scenario: A record retains a bounded recap and binds it as input
 

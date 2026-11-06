@@ -58,6 +58,25 @@ def test_creation_is_idempotent_without_resetting_later_progress(vault: Path):
     assert store.read(initial["state"]["episode_id"]) == later
 
 
+def test_material_extension_preserves_legacy_journal_bytes_and_hashes(vault: Path):
+    store = _store(vault)
+    first = store.create("legacy-material-journal", {"excerpt": "Original retained excerpt."})
+    old = _advance(store, first, "append_input_revision", input_evidence={"excerpt": "Second recap."})
+    identity = old["state"]["episode_id"]
+    before = store.path(identity).read_bytes()
+    assert _store(vault).read(identity) == old
+    assert store.path(identity).read_bytes() == before
+    changed = _advance(store, old, "append_input_revision", input_evidence={
+        "excerpt": "Second recap.", "materials": {"version": 1, "items": []},
+    })
+    original, extended = json.loads(before), json.loads(store.path(identity).read_bytes())
+    assert extended["root_hash"] == original["root_hash"]
+    assert extended["input_evidence"] == original["input_evidence"]
+    assert extended["transitions"][:-1] == original["transitions"]
+    assert changed["state"]["input_revisions"][:2] == old["state"]["input_revisions"]
+    assert "materials" not in original["input_evidence"]
+
+
 def test_guarded_read_binds_reconstruction_and_invalidates_after_a_revision(vault: Path):
     """A proof must guard the journal it reconstructed, not a later reread."""
     store = _store(vault)

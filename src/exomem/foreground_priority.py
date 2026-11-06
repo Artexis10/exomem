@@ -238,6 +238,9 @@ class BulkCancelled(BaseException):
 
 def check_cancelled() -> None:
     """Cancel this thread's owned bulk scope between complete work units."""
+    from . import request_budget
+
+    request_budget.checkpoint()
     stop = getattr(_local, "stop", None)
     if stop is not None and stop.is_set():
         raise BulkCancelled()

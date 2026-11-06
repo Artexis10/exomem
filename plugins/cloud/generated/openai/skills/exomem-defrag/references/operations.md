@@ -945,12 +945,67 @@ this is how you query their values.
 
 Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
 
+### Preserved materials
+
+`record_episode` with `operation.kind="input"` binds already-preserved material to an existing episode; it creates no Source or destination effect.
+Supply the current `input_revision` and `journal_digest` from `read_episode` with `operation.kind="candidates"`.
+Supply `materials: {version: 1, items: [...]}` within 16 KiB, with at most eight uniquely keyed items.
+Each item has `key` (160 characters), `original_reference`, `reading_reference`, or both (canonical references, 2048 characters each).
+An original reference names its whole companion page; a reading reference may select an exact semantic unit.
+Optional `producer` (256 characters) and `producer_version` (160 characters) are authored attribution, never authenticated extractor identity.
+Optional `locator: {kind: "dataset_rows", record_path: null, row_indices: [0]}` selects one to 32 unique zero-based records.
+`record_path` may name a nested JSON array and is at most 2048 characters; the existing dataset parser verifies the selection.
+Other locator kinds and unknown fields are refused.
+
+Empty `items` explicitly clears bindings.
+Later recaps inherit the latest explicit envelope without copying it or refreshing its versions.
+The write returns the existing terminal mutation receipt.
+Read `candidates` after the write for stable handles with the original binding `input_revision` and `material_key`.
+A byte-equivalent replacement under current guards adds no revision.
+After a lost reply, inspect public state before another mutation; stale guards refuse without writing or transparently resealing a retry.
+
+`read_episode` with `operation.kind="material"`, `episode`, binding `input_revision` and `material_key` reads one material.
+It reports original and reading states independently: `available`, `stale` or content-free `unavailable`.
+Original availability requires current authorized bytes; a readable companion or an old preservation receipt is insufficient.
+A changed reading is stale and never silently rebound; an unavailable original does not suppress a usable reading.
+The read returns at most 8192 bytes of exact reading text, with no binary bytes or download capability.
+Unchecked handles in inspection do not prove byte availability.
+Pairing and producer attribution remain caller-authored; they establish neither equivalent content, independent origins nor compilation coverage.
+
+Journals with material bindings require a reader-capable release, including on rollback.
+Older strict readers refuse those journals before changing them; no migration rewrites legacy journals.
+Source, Evidence and Planning effects use their native writers through sealed episode leaves.
+The ordinary mixed-media journey still needs separate acceptance evidence.
+
 ### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
 - `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.
-- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Never a free-form effect.
-- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed leaf needs the next `effect_revision`; a committed one cannot change.
+- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Native episode kinds also include `capture-source`, `preserve-evidence`, `add-plan`, `update-plan` and `triage-plan`.
+- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args, support?, source_intent?}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed effect needs the next `effect_revision`; an attempted leaf keeps its exact effect and associations.
 - `resume` needs `journal_digest` from your last candidates/prepare/disposition result (a stale one is refused with `EPISODE_REVISION_CONFLICT`) and `input_revision` (the revision your coverage review covered); `order` and `max_leaves` (1 to 16, default 8) bound the pass.
 - Finish with one `coverage` pass: compare the input it names with each receipt and readback, prepare anything omitted or misrouted, then attest with `resume` and `postcommit`. A committed note is not coverage.
+
+Native binary leaves require `args.original: {representation: "original", reference, version, size}`.
+Use a whole canonical original reference, its exact SHA-256 and byte size.
+Temporary paths, upload handles and readable extraction text cannot substitute for original custody.
+Use the native writer's other arguments for the selected Source or Evidence destination.
+Preparation verifies the complete native write without publishing; execution retains its sealed core allocation and checks current authority again.
+Known prior preservation refuses before sealing; it does not count as an executed leaf.
+
+Planning leaves use the native add, update or triage arguments, including current guards and an attributable reason.
+Optional leaf `source_intent` uses the existing origin-input grammar and retains the input that expresses the intended work.
+Optional `support: {binding_input_revision, material_key, representation, reviewed_input_revision}` identifies reviewed material without changing the mutation effect.
+These associations prove neither expressed intent nor completeness; the active agent makes those judgments.
+An origin carrier may also use `{representation: "original", reference, version, size}` for a retained original input.
+That proof authenticates current bytes and access; it does not replace exact reading-text proof.
+Original and reading inputs may share one source without proving independent origins or equivalent content.
+
+Ordinary curation apply and resume also record the episode invocation before dispatch.
+After a lost reply, inspect and reconcile the same operation before retrying.
+Only an exact typed no-effect terminal permits a same-operation retry: the native one, or curation's recovery proof that a stopped attempt published nothing.
+A generic error remains uncertain.
+Historical commitment can recover after input loss, while current coverage still requires authorized output and exact original bytes.
+New episode-bound plans require a reader that understands their invocation marker, including after rollback.
+Older strict readers refuse those plans before applying them; legacy unmarked plans keep their identities.
 
 ### Result shapes
 - record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped, compile?}`. `compile` is `{outcome, cite, decided, open}`: the recap's ref, its Decided item count, and how many lines no cited recap holds (`unchecked` when not checked). Compile or explicitly dismiss every Decided item before citing the recap from updated compiled notes. A citation holds every line in that revision; it does not prove semantic coverage. The conditional `next_step` appears only when live policy permits capture; the block is absent when the recap decides nothing.

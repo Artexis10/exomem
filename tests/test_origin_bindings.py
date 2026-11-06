@@ -1045,3 +1045,31 @@ def test_a_move_retargets_a_link_after_a_documented_opener(vault: Path) -> None:
     )
 
     assert "See [[Knowledge Base/Notes/Insights/renamed-disclosure]] for" in doc.read_text(encoding="utf-8")
+
+
+def test_original_proof_is_independent_of_the_reading_and_rechecks_actual_bytes(vault, monkeypatch):
+    """A reading edit must not stale exact original support or turn byte proof into text proof."""
+    from exomem import commands
+
+    with request_scope(owner_principal(surface="mcp")):
+        captured = commands.op_preserve_evidence(vault, scope="study", category="accounts", filename="original.bin", content="Retained byte account.")
+        original = {"representation": "original", "reference": captured["ref"], "version": captured["hash"], "size": captured["size"]}
+        page = vault / captured["sidecar_path"]
+        reading = {"reference": captured["ref"], "version": provenance.evidence_version(page.read_text())}
+        page.write_text(page.read_text() + "\nA revised reading.\n")
+
+        def no_text_verifier(*_args, **_kwargs):
+            raise AssertionError("binary proof entered the text verifier")
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(origin_bindings.retained_inputs, "exact_text_verdict", no_text_verifier)
+            proof = origin_bindings.resolve_origin_input(vault, original)
+            assert isinstance(proof, origin_bindings.OriginalInputProof)
+            proof.recheck(vault)
+        with pytest.raises(provenance.OriginError, match="ORIGIN_INPUT_STALE"):
+            origin_bindings.resolve_origin_input(vault, reading)
+        carrier = _compiled(original)
+        assert origin_bindings.project_origin_text(vault, carrier) == carrier
+        (vault / captured["path"]).unlink()
+        assert "exomem-origin" not in origin_bindings.project_origin_text(vault, carrier)
+        assert "Retain the observation" in origin_bindings.project_origin_text(vault, carrier)

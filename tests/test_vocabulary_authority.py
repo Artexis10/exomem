@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -67,6 +68,9 @@ def install_unit_session_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _unit_session_status_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     install_unit_session_boundary(monkeypatch)
+    # Preparation opens the session read-only; the boundary above stubs the check it serves.
+    # Local to this module: other importers of the helper publish through the real store.
+    monkeypatch.setattr(store, "open_active_governance_read_connection", lambda _root: sqlite3.connect(":memory:"))
 
 
 @dataclass(frozen=True)
@@ -541,6 +545,44 @@ def test_exact_approval_spends_with_the_receipt_and_never_reexecutes(tmp_path: P
     assert replay.state == "committed"
     with pytest.raises(vocabulary_authority.VocabularyAuthorityDenied):
         authority.reserve(_operation(operation_id="new-operation"), principal=agent)
+
+
+def test_preparation_eligibility_does_not_reserve_request_or_change_custody(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    authority, agent, operation = _store(tmp_path / "vault"), _principal(), _operation()
+    _activate(authority, agent)
+    _approve_exact(authority, agent, operation, expires_at=NOW + 100)
+    custody = tmp_path / "custody"
+    before = {path.name: path.read_bytes() for path in custody.iterdir()}
+    assert authority.check_eligible(operation, principal=agent) == "eligible"
+    with pytest.raises(vocabulary_authority.VocabularyAuthorityDenied):
+        authority.check_eligible(_operation(operation_id="unapproved"), principal=agent)
+    assert {path.name: path.read_bytes() for path in custody.iterdir()} == before
+    assert authority.reserve(operation, principal=agent).state == "reserved"
+
+
+def test_preparation_distinguishes_current_reservation_conflict_commit_and_revocation(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    authority, agent, operation = _store(tmp_path / "vault"), _principal(), _operation()
+    _activate(authority, agent)
+    approved = _approve_exact(authority, agent, operation, expires_at=NOW + 100)
+    authority.reserve(operation, principal=agent)
+    assert authority.check_eligible(operation, principal=agent) == "eligible"
+    changed = _operation(effects=(Effect("entity.create", "Knowledge Base/Entities/Organizations/b.md", "memory:entity-b"),))
+    with pytest.raises(vocabulary_authority.VocabularyAuthorityConflict):
+        authority.check_eligible(changed, principal=agent)
+    _revoke(authority, agent, approved)
+    with pytest.raises(vocabulary_authority.VocabularyAuthorityDenied):
+        authority.check_eligible(operation, principal=agent)
+
+    committed = _operation(operation_id="committed")
+    _approve_exact(authority, agent, committed, expires_at=NOW + 100)
+    committed_reservation = authority.reserve(committed, principal=agent)
+    with authority.commit_guard(committed_reservation, principal=agent) as guard:
+        guard.mark_committed(vocabulary_authority._canonical_receipt_for_writer(
+            operation=committed, receipt_id="native-commit",
+        ))
+    assert authority.check_eligible(committed, principal=agent) == "committed"
 
 
 def test_pending_request_binds_the_stored_full_operation_before_owner_approval(tmp_path: Path, monkeypatch) -> None:

@@ -15,7 +15,8 @@ import sqlite3
 import stat
 import uuid
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -36,6 +37,20 @@ _RECEIPT_SEAL = object()
 _MARKER_SUFFIX = ".vocabulary-authority.activation.json"
 _DATABASE_SUFFIX = ".vocabulary-authority.sqlite"
 _MARKER_VERSION = 2
+_PREPARATION_ROOT: ContextVar[Path | None] = ContextVar("vocabulary_preparation_root", default=None)
+
+
+@contextmanager
+def _preparation_scope(vault_root: Path):
+    token = _PREPARATION_ROOT.set(Path(vault_root).resolve())
+    try:
+        yield
+    finally:
+        _PREPARATION_ROOT.reset(token)
+
+
+def _preparing(vault_root: Path) -> bool:
+    return _PREPARATION_ROOT.get() == Path(vault_root).resolve()
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +612,9 @@ class VocabularyAuthority:
             raise VocabularyAuthorityUnavailable from None
 
     def _connect(self, custody: object, *, create: bool, marker: Mapping[str, Any] | None = None) -> sqlite3.Connection | None:
+        readonly = _preparing(self.vault_root)
+        if readonly and create:
+            raise VocabularyAuthorityUnavailable
         current_marker = dict(marker) if marker is not None else self._marker(custody)
         if current_marker is None:
             return None
@@ -626,9 +644,13 @@ class VocabularyAuthority:
                 info = os.fstat(retained.fd)
                 if not authorization_custody._file_is_owner_protected(retained.fd, info):  # noqa: SLF001
                     raise VocabularyAuthorityUnavailable
-                connection = sqlite3.connect(path, timeout=5, isolation_level=None)
-                connection.execute("PRAGMA journal_mode = DELETE")
-                connection.execute("PRAGMA synchronous = FULL")
+                if readonly:
+                    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5, isolation_level=None)
+                    connection.execute("PRAGMA query_only = ON")
+                else:
+                    connection = sqlite3.connect(path, timeout=5, isolation_level=None)
+                    connection.execute("PRAGMA journal_mode = DELETE")
+                    connection.execute("PRAGMA synchronous = FULL")
                 connection.execute("PRAGMA foreign_keys = ON")
                 self._ensure_schema(connection, create=create, marker=current_marker)
                 self._validate_sqlite_sidecars(path)
@@ -761,8 +783,14 @@ class VocabularyAuthority:
                 raise VocabularyAuthorityUnavailable
             from .governance import authorization_session_lifecycle, store
 
-            connection = store.open_authorization_session_connection(self.vault_root)
+            readonly = _preparing(self.vault_root)
+            connection = (
+                store.open_active_governance_read_connection(self.vault_root) if readonly
+                else store.open_authorization_session_connection(self.vault_root)
+            )
             try:
+                if readonly:
+                    connection.execute("BEGIN")
                 authorization_session_lifecycle.status_verified_session(
                     connection, custody=custody, context=context, now=now
                 )
@@ -1400,6 +1428,49 @@ class VocabularyAuthority:
             raise
         finally:
             connection.close()
+
+    def check_eligible(self, operation: CanonicalOperation, *, principal: RequestPrincipal, now: int | None = None) -> str:
+        """Check current complete authority without reserving, requesting or spending it."""
+        if not isinstance(operation, CanonicalOperation):
+            raise VocabularyAuthorityDenied("canonical operation required")
+        with _preparation_scope(self.vault_root):
+            current = self._now(now)
+            custody = self._validate_custody(principal, now=current)
+            connection = self._connect(custody, create=False)
+            if connection is None:
+                raise VocabularyAuthorityDenied("v2 authority is not activated")
+            try:
+                connection.execute("BEGIN")
+                # A read can wait for a writer; recheck live custody and expiry afterwards.
+                current = self._now(now)
+                custody = self._validate_custody(principal, now=current)
+                self._require_active(connection, custody)
+                existing = connection.execute(
+                    "SELECT audience_id, command_digest, effect_digest, generation, state, operation_json "
+                    "FROM reservations WHERE operation_id = ?", (operation.operation_id,),
+                ).fetchone()
+                if existing is not None:
+                    try:
+                        stored = CanonicalOperation._from_record(json.loads(existing[5]))
+                    except (KeyError, TypeError, ValueError) as error:
+                        raise VocabularyAuthorityUnavailable from error
+                    if existing[:3] != (principal.audience_id, operation.command_digest, operation.effect_digest) or (
+                        stored.as_dict() != operation.as_dict()
+                    ):
+                        raise VocabularyAuthorityConflict("operation identity is already bound")
+                    if int(existing[3]) != custody.control.activation_epoch:
+                        raise VocabularyAuthorityDenied("reservation generation changed")
+                    # These are the existing reservation protocol's terminal/current states.
+                    if existing[4] == "committed":
+                        return "committed"
+                    if existing[4] != "reserved":
+                        raise VocabularyAuthorityDenied("reservation is not current")
+                if self._matching_authorities(connection, operation, principal, custody, now=current) is None:
+                    raise VocabularyAuthorityDenied("complete effect set lacks current authority")
+                self._validate_custody(principal, now=self._now(now))
+                return "eligible"
+            finally:
+                connection.close()
 
     def reserve(self, operation: CanonicalOperation, *, principal: RequestPrincipal, now: int | None = None) -> Reservation:
         current = self._now(now)

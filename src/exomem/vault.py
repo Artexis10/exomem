@@ -41,6 +41,7 @@ from . import (
     freshness,
     held_fs,
     privacy_log,
+    request_budget,
     reserved_paths,
     stack_sites,
     view_lag,
@@ -1249,6 +1250,7 @@ def _leaf_hash(path: Path, expected: PathIdentity) -> str:
         if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded content identity changed")
         while chunk := os.read(descriptor, 65536):
+            request_budget.checkpoint()
             digest.update(chunk)
     finally:
         os.close(descriptor)
@@ -1659,6 +1661,7 @@ def _descriptor_hash(descriptor: int, expected: PathIdentity) -> str:
         if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
         while chunk := os.read(descriptor, 65536):
+            request_budget.checkpoint()
             digest.update(chunk)
         if not _same_identity(expected, os.fstat(descriptor)):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
@@ -4149,6 +4152,7 @@ def _read_bounded_guarded_snapshot(
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
+            request_budget.checkpoint()
             chunk = os.read(leaf, min(65536, remaining))
             if not chunk:
                 break
@@ -4274,6 +4278,7 @@ def _read_bounded_windows_snapshot(
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
+            request_budget.checkpoint()
             chunk = os.read(leaf, min(65536, remaining))
             if not chunk:
                 break
@@ -5257,6 +5262,34 @@ def _governed_advisory_target(
     return target
 
 
+class _NativePrepared(Exception):
+    """Owner-local final preparation snapshot; no canonical effect has started."""
+
+    def __init__(self, value: dict):
+        super().__init__("native operation prepared")
+        self.value = value
+
+
+class DefiniteNoEffect(Exception):
+    """A native owner stopped this invocation before its publication path."""
+
+    #: The native no-effect protocol's one reason: the sealed destination already exists.
+    DESTINATION_EXISTS = "destination_exists"
+
+    def __init__(self, reason: str, evidence: dict):
+        super().__init__(reason)
+        self.reason, self.evidence = reason, evidence
+
+    @staticmethod
+    def destination_evidence(destination: str) -> dict:
+        """The exact evidence a `DESTINATION_EXISTS` stop carries and its terminal must repeat."""
+        return {"destination": destination, "publication_started": False}
+
+    @classmethod
+    def destination_exists(cls, destination: str) -> DefiniteNoEffect:
+        return cls(cls.DESTINATION_EXISTS, cls.destination_evidence(destination))
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -5271,6 +5304,7 @@ def batch_atomic_write(
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _prepare: Callable[[list[PlannedWrite]], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -5291,6 +5325,19 @@ def batch_atomic_write(
                 "defer_graph_completion requires vault_root and post_commit_fanout=False"
             )
         caller_writes = list(writes)
+        if _prepare is not None:
+            from . import vocabulary_gate
+
+            # Preparation stages the complete native batch but owns no heat, queue or receipt.
+            with vocabulary_gate.preparation_context(Path(vault_root)):
+                return _batch_atomic_write_locked(
+                    caller_writes, vault_root=vault_root, required_guards=required_guards,
+                    completion_guards=completion_guards, semantic_states=semantic_states,
+                    post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                    defer_graph_completion=defer_graph_completion,
+                    _vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                    _validate_prepared_bindings=_validate_prepared_bindings, _prepare=_prepare,
+                )
         from . import curation_witness
 
         augmented_writes, curation_witness_state = curation_witness.augment_batch(
@@ -5320,6 +5367,7 @@ def batch_atomic_write(
                 _vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 publication_intents_out=publication_intents_out,
                 _validate_prepared_bindings=_validate_prepared_bindings,
+                _before_first_install=curation_witness.publication_hook(curation_witness_state),
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -5344,6 +5392,8 @@ def _batch_atomic_write_locked(
     _vocabulary_auxiliaries: Any | None = None,
     publication_intents_out: list[Any] | None = None,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _prepare: Callable[[list[PlannedWrite]], None] | None = None,
+    _before_first_install: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5371,7 +5421,7 @@ def _batch_atomic_write_locked(
     deferred_checkpoint: GraphSyncCheckpoint | None = None
     deferred_predecessor: GraphSyncCheckpoint | None = None
     publication_intents: list[Any] = []
-    publication_intents_enabled = vault_root is not None and (
+    publication_intents_enabled = _prepare is None and vault_root is not None and (
         post_commit_fanout or publication_intents_out is not None
     )
     if vault_root is not None:
@@ -5543,7 +5593,7 @@ def _batch_atomic_write_locked(
     # Later is also wrong: after the replace, a crash cut between the markdown
     # and the enqueue loses the dirty set, which is the whole property the
     # pre-commit ordering buys.
-    if graph_debt_checkpoint is not None:
+    if graph_debt_checkpoint is not None and _prepare is None:
         _enqueue_graph_debt(Path(vault_root), graph_debt_checkpoint)
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
@@ -5565,7 +5615,10 @@ def _batch_atomic_write_locked(
                 # and the seam applies the private-state posture at creation.
                 from . import state_paths
 
-                state_paths.ensure_vault_state_dir(Path(vault_root))
+                if _prepare is None:
+                    state_paths.ensure_vault_state_dir(Path(vault_root))
+                else:
+                    _create_parent_dirs(state_paths.vault_state_dir(Path(vault_root)), created_dirs)
             for directory in write.ensure_directories:
                 if vault_root is None or state_target:
                     _create_parent_dirs(directory, created_dirs)
@@ -5688,7 +5741,7 @@ def _batch_atomic_write_locked(
                     or actual_hash != write.expected_hash
                 ):
                     raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
-        if vault_root is not None:
+        if vault_root is not None and _prepare is None:
             from . import derived_receipts
             from .writer_lease import (
                 active_derived_batch_custody,
@@ -5822,7 +5875,8 @@ def _batch_atomic_write_locked(
             vault_root, staged, snapshots, auxiliary_manifest=_vocabulary_auxiliaries
         )
         validate_active_write_fence()
-        log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
+        if _prepare is None:
+            log_active_mutation_phase("canonical_commit_started", affected_count=len(staged))
         for index, (final, workspace, artifact) in enumerate(staged):
             if index == 0 and _validate_prepared_bindings is not None:
                 _validate_prepared_bindings()
@@ -5876,6 +5930,12 @@ def _batch_atomic_write_locked(
                 if source_guards[index] is not None
                 else None
             )
+            if index == 0 and _prepare is not None:
+                _prepare(caller_writes)
+                raise ValueError("native preparation must stop before publication")
+            if index == 0 and _before_first_install is not None:
+                # The owner's own durable write, never in `replaced`: a rollback does not revert it.
+                _before_first_install()
             replacement_intents: tuple[Any, ...] = ()
             if publication_intents_enabled:
                 from . import file_watcher
@@ -7263,19 +7323,18 @@ class _InboundEdit:
     gone: frozenset[str]  # rels whose edges and basename contribution are dropped
     # rel -> signature of the bytes this edit reflects; None for a file seen absent
     applied: dict[str, freshness.FileSignature | None]
+    source_hashes: dict[str, str]
 
 
 @dataclass
 class _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
     stem_counts: dict[str, int]  # basename -> occurrences in walk
-    known_rels: set[str]  # vault-relative POSIX paths already
-    # counted toward stem_counts — lets
-    # apply() tell a rename's "new" side
-    # from an in-place edit.
+    sources: dict[str, str]  # full source hashes for the paths counted toward stem_counts
     # The last checkpoint at which this data was proven complete. A patch can
     # advance data that has one; data without one can only be rebuilt.
     checkpoint: freshness.FreshnessCheckpoint | None = None
+    sources_proven: bool = False  # source records belong to this complete checkpoint, never a partial patch
     stem_paths: dict[str, set[str]] = field(init=False)
     # file -> the bucket keys holding its entries, so a patch visits only those.
     file_targets: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -7288,13 +7347,13 @@ class _InboundIndexData:
 
     def __post_init__(self) -> None:
         self.stem_paths = {}
-        for rel in self.known_rels:
+        for rel in self.sources:
             self.stem_paths.setdefault(PurePosixPath(rel).stem, set()).add(rel)
 
     def _forget(self, rel: str) -> None:
-        if rel not in self.known_rels:
+        if rel not in self.sources:
             return
-        self.known_rels.remove(rel)
+        self.sources.pop(rel)
         stem = PurePosixPath(rel).stem
         paths = self.stem_paths[stem]
         paths.remove(rel)
@@ -7304,10 +7363,11 @@ class _InboundIndexData:
             self.stem_paths.pop(stem)
             self.stem_counts.pop(stem)
 
-    def _remember(self, rel: str) -> None:
-        if rel in self.known_rels:
+    def _remember(self, rel: str, digest: str) -> None:
+        existing = rel in self.sources
+        self.sources[rel] = digest
+        if existing:
             return
-        self.known_rels.add(rel)
         stem = PurePosixPath(rel).stem
         paths = self.stem_paths.setdefault(stem, set())
         paths.add(rel)
@@ -7316,9 +7376,9 @@ class _InboundIndexData:
     def count_after(self, edit: _InboundEdit) -> int:
         """How many files this index would know after `edit`, without applying it."""
         return (
-            len(self.known_rels)
-            + sum(1 for rel in edit.reread if rel not in self.known_rels)
-            - sum(1 for rel in edit.gone if rel in self.known_rels)
+            len(self.sources)
+            + sum(1 for rel in edit.reread if rel not in self.sources)
+            - sum(1 for rel in edit.gone if rel in self.sources)
         )
 
     def apply(self, edit: _InboundEdit) -> None:
@@ -7330,6 +7390,8 @@ class _InboundIndexData:
         file's order against files touched at another time does not mirror a
         fresh walk, but the set of entries per target always matches a rebuild.
         """
+        # Partial rows cannot authorize deletion proof at their earlier complete checkpoint.
+        self.sources_proven = False
         affected = edit.gone | frozenset(edit.reread)
         stale_keys: set[str] = set()
         for rel in affected:
@@ -7363,7 +7425,7 @@ class _InboundIndexData:
         for rel in edit.gone:
             self._forget(rel)
         for rel in edit.reread:
-            self._remember(rel)
+            self._remember(rel, edit.source_hashes[rel])
 
 
 def _plan_inbound_edit(
@@ -7400,6 +7462,7 @@ def _plan_inbound_edit(
         else:
             changed.discard(rel)
     reread: dict[str, list[tuple[int, str, str, str]]] = {}
+    source_hashes: dict[str, str] = {}
     gone = set(deleted)
     applied: dict[str, freshness.FileSignature | None] = {rel: None for rel in deleted}
     for rel in changed:
@@ -7419,9 +7482,10 @@ def _plan_inbound_edit(
             (lineno, context, raw, _inbound_bucket_key(raw))
             for lineno, context, raw in _scan_wikilinks(text)
         ]
+        source_hashes[rel] = content_hash(text)
         if before == after:  # bytes changed while read: apply them, never vouch for them
             applied[rel] = after
-    return _InboundEdit(reread=reread, gone=frozenset(gone), applied=applied)
+    return _InboundEdit(reread=reread, gone=frozenset(gone), applied=applied, source_hashes=source_hashes)
 
 
 @dataclass
@@ -7482,7 +7546,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
 
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
-    known_rels: set[str] = set()
+    sources: dict[str, str] = {}
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
     for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
@@ -7492,7 +7556,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
         except (OSError, UnicodeDecodeError, PathGuardError, ValueError):
             continue
         stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
-        known_rels.add(md_rel)
+        sources[md_rel] = content_hash(text)
         keys: list[str] = []
         for lineno, context, raw in _scan_wikilinks(text):
             normalized = _inbound_bucket_key(raw)
@@ -7512,7 +7576,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     return _InboundIndexData(
         buckets=buckets,
         stem_counts=stem_counts,
-        known_rels=known_rels,
+        sources=sources,
         file_targets=file_targets,
         next_seq=seq,
     )
@@ -7613,6 +7677,7 @@ def _catch_up_inbound(
                 break  # nothing more is coming: an unreadable page or a pending external change
             continue
         data.checkpoint, data.applied = delta.to, {}
+        data.sources_proven = True
         with _INBOUND_INDEX_LOCK:
             if state.generation != generation:
                 break
@@ -7620,6 +7685,7 @@ def _catch_up_inbound(
                 _INBOUND_INDEX[root] = (delta.to.triple, data)
                 return True
     data.checkpoint, data.applied = None, {}
+    data.sources_proven = False
     return False
 
 
@@ -7770,6 +7836,7 @@ def on_inbound_files_changed(
             data.applied.update(edit.applied)
             if proven:
                 data.checkpoint = bridge.to
+                data.sources_proven = True
                 data.applied = {}
                 _INBOUND_INDEX[root] = (bridge.to.triple, data)
 
@@ -7807,7 +7874,7 @@ def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _Inbound
     return _InboundIndexData(
         buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
-        known_rels=set(data.stem_paths.get(basename, ())),
+        sources={rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())},
     )
 
 
@@ -7864,6 +7931,9 @@ def cached_inbound_wikilinks(
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
     """
+    from .governance import egress
+    from .published_admission import admission_of
+
     root = str(vault_root.resolve())
     state = _INBOUND_INDEX_GENERATIONS.get(root)
     if state is None:
@@ -7891,29 +7961,88 @@ def cached_inbound_wikilinks(
     finally:
         _INBOUND_INDEX_LOCK.release()
 
+    admission = admission_of(visible)
+    authority = admission.identity() if admission is not None else None
+    reading = visible
+    checked: tuple[freshness.FreshnessCheckpoint, int | None] | None = None
+
+    def registry_current() -> bool:
+        if checked is None:
+            return False
+        target, pending_epoch = checked
+        # Instance and generation identify this exact endpoint without rehashing the registry map.
+        return (
+            freshness.consumer_checkpoint_instance() == target.instance_id
+            and freshness.generation(vault_root, "vault") == target.generation
+            and freshness.external_pending_epoch(vault_root) == pending_epoch
+        )
+
+    def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
+        if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
+            return frozenset()
+        try:
+            if (
+                state.generation != cache_generation or _INBOUND_INDEX.get(root) is not cached
+                or cached[1].checkpoint != checkpoint or not cached[1].sources_proven
+            ):
+                return frozenset()
+            source_hashes = {path: cached[1].sources[path] for path in paths if path in cached[1].sources}
+        finally:
+            _INBOUND_INDEX_LOCK.release()
+        return view_lag.source_withheld_paths(vault_root, reader, source_hashes)
+
     def current() -> bool:
         """The registry has nothing this reader could see that the data lacks."""
+        nonlocal reading, checked
+        reader = None
+        if isinstance(visible, egress.ReaderView) and authority is not None:
+            reader = visible.fresh(withheld=frozenset())
+            current_admission = admission_of(reader)
+            if reader is None or current_admission is None or current_admission.identity() != authority:
+                return False
+        pending_epoch = freshness.external_pending_epoch(vault_root)
+        target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
             and freshness.consumer_checkpoint_instance() == instance
             and freshness.generation(vault_root, "vault") == generation
             and not freshness.external_pending(vault_root)
         ):
-            return True
-        # No deleted-page proof: the verdict store is stamped by another checkpoint than this index.
-        return visible is not None and view_lag.consumer_lag_only_withheld(
-            vault_root, checkpoint, visible, pending=True
-        )
+            held = frozenset()
+        elif visible is None:
+            return False
+        else:
+            try:
+                delta = freshness.delta_since(vault_root, "vault", checkpoint)
+            except Exception as error:  # noqa: BLE001 - an unreadable optional proof retains the lag
+                view_lag._report_fault("cached_inbound_wikilinks", error)
+                return False
+            target = delta.to
+            held = view_lag.withheld_lag(
+                vault_root, delta, reader if reader is not None else visible, pending=True,
+                withheld_before=(lambda paths: withheld_before(paths, reader)) if reader is not None else None,
+            )
+        if held is None or not egress.pin_proven_withheld(held):
+            return False
+        if reader is not None:
+            # Pinning changes the request's exclusions, not predicates already constructed.
+            reading = reader.fresh()
+            current_admission = admission_of(reading)
+            if reading is None or current_admission is None or current_admission.identity() != authority:
+                return False
+        checked = target, pending_epoch
+        return registry_current()
 
     if not current():
         return None
-    result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading)
     if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
         if (
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
+            or not registry_current()
         ):
             return None
     finally:
@@ -7963,6 +8092,7 @@ def _select_inbound_wikilinks(
         for e in sorted(candidates, key=lambda e: e.seq)
         # Skip the target file itself (self-references aren't inbound).
         if e.path.removesuffix(".md") not in self_keys
+        and (visible is None or visible(e.path))
     ]
 
 
@@ -8083,12 +8213,14 @@ class WikilinkResolver:
             for rel_path, title in entries
         )
         for rel_path, title_lower in normalized:
+            request_budget.checkpoint()
             resolver._add_entry(rel_path, title_lower)
         return resolver
 
     def _build(self) -> None:
         vault_resolved = self.vault_root.resolve()
         for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
+            request_budget.checkpoint()
             try:
                 rel = md.resolve().relative_to(vault_resolved).as_posix()
             except ValueError:

@@ -5309,13 +5309,38 @@
     }
   },
   "read_episode": {
-    "description": "Inspect episode recaps, candidates or source coverage without writing. Select one operation.kind.",
+    "description": "Inspect episode recaps, candidates or coverage, or recover one preserved material's original and reading states. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "operation": {
           "description": "One operation, selected by `kind`.",
           "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "material",
+                  "type": "string"
+                },
+                "episode": {},
+                "input_revision": {
+                  "description": "For `resume`: the revision your coverage covered.",
+                  "type": "integer"
+                },
+                "material_key": {
+                  "description": "For `material`: key with its original binding input_revision. Original and reading recover independently under current authority.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "episode",
+                "input_revision",
+                "material_key"
+              ],
+              "additionalProperties": false
+            },
             {
               "type": "object",
               "properties": {
@@ -5374,8 +5399,8 @@
           },
           "properties": {
             "episode": {
-              "type": "string",
-              "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
+              "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise.",
+              "type": "string"
             },
             "order": {
               "items": {
@@ -7954,7 +7979,7 @@
     }
   },
   "record_episode": {
-    "description": "Record an episode, prepare a capture, save a disposition or resume its workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes. Select one operation.kind.",
+    "description": "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -8018,6 +8043,123 @@
               },
               "required": [
                 "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "input",
+                  "type": "string"
+                },
+                "episode": {},
+                "input_revision": {},
+                "journal_digest": {},
+                "materials": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "version": {
+                      "const": 1,
+                      "type": "integer"
+                    },
+                    "items": {
+                      "items": {
+                        "additionalProperties": false,
+                        "anyOf": [
+                          {
+                            "required": [
+                              "original_reference"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "reading_reference"
+                            ]
+                          }
+                        ],
+                        "properties": {
+                          "key": {
+                            "maxLength": 160,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "producer": {
+                            "maxLength": 256,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "producer_version": {
+                            "maxLength": 160,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "original_reference": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "reading_reference": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "locator": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "kind": {
+                                "const": "dataset_rows"
+                              },
+                              "record_path": {
+                                "maxLength": 2048,
+                                "minLength": 1,
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "row_indices": {
+                                "items": {
+                                  "maximum": 9999,
+                                  "minimum": 0,
+                                  "type": "integer"
+                                },
+                                "maxItems": 32,
+                                "minItems": 1,
+                                "type": "array",
+                                "uniqueItems": true
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "record_path",
+                              "row_indices"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "key"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 8,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "items"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "kind",
+                "episode",
+                "input_revision",
+                "journal_digest",
+                "materials"
               ],
               "additionalProperties": false
             },
@@ -8209,17 +8351,17 @@
               "type": "string",
               "description": "The `ep-` key a record returned; omit on a conversation's first record, required otherwise."
             },
+            "input_revision": {
+              "description": "For `resume`: the revision your coverage covered.",
+              "type": "integer"
+            },
+            "journal_digest": {
+              "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT.",
+              "type": "string"
+            },
             "candidate": {
               "type": "string",
               "description": "Your stable key for one change."
-            },
-            "input_revision": {
-              "type": "integer",
-              "description": "For `resume`: the revision your coverage covered."
-            },
-            "journal_digest": {
-              "type": "string",
-              "description": "For `resume`: from your last candidates/prepare/ disposition result; stale refuses with EPISODE_REVISION_CONFLICT."
             },
             "order": {
               "items": {

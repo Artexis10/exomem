@@ -203,15 +203,29 @@ def _owns_key(regions, key):
     return False
 
 
-def owned_entry(root, marker, path):
-    """None means an ordinary file only when the marker completely names C ownership."""
+def _require_current_marker(marker):
     if marker["version"] != 2:
         # Legacy markers cannot distinguish arbitrary source paths; repair needs canonical custody, not editable views.
         raise CollectionStoreError("COLLECTION_STORE_MARKER_UPGRADE_REQUIRED", "canonical marker ownership needs an upgrade")
-    path = collections._reference_key(Path(root), path)
-    if path is None:
+
+
+def owned_entry(root, marker, path):
+    """None means an ordinary file only when the marker completely names C ownership."""
+    reference = collections._reference_key(Path(root), path)
+    if reference is None:
+        # A legacy marker is refused for its version before the path.
+        _require_current_marker(marker)
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "invalid canonical projection path")
-    key = collections._portable_path_key(path)
+    return _owned_entry_for_key(marker, reference)
+
+
+def _owned_entry_for_key(marker, reference):
+    """`owned_entry` for a path that `collections._reference_key` already normalized.
+
+    That normalization is idempotent, so a caller that holds its result skips folding it again.
+    """
+    _require_current_marker(marker)
+    key = collections._portable_path_key(reference)
     return next((entry for entry in marker["collections"] if _owns_key(_entry_regions(entry), key)), None)
 
 

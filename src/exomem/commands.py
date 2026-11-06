@@ -73,6 +73,7 @@ from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
 from . import envelope as envelope_module
+from . import episode_materials as episode_materials_module
 from . import episode_memory as episode_memory_module
 from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
@@ -177,7 +178,7 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
-from .governance import connector_boundary
+from .governance import companions, connector_boundary
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -2534,6 +2535,7 @@ _PRE_ADMISSION_SIGNALS = (
 )
 
 
+@companions.request_byte_proofs()
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -3952,11 +3954,17 @@ def op_audit(
         vault_root,
         categories=categories,
         semantic_detail=detail,
+        budget=request_budget_module.current(),
     )
-    return report.as_public_dict(
+    result = report.as_public_dict(
         detail=detail,
         legacy_sample_limit=legacy_sample_limit,
     )
+    budget = request_budget_module.current()
+    block = budget.as_response_block() if budget is not None else None
+    if block is not None:
+        result["budget"] = block
+    return result
 
 
 def op_attention(
@@ -8856,11 +8864,17 @@ _EpisodeProposalArgument = Annotated[
 
 
 
+_EpisodeMaterialsArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema({"anyOf": [episode_materials_module.ARGUMENT_SCHEMA, {"type": "null"}]}),
+]
+
+
 def op_episode_memory(
     vault_root: Path,
     source_schema: object,
     action: Literal[
-        "record", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
+        "record", "input", "material", "inspect", "candidates", "prepare", "disposition", "resume", "coverage"
     ],
     episode: str | None = None,
     subject: str | None = None,
@@ -8880,6 +8894,8 @@ def op_episode_memory(
     reason: str | None = None,
     input_revision: int | None = None,
     journal_digest: str | None = None,
+    materials: _EpisodeMaterialsArgument = None,
+    material_key: str | None = None,
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
@@ -8899,7 +8915,7 @@ def op_episode_memory(
     Help: references/operations.md.
 
     Args:
-        action: `record` writes; `inspect`, `candidates`, `coverage` read.
+        action: `record` and `input` write; `material`, `inspect`, `candidates`, `coverage` read.
         episode: The `ep-` key a record returned; omit on a conversation's
             first record, required otherwise.
         subject: One line, max 120 characters.
@@ -8916,6 +8932,14 @@ def op_episode_memory(
         input_revision: For `resume`: the revision your coverage covered.
         journal_digest: For `resume`: from your last candidates/prepare/
             disposition result; stale refuses with EPISODE_REVISION_CONFLICT.
+        materials: For `input`: version 1 with up to 8 uniquely keyed original/
+            reading references, within 16 KiB. Empty items clears; later recaps
+            inherit without refreshing. Requires current input_revision and
+            journal_digest. Equivalent current replacement writes nothing.
+            After a lost reply inspect public state before another mutation;
+            stale guards refuse unchanged, never transparently reseal a retry.
+        material_key: For `material`: key with its original binding input_revision.
+            Original and reading recover independently under current authority.
         max_leaves: For `resume`: 1 to 16.
         postcommit: For `resume`: true attests review instead of executing.
 
@@ -8939,6 +8963,8 @@ def op_episode_memory(
         "reason": reason,
         "input_revision": input_revision,
         "journal_digest": journal_digest,
+        "materials": materials,
+        "material_key": material_key,
         "order": order,
         "max_leaves": max_leaves,
         "postcommit": postcommit,
@@ -8948,6 +8974,11 @@ def op_episode_memory(
         "inspect": (set(), set()),
         "candidates": (set(), set()),
         "coverage": (set(), set()),
+        "input": (
+            {"materials", "input_revision", "journal_digest"},
+            {"materials", "input_revision", "journal_digest"},
+        ),
+        "material": ({"input_revision", "material_key"}, {"input_revision", "material_key"}),
         "prepare": ({"candidate", "proposal"}, {"candidate", "proposal"}),
         "disposition": (
             {"candidate", "disposition", "reason"},
@@ -8960,7 +8991,7 @@ def op_episode_memory(
     }.get(action, (None, None))
     if allowed is None:
         raise ValueError(
-            "EPISODE_INVALID: action must be record, inspect, candidates, prepare, "
+            "EPISODE_INVALID: action must be record, input, material, inspect, candidates, prepare, "
             "disposition, resume or coverage"
         )
     supplied = {**recap, **workflow}
@@ -8986,6 +9017,16 @@ def op_episode_memory(
             about=about,
             client=client,
         )
+    if action in {"input", "material"}:
+        from .episode_recovery import EpisodeInputOwner
+
+        key = episode_workflow_module._key(episode)  # noqa: SLF001 - share the public episode-key contract.
+        owner = EpisodeInputOwner(vault_root)
+        if action == "input":
+            return owner.bind_materials(
+                key, input_revision=input_revision, journal_digest=journal_digest, materials=materials,
+            )
+        return owner.recover_material(key, input_revision=input_revision, material_key=material_key)
     if action == "candidates":
         return episode_workflow_module.inspect(vault_root, episode=episode)
     if action == "coverage":
@@ -9404,6 +9445,8 @@ def _process_media(
                 "job_id": result.job_id,
                 "requeued": result.requeued,
             }
+            if result.document_container is not None:
+                row["document_container"] = result.document_container
             results.append(row)
         return {
             "operation": operation,
@@ -9463,7 +9506,9 @@ def _process_media(
             "MEDIA_PATH_OUTSIDE_KB",
             f"media path must be inside {kb_dirname()}: {path}",
         ) from exc
-    if media_processing.classify_media(binary) is None:
+    from . import document_containers
+
+    if media_processing.classify_media(binary) is None and not document_containers.is_container(binary):
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
 
     try:
@@ -9483,6 +9528,8 @@ def _process_media(
         "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
         "job_id": result.job_id,
     }
+    if result.document_container is not None:
+        payload["document_container"] = result.document_container
     if operation in mutation_terminal_module.MEDIA_REQUEUE_OPERATIONS:
         payload["requeued"] = result.requeued
     payload["index_refreshed"] = 0
@@ -9494,8 +9541,12 @@ def _run_media_operation(
     vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
 ):
     """Run one explicit media operation on one governed binary."""
-    from . import media_processing
+    from . import document_containers, media_processing
 
+    if document_containers.is_container(binary):
+        if language is not None or multilingual or operation == "reprocess":
+            raise media_processing.MediaProcessingError("UNSUPPORTED_MEDIA", "process or retry the container; reprocess individual document payloads without a language option")
+        return media_processing.process_container(vault_root, binary, retry=operation == "retry", commit_guard=commit_guard)
     if operation == "process" and (language is not None or multilingual):
         return media_processing.process_declared_media(
             vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
@@ -13646,6 +13697,17 @@ def _resolved_invocation_selector(command: Command, kwargs: dict[str, Any], sele
     if parameter is None or parameter.default is inspect.Parameter.empty:
         return _MISSING_SELECTOR_DEFAULT
     return parameter.default
+
+
+
+def invocation_is_audit(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Resolve audit routes from command metadata, including omitted defaults."""
+    if command.leaf is op_audit:
+        return True
+    if "audit" not in command.routes:
+        return False
+    selector = egress_module.selector_for_command(command.name)
+    return selector is not None and _resolved_invocation_selector(command, kwargs, selector) == "audit"
 
 
 def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[str, Any]) -> bool:

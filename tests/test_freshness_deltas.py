@@ -756,6 +756,28 @@ def test_an_adopted_origin_survives_the_watchers_boot_seed(tmp_path: Path) -> No
     assert delta.changed == frozenset() and delta.deleted == frozenset()
 
 
+@pytest.mark.parametrize("later_event", [False, True], ids=["before_event", "after_event"])
+def test_a_local_consumer_cannot_borrow_an_adopted_floor_after_a_seed(
+    tmp_path: Path, later_event: bool
+) -> None:
+    """A retained resolver must not skip the corpus changes hidden by a new seed."""
+    page = _kb_file(tmp_path, "consumer-before-seed.md")
+    _seed(tmp_path, [page])
+    local = freshness.recall_checkpoint(tmp_path, "vault")
+    inherited = _foreign(local)
+    assert freshness.adopt_recall_origin(tmp_path, "vault", inherited)
+
+    _seed(tmp_path, [page])
+    if later_event:
+        _kb_file(tmp_path, page.name, body="A later recorded write.")
+        freshness.on_files_changed(tmp_path, changed=[page])
+
+    local_delta = freshness.recall_delta_since(tmp_path, "vault", local)
+    assert not local_delta.complete, "only the explicitly adopted snapshot may cross the seed"
+    assert not local_delta.changed and not local_delta.deleted
+    assert freshness.recall_delta_since(tmp_path, "vault", inherited).complete
+
+
 def test_a_seed_drops_an_origin_whose_window_it_cannot_honestly_bridge(
     tmp_path: Path,
 ) -> None:

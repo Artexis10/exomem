@@ -1375,20 +1375,14 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
     terminal proves what it can from what is on disk. Two facts are provable and
     they are *different answers*:
 
-    * the sidecar acknowledges the committed generation -- the graph is current
-      for this write, which is exactly the `completed` this field has always
-      meant;
-    * it does not, and work is still queued against it -- `pending`.
+    * the sidecar acknowledges the committed generation, has no queued repair,
+      and has not withdrawn availability -- `completed`;
+    * required repair remains queued or availability is withdrawn -- `pending`.
 
-    Reporting nothing for the first is what a queue-only probe does, and it grows
-    **more** wrong as the drain gets healthier: a write whose repair landed before
-    its response was shaped then says nothing about the graph at all, and a caller
-    cannot tell a converged graph from an unreported one. Measured at 16 of 43
-    writes in one 400-page run once the drain stopped being refused.
-
-    Both terms still matter for `pending`: an unacknowledged checkpoint with an
-    empty queue is a rebuild's business, and a queue holding later work says
-    nothing about whether *this* generation converged.
+    A covering acknowledgement alone does not prove that graph relations are
+    current. Later queued repair or a withdrawn marker still reports pending.
+    An unacknowledged checkpoint with no queued repair remains the rebuild
+    coordinator's responsibility.
 
     Never raises. This runs while shaping a terminal for canonical bytes that are
     already durable; a probe that failed loudly here would turn a successful
@@ -1400,11 +1394,13 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
         committed = graph_sync.read_checkpoint(vault_root)
         if committed is None:
             return None
-        acknowledged = graph_sync.acknowledged_checkpoint(vault_root)
-        if acknowledged is not None and acknowledged.covers(committed):
-            return {"graph_sync": "completed"}
-        if deferred_index.list_graph_paths(vault_root):
+        state, acknowledged = graph_sync.acknowledgement_state(vault_root, require_available=True)
+        if deferred_index.list_graph_paths(vault_root, limit=1):
             return graph_sync.committed_graph_queued(committed)
+        if acknowledged is not None and acknowledged.covers(committed):
+            if state == "unavailable":
+                return graph_sync.committed_graph_unavailable(committed)
+            return {"graph_sync": "completed"}
         return None
     except Exception:  # noqa: BLE001 - a report must not fail a durable write
         logger.warning("durable graph outcome probe failed", exc_info=True)
@@ -2000,6 +1996,11 @@ class LeaseConfig:
     @property
     def enabled(self) -> bool:
         return bool(self.url)
+
+    @property
+    def coordinated_across_hosts(self) -> bool:
+        """Writer authority can move to another host: coordination is on in the multi-host topology."""
+        return self.enabled and self.topology == "multi-host"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LeaseConfig:
@@ -8617,6 +8618,7 @@ def invoke_command(
     **kwargs: Any,
 ) -> Any:
     from .commands import (
+        invocation_is_audit,
         invocation_is_read_only,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
@@ -8823,38 +8825,71 @@ def invoke_command(
     from . import published_admission
     from .collection_store import ownership
     from .collection_store import preview as store_preview
+    from .governance import companions
 
     # The command's store-owned pages are decided on one store request per decision shape, dropped
     # with the command; a refused request withholds them together for the rest of it.
     with ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector, \
-            published_admission.deciding():
+            published_admission.deciding(), companions.request_byte_proofs():
+        from .cli_ops import _AuditBudgetExhausted
+
+        budget = request_budget.current()
+        checkpoint = (
+            request_budget.ReadCheckpoint(budget)
+            if budget is not None and invocation_is_audit(command, kwargs) else None
+        )
+
+        def finish_ownership(check: request_budget.ReadCheckpoint | None) -> None:
+            with request_budget.checking(check), call_spans.span("command.ownership_finish"):
+                if check is not None:
+                    check()
+                ownership_scope.finish()
+                if check is not None:
+                    check()
+
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
-            # Fixed phase labels carry timing only, never caller or vault data.
-            with body_meter as measured, call_spans.span("command.body", measured):
-                result = _invoke()
-            # The terminal filter decides the store-owned pages in a scope of its own, so it asks the
-            # store live rather than replaying the body's verdict; the one place that scope can
-            # withhold the pages is here, so this is also where the owner is told it did.
-            with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
-                result = postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                result = store_preview.note_withheld_pages(command.name, result, injected[0])
-        except BaseException as error:
             try:
-                with call_spans.span("command.terminal_filter"):
-                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            finally:
+                # Fixed phase labels carry timing only, never caller or vault data.
+                with body_meter as measured, call_spans.span("command.body", measured):
+                    result = _invoke()
+                # The terminal filter asks the store live rather than replaying the body's verdict.
+                with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
+                    result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
+                                        checkpoint=checkpoint)
+                    result = store_preview.note_withheld_pages(command.name, result, injected[0])
+                finish_ownership(checkpoint)
+            except BaseException as error:
+                # This exact internal terminal contains no content to scan or prove again.
+                if type(error) is _AuditBudgetExhausted:
+                    raise
                 try:
-                    ownership_scope.finish()
-                finally:
-                    with call_spans.span("command.disclosure_receipt"):
-                        emit_boundary_receipt(collector)
-            raise
-        try:
-            with call_spans.span("command.ownership_finish"):
-                ownership_scope.finish()
+                    if isinstance(error, request_budget.ReadBudgetExhausted):
+                        raise
+                    # Fatal signals keep their existing filtering and ownership finalization.
+                    error_checkpoint = checkpoint if isinstance(error, Exception) else None
+                    with request_budget.checking(error_checkpoint):
+                        try:
+                            if error_checkpoint is not None:
+                                error_checkpoint()
+                            with call_spans.span("command.terminal_filter"):
+                                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+                            if error_checkpoint is not None:
+                                error_checkpoint()
+                        except request_budget.ReadBudgetExhausted:
+                            raise
+                        except BaseException as filtering_error:
+                            if type(filtering_error) is not _AuditBudgetExhausted:
+                                finish_ownership(error_checkpoint if isinstance(filtering_error, Exception) else None)
+                            raise
+                        finish_ownership(error_checkpoint)
+                except request_budget.ReadBudgetExhausted:
+                    if budget is not None:
+                        budget.note_truncated("audit.release")
+                    raise _AuditBudgetExhausted() from None
+                raise
         finally:
             with call_spans.span("command.disclosure_receipt"):
                 emit_boundary_receipt(collector)

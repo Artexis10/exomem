@@ -13,6 +13,7 @@ from contextlib import closing
 
 import pytest
 from test_collection_store_migration import (
+    PLANNING,
     WORK,
     X3,
     legacy_vault,
@@ -24,14 +25,14 @@ from test_collection_store_migration import (
 )
 from test_collection_store_migration import env as env
 from test_collection_store_service import OWNER, call
-from test_collection_store_writer import CID, KEY
+from test_collection_store_writer import CID, KEY, OTHER
 from test_governance_egress import EXTERNAL, write_rule, write_scope
 
 from exomem import commands, curation, episode_workflow, records, writer_lease
 from exomem import schema as schema_module
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import chain, connection, runtime
+from exomem.collection_store import chain, connection, curation_step, runtime
 from exomem.collection_store.preview import bound_writer
 from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -274,16 +275,11 @@ def test_a_run_approved_before_the_migration_resumes_and_commits_once(env, capsy
     run, operation = leaf["run_id"], leaf["operation_id"]
     plan_id, fingerprint = curation.CurationStore(root).identities(run)
 
-    def stopped(name):
-        if name == "after-prepared-state":
-            raise curation.CurationFault(name)
-
-    # The owner approves the run, and the process stops before its leaf runs.
-    with monkeypatch.context() as crash, request_scope(OWNER):
-        crash.setattr(curation, "_fault_barrier", stopped)
-        with pytest.raises(curation.CurationFault):
-            curation.apply(root, run_id=run, plan_id=plan_id, expected_plan_fingerprint=fingerprint,
-                           why="Approve the sealed work item.")
+    # The owner approves the run, and the process stops before execution joins its episode leaf.
+    # (A stop after that join is a tracked attempt, which stays uncertain by contract.)
+    with request_scope(OWNER):
+        curation.CurationStore(root).create_approval(run, plan_id=plan_id, fingerprint=fingerprint,
+                                                     why="Approve the sealed work item.")
     stop_writer()
     migrated(root, capsys).stop()
     # With no service the dispatcher refuses the resume and records no receipt, so the run stays resumable.
@@ -339,6 +335,94 @@ def test_a_crash_after_the_store_commit_reconciles_from_the_transaction_row(env,
         service.stop()
 
 
+def test_store_commit_without_evidence_file_is_never_proved_uncommitted(env, capsys, monkeypatch):
+    """Defect: an episode step that the store committed just before the process died has no evidence
+    file, so the next resume proves it published nothing and appends the item a second time."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        run, operation, _plan_id, _fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
+        commit = curation_step.commit
+
+        def die_after_the_commit(*arguments, **keywords):
+            commit(*arguments, **keywords)
+            raise ProcessCut
+
+        reviewed = episode(root, action="candidates")
+        with monkeypatch.context() as crash:
+            crash.setattr(curation_step, "commit", die_after_the_commit)
+            with pytest.raises(ProcessCut):
+                episode(root, action="resume", input_revision=reviewed["input_revision"],
+                        journal_digest=reviewed["journal_digest"])
+        assert transactions(root, run, operation) == [("append", CID)]
+        reviewed = episode(root, action="candidates")
+        leaf_id = reviewed["candidates"][0]["leaves"][0]["leaf_id"]
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+
+        assert resumed["reconciled"] == [{"leaf_id": leaf_id, "outcome": "committed"}], resumed
+        assert resumed["executed"] == []
+        assert receipts(root, run) == [("recovered-committed", "leaf")]
+        assert transactions(root, run, operation) == [("append", CID)]
+        assert titles_in_work(root).count("From an episode") == 1
+    finally:
+        service.stop()
+
+
+@pytest.mark.parametrize("served", [True, False], ids=["served store", "unserved store"])
+def test_store_step_without_transaction_retries_same_request(env, capsys, monkeypatch, served):
+    """Defect: an episode step that died before its store transaction stays uncertain for good, or
+    retries under another request id; read off the store thread, it is proved unpublished blind."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        run, operation, _plan_id, _fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
+        dispatch, resolve, dispatching = curation._dispatch_step, curation_step.resolve_guards, []
+
+        def tracked(*arguments, **keywords):
+            dispatching.append(arguments[1]["step_id"])
+            return dispatch(*arguments, **keywords)
+
+        def die_before_the_store_write(*arguments, **keywords):
+            if dispatching:
+                raise ProcessCut
+            return resolve(*arguments, **keywords)
+
+        reviewed = episode(root, action="candidates")
+        with monkeypatch.context() as crash:
+            crash.setattr(curation, "_dispatch_step", tracked)
+            crash.setattr(curation_step, "resolve_guards", die_before_the_store_write)
+            with pytest.raises(ProcessCut):
+                episode(root, action="resume", input_revision=reviewed["input_revision"],
+                        journal_digest=reviewed["journal_digest"])
+        assert transactions(root, run, operation) == []
+        if not served:
+            service.stop()
+        reviewed = episode(root, action="candidates")
+        leaf_id = reviewed["candidates"][0]["leaves"][0]["leaf_id"]
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+
+        if served:
+            assert [item["outcome"] for item in resumed["executed"]] == ["committed"], resumed
+            proof = curation.CurationStore(root).reconstruct(run)["receipts"][0]
+            assert (proof["native_reason"], proof["native_evidence"]) == (
+                curation.RECOVERY_STORE_TRANSACTION_ABSENT, {"request_id": curation.store_request_id(run, operation)})
+            assert receipts(root, run) == [("definite-no-effect", "leaf"), ("committed", "leaf")]
+            assert transactions(root, run, operation) == [("append", CID)]
+            assert titles_in_work(root).count("From an episode") == 1
+        else:
+            assert resumed["blocked"] == [{"leaf_id": leaf_id, "code": "EPISODE_OUTCOME_UNCERTAIN"}], resumed
+            assert receipts(root, run) == []
+            assert transactions(root, run, operation) == []
+    finally:
+        service.stop()
+
+
 def test_an_update_record_leaf_applies_a_correction_through_the_store(env, capsys, monkeypatch):
     """Defect: a Records correction leaf on a store collection cannot be sealed or applied, so the
     agent that observed the correction has no way to make it."""
@@ -354,6 +438,37 @@ def test_an_update_record_leaf_applies_a_correction_through_the_store(env, capsy
         assert apply_run(root, run, plan_id, fingerprint)["phase"] == "completed"
         assert rows(root, CID)[KEY]["title"] == "Corrected"
         assert transactions(root, run, operation) == [("update", CID)]
+    finally:
+        service.stop()
+
+
+def test_an_episode_planning_leaf_prepares_and_commits_through_the_store(env, capsys, monkeypatch):
+    """Defect: an episode `prepare` of a Planning leaf on a store collection runs off the store
+    thread, so the file writer refuses it and the agent cannot record the intended work."""
+    monkeypatch.setenv(episode_workflow.ENABLE_ENV, "1")
+    root = legacy_vault(env)
+    service = migrated(root, capsys)
+    try:
+        record_an_episode(root)
+        snapshot = call(root, "plan_memory", action="query", collection=PLANNING)["snapshot"]
+        prepared = episode(root, action="prepare", candidate="work", proposal={
+            "route": "planning", "alternatives": [], "evidence": "complete", "title": "Planned work",
+            "reason": "Intended work the episode observed.",
+            "leaves": [{"leaf_key": "add", "effect_revision": 1, "kind": "add-plan",
+                        "args": {"collection": PLANNING, "item": {"title": "From an episode"},
+                                 "why": "The episode expressed intended work.",
+                                 "expected_container_hash": snapshot}}]})
+        leaf = prepared["candidates"][0]["leaves"][0]
+        sealed = curation.CurationStore(root).load_plan(leaf["run_id"])["binding_manifest"][0]["prepared"]
+        assert sealed["store"]["collection_id"] == OTHER
+
+        episode(root, action="disposition", candidate="work", disposition="routed", reason="Observed.")
+        reviewed = episode(root, action="candidates")
+        resumed = episode(root, action="resume", input_revision=reviewed["input_revision"],
+                          journal_digest=reviewed["journal_digest"])
+        assert [item["outcome"] for item in resumed["executed"]] == ["committed"], resumed
+        assert transactions(root, leaf["run_id"], leaf["operation_id"]) == [("append", OTHER)]
+        assert "From an episode" in [row["title"] for row in rows(root, PLANNING).values()]
     finally:
         service.stop()
 
@@ -498,14 +613,6 @@ def view_state(root, view):
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         found = reader.execute("SELECT state FROM projection_state WHERE path = ?", (view,)).fetchone()
     return None if found is None else found[0]
-
-
-def process_cut_at(name):
-    """A fault barrier that kills the process at the named point of a curation step."""
-    def barrier(reached):
-        if reached == name:
-            raise ProcessCut
-    return barrier
 
 
 def withhold_from_external(root, paths):
@@ -716,15 +823,16 @@ def test_a_second_run_of_the_same_sealed_plan_does_not_take_the_first_runs_commi
         record_an_episode(root)
         first, operation, plan_id, fingerprint = prepare_and_route(root, leaf_into_work(container_of(root)))
         sealed = curation.CurationStore(root).load_plan(first)
-        base = {name: value for name, value in sealed.items() if name not in {"binding_manifest", "registry_ids"}}
+        base = {name: value for name, value in sealed.items()
+                if name not in {"binding_manifest", "registry_ids", "episode_invocation_version"}}
         second = curation.CurationStore(root).create_forward(
             base, binding_manifest=sealed["binding_manifest"], registry_ids=sealed["registry_ids"],
             today=dt.date.today() + dt.timedelta(days=1), allow_records=True)["run_id"]
         assert second != first and curation.CurationStore(root).identities(second) == (plan_id, fingerprint)
-        with monkeypatch.context() as crash:
-            crash.setattr(curation, "_fault_barrier", process_cut_at("after-prepared-state"))
-            with pytest.raises(ProcessCut):
-                apply_run(root, second, plan_id, fingerprint, key="apply-the-second-run")
+        # The episode binds its leaf to the first run, so the second refuses before it writes anything.
+        assert refusal(lambda: apply_run(root, second, plan_id, fingerprint, key="apply-the-second-run"))[0] == (
+            "CURATION_BINDING_STALE")
+        assert receipts(root, second) == [] and transactions(root, second, operation) == []
         apply_run(root, first, plan_id, fingerprint)
         head = store_head(root)
         assert refusal(lambda: resume_run(root, second, plan_id))[0] == "CURATION_BINDING_STALE"

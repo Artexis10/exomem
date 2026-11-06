@@ -408,6 +408,47 @@ The resolver SHALL join each pair of adjacent non-stopword tokens in one clause 
 - **WHEN** a non-owner reader's turn reaches a withheld anchor only through a join
 - **THEN** the audience decision withholds that anchor and leaves it out of the join's name-term count
 
+### Requirement: The turn slice follows the conversation
+In `maps` mode, the turn slice's anchors compile SHALL receive the request's `conversation` and `trigger`, and SHALL apply the conversation-aware activation contract to them as the `anchors` packet does. It SHALL receive no continuity refs, no `anchor` and no attribution, and SHALL NOT mint a token, learn or record heat. A slice lead that the conversation reached SHALL carry the `conversation` evidence kind, and a lead whose cue the user did not speak SHALL carry the `origin` (`focus` or `conversation`) that the anchors packet gives it. The conversation SHALL NOT change the map. For a restricted caller, the compile SHALL read the conversation's refs and entries over the caller's view. The slice's description SHALL say that the block holds what the turn and its conversation reached, with the evidence, and that it is not checked for relevance.
+
+#### Scenario: A follow-up reaches the subject of an earlier turn
+- **WHEN** an earlier user entry names the invented anchor "Pelican Ledger", and the follow-up turn reaches "Pelican Ledger" only by one contact kind that alone gives `partial`
+- **THEN** the slice lists "Pelican Ledger" as `resolved`, with the `conversation` evidence kind
+- **AND** the same turn without `conversation` lists it as `partial`
+
+#### Scenario: An anaphoric follow-up is carried from the conversation
+- **WHEN** the newest earlier user entry resolves "Pelican Ledger", and the follow-up turn points back with no words of its own subject
+- **THEN** the slice lists "Pelican Ledger" as `partial` with evidence `[conversation]`
+- **AND** the same turn without `conversation` gives a slice without "Pelican Ledger"
+
+#### Scenario: A lead reached by the agent's focus says so
+- **WHEN** a turn reaches nothing by its own words, and `conversation.focus` names the invented anchor "Pelican Ledger"
+- **THEN** the slice lists "Pelican Ledger" with `origin: "focus"`
+- **AND** a lead that the turn's own words reached carries no `origin`
+
+#### Scenario: A conversation that names a withheld page changes no byte for a restricted caller
+- **WHEN** a restricted caller's conversation names an anchor and a page that are withheld from it, in a vault and in its twin that lacks them
+- **THEN** the two packets that the caller receives are byte-identical
+
+#### Scenario: The slice compile writes nothing
+- **WHEN** a `maps` request carries a `conversation` and a continuity token
+- **THEN** the slice compile writes no session, heat or learning record; the final maps response may append private composed metadata under served-context-record
+
+### Requirement: A maps packet reports its continuity inputs
+In a served `maps` packet, `generation.conversation` SHALL be the state that the turn slice's compile computed for the request's `conversation`. When no slice compile reads the conversation, it SHALL be `absent`. `generation.continuity` SHALL be `absent` when the request carries no token, `applied` when the token carries a map generation and was minted under the serving role registry and conventions, and `stale` for any other token. `generation.continuity_thread` SHALL be `absent`.
+
+#### Scenario: A token reads applied after the map moves
+- **WHEN** a caller passes the token of its last `maps` packet after a vault write changed the map generation
+- **THEN** `generation.continuity` is `applied`, and the map is sent in full
+
+#### Scenario: A token without a map generation reads stale
+- **WHEN** a `maps` request carries a token that cannot be decoded, an `anchors` token with no map generation, or a token minted under other conventions
+- **THEN** `generation.continuity` is `stale`
+
+#### Scenario: With the slice off, the conversation is not read
+- **WHEN** `EXOMEM_ACTIVATION_TURN_SLICE` is `off` and the request carries a `conversation`
+- **THEN** `generation.conversation` is `absent`, and the packet omits the turn slice
+
 ### Requirement: Shared index collection preserves caller boundaries
 The shared working-set index SHALL collect owner-derived inputs inside the existing internal-producer scope, limited to collection in its write path. The scope SHALL restore the prior principal and disclosure collector on success and failure. It SHALL NOT replace authorization held by an active operation. External reads SHALL retain caller-view filtering, disclosure and historical admission.
 
@@ -575,10 +616,15 @@ The map SHALL be a projection of the catalogue that does not depend on the turn.
 ### Requirement: Topic membership is declared
 A topic SHALL be a domain that the vocabulary registry declares. An entry SHALL belong to a topic only through one of these:
 - its page's `topics` field, a value or a list, names the domain;
-- one of its page's project keys (its `project` and `projects` fields) maps to the domain through that key's `domain` field in the project-key registry; a project anchor belongs to its own key's domains;
-- an authored relation from the entry to a page is of a relation kind whose registry family is `membership`, and that page declares the domain through its own `topics` field or project key.
+- one of its page's project keys (its `project` and `projects` fields) maps to the domain through that key's hand-written `domain` field or a `project` carrier in the `topic-carriers` overlay registry; a project anchor belongs to its own key's domains;
+- a `folder` carrier declares the domain and its folder contains the entry;
+- a `tag` carrier declares the domain and matches one of the entry's frontmatter tags;
+- a home declares the domain and its folder contains the entry;
+- an authored relation from the entry to a page is of a relation kind whose registry family is `membership`, and that page declares the domain through its own topics, project keys, carriers or home.
 
 A declared value SHALL resolve when the domains resolver returns it as a built-in, registered or alias key; a deprecated key SHALL resolve to its replacement. A value that does not resolve SHALL give no membership, and the catalogue SHALL count it as an unresolved declaration. A page's `domain` field SHALL NOT declare membership, because it names a source's subject or an experiment's folder. Membership SHALL run from the entry to the topic and SHALL NOT be transitive: an entry SHALL NOT join a topic that its relation's target reaches only through its own relations. A mention of an anchor SHALL NOT give the mentioning page that anchor's topics. Notes that are not anchors SHALL be catalogue entries in the topics they declare.
+
+A caller denied the `topic-carriers` or `homes` overlay SHALL receive no membership from that overlay. A relation SHALL add membership only from a target admitted to the caller. Membership SHALL use the current registries at read time, so a carrier save changes the next map without a page write or catalogue refold.
 
 #### Scenario: A vault-added domain gets a domain map
 - **WHEN** the vault overlay adds a domain and pages declare it
@@ -599,6 +645,30 @@ A declared value SHALL resolve when the domains resolver returns it as a built-i
 #### Scenario: A mention does not spread membership
 - **WHEN** a note mentions an anchor of another topic and has no relation of the membership family to it
 - **THEN** the note does not join that topic
+
+#### Scenario: A project carrier gives its pages a topic
+- **WHEN** a project carrier declares a topic and a note names its key in `project` or `projects`
+- **THEN** the note joins that topic without a change to the project-key file
+
+#### Scenario: A folder carrier gives contained entries a topic
+- **WHEN** a folder carrier declares a topic and its folder contains a catalogue entry
+- **THEN** the entry joins that topic
+
+#### Scenario: A tag carrier files a note in a type folder
+- **WHEN** a note in a type folder has a tag whose carrier declares a topic
+- **THEN** the note joins that topic without a page write
+
+#### Scenario: A home gives membership
+- **WHEN** a home declares a topic and its folder contains a catalogue entry
+- **THEN** the entry joins that topic
+
+#### Scenario: A denied overlay gives no membership
+- **WHEN** a caller may not read the carrier or home overlay that declares a topic
+- **THEN** that overlay gives no topic membership to the caller's entries
+
+#### Scenario: A membership target declares topics through a carrier
+- **WHEN** an admitted membership-relation target declares a topic through a carrier
+- **THEN** the source entry joins that topic without following the target's relations
 
 ### Requirement: Profiles read by ref
 A caller SHALL be able to read an anchor profile and a topic profile by ref. A profile SHALL be compiled through the role lanes over the anchor or over the topic's members, with the categories and roles that the registries declare. Each profile line SHALL be one of these:

@@ -30,11 +30,11 @@ _ROUTES = {
     "relation_only",
     "no_capture",
 }
-_ADAPTER_PENDING_ROUTES = {"source", "evidence", "planning", "experiment"}
+_ADAPTER_PENDING_ROUTES = {"experiment"}
 _NO_EFFECT_ROUTES = _ADAPTER_PENDING_ROUTES | {"no_capture"}
-#: Routes whose leaves are optional: a `records` event routed with no leaf stays
-#: pending, as every Records event did before its leaf existed (task 3.5).
-_OPTIONAL_LEAF_ROUTES = {"records"}
+#: Integrated routes retain their historical leafless declarations as pending.
+# nosemgrep: ep-word-set -- closed episode proposal route tokens, as in _ROUTE_KINDS.
+_OPTIONAL_LEAF_ROUTES = {"records", "source", "evidence", "planning"}
 #: The curation step kinds each effect route owns. No route owns a move,
 #: delete or recover step.
 _ROUTE_KINDS = {
@@ -45,6 +45,8 @@ _ROUTE_KINDS = {
     "semantic_unit": {"edit", "supersede", curation.OBSERVE_UNIT_STEP_KIND},
     # The Records leaf is this route's alone, and this route owns nothing else.
     "records": curation.RECORDS_STEP_KINDS,
+    "source": {"capture-source"}, "evidence": {"preserve-evidence"},
+    "planning": curation.PLANNING_STEP_KINDS,
 }
 MAX_STATE_BYTES = 256 * 1024
 MAX_INPUT_REVISIONS = 64
@@ -126,7 +128,7 @@ def leaf_id(candidate: str, key: str) -> str:
 
 def _evidence(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or set(raw) - {
-        "reference", "excerpt", "digest", "about", "version_scheme"
+        "reference", "excerpt", "digest", "about", "version_scheme", "materials"
     }:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence has unknown fields")
     value = dict(raw)
@@ -169,6 +171,10 @@ def _evidence(raw: Any) -> dict[str, Any]:
         raise _fail("EPISODE_EVIDENCE_INVALID", "evidence is empty")
     if about:
         keep["about"] = list(about)
+    if "materials" in value:
+        from .episode_materials import normalize
+
+        keep["materials"] = normalize(value["materials"], sealed=True)
     keep["recovery"] = "available" if {"reference", "excerpt"} & set(keep) else "unavailable"
     return keep
 
@@ -211,10 +217,12 @@ def append_input_revision(
     old = {
         key: value
         for key, value in result["input_revisions"][-1]["evidence"].items()
-        if key != "recovery"
+        if key not in {"recovery", "materials"}
     }
-    new = {key: value for key, value in evidence.items() if key != "recovery"}
-    if _json(old) == _json(new):
+    new = {key: value for key, value in evidence.items() if key not in {"recovery", "materials"}}
+    binding = material_binding(result)
+    inherited = binding[1] if binding is not None else None
+    if _json(old) == _json(new) and evidence.get("materials", inherited) == inherited:
         raise _fail("EPISODE_REVISION_UNCHANGED", "input evidence is byte-equivalent")
     if len(result["input_revisions"]) >= MAX_INPUT_REVISIONS:
         raise _fail("EPISODE_TOO_LARGE", "too many input revisions")
@@ -223,6 +231,18 @@ def append_input_revision(
     )
     _invalidate(result)
     return _copy(result)
+
+
+def material_binding(
+    state: Mapping[str, Any], input_revision: int | None = None,
+) -> tuple[int, dict[str, Any]] | None:
+    """Find the last explicit envelope without copying it into later recaps."""
+    for item in reversed(state["input_revisions"]):
+        if input_revision is not None and item["revision"] > input_revision:
+            continue
+        if "materials" in item["evidence"]:
+            return item["revision"], item["evidence"]["materials"]
+    return None
 
 
 def _candidate(state: dict[str, Any], identity: str) -> dict[str, Any]:
@@ -258,7 +278,7 @@ def _effect(kind: str, args: Mapping[str, Any]) -> str:
 
 
 def _leaf(raw: Any, candidate: str) -> dict[str, Any]:
-    if not isinstance(raw, Mapping) or set(raw) != {"leaf_key", "effect_revision", "kind", "args"}:
+    if not isinstance(raw, Mapping) or set(raw) - {"support", "source_intent"} != {"leaf_key", "effect_revision", "kind", "args"}:
         raise _fail("EPISODE_PROPOSAL_INVALID", "leaf has unknown fields")
     if type(raw["effect_revision"]) is not int or raw["effect_revision"] < 1:
         raise _fail("EPISODE_PROPOSAL_INVALID", "effect revision is invalid")
@@ -277,7 +297,28 @@ def _leaf(raw: Any, candidate: str) -> dict[str, Any]:
             "EPISODE_PROPOSAL_INVALID", "leaf is not a supported curation effect"
         ) from error
     key = _string(raw["leaf_key"], "leaf_key", 160)
+    source_intent = raw.get("source_intent")
+    if source_intent is not None:
+        from . import provenance
+
+        if step["kind"] not in curation.PLANNING_STEP_KINDS:
+            raise _fail("EPISODE_PROPOSAL_INVALID", "source intent belongs to a Planning leaf")
+        source_intent = provenance._origin_payload(  # noqa: SLF001
+            {"inputs": {"intent": source_intent}, "assessments": [], "bindings": []}, authoring=True
+        )["inputs"]["intent"]
+    support = raw.get("support")
+    if support is not None and (
+        not isinstance(support, Mapping)
+        or set(support) != {"binding_input_revision", "material_key", "representation", "reviewed_input_revision"}
+        or support["representation"] not in {"original", "reading"}
+        or any(type(support[field]) is not int or support[field] < 1 for field in ("binding_input_revision", "reviewed_input_revision"))
+    ):
+        raise _fail("EPISODE_PROPOSAL_INVALID", "leaf material support is invalid")
+    if support is not None:
+        _string(support["material_key"], "material_key", 160)
     return {
+        **({"support": dict(support)} if support is not None else {}),
+        **({"source_intent": source_intent} if source_intent is not None else {}),
         "leaf_id": leaf_id(candidate, key),
         "leaf_key": key,
         "effect_revision": raw["effect_revision"],
@@ -371,6 +412,9 @@ def revise_proposal(
         old = prior.get(leaf["leaf_id"])
         if old is None and leaf["effect_revision"] != 1:
             raise _fail("EPISODE_EFFECT_REVISION_REQUIRED", "a new effect starts at revision one")
+        association_changed = old is not None and any(old.get(field) != leaf.get(field) for field in ("support", "source_intent"))
+        if old and old["attempts"] and association_changed:
+            raise _fail("EPISODE_ATTEMPTED_LEAF", "attempted leaf material support is frozen")
         if old and old["effect_digest"] != leaf["effect_digest"]:
             if any(
                 item["attempts"] and item["effect_digest"] == leaf["effect_digest"]
@@ -397,6 +441,9 @@ def revise_proposal(
                     "outcome_proof": old["outcome_proof"],
                     "attempts": old["attempts"],
                     "attempt_history": old["attempt_history"],
+                    **({"support": old["support"]} if "support" in old else {}),
+                    **({"source_intent": old["source_intent"]} if "source_intent" in old else {}),
+                    **({"invocation_id": old["invocation_id"]} if "invocation_id" in old else {}),
                 }
             ]
             if old["outcome"] == "proven_uncommitted":
@@ -407,6 +454,8 @@ def revise_proposal(
         elif old:
             if leaf["effect_revision"] != old["effect_revision"]:
                 raise _fail("EPISODE_PROPOSAL_INVALID", "unchanged effect cannot change revision")
+            if "invocation_id" in old:
+                leaf["invocation_id"] = old["invocation_id"]
             leaf.update(
                 {
                     key: old[key]
@@ -420,6 +469,8 @@ def revise_proposal(
                     )
                 }
             )
+        if old and not old["attempts"] and association_changed:
+            leaf["binding"] = None
         for owned in _all_leaves(result):
             if owned["leaf_id"] != leaf["leaf_id"] and (
                 owned["effect_digest"] == leaf["effect_digest"]
@@ -517,11 +568,14 @@ def _binding(raw: Any, leaf: Mapping[str, Any]) -> dict[str, Any]:
     manifest, registries = sealed.get("binding_manifest"), sealed.get("registry_ids")
     if not isinstance(manifest, list) or not isinstance(registries, Mapping):
         raise _fail("EPISODE_BINDING_INVALID", "sealed plan evidence is incomplete")
+    marker = {"episode_invocation_version": sealed["episode_invocation_version"]} if "episode_invocation_version" in sealed else {}
+    if marker and (type(marker["episode_invocation_version"]) is not int or marker["episode_invocation_version"] != 1):
+        raise _fail("EPISODE_BINDING_INVALID", "episode invocation reader marker is invalid")
     plan_id = curation.plan_id(
-        {**plan, "binding_manifest": manifest, "registry_ids": dict(registries)}
+        {**plan, **marker, "binding_manifest": manifest, "registry_ids": dict(registries)}
     )
     if raw["plan_id"] != plan_id or raw["plan_fingerprint"] != curation.plan_fingerprint(
-        plan, manifest, registries
+        {**plan, **marker}, manifest, registries
     ):
         raise _fail("EPISODE_BINDING_INVALID", "sealed plan identity does not match evidence")
     if not isinstance(raw["run_id"], str) or not re.fullmatch(
@@ -539,6 +593,9 @@ def _binding(raw: Any, leaf: Mapping[str, Any]) -> dict[str, Any]:
         )
     if step["kind"] != leaf["kind"] or _effect(step["kind"], step["args"]) != leaf["effect_digest"]:
         raise _fail("EPISODE_EFFECT_MISMATCH", "step does not match leaf effect")
+    prepared = manifest[raw["ordinal"]].get("prepared", {}) if raw["ordinal"] < len(manifest) else {}
+    if prepared.get("source_intent") != leaf.get("source_intent") or prepared.get("episode", {}).get("support") != leaf.get("support"):
+        raise _fail("EPISODE_BINDING_INVALID", "sealed input association differs from the leaf")
     preimage = _preimage(manifest)
     if raw.get("preimage_digest", preimage) != preimage:
         raise _fail("EPISODE_BINDING_INVALID", "sealed plan preimage does not match the binding")
@@ -577,6 +634,10 @@ def mark_attempt_started(state: Mapping[str, Any], candidate: str, leaf: str) ->
         raise _fail("EPISODE_DISPOSITION_INVALID", "only routed candidates may execute")
     if owner["proposal"] is None or owner["proposal"]["route"] in _NO_EFFECT_ROUTES:
         raise _fail("EPISODE_DISPOSITION_INVALID", "selected route has no executable effect")
+    return _start_bound_attempt(result, candidate, leaf)
+
+
+def _start_bound_attempt(result: dict, candidate: str, leaf: str) -> dict[str, Any]:
     item = _owned(result, candidate, leaf)
     if item["binding"] is None:
         raise _fail("EPISODE_BINDING_REQUIRED", "attempt requires curation binding")
@@ -589,6 +650,19 @@ def mark_attempt_started(state: Mapping[str, Any], candidate: str, leaf: str) ->
     item["attempt_history"].append(
         {"attempt": item["attempts"], "outcome": "uncertain", "outcome_proof": None}
     )
+    return _copy(result)
+
+
+def invocation_id(episode: str, leaf: Mapping[str, Any], attempt: int) -> str:
+    return _hash("exomem-episode-invocation-v1", episode, leaf["leaf_id"], leaf["effect_digest"], leaf["binding"]["operation_id"], attempt)
+
+
+def mark_curation_invocation(state: Mapping[str, Any], candidate: str, leaf: str) -> dict[str, Any]:
+    """Track independently authorized curation without changing its admission policy."""
+    result = _start_bound_attempt(_copy(state), candidate, leaf)
+    item = _owned(result, candidate, leaf)
+    item["invocation_id"] = invocation_id(result["episode_id"], item, item["attempts"])
+    item["attempt_history"][-1]["invocation_id"] = item["invocation_id"]
     return _copy(result)
 
 
@@ -623,6 +697,7 @@ def reconcile_leaf(state: Mapping[str, Any], observation: VerifiedLeafOutcome) -
         "operation_id": observation.operation_id,
     }
     item["attempt_history"][-1] = {
+        **item["attempt_history"][-1],
         "attempt": item["attempts"],
         "outcome": item["outcome"],
         "outcome_proof": _copy(item["outcome_proof"]),

@@ -31,6 +31,7 @@ from exomem import (
     freshness,
     lexstore,
     readiness,
+    request_budget,
     view_lag,
     working_set,
     working_set_index,
@@ -149,6 +150,108 @@ def test_the_owner_still_sees_every_write_as_a_lag(served: Path) -> None:
 
     assert _links(served, restricted=False)["inbound"] is None
     assert _pack_truncation(served, restricted=False) == ([], BOTH_SIDES_UNKNOWN)
+
+
+def test_deleted_withheld_sources_keep_the_direct_read_complete_without_retained_evidence(
+    served: Path,
+) -> None:
+    """Deletion keeps neither a hidden backlink nor its competing basename in the direct reply."""
+    shadow = "Knowledge Base/Notes/Patterns/coverage-anchor.md"
+    _write_as_the_service_does(served, shadow, "# Private shadow\n\nPrivate context [[coverage-anchor]].\n")
+    lexstore.ensure_fresh(served)
+    assert vault_module.prime_inbound_index(served, eager=True)
+    assert HIDDEN not in _hold_verdicts(served)
+    before = _links(served, restricted=True)
+    assert [item["path"] for item in before["inbound"]] == [BACKLINKER]
+
+    _delete_as_the_service_does(served, HIDDEN)
+    _delete_as_the_service_does(served, shadow)
+
+    assert _links(served, restricted=True) == before
+    assert _links(served, restricted=False)["inbound"] is None
+    with egress.proven_withheld_scope():
+        assert egress.pin_proven_withheld(frozenset({BACKLINKER}))
+        assert _links(served, restricted=True)["inbound"] == []
+
+
+def test_a_verdict_for_newer_bytes_cannot_hide_an_inbound_source_deletion(served: Path) -> None:
+    """The resident index holds earlier bytes, even when the catalogue's vault stamp is unchanged."""
+    store = lexstore.get_store(served)
+    vault_checkpoint = store.published_recall_checkpoint("vault")
+    kb_checkpoint = store.published_recall_checkpoint("kb")
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nDifferent private context [[coverage-anchor]].\n")
+    store.apply_catalog_delta("kb", freshness.recall_delta_since(served, "kb", kb_checkpoint))
+    assert store.published_recall_checkpoint("vault") == vault_checkpoint
+    assert HIDDEN not in _hold_verdicts(served)
+
+    _delete_as_the_service_does(served, HIDDEN)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_a_partial_inbound_patch_cannot_authorize_a_deleted_source(served: Path) -> None:
+    """A patched source hash has no association with the cache's earlier complete checkpoint."""
+    _withhold_from_external(served, 'tags: ["private-proof"]')
+    _seed_live_recall(served)
+    assert lexstore.get_store(served).rebuild_atomic()
+    assert vault_module.prime_inbound_index(served, eager=True)
+    _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nUnpatched change.\n")
+    _write_as_the_service_does(served, BACKLINKER, (
+        "---\ntags: [private-proof]\n---\n# Private backlink\n\n[[coverage-anchor]]\n"
+    ))
+    vault_module.on_inbound_files_changed(served, [BACKLINKER], [])
+    lexstore.ensure_fresh(served)
+    assert BACKLINKER not in _hold_verdicts(served)
+
+    _delete_as_the_service_does(served, BACKLINKER)
+
+    assert _links(served, restricted=True)["inbound"] is None
+
+
+def test_revocation_during_deleted_inbound_selection_discards_the_retained_reply(
+    served: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy
+
+    _hold_verdicts(served)
+    _delete_as_the_service_does(served, HIDDEN)
+    select = vault_module._select_inbound_wikilinks
+
+    def revoke_after_selection(*args, **kwargs):
+        links = select(*args, **kwargs)
+        _withhold_from_external(served, f'paths: ["{BACKLINKER}"]')
+        return links
+
+    monkeypatch.setattr(vault_module, "_select_inbound_wikilinks", revoke_after_selection)
+    with policy.request_policy_snapshot():
+        assert _links(served, restricted=True)["inbound"] is None
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["changed", "deleted"])
+def test_inbound_finalization_reports_a_visible_write_after_the_lag_proof(
+    served: Path, monkeypatch: pytest.MonkeyPatch, deleted: bool,
+) -> None:
+    """The registry can advance before its event reaches the resident inbound index."""
+    _hold_verdicts(served)
+    assert _links(served, restricted=True)["inbound"] is not None
+    if deleted:
+        _delete_as_the_service_does(served, HIDDEN)
+    else:
+        _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nChanged private source.\n")
+    prove = view_lag.withheld_lag
+    proofs = []
+
+    def write_after_final_proof(*args, **kwargs):
+        result = prove(*args, **kwargs)
+        proofs.append(result)
+        if len(proofs) == 2:
+            _write_as_the_service_does(served, NEWCOMER, "# New source\n\n[[coverage-anchor]]\n")
+        return result
+
+    monkeypatch.setattr(view_lag, "withheld_lag", write_after_final_proof)
+
+    assert _links(served, restricted=True)["inbound"] is None
+    assert (served / NEWCOMER).is_file()
 
 
 def test_a_lag_history_cannot_bridge_is_reported_to_the_restricted_reader(served: Path) -> None:
@@ -333,6 +436,8 @@ def activation(
     working_set_index.WorkingSetIndex(vault).rebuild()
     working_set_index.WorkingSetIndex(vault).update(freshness_stamp=_stamp(vault))
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    # Coverage assertions need complete packets; request-path tests cover budget expiry.
+    monkeypatch.setattr(request_budget, "ACTIVATION_DOOR_BUDGET_SECONDS", 60)
     scheduled: list[str] = []
     monkeypatch.setattr(
         working_set_runtime,
@@ -747,22 +852,29 @@ def test_a_fault_reading_the_lag_is_reported_to_the_restricted_reader_not_raised
     assert served["generation"]["index_stale"] is True
 
 
+@pytest.mark.parametrize("publication_phase", ["before_compile", "after_compile"])
 def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
-    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, publication_phase: str
 ) -> None:
     """Another publisher moves the catalogue by a withheld page after readiness."""
     before = _activate(activation.vault)
     published: list[bool] = []
     real_compile = working_set.compile_packet
 
-    def compile_then_publish(*args, **kwargs):
-        packet = real_compile(*args, **kwargs)
+    def publish():
         if not published:
             _write_hidden_hub(activation.vault, "Second.")
             working_set_index.WorkingSetIndex(activation.vault).update(
                 freshness_stamp=_stamp(activation.vault)
             )
             published.append(True)
+
+    def compile_then_publish(*args, **kwargs):
+        if publication_phase == "before_compile":
+            publish()
+        packet = real_compile(*args, **kwargs)
+        if publication_phase == "after_compile":
+            publish()
         return packet
 
     monkeypatch.setattr(working_set, "compile_packet", compile_then_publish)
@@ -775,16 +887,16 @@ def test_a_withheld_publication_during_the_request_does_not_withdraw_the_packet(
     assert served == before
 
 
+@pytest.mark.parametrize("publication_phase", ["before_compile", "after_compile"])
 def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
-    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, publication_phase: str
 ) -> None:
     _activate(activation.vault)
     published: list[bool] = []
     real_compile = working_set.compile_packet
     page = activation.vault / "Knowledge Base/Products/Cargo Sled.md"
 
-    def compile_then_publish(*args, **kwargs):
-        packet = real_compile(*args, **kwargs)
+    def publish():
         if not published:
             _write_as_the_service_does(
                 activation.vault, "Knowledge Base/Products/Cargo Sled.md",
@@ -795,6 +907,13 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
                 freshness_stamp=_stamp(activation.vault)
             )
             published.append(True)
+
+    def compile_then_publish(*args, **kwargs):
+        if publication_phase == "before_compile":
+            publish()
+        packet = real_compile(*args, **kwargs)
+        if publication_phase == "after_compile":
+            publish()
         return packet
 
     monkeypatch.setattr(working_set, "compile_packet", compile_then_publish)
@@ -803,6 +922,52 @@ def test_a_visible_publication_during_the_request_still_withdraws_the_packet(
 
     assert published == [True]
     assert served.get("abstention") == {"reason": "unavailable"}
+
+
+@pytest.mark.parametrize("visible_change", [False, True])
+def test_a_rebased_compilation_rechecks_changes_before_serving(
+    activation: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, visible_change: bool
+) -> None:
+    """A forward rebase cannot conceal a later change to an unselected visible page."""
+    before = _activate(activation.vault)
+    real_compile = working_set.compile_packet
+    units_lane = working_set._units_lane
+    changed: list[bool] = []
+
+    def publish_then_compile(*args, **kwargs):
+        _write_hidden_hub(activation.vault, "Second.")
+        working_set_index.WorkingSetIndex(activation.vault).update(
+            freshness_stamp=_stamp(activation.vault)
+        )
+        return real_compile(*args, **kwargs)
+
+    def select_then_change(*args, **kwargs):
+        result = units_lane(*args, **kwargs)
+        if not changed:
+            view = lexstore._admitted_catalog_view(activation.vault)
+            assert view is not None and view.connection is not None
+            if visible_change:
+                _write_as_the_service_does(
+                    activation.vault, "Knowledge Base/Notes/Insights/new-context.md",
+                    "# New context\n\nA separate context arrived.\n",
+                )
+            else:
+                _write_as_the_service_does(
+                    activation.vault, HIDDEN_HUB, HUB_BODY.format("Third."),
+                )
+            changed.append(True)
+        return result
+
+    monkeypatch.setattr(working_set, "compile_packet", publish_then_compile)
+    monkeypatch.setattr(working_set, "_units_lane", select_then_change)
+
+    served = _activate(activation.vault)
+
+    assert changed == [True]
+    if visible_change:
+        assert served.get("abstention") == {"reason": "unavailable"}
+    else:
+        assert served == before
 
 
 # ---- the pages a turn names ----------------------------------------------

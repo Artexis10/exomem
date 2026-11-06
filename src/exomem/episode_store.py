@@ -49,6 +49,7 @@ _FIELDS = {
     },
     "attest_precommit": {"input_revision"},
     "mark_attempt_started": {"candidate", "leaf"},
+    "mark_curation_invocation": {"candidate", "leaf"},
     "reconcile_curation_leaf": {"candidate", "leaf"},
     "attest_postcommit": {"input_revision", "leaf_ids"},
 }
@@ -125,13 +126,11 @@ def _apply_event(state: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str
         return model.attest_precommit(state, args["input_revision"])
     if action == "mark_attempt_started":
         return model.mark_attempt_started(state, args["candidate"], args["leaf"])
+    if action == "mark_curation_invocation":
+        return model.mark_curation_invocation(state, args["candidate"], args["leaf"])
     if action == "reconcile_curation_leaf":
         outcome = model.VerifiedLeafOutcome(**evidence["outcome"])
-        if (outcome.candidate_id, outcome.leaf_id, outcome.outcome) != (
-            args["candidate"],
-            args["leaf"],
-            "committed",
-        ):
+        if (outcome.candidate_id, outcome.leaf_id) != (args["candidate"], args["leaf"]) or outcome.outcome not in {"committed", "proven_uncommitted"}:
             raise _error("EPISODE_TRANSITION_INVALID", "accepted outcome differs from command")
         return model.reconcile_leaf(state, outcome)
     return model.attest_postcommit(state, args["input_revision"], args["leaf_ids"])
@@ -275,7 +274,9 @@ class EpisodeStore:
                 ) from error
             return self._reconstruct(identity, journal), guard
 
-    def _write(self, identity: str, journal: Mapping[str, Any], prior: Any = None) -> None:
+    def _write(
+        self, identity: str, journal: Mapping[str, Any], prior: Any = None, *, commit_point: bool = True
+    ) -> None:
         path = self.path(identity)
         self.curation._assert_safe(path)
         encoded = self._encoded(journal)
@@ -289,6 +290,7 @@ class EpisodeStore:
                 vault_root=self.vault_root,
                 # Operational JSON is not an admitted knowledge/index input.
                 post_commit_fanout=False,
+                commit_point=commit_point,
             )
         except (
             BatchWriteError,
@@ -355,7 +357,7 @@ class EpisodeStore:
                         candidate_id=args["candidate"],
                         leaf_id=args["leaf"],
                         effect_digest=leaf["effect_digest"],
-                        outcome="committed",
+                        outcome=leaf["outcome"],
                         **proof,
                     )
                 )
@@ -389,6 +391,7 @@ class EpisodeStore:
         expected_digest: str,
         action: str,
         args: Mapping[str, Any],
+        commit_point: bool = True,
     ) -> dict[str, Any]:
         """Accept a finite command under CAS, then persist its validated result event.
 
@@ -400,6 +403,7 @@ class EpisodeStore:
             expected_revision=expected_revision,
             expected_digest=expected_digest,
             commands=[(action, args)],
+            commit_point=commit_point,
         )
 
     def transitions(
@@ -409,8 +413,12 @@ class EpisodeStore:
         expected_revision: int,
         expected_digest: str,
         commands: Sequence[tuple[str, Mapping[str, Any]]],
+        commit_point: bool = True,
     ) -> dict[str, Any]:
         """Accept finite commands under one CAS and persist them in one write.
+
+        `commit_point=False` marks the write as an owner's bookkeeping, not the
+        enclosing command's durable commit (the writer lease's committed signal).
 
         Every event is validated before anything is written, so a refused
         command leaves none of its sequence behind. Every command but a
@@ -472,5 +480,5 @@ class EpisodeStore:
             if accepted is current:
                 return current
             result = self._reconstruct(identity, journal)
-            self._write(identity, journal, prior)
+            self._write(identity, journal, prior, commit_point=commit_point)
             return result

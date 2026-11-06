@@ -16,7 +16,7 @@
 ## 2. cellctl and runtime (red-first)
 
 - [x] 2.1 Make the storage classes, driver and topology key configuration rather than constants. Accept a cell PV on any configured cell class in the identity check, and match PVs to nodes for local volumes. Evidence: unit tests, including an unmigrated cell on the old class while the local class is configured.
-- [ ] 2.2 Requalify the storage-capacity term under D12:
+- [x] 2.2 Requalify the storage-capacity term under D12:
   - physical pool size minus the effective D12 reserve and ordinary physical charges not already represented by counted cell commitments, over the default size;
   - pool size and reserved bytes from physical provider inventory, including unclaimed volumes and partial operations;
   - larger cells charge more;
@@ -25,7 +25,8 @@
   - Evidence: unit tests on recorded observations, including a pass during a backup.
   - Audit after #2145: `test_local_reservations.py` covers physical orphan charges, incarnation matching, larger commitments and missing frames.
     Drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645) records a guarded frame and recomputes five slots from it.
-    Still open: the unit test for unchanged slots during a backup uses unguarded observations; it does not qualify the D12 frame path.
+    `test_a_guarded_backup_frame_does_not_charge_its_snapshot_and_clone_twice` parses the provider frame and keeps 20 slots before and during a backup.
+    The check retains an orphan charge and credits the serving sources; snapshot, clone and pending volumes consume no second reserve.
 - [x] 2.3 Render the hourly online backup as a non-stopping hold:
   - snapshot, read-only clone, restic on the clone, cleanup whatever the outcome;
   - one hold per cell at a time;
@@ -60,15 +61,15 @@
   - Evidence: unit tests on a recorded mismatch, and a rehearsal etcd restore from an older snapshot.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). The server was reset from an older local etcd snapshot; `cellctl.readopt` reported the newer cell for re-adoption, the runbook steps re-adopted its volume, and it served with its data and a matching identity. Not exercised: the escrowed-key S3 snapshot listing.
 
-- [ ] 2.10 Requalify local online growth under D10 and D12:
+- [x] 2.10 Requalify local online growth under D10 and D12:
   - the hourly backup Job reports the filesystem's used and total bytes in its termination message, and cellctl records them;
   - past 80% use, cellctl grows the claim by one default cell size, up to the configured cap, at most once per backup;
   - only through the provider transaction that retains the prospective reserve; otherwise an alert and a retained target;
   - the grown size is recorded in a cellctl-owned row column (Substrate migration) and the claim renders at the larger of it and `storage_gib`.
   - Evidence: unit tests for growth, the cap, the pool refusal with its alert, and a rehearsal growth of a serving cell.
   - D12 audit: drill [40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645), check 6, proves guarded growth and the cap.
-    `test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin` proves retained growth after provider refusal.
-    Still open: a provider-refusal test that also observes the growth alert; the existing alert test uses unguarded capacity.
+    `test_two_cells_keep_their_requests_across_restart_and_cancel_before_begin` proves retained growth after provider refusal and observes the firing growth alert.
+    The serving cell stays ready, its desired increase remains recorded, and its published size stays unchanged until the provider accepts it.
   - Done: Cloud rehearsal run 37436989618 (`local-storage-drill` mode, commit 3070083fa). At 85% use a serving cell grew from 4 to 8 GiB online: same pod, 0 restarts, filesystem 4143677440 to 8369172480 bytes, quota applied at 16Gi with no refusal, row `grown_storage_gib` 8, next clone 8Gi, published slots matching D6. At the cap the verdict was `at-cap` and cellctl raised `storage-growth-blocked` (no receiver in the rehearsal).
 
 ## 3. Chart, admission, policy
@@ -173,11 +174,33 @@ Source and disposable rehearsals can finish before purchase. Production installa
 
 ## 10. Authoritative reservations before local import growth
 
-The earlier rehearsals prove their recorded workflows. They do not prove concurrent allocation, provider death or delayed CSI cancellation. Tasks 2.2 and 2.10 reopen that qualification; production tasks retain their existing authority boundaries.
+Tasks 10.2–10.5 record the delivered source and its historical proof. The drill qualifies only its recorded inputs. Task 10.6 retains qualification of the images after the snapshot Secret fix; production tasks retain their existing authority boundaries.
 
 - [x] 10.1 Recheck the D12 contract independently, including cancellation before Begin, source incarnation and concurrency reduction.
-- [ ] 10.2 Add provider transactions, physical full-size accounting and atomic bounded family metadata to the pinned source overlay. Verify competing allocations and recovery of every partial command boundary.
-- [ ] 10.3 Carry immutable family identity through the existing LogicalVolume protocol and snapshot Secret transport. Verify old queued requests cannot use a later family's reservation.
-- [ ] 10.4 Integrate Begin and acknowledged closure with cellctl holds, provider budget publication and prospective local claim growth. Keep local import limits NULL until qualification passes.
-- [ ] 10.5 Extend the disposable storage drill with the qualified nsenter/LVM process chain. Verify daemon death, early cancellation, stale tokens, source recreation, orphan charges, concurrency reduction and two complete online-backup cycles.
+- [x] 10.2 Add provider transactions, physical full-size accounting and atomic bounded family metadata to the pinned source overlay. Verify competing allocations and recovery of every partial command boundary.
+  - Delivered in [#2145](https://github.com/Artexis10/exomem/pull/2145), merge `808543bb5`.
+    `infra/topolvm/overlay/internal/lvmd/reservation_test.go` covers competing claims, orphan charges, interrupted snapshot creation, resize, activation and cleanup, restart, cancellation and concurrency reduction.
+    `command/transaction.go` gives each transaction its own lock descriptor and replaces bounded family metadata in one LVM commit.
+    The native provider proof in [run 40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645) retains physical target commitments across daemon death.
+- [x] 10.3 Carry immutable family identity through the existing LogicalVolume protocol and snapshot Secret transport. Verify old queued requests cannot use a later family's reservation.
+  - Delivered in #2145; `reservation_binding_test.go` covers snapshot retries, source growth and persisted clone bindings.
+    `TestReservationImmutableChildrenAndSourceGrowth` rejects an old token after the next family begins.
+    [#2185](https://github.com/Artexis10/exomem/pull/2185), merge `1a434bdac`, rejects malformed snapshot Secret data instead of creating an ordinary snapshot.
+    `TestSnapshotSecretCannotLoseItsFamilyBinding` covers complete family bindings, legacy requests, a wrong key and a missing source UUID.
+- [x] 10.4 Integrate Begin and acknowledged closure with cellctl holds, provider budget publication and prospective local claim growth. Keep local import limits NULL until qualification passes.
+  - Delivered in #2145 and audited in #2185.
+    `infra/cellctl/tests/test_local_reservations.py` covers timeout closure, fresh physical identity before limit publication, provider acknowledgement before growth and exact Secret cleanup.
+    [#2438](https://github.com/Artexis10/exomem/pull/2438) completes the guarded backup-frame and provider-refusal alert checks cited by 2.2 and 2.10.
+    These checks establish source behavior; they do not activate local reservations or publish production import limits.
+- [x] 10.5 Extend the disposable storage drill with the qualified nsenter/LVM process chain. Verify daemon death, early cancellation, stale tokens, source recreation, orphan charges, concurrency reduction and two complete online-backup cycles.
+  - [Run 40475119645](https://github.com/Artexis10/exomem/actions/runs/40475119645), source `7a84fd129`, passed the native host proof and all eight cluster checks.
+    The host proof includes descriptor and target-persistence negative controls; the provider-pod check verifies the real nsenter/LVM fence.
+    `infra/cloud-rehearsal/reservations/service_test.go` exercises the provider restart, cancellation, token, physical identity, orphan-charge and concurrency-reduction cases with real LVM.
+    The cluster report records three complete hourly backups of a serving cell.
+    This historical result does not qualify a later provider image; that obligation remains in 10.6.
 - [ ] 10.6 Review the integrated batch, pass CI, merge and qualify its built images through the ordinary release. Keep production activation separate.
+  - Source review, CI and merge completed in #2145 and #2185.
+    [Release v0.149.0](https://github.com/Artexis10/exomem/releases/tag/v0.149.0) contains both merges; [publisher 40857280151](https://github.com/Artexis10/exomem/actions/runs/40857280151) succeeded.
+    Pending: an exact provider image and compatible build provenance that include the snapshot Secret fix from #2185.
+    The retained drill image uses source `7a84fd129`; its recorded `infra/topolvm/source.patch` and rehearsal workflow differ from v0.149.0 and current source.
+    The release receipt therefore does not close provider-image qualification. Local cutover, production activation and the Home rollout remain separate.

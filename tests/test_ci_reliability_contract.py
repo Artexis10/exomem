@@ -118,9 +118,7 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
         step for step in job["steps"] if step.get("name") == "Upload test timing evidence"
     )
     assert junit_step["uses"] == "actions/upload-artifact@v4"
-    assert junit_step["if"] == (
-        "${{ always() && (steps.scope.outputs.docs_only != 'true' || matrix.shard == 1) }}"
-    )
+    assert junit_step["if"] == "always()"
     assert junit_step["with"]["name"] == (
         f"{tier}-py${{{{ matrix.python-version }}}}-shard-${{{{ matrix.shard }}}}-junit"
     )
@@ -151,7 +149,6 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
 
-    assert matrix["shard"] == list(range(1, shards + 1))
     assert job["name"] == (
         f"{tier} tests (py${{{{ matrix.python-version }}}}, "
         f"shard ${{{{ matrix.shard }}}}/{shards})"
@@ -682,8 +679,8 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
     )
 
 
-#: Jobs whose tests a docs-only pull request narrows (scripts/ci_change_scope.py).
-SCOPED_JOBS = ("core-tests", "harness-tests", "product-e2e")
+#: Jobs that compare the merge tree before narrowing docs-only work.
+SCOPED_JOBS = ("scope", "product-e2e")
 
 
 def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
@@ -798,8 +795,9 @@ def test_change_scope_compares_the_merge_commit_with_its_base(job_id: str) -> No
     checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
     assert "ref" not in checkout["with"]
     assert checkout["with"]["fetch-depth"] in (0, 2)
-    scope = next(step for step in job["steps"] if step.get("id") == "scope")
-    assert "scripts/ci_change_scope.py" in scope["run"]
+    scope = next(
+        step for step in job["steps"] if "scripts/ci_change_scope.py" in step.get("run", "")
+    )
     assert scope["env"]["EVENT_NAME"] == "${{ github.event_name }}"
 
 

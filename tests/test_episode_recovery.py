@@ -8,6 +8,7 @@ import pytest
 
 from exomem import (
     commands,
+    episode_materials,
     freshness,
     memory_refs,
     semantic_index,
@@ -69,7 +70,9 @@ def _owner_store(vault: Path):
     return EpisodeInputOwner(vault)
 
 
-def _write_source_rule(vault: Path, *, ceiling: int, audience: str = "client-a") -> None:
+def _write_source_rule(
+    vault: Path, *, ceiling: int, audience: str = "client-a", paths: str = "Sources/**",
+) -> None:
     root = vault / "Knowledge Base" / "_Governance"
     (root / "scopes").mkdir(parents=True, exist_ok=True)
     (root / "rules").mkdir(parents=True, exist_ok=True)
@@ -77,7 +80,7 @@ def _write_source_rule(vault: Path, *, ceiling: int, audience: str = "client-a")
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAA\n"
         "name: Episode source\n"
-        'paths: ["Sources/**"]\n',
+        f'paths: ["{paths}"]\n',
         encoding="utf-8",
     )
     (root / "rules" / "episode-source-client-a.yaml").write_text(
@@ -118,6 +121,154 @@ def test_recover_page_input_across_sessions_for_same_audience(vault: Path) -> No
     assert len(recovered["digest"]) == 64
     assert recovered["representation"] == "page_body"
     assert recovered["body"] == "Original authorized source body.\n"
+
+
+def test_material_original_requires_current_bytes_and_reports_only_proved_staleness(vault) -> None:
+    reading = _write_page(vault, "A separate readable interpretation.\n")
+    key = "ep-" + "d2" * 16
+    with request_scope(owner_principal(surface="mcp")):
+        original = commands.op_preserve_evidence(
+            vault, scope="Synthetic", category="Inputs", filename="original.txt",
+            content="first original", description="Original evidence.",
+        )
+        companion = vault / original["sidecar_path"]
+        reference = memory_refs.ref_from_markdown(companion.read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "evidence", "original_reference": reference, "reading_reference": reading,
+            }]})
+        raw = vault / original["path"]
+        raw.write_text("other original")  # The byte count stays the same; the native hash must decide.
+        unavailable = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert unavailable["original"] == {"status": "unavailable"}
+        assert unavailable["reading"]["status"] == "available"
+        companion.write_text(companion.read_text().replace(
+            hashlib.sha256(b"first original").hexdigest(), hashlib.sha256(b"other original").hexdigest(),
+        ))
+        stale = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert stale["original"] == {"status": "stale"}
+        assert stale["reading"]["status"] == "available"
+
+
+def test_withheld_and_absent_material_representations_disclose_the_same_result(vault) -> None:
+    reading = _write_page(vault, "The independently released reading.\n")
+    key = "ep-" + "d3" * 16
+    with request_scope(_owner("client-a")):
+        original = commands.op_preserve_evidence(vault, scope="Synthetic", category="Inputs",
+            filename="original.txt", content="Exact original", description="Preserved input.")
+        companion = vault / original["sidecar_path"]
+        reference = memory_refs.ref_from_markdown(companion.read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "evidence", "original_reference": reference, "reading_reference": reading,
+                "producer": "Authored attribution",
+            }]})
+    _write_source_rule(vault, ceiling=0, paths="Evidence/**")
+    with request_scope(_owner("client-a")):
+        withheld = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert withheld["original"] == {"status": "unavailable"}
+        assert withheld["reading"]["status"] == "available"
+        assert "attribution" not in withheld
+        companion.unlink()
+        absent = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="evidence")
+        assert absent == withheld
+    _write_source_rule(vault, ceiling=0, paths="Sources/**")
+    with request_scope(_owner("client-a")):
+        hidden_reading = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="evidence")
+        assert hidden_reading["reading"] == {"status": "unavailable"}
+        (vault / _REL).unlink()
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="evidence") == hidden_reading
+        unknown = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="unknown")
+        assert {k: v for k, v in unknown.items() if k != "material_key"} == {
+            k: v for k, v in hidden_reading.items() if k != "material_key"
+        }
+        assert commands.op_episode_memory(vault, None, action="candidates", episode=key)["materials"] == []
+
+
+@pytest.mark.parametrize("representation,revoked_paths", [
+    ("original", "Evidence/**"),
+    ("reading", "Sources/**"),
+    ("original", None),
+], ids=["revoke-original", "revoke-reading", "delete-original"])
+def test_material_terminal_release_rechecks_each_representation(
+    vault, monkeypatch, representation, revoked_paths,
+) -> None:
+    from exomem.writer_lease import invoke_command
+
+    reading = _write_page(vault, "An independent reading.\n")
+    key = "ep-" + "fe" * 16
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "episode_memory")
+    with request_scope(_owner("client-a")):
+        saved = commands.op_preserve_evidence(vault, scope="Synthetic", category="Inputs",
+            filename="proof.txt", content="Original bytes", description="Synthetic proof.")
+        original = memory_refs.ref_from_markdown((vault / saved["sidecar_path"]).read_text())
+        current = _owner_store(vault).create(key, reference=reading)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [{
+                "key": "selected", "original_reference": original, "reading_reference": reading,
+                "producer": "Caller attribution",
+            }]})
+        recover = episode_materials.recover_reading
+
+        def change_after_recovery(*args, **kwargs):
+            value = recover(*args, **kwargs)
+            if revoked_paths is not None:
+                _write_source_rule(vault, ceiling=0, paths=revoked_paths)
+            else:
+                (vault / saved["path"]).unlink()
+            return value
+
+        monkeypatch.setattr(episode_materials, "recover_reading", change_after_recovery)
+        result = invoke_command(command, vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="selected")
+        monkeypatch.setattr(episode_materials, "recover_reading", recover)
+        current = invoke_command(command, vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="selected")
+        assert result == current
+        assert result[representation] == {"status": "unavailable"}
+        peer = "reading" if representation == "original" else "original"
+        assert result[peer]["status"] == "available"
+        assert "attribution" not in result
+
+
+def test_material_reading_releases_only_its_exact_unit_and_preserves_the_response_bound(vault) -> None:
+    reference = _write_page(vault, "Unreturned context. " * 500 + "\n- [finding] Exact reading ^exact\n")
+    key = "ep-" + "d4" * 16
+    with request_scope(_owner("client-a")):
+        current = _owner_store(vault).create(key, reference=reference)
+        bound = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=1, journal_digest=current["journal_digest"], materials={"version": 1, "items": [
+                {"key": "unit", "reading_reference": reference + "#exact"},
+                {"key": "whole", "reading_reference": reference},
+            ]})
+        unit = commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=bound["input_revision"], material_key="unit")
+        assert unit["reading"]["text"] == "- [finding] Exact reading ^exact"
+        assert unit["reading"]["unit_fingerprint"]
+        assert unit["reading"]["span"]["end_offset"] > unit["reading"]["span"]["start_offset"]
+        assert "Unreturned context" not in json.dumps(unit)
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="whole")["reading"] == {"status": "unavailable"}
+        _write_page(vault, "\n- [finding] A changed reading ^exact\n")
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=2, material_key="unit")["reading"] == {"status": "stale"}
+        current = commands.op_episode_memory(vault, None, action="candidates", episode=key)
+        refreshed = commands.op_episode_memory(vault, None, action="input", episode=key,
+            input_revision=2, journal_digest=current["journal_digest"], materials={"version": 1, "items": [
+                {"key": "unit", "reading_reference": reference + "#exact"},
+            ]})
+        assert refreshed["input_revision"] == 3
+        assert commands.op_episode_memory(vault, None, action="material", episode=key,
+            input_revision=3, material_key="unit")["reading"]["text"] == "- [finding] A changed reading ^exact"
 
 
 def test_compiling_a_source_does_not_invalidate_retained_episode_input(vault: Path) -> None:
@@ -688,13 +839,19 @@ def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
 
 
 def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
-    """Neither a new recap page nor its selected unit is another original."""
+    """A withheld successor cannot hide the retired recap, exact span or single origin."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem import episode_model as model
     from exomem import retained_inputs
+    from exomem.episode_store import EpisodeStore
 
     key = "ep-" + "31" * 16
+    identity = model.episode_id(key)
     with request_scope(_owner("root-proof-a")):
         owner = _owner_store(vault)
         roots = []
+        first = None
         for summary in ("First recap", "Revised recap"):
             recorded = commands.op_episode_memory(
                 vault, source_schema, action="record", episode=key,
@@ -709,12 +866,188 @@ def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, so
             assert parent is not None and unit is not None
             assert parent.root == unit.root
             roots.append(parent.root)
+            if first is None:
+                first = recorded
+                original_body = commands.op_get(vault, path=recorded["source"]["path"])["body"]
+                current = owner.inspect(identity)
+                owner.append_input(
+                    current["episode_id"], expected_revision=current["revision"],
+                    expected_digest=current["journal_digest"], reference=reference + "#root-proof",
+                )
         assert roots[0] == roots[1]
+        first_ref = first["source"]["ref"]
+        source = vault / first["source"]["path"]
+        journal = EpisodeStore(vault, owner_audience_id="root-proof-a").path(identity)
+        write_scope(vault, paths=recorded["source"]["path"].removeprefix("Knowledge Base/"))
+        write_rule(vault, ceiling=0, audience="root-proof-a")
+        _reset_caches()
+        assert not egress.visible_memory_refs(vault, [reference], principal=_owner("root-proof-a"))
+        assert commands.op_get(vault, path=first["source"]["path"])["body"] == original_body
+        before = source.read_bytes(), journal.read_bytes()
+        page = owner.recover_input(identity, input_revision=1)
+        unit = owner.recover_input(identity, input_revision=2)
+        assert page["status"] == unit["status"] == "available"
+        assert page["reference"] == first_ref and page["body"] == original_body
+        assert unit["reference"] == first_ref + "#root-proof"
+        assert unit["text"] == "- [finding] A retained observation ^root-proof"
+        for selected in (first_ref, first_ref + "#root-proof"):
+            proof = owner.prove_original(
+                retained_inputs.resolve_retained_input(vault, selected, disclosure=True)
+            )
+            assert proof is not None and proof.root == roots[0]
+        assert (source.read_bytes(), journal.read_bytes()) == before
+        with pytest.raises(ValueError, match="EPISODE_INPUT_UNAVAILABLE"):
+            owner.create("retired-input", reference=first_ref)
     with request_scope(_owner("root-proof-b")):
         owner = _owner_store(vault)
         owner.bind_committed_input(key, path=recorded["source"]["path"], reference=reference)
         other = owner.prove_original(retained_inputs.resolve_retained_input(vault, reference))
         assert other is not None and other.root != roots[-1]
+
+
+@pytest.mark.parametrize("scheme", [None, "evidence-v1"])
+@pytest.mark.parametrize("selection", ["page", "unit"])
+def test_retired_recorder_keeps_the_bound_scope_and_digest_scheme(
+    vault: Path, source_schema, scheme, selection
+) -> None:
+    """Legacy raw hashes stay raw, and a unit-only binding cannot prove its parent."""
+    from exomem import episode_model as model
+    from exomem import retained_inputs
+    from exomem.episode_store import EpisodeStore
+
+    key = "ep-" + "86" * 16
+    with request_scope(_owner("client-a")):
+        owner = _owner_store(vault)
+        first = commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="First summary", worked_on=["[finding] Original unit ^exact"],
+        )
+        reference = first["source"]["ref"]
+        selected = reference + "#exact" if selection == "unit" else reference
+        evidence = owner._resolve_reference(selected, version_scheme=scheme).evidence
+        # Seed the existing journal format as an old binding, without a migration path.
+        store = EpisodeStore(vault, owner_audience_id="client-a")
+        store.path(model.episode_id(key)).unlink()
+        current = store.create(key, evidence)
+        commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="Second summary", worked_on=["[finding] Original unit ^exact"],
+        )
+        recovered = owner.recover_input(current["state"]["episode_id"], input_revision=1)
+        assert recovered["status"] == "available"
+        assert recovered["reference"] == selected and recovered["digest"] == evidence["digest"]
+        assert ("version_scheme" in evidence) == (scheme is not None)
+        if selection == "unit":
+            assert recovered["text"] == "- [finding] Original unit ^exact"
+        parent = retained_inputs.resolve_retained_input(vault, reference, disclosure=True)
+        assert (owner.prove_original(parent) is not None) == (selection == "page")
+        path = vault / first["source"]["path"]
+        path.write_text(path.read_text().replace("ingested_into: []", "ingested_into: [compiled]"))
+        recovered = owner.recover_input(current["state"]["episode_id"], input_revision=1)
+        assert recovered["status"] == ("available" if scheme else "stale")
+
+
+@pytest.mark.parametrize("change", ["body", "summary", "title", "tags", "client", "captured"])
+def test_retired_recorder_still_rejects_material_changes(vault: Path, source_schema, change) -> None:
+    """Retirement cannot hide a changed recap or other bound metadata."""
+    from exomem import episode_model as model
+    from exomem import retained_inputs
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    key = "ep-" + "97" * 16
+    with request_scope(_owner("client-a")):
+        owner = _owner_store(vault)
+        first = commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="First summary", worked_on=["An original observation"], client="test-client",
+        )
+        commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="Second summary", worked_on=["An original observation"], client="test-client",
+        )
+        path = vault / first["source"]["path"]
+        frontmatter, body, _raw = parse_frontmatter(path.read_text())
+        if change == "body":
+            body = body.replace("original observation", "changed observation")
+        else:
+            frontmatter[change] = ["changed"] if change == "tags" else "Changed metadata"
+        path.write_text(render_frontmatter_document(serialize_frontmatter(frontmatter), body))
+        assert owner.recover_input(model.episode_id(key), input_revision=1) == {
+            "status": "stale", "input_revision": 1,
+        }
+        assert owner.prove_original(retained_inputs.resolve_retained_input(
+            vault, first["source"]["ref"], disclosure=True
+        )) is None
+
+
+def test_retired_recorder_cannot_reconstruct_overwritten_fields(vault: Path, source_schema) -> None:
+    """Stripping retirement fields does not recover values present in the old binding."""
+    from exomem import episode_model as model
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    key = "ep-" + "a8" * 16
+    with request_scope(_owner("client-a")):
+        owner = _owner_store(vault)
+        first = commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="First summary", worked_on=["An original observation"],
+        )
+        path = vault / first["source"]["path"]
+        frontmatter, body, _raw = parse_frontmatter(path.read_text())
+        frontmatter.update(status="active", updated="2026-09-20", superseded_by=["[[Earlier page]]"])
+        path.write_text(render_frontmatter_document(serialize_frontmatter(frontmatter), body))
+        bound = owner.bind_committed_input(key, path=first["source"]["path"], reference=first["source"]["ref"])
+        commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="Second summary", worked_on=["An original observation"],
+        )
+        assert owner.recover_input(model.episode_id(key), input_revision=bound["input_revision"]) == {
+            "status": "stale", "input_revision": bound["input_revision"],
+        }
+
+
+@pytest.mark.parametrize("note_type", ["source", "insight"])
+def test_retirement_exception_does_not_admit_generic_or_compiled_input(vault: Path, note_type) -> None:
+    """Episode labels alone do not grant the recorder's historical lifecycle exception."""
+    from exomem.replace import _mark_superseded
+
+    key = "ep-" + "b9" * 16
+    reference = _write_page(vault, "Retained ordinary input.\n", episode=key)
+    path = vault / _REL
+    path.write_text(path.read_text().replace("type: source\n", f"type: {note_type}\n", 1))
+    with request_scope(_owner("client-a")):
+        owner = _owner_store(vault)
+        current = owner.create(key, reference=reference)
+        path.write_text(_mark_superseded(path.read_text(), "Replacement", "2026-09-21"))
+        assert owner.recover_input(current["episode_id"]) == {
+            "status": "unavailable", "input_revision": 1,
+        }
+
+
+def test_retired_recorder_recovery_still_requires_current_owned_release(vault: Path, source_schema) -> None:
+    """Readable successor history cannot authorize a revoked original or another owner's journal."""
+    from exomem import episode_model as model
+
+    key = "ep-" + "ca" * 16
+    with request_scope(_owner("client-a")):
+        first = commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="First summary", worked_on=["An original observation"],
+        )
+        commands.op_episode_memory(
+            vault, source_schema, action="record", episode=key, subject="Retained recap",
+            summary="Second summary", worked_on=["An original observation"],
+        )
+    with request_scope(_owner("client-b")):
+        assert commands.op_get(vault, path=first["source"]["path"])["body"]
+        with pytest.raises(ValueError, match="EPISODE_NOT_FOUND"):
+            _owner_store(vault).recover_input(model.episode_id(key), input_revision=1)
+    _write_source_rule(vault, ceiling=0)
+    with request_scope(_owner("client-a")):
+        with egress.disclosure_boundary(vault, "episode-recovery") as collector:
+            recovered = _owner_store(vault).recover_input(model.episode_id(key), input_revision=1)
+    assert recovered == {"status": "unavailable", "input_revision": 1}
+    assert collector.outcomes == []
 
 
 @pytest.mark.parametrize("history", ["missing", "digest-only", "foreign", "ownerless", "corrupt", "unit-only"])

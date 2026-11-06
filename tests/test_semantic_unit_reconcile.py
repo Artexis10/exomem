@@ -565,6 +565,12 @@ def test_an_old_generation_reads_incomplete_until_reconcile_restores_coverage_an
         conn.execute(
             "UPDATE semantic_units SET parser_version = ?, parent_generation = 'older'", (older,)
         )
+        # An older parser wrote the parent summary and its occurrence rows together.
+        conn.execute(
+            "UPDATE pages SET structure_json = json_set("
+            "structure_json, '$.parser_version', ?, '$.parent_generation', 'older')",
+            (older,),
+        )
         conn.commit()
     finally:
         conn.close()

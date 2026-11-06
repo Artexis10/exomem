@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 
+from .. import request_budget
 from ..issued_cursor import is_issued_cursor
 from . import authorization_sessions
 
@@ -769,6 +770,7 @@ def _scrub_value(
     structural: bool = False,
 ) -> tuple[Any, bool]:
     """``result`` marks the walk's root mapping; ``structural`` a string under one of its result fields."""
+    request_budget.checkpoint()
     if isinstance(value, str):
         structural = structural or (field_name is not None and _is_structural_field(field_name))
         return classify(value, structural)

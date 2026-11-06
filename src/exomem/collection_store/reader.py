@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .. import record_formats
+from .. import call_spans, record_formats
 from .. import structured_collections as collections
 
 
@@ -35,8 +35,10 @@ class StoreAdapter:
             return self._read(manifest)
 
     def _read(self, manifest: collections.CollectionManifest) -> record_formats.AdapterSnapshot:
-        items, snapshot, _ = self.writer._operation.authorized_rows(manifest.collection_id)
-        return self._snapshot(manifest, items, snapshot)
+        with call_spans.span("store.authorized_rows"):
+            items, snapshot, _ = self.writer._operation.authorized_rows(manifest.collection_id)
+        with call_spans.span("store.materialize", {"items": len(items)}):
+            return self._snapshot(manifest, items, snapshot)
 
     def _snapshot(self, manifest, items, snapshot):
         versions = [manifest.manifest_version]
@@ -53,9 +55,13 @@ class StoreAdapter:
             source = collections.SourceVersion(row_source(manifest, item), item.get("public_version") or self.writer._version(item))
             stored = json.loads(item["values_json"])
             values = {name: stored[name] for name in fields if name in stored}
+            identity = collections.ItemIdentity(manifest.collection_id, item["item_key"])
+            if self.project_values is not None:
+                with call_spans.span("store.project_values"):
+                    values = self.project_values(values)
             records.append(record_formats.Record(
-                collections.ItemIdentity(manifest.collection_id, item["item_key"]),
-                values if self.project_values is None else self.project_values(values),
+                identity,
+                values,
                 source, record_formats.SourceSpan(0, 0), body=item["body"],
             ))
             if manifest.storage.strategy == "markdown-items" and manifest.view_mode == "items":

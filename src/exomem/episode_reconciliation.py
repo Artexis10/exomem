@@ -33,19 +33,22 @@ def reconcile_curation_leaf(
     state: Mapping[str, Any],
     candidate_id: str,
     leaf_id: str,
+    *,
+    live: bool = False,
 ) -> dict[str, Any]:
     """Verify an internal uncertain leaf under the existing vault read boundary.
 
     The consistency guard excludes canonical writers throughout the evidence
     read, including multi-path postimages, without acquiring writer authority.
     It is reentrant when the future episode owner already holds that boundary.
+    `live=True` is for a read-only trial alone; see `_reconcile_held`.
     """
     from .writer_lease import active_manager
 
     with active_manager().consistency_guard(
         vault_root, operation="episode-reconciliation", holder_kind="command"
     ):
-        return _reconcile_held(vault_root, state, candidate_id, leaf_id)
+        return _reconcile_held(vault_root, state, candidate_id, leaf_id, live=live)
 
 
 def _reconcile_held(
@@ -54,20 +57,21 @@ def _reconcile_held(
     candidate_id: str,
     leaf_id: str,
     *,
-    live: bool = True,
+    live: bool = False,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return a reconciled copy only for an evidenced, currently verified commit.
+    """Return a reconciled copy only for an evidenced historical commit.
 
-    `live=False` verifies the historical commitment alone -- plan, approval,
-    receipt and atomic witness -- and leaves the live postimage to the caller;
+    The commitment is verified from plan, approval, receipt and atomic witness
+    alone, so a later change to its output, or the output's loss, never makes
+    it uncertain; current coverage reports that change separately. `live=True`
+    also requires the live postimage: only the read-only trial that reports a
+    plan committed elsewhere as `diverged` uses it, and it records nothing.
     `evidence`, when given, receives the verified witness, step and binding.
 
     All receipt, approval, plan and witness bytes come from the existing canonical
     curation store.  A receipt gap stays uncertain until that store's executor
-    recovers it. With `live=True`, a changed postimage also stays uncertain;
-    historical coverage uses `live=False` and verifies the chain tip separately.
-    Neither case becomes permission to retry.
+    recovers it, and never becomes permission to retry.
 
     A failed receipt cannot prove noncommit for this episode attempt: the current
     binding does not identify a curation attempt, and an older failure may predate
@@ -107,7 +111,30 @@ def _reconcile_held(
             and receipt["outcome"] in curation.COMMITTED_OUTCOMES
         ]
         if len(receipts) != 1:
-            raise _uncertain("one verified committed receipt is required")
+            ordinal = verified_binding["ordinal"]
+            native_binding = plan["binding_manifest"][ordinal]
+            # An existing same-operation witness wins; its owner must repair the terminal first.
+            witness = curation._validated_operation_witness(  # noqa: SLF001
+                store, run, plan_identity=identity, ordinal=ordinal, step=plan["steps"][ordinal],
+                binding=native_binding, operation_identity=operation, compensation=False, live=False,
+            )
+            terminals = [receipt for receipt in reconstructed["receipts"]
+                         if receipt.get("operation_id") == operation
+                         and receipt.get("invocation_id") == leaf.get("invocation_id")
+                         and receipt.get("episode_attempt") == leaf["attempts"]
+                         and curation._valid_no_effect(  # noqa: SLF001
+                             receipt, run=run, plan_identity=identity, step=plan["steps"][ordinal],
+                             binding=native_binding, operation=operation,
+                         )]
+            if witness is None and leaf.get("invocation_id") is not None and len(terminals) == 1 and all(
+                attempt["outcome"] != "uncertain" for attempt in leaf["attempt_history"][:-1]
+            ):
+                return episode_model.reconcile_leaf(snapshot, episode_model.VerifiedLeafOutcome(
+                    candidate_id=candidate_id, leaf_id=leaf_id, operation_id=operation,
+                    effect_digest=leaf["effect_digest"], outcome="proven_uncommitted",
+                    receipt_digest=curation._digest(terminals[0]),  # noqa: SLF001
+                ))
+            raise _uncertain("one verified committed receipt or exact typed no-effect terminal is required")
         ordinal = verified_binding["ordinal"]
         witness = curation._validated_operation_witness(
             store,
@@ -174,9 +201,12 @@ def _tip_is_live(
             return visible and curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]
             )
+        if evidence["step"]["kind"] in curation.PRESERVATION_STEP_KINDS:
+            curation._verify_live_postcondition(vault_root, evidence["witness"], step=evidence["step"], binding=evidence["binding"])  # noqa: SLF001
+            return True
         if after != "absent" and keep is not None and not keep(path):
             return False
-        if evidence["step"]["kind"] in curation.RECORDS_STEP_KINDS:
+        if evidence["step"]["kind"] in curation.COLLECTION_STEP_KINDS:
             # A Records item is current only while its Records receipt agrees.
             if curation._verify_records_receipt(  # noqa: SLF001
                 vault_root, evidence["binding"], evidence["witness"], kind=evidence["step"]["kind"]

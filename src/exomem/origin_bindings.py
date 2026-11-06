@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import note_types, provenance, retained_inputs, source_closure, working_set_runtime
+from . import (
+    artifact_recovery,
+    note_types,
+    provenance,
+    retained_inputs,
+    source_closure,
+    working_set_runtime,
+)
 from .episode_recovery import EpisodeInputOwner
 from .governance import egress
+from .governance.principal import effective_principal
 from .vault import PathGuard, PlannedWrite, parse_frontmatter
 
 if TYPE_CHECKING:
@@ -33,21 +41,61 @@ class OriginInputProof:
 
 
 @dataclass(frozen=True)
+class OriginalInputProof:
+    """A canonical original binding; every recheck reacquires native bytes and release."""
+
+    root: str
+    version: str
+    size: int
+
+    def recheck(self, vault_root: Path) -> None:
+        _resolve_original(vault_root, {"reference": self.root, "version": self.version, "size": self.size})
+
+
+def _resolve_original(vault_root: Path, spec: Mapping) -> OriginalInputProof:
+    try:
+        snapshot = retained_inputs._read_snapshot(vault_root, spec["reference"])  # noqa: SLF001
+        if not source_closure._eligible_path(snapshot.page.path):  # noqa: SLF001
+            raise _unavailable()
+        who = replace(effective_principal(), administrative_ingress=False)
+        with artifact_recovery.stage(vault_root, snapshot.page.path, who) as (held, _descriptor):
+            stale = (held.sha256, held.size) != (spec["version"], spec["size"])
+            artifact_recovery.require_current(vault_root, held, who)
+        if stale:
+            raise provenance.OriginError("ORIGIN_INPUT_STALE", "original input binding changed")
+        return OriginalInputProof(snapshot.canonical, spec["version"], spec["size"])
+    except (retained_inputs.RetainedInputError, artifact_recovery.RecoveryUnavailable, OSError, ValueError) as error:
+        if isinstance(error, provenance.OriginError):
+            raise
+        raise _unavailable() from error
+
+
+@dataclass(frozen=True)
 class PreparedOriginInputs:
     """Exact authoring bytes and input proofs; each commit check reacquires release."""
 
     source: str
-    inputs: tuple[tuple[str, OriginInputProof], ...]
+    inputs: tuple[tuple[str, OriginInputProof | OriginalInputProof], ...]
 
     def revalidate(self, vault_root: Path) -> None:
         document = provenance.parse_origin(self.source, managed=True, authoring=True, strict=True)
         if document.payload is None:
             raise _unavailable()
+        from .governance import policy
+
         bindings = document.payload["inputs"]
-        for label, prior in self.inputs:
-            current = resolve_origin_input(vault_root, bindings[label])
-            if current.root != prior.root:
-                raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input root changed")
+        failure = None
+        with policy.outside_request_policy_snapshot():
+            try:
+                for label, prior in self.inputs:
+                    current = resolve_origin_input(vault_root, bindings[label])
+                    if current.root != prior.root:
+                        raise provenance.OriginError("ORIGIN_INPUT_STALE", "retained input root changed")
+            except provenance.OriginError as error:
+                failure = error
+        # Frozen domain errors cannot cross a generator context manager's traceback assignment.
+        if failure is not None:
+            raise failure
 
     def required_guards(
         self, vault_root: Path, writes: tuple[PlannedWrite, ...] | list[PlannedWrite]
@@ -59,6 +107,9 @@ class PreparedOriginInputs:
         }
         guards = []
         for _label, proof in self.inputs:
+            if isinstance(proof, OriginalInputProof):
+                proof.recheck(vault_root)
+                continue
             assert proof.retained.guard is not None
             guard = proof.retained.guard
             write = guarded_writes.get(guard.target)
@@ -107,12 +158,14 @@ def _text_refused(vault_root: Path, verdict: str) -> provenance.OriginError:
 
 def resolve_origin_input(
     vault_root: Path, binding: object, *, disclosure: bool = False
-) -> OriginInputProof:
+) -> OriginInputProof | OriginalInputProof:
     """Validate one parsed binding against the current released page/unit/span."""
     # The envelope owner defines this grammar; do not create a second validator.
     spec = provenance._origin_payload(  # noqa: SLF001
         {"inputs": {"input": binding}, "assessments": [], "bindings": []}, authoring=False
     )["inputs"]["input"]
+    if spec.get("representation") == "original":
+        return _resolve_original(vault_root, spec)
     try:
         retained = retained_inputs.resolve_retained_input(
             vault_root, spec["reference"], disclosure=disclosure
@@ -186,13 +239,16 @@ def project_origin_text(vault_root: Path, text: str) -> str:
                         raise
             retained_inputs.recheck_retained_inputs(
                 vault_root,
-                tuple((proof.retained, proof.text) for proof in proofs),
+                tuple((proof.retained, proof.text) for proof in proofs if isinstance(proof, OriginInputProof)),
                 disclosure=True,
             )
             # Check earlier inputs again after all later releases, including
             # exact episode-journal evidence. Changes after this checkpoint
             # remain the existing readers' observational window.
             for proof in proofs:
+                if isinstance(proof, OriginalInputProof):
+                    proof.recheck(vault_root)
+                    continue
                 for guard in proof.guards:
                     guard.recheck(vault_root)
         except (provenance.OriginError, retained_inputs.RetainedInputError, OSError, ValueError):
@@ -202,6 +258,55 @@ def project_origin_text(vault_root: Path, text: str) -> str:
     # Malformed, duplicate, unavailable and code-hidden carriers are never
     # partially disclosed. Keep unrelated prose in its original positions.
     return provenance.remove_carriers(text, withheld)
+
+
+def release_origin_response(vault_root: Path, value):
+    """Project managed body carriers again at terminal release under current input permission."""
+    from .governance import policy
+
+    def carried(item) -> str | None:
+        # Values are authored fields; native managed attribution lives in the row's body.
+        body = item.get("body")
+        path = item.get("path")
+        if isinstance(body, str) and not (isinstance(path, str) and source_closure._eligible_path(path)):  # noqa: SLF001
+            return body
+        return None
+
+    def has_carrier(item) -> bool:
+        if isinstance(item, list):
+            return any(has_carrier(child) for child in item)
+        if not isinstance(item, dict):
+            return False
+        body = carried(item)
+        return bool(body is not None and provenance.reserved_spans(body)) or any(
+            has_carrier(child) for key, child in item.items() if key != "values"
+        )
+
+    def walk(item):
+        if isinstance(item, list):
+            return [walk(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        out = {key: child if key == "values" else walk(child) for key, child in item.items()}
+        body = carried(item)
+        if body is not None:
+            projected = project_origin_text(vault_root, body)
+            if projected != body:
+                out["body"] = projected
+                out.pop("content", None)
+                out.pop("evidence_version", None)
+        return out
+
+    # Most responses carry no reserved span. Finding that is a text scan, while the live
+    # policy read below walks the vault, so it must not run once per postfiltered response.
+    if not has_carrier(value):
+        return value
+    # A false refusal removes only the selected attribution, keeping the row's usable prose.
+    # This final input proof must not reuse a request's earlier release snapshot.
+    with policy.outside_request_policy_snapshot():
+        if not egress.projects_origin_for_caller(vault_root):
+            return value
+        return walk(value)
 
 
 def _authored_origin(source: str, before_source: str | None) -> provenance.OriginDocument | None:

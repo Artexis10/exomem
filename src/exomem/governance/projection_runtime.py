@@ -1728,6 +1728,33 @@ def _find_projected_hits_pinned(
             window=candidate_depth,
         )
 
+    knowledge_base_name = kb_dirname()
+    lane_hits = {
+        lane: _retain_projected_scope_lane(
+            hits,
+            scope=scope,
+            candidate_depth=candidate_depth,
+            outside_depth=limit,
+            knowledge_base_name=knowledge_base_name,
+        )
+        for lane, hits in lane_hits.items()
+    }
+    from .egress import container_parent_allows
+
+    # Admit only retained windows before their passages reach graph seeds or scoring.
+    candidate_access = {
+        identity: container_parent_allows(
+            Path(vault_root), identity, policy=runtime.snapshot.policy,
+            principal=principal, purpose=declared_purpose,
+        )
+        for identity in {hit.item_identity for hits in lane_hits.values() for hit in hits}
+    }
+    lane_hits = {
+        lane: tuple(hit for hit in hits if candidate_access[hit.item_identity])
+        for lane, hits in lane_hits.items()
+    }
+    withheld = withheld | frozenset(identity for identity, allowed in candidate_access.items() if not allowed)
+
     graph_degrees: dict[str, int] = {}
     graph_hops: set[str] = set()
     graph_provenance: dict[str, GraphProvenance] = {}
@@ -1818,6 +1845,27 @@ def _find_projected_hits_pinned(
                     )
                     for identity in graph_ranking
                 )
+                lane_hits["graph"] = _retain_projected_scope_lane(
+                    lane_hits["graph"],
+                    scope=scope,
+                    candidate_depth=candidate_depth,
+                    outside_depth=limit,
+                    knowledge_base_name=knowledge_base_name,
+                )
+                for hit in lane_hits["graph"]:
+                    target = hit.item_identity
+                    if target not in candidate_access:
+                        candidate_access[target] = container_parent_allows(
+                            Path(vault_root), target, policy=runtime.snapshot.policy,
+                            principal=principal, purpose=declared_purpose,
+                        )
+                lane_hits["graph"] = tuple(
+                    hit for hit in lane_hits["graph"] if candidate_access[hit.item_identity]
+                )
+                graph_degrees = {identity: degree for identity, degree in graph_degrees.items() if candidate_access.get(identity, False)}
+                graph_hops = {identity for identity in graph_hops if candidate_access.get(identity, False)}
+                graph_provenance = {identity: value for identity, value in graph_provenance.items() if candidate_access.get(identity, False)}
+                withheld = withheld | frozenset(identity for identity, allowed in candidate_access.items() if not allowed)
             except projected_retrieval.ProjectedLaneUnavailable:
                 warming.add("graph")
             except projected_retrieval.ProjectedRetrievalUnavailable as error:
@@ -1826,17 +1874,6 @@ def _find_projected_hits_pinned(
                 ) from error
 
     lane_order = ranking_config.LANE_ORDER[:5]
-    knowledge_base_name = kb_dirname()
-    lane_hits = {
-        lane: _retain_projected_scope_lane(
-            hits,
-            scope=scope,
-            candidate_depth=candidate_depth,
-            outside_depth=limit,
-            knowledge_base_name=knowledge_base_name,
-        )
-        for lane, hits in lane_hits.items()
-    }
     active_lanes = [lane for lane in lane_order if lane_hits.get(lane)]
     rankings = [
         [hit.item_identity for hit in lane_hits[lane]] for lane in active_lanes

@@ -223,9 +223,11 @@ def test_changed_postimage_never_becomes_a_safe_retry(vault: Path):
     destination.write_text(destination.read_text() + "\nLater independent change.\n")
     from exomem.episode_reconciliation import reconcile_curation_leaf
 
-    with pytest.raises(model.EpisodeError, match="EPISODE_OUTCOME_UNCERTAIN"):
-        reconcile_curation_leaf(vault, state, candidate, leaf)
-    assert state["candidates"][0]["leaves"][0]["outcome"] == "uncertain"
+    # The commit is history: the later edit is a current-coverage finding, not a reason to retry.
+    reconciled = reconcile_curation_leaf(vault, state, candidate, leaf)
+    assert reconciled["candidates"][0]["leaves"][0]["outcome"] == "committed"
+    with pytest.raises(model.EpisodeError, match="EPISODE_ATTEMPT_UNCERTAIN"):
+        model.mark_attempt_started(reconciled, candidate, leaf)
 
 
 @pytest.mark.parametrize(

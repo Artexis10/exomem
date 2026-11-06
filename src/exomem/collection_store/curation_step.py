@@ -276,7 +276,7 @@ def verify_imported(writer, prepared, postimage, *, kind):
 
 
 def needs_store(root, command, arguments):
-    """Whether a curation or episode command has a Records step in a canonically owned collection.
+    """Whether a curation or episode command has a Records or Planning step in a canonically owned collection.
 
     Structured-files maintenance on such a collection counts too: it moves the collection's views.
 
@@ -303,7 +303,7 @@ def needs_store(root, command, arguments):
             args = leaf.get("args") if isinstance(leaf, Mapping) else None
             if (
                 isinstance(args, Mapping)
-                and leaf.get("kind") in curation.RECORDS_STEP_KINDS
+                and leaf.get("kind") in curation.COLLECTION_STEP_KINDS
                 and isinstance(args.get("collection"), str)
             ):
                 selectors.add(args["collection"])

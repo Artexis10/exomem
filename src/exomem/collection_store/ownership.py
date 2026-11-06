@@ -72,10 +72,13 @@ class Proof:
     def owner(self, root, path, *, ancestors=False):
         if self.marker is None:
             return None
-        path = collections._reference_key(Path(root), path) or path
+        reference = collections._reference_key(Path(root), path)
+        path = reference or path
         if not relevant(path, ancestors=ancestors):
             return None
-        owner = authority.owned_entry(root, self.marker, path)
+        # An unkeyed path takes the public route, which refuses it exactly as before.
+        owner = (authority._owned_entry_for_key(self.marker, reference) if reference
+                 else authority.owned_entry(root, self.marker, path))
         if owner is None and ancestors:
             key = collections._portable_path_key(path).rstrip("/")
             owner = next((entry for entry in self.entries if any(

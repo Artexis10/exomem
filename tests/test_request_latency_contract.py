@@ -146,17 +146,17 @@ def test_the_paired_mcp_read_bar_is_pending_and_never_labels_live_traffic() -> N
     assert bar.observe is False
     live = contract.observation_bar(surface="mcp", tool="search_memory", deep=False)
     assert live is not None and live.id == "mcp-observed"
-    # The six collection-store groups carry the private-sandbox target; only gating groups
+    # The six collection-store groups carry the private-sandbox targets; only gating groups
     # carry an allowance, and the multiplicity family size comes from this list.
     groups = {**reference["gating_groups"], **reference["non_gating_groups"]}
-    assert sorted(name for name, group in groups.items() if group.get("p95_target_ms") == 100) == [
-        "planning-list",
-        "planning-query",
-        "planning-read",
-        "records-list",
-        "records-query",
-        "records-read",
-    ]
+    assert {name: group["p95_target_ms"] for name, group in groups.items() if "p95_target_ms" in group} == {
+        "planning-list": 150,
+        "planning-query": 100,
+        "planning-read": 100,
+        "records-list": 300,
+        "records-query": 100,
+        "records-read": 100,
+    }
     assert all("allowance_ms" in group for group in reference["gating_groups"].values())
     assert not any("allowance_ms" in group for group in reference["non_gating_groups"].values())
 

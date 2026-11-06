@@ -548,8 +548,8 @@ _TOOL_HELP = {
     "change_files": ("write", "Change files", "Create, append, move, delete, recover or reclassify governed files. Preview reclassification through browse_memory."),
     "change_observations": ("write", "Change observations", "Add, update or remove a semantic unit with the existing review and fingerprint guards."),
     "change_settings": ("write", "Change settings", "Set or clear saved engagement only on an explicit user setting-change request. Inspect settings through bootstrap first."),
-    "read_episode": ("read", "Read episode", "Inspect episode recaps, candidates or source coverage without writing."),
-    "record_episode": ("write", "Record episode", "Record an episode, prepare a capture, save a disposition or resume its workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes."),
+    "read_episode": ("read", "Read episode", "Inspect episode recaps, candidates or coverage, or recover one preserved material's original and reading states."),
+    "record_episode": ("write", "Record episode", "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
     "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),
@@ -663,6 +663,8 @@ _REMAINING = {
     ), True),
     "episode_memory": ("action", (
         _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved"),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
+        _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),
         _row("candidates", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
         _row("coverage", "read_episode", ("episode", "order", "max_leaves", "postcommit")),

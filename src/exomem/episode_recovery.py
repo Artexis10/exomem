@@ -7,17 +7,18 @@ nor exposes episode state beyond the small operational projection below.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import curation, note_types, provenance, retained_inputs
+from . import curation, episode_capture, episode_materials, note_types, provenance, retained_inputs
 from . import episode_model as model
+from .collection_store.ownership import read_scope
 from .episode_store import EpisodeStore
 from .get_page import GetResult
 from .governance import egress
 from .governance.principal import effective_principal
-from .vault import PathGuard
+from .vault import PathGuard, content_hash
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _MAX_RESPONSE_BYTES = 8192
@@ -87,10 +88,8 @@ class EpisodeInputOwner:
                     evidence = revision["evidence"]
                     if evidence.get("reference") != resolved.canonical:
                         continue
-                    expected = self._page_evidence(
-                        page, resolved.canonical, evidence.get("version_scheme")
-                    )
-                    if evidence.get("digest") == expected["digest"]:
+                    if self._matches_bound_evidence(resolved, evidence, identity, whole_parent=True):
+                        resolved.guard.recheck(self.vault_root)
                         guard.recheck(self.vault_root)
                         return EpisodeRootProof(
                             model._hash("exomem-episode-origin-v1", store.owner_audience_id, identity),
@@ -140,6 +139,52 @@ class EpisodeInputOwner:
         if material:
             evidence["version_scheme"] = model.MATERIAL_EVIDENCE_SCHEME
         return evidence
+
+    def _retired_recorder(self, resolved: retained_inputs.RetainedInput, identity: str) -> bool:
+        page = resolved.page
+        return episode_capture.is_retired_revision(
+            page.path, page.frontmatter, audience=self._owner()
+        ) and model.episode_id(page.frontmatter["episode"]) == identity
+
+    def _matches_bound_evidence(
+        self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], identity: str,
+        *, whole_parent: bool = False,
+    ) -> bool:
+        unit_ref = None if whole_parent else resolved.unit_ref
+        fingerprint = resolved.unit.fingerprint if unit_ref is not None and resolved.unit else None
+        scheme = evidence.get("version_scheme")
+        expected = self._page_evidence(
+            resolved.page, resolved.canonical, scheme,
+            unit_ref=unit_ref, unit_fingerprint=fingerprint,
+        )
+        if evidence.get("digest") == expected["digest"]:
+            return True
+        if not self._retired_recorder(resolved, identity):
+            return False
+        candidate = episode_capture.pre_retirement_content(resolved.page.content)
+        if candidate is None:
+            return False
+        expected = self._page_evidence(
+            replace(resolved.page, content=candidate, content_hash=content_hash(candidate)),
+            resolved.canonical, scheme, unit_ref=unit_ref, unit_fingerprint=fingerprint,
+        )
+        # A match proves the old material, not who wrote the retirement fields.
+        return evidence.get("digest") == expected["digest"]
+
+    def _resolve_bound_reference(
+        self, evidence: dict[str, Any], identity: str
+    ) -> retained_inputs.RetainedInput:
+        try:
+            with read_scope(self.vault_root, finalize=True):
+                snapshot = retained_inputs._read_snapshot(  # noqa: SLF001
+                    self.vault_root, evidence["reference"]
+                )
+                resolved = retained_inputs._release_snapshot(  # noqa: SLF001
+                    self.vault_root, snapshot, disclosure=self._retired_recorder(snapshot, identity)
+                )
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
+        return resolved
 
     def _resolve_reference(
         self, reference: Any, *, version_scheme: str | None = None, new_input: bool = False
@@ -306,6 +351,89 @@ class EpisodeInputOwner:
             raise
         return self._projection(current)
 
+    def bind_materials(
+        self, key: str, *, input_revision: int, journal_digest: str, materials: Any,
+    ) -> dict[str, Any]:
+        store = self._store()
+        identity = model.episode_id(key)
+        try:
+            with store._guard():
+                current = store.read(identity)
+                latest = current["state"]["input_revisions"][-1]
+                if (
+                    type(input_revision) is not int or input_revision != latest["revision"]
+                    or journal_digest != current["journal_digest"]
+                ):
+                    raise _error("EPISODE_REVISION_CONFLICT", "reload the episode input revision and journal digest")
+                evidence = {name: value for name, value in latest["evidence"].items() if name != "recovery"}
+                evidence["materials"] = episode_materials.seal(self.vault_root, materials)
+                unchanged = False
+                try:
+                    current = store.transition(
+                        identity, expected_revision=current["revision"],
+                        expected_digest=current["journal_digest"], action="append_input_revision",
+                        args={"input_evidence": evidence},
+                    )
+                except model.EpisodeError as error:
+                    if error.code != "EPISODE_REVISION_UNCHANGED":
+                        raise
+                    unchanged = True
+        except curation.CurationError as error:
+            if error.code == "CURATION_RUN_NOT_FOUND":
+                raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
+            raise
+        except retained_inputs.RetainedInputError as error:
+            raise _retained_error(error) from error
+        return {
+            "summary": "Material references are unchanged." if unchanged else "Bound the preserved material references.",
+            "operation": "episode_input", "episode": key, **self._projection(current),
+            "unchanged": unchanged,
+            "materials": episode_materials.handles(self.vault_root, current["state"]),
+        }
+
+    def _material_item(self, key: str, *, input_revision: int, material_key: str) -> dict | None:
+        if type(input_revision) is not int or input_revision < 1:
+            raise _error("EPISODE_INPUT_INVALID", "input revision must be a positive integer")
+        if not isinstance(material_key, str) or not material_key.strip() or len(material_key) > 160:
+            raise _error("EPISODE_MATERIAL_INVALID", "material_key must be nonempty and at most 160 characters")
+        try:
+            current = self._store().read(model.episode_id(key))
+        except curation.CurationError as error:
+            if error.code == "CURATION_RUN_NOT_FOUND":
+                raise _error("EPISODE_NOT_FOUND", "episode is unavailable") from error
+            raise
+        binding = model.material_binding(current["state"], input_revision)
+        return next((
+            row for row in binding[1]["items"] if row["key"] == material_key
+        ), None) if binding is not None and binding[0] == input_revision else None
+
+    def release_material(self, original: dict, filtered: dict) -> dict[str, Any]:
+        item = self._material_item(
+            original["episode"], input_revision=original["input_revision"], material_key=original["material_key"],
+        )
+        return episode_materials.release_material(self.vault_root, item, filtered, max_bytes=_MAX_RESPONSE_BYTES)
+
+    def recover_material(self, key: str, *, input_revision: int, material_key: str) -> dict[str, Any]:
+        item = self._material_item(key, input_revision=input_revision, material_key=material_key)
+        result = {
+            "summary": "Original unavailable; reading unavailable.",
+            "operation": "episode_material", "episode": key,
+            "input_revision": input_revision, "material_key": material_key,
+            "original": {"status": "unavailable"}, "reading": {"status": "unavailable"},
+        }
+        if item is not None:
+            result["original"] = episode_materials.recover_original(self.vault_root, item)
+            result["reading"] = episode_materials.recover_reading(
+                self.vault_root, item, max_bytes=_MAX_RESPONSE_BYTES,
+            )
+            if all(result[field]["status"] == "available" for field in ("original", "reading") if field in item):
+                result["attribution"] = {
+                    "basis": "caller_authored",
+                    **{field: item[field] for field in ("producer", "producer_version") if field in item},
+                }
+        result["summary"] = f"Original {result['original']['status']}; reading {result['reading']['status']}."
+        return result
+
     def inspect(self, episode_id: str) -> dict[str, Any]:
         store = self._store()
         try:
@@ -337,6 +465,8 @@ class EpisodeInputOwner:
                 for item in revisions
             ],
             "latest_reference": revisions[-1]["evidence"].get("reference"),
+            **({"materials": episode_materials.handles(self.vault_root, current["state"])}
+               if model.material_binding(current["state"]) is not None else {}),
         }
 
     def recover_input(
@@ -363,14 +493,15 @@ class EpisodeInputOwner:
                 if "reference" not in evidence:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 try:
-                    resolved = self._resolve_reference(
-                        evidence["reference"], version_scheme=evidence.get("version_scheme")
-                    )
+                    resolved = self._resolve_bound_reference(evidence, episode_id)
                 except model.EpisodeError:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
-                if resolved.evidence["digest"] != evidence.get("digest"):
+                if not self._matches_bound_evidence(resolved, evidence, episode_id):
                     return {"status": "stale", "input_revision": revision["revision"]}
-                field, value = ("body", resolved.body) if resolved.body is not None else ("text", resolved.text)
+                field, value = (
+                    ("body", resolved.page.body) if resolved.unit is None
+                    else ("text", resolved.unit.span.text)
+                )
                 if value is None or len(value.encode("utf-8")) > _MAX_RESPONSE_BYTES:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
                 if not retained_inputs.exact_text_visible(self.vault_root, value):

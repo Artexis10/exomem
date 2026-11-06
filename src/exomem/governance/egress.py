@@ -41,7 +41,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -54,6 +54,8 @@ from .. import (
     call_spans,
     find_corpus,
     memory_refs,
+    originals,
+    request_budget,
     reserved_paths,
     state_paths,
     vault,
@@ -2050,21 +2052,31 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
-def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
-                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def _independent_content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                                 snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
     return (connector_boundary.permits(vault_root, path, who, content=snapshot, artifact_copy=artifact_copy)
             and raw_protection.permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
-def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
-    """`content_permits` for each path of one walk.
+def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
+                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    """Apply current container dependencies and independent content floors to a real path."""
+    from .. import document_containers
 
-    Inside a request scope the connector snapshot is read once for the walk;
-    see `connector_boundary.permits_filter`.
-    """
-    boundary = connector_boundary.permits_filter(vault_root, who)
-    return lambda path: boundary(path) and raw_protection.permits(vault_root, path, who)
+    try:
+        dependency = document_containers.parent_for_path(vault_root, path, content=snapshot, artifact_copy=artifact_copy)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    if dependency is not None and any(not content_permits(vault_root, parent, who) for parent in dependency):
+        return False
+    return _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy)
+
+
+
+def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
+    """Apply all content floors once per path, using their shared request memos."""
+    return lambda path: content_permits(vault_root, path, who)
 
 
 def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool:
@@ -2081,9 +2093,11 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
     read error the same way they refuse a restricted page, and a refusal that a
     retry could lift must not outlast the retry.
     """
+    from .. import document_containers
     from ..collection_store import ownership
 
     if (not _is_markdown_path(rel_path) or raw_protection.marked(rel_path)
+            or document_containers.in_payload_tree(rel_path)
             or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
@@ -2164,6 +2178,36 @@ _DECIDE_PATH_BATCH = Batch(
 )
 
 
+def container_parent_allows(
+    vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
+    purpose: str | None, content: bytes | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+) -> bool:
+    """Meet current parent authority before any cached child disclosure or model scoring."""
+    from .. import document_containers
+
+    try:
+        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        if parent is None:
+            return True
+        # Recheck the validated binding before using its fingerprint without a local inode.
+        parent = document_containers._require_identity(vault_root, parent.path, parent.sha256, parent.size)
+    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+        return False
+    if _release_level_for_path_only_snapshot(
+        vault_root, parent.path, policy=policy, principal=principal, purpose=purpose,
+        content_fingerprint=parent.sha256,
+    ) < LEVEL_FULL:
+        return False  # A parent's excerpt cannot authorize an intact payload or its complete extracted text.
+    decision = _decide_path(
+        vault_root, originals.sidecar_path(Path(parent.path)).as_posix(),
+        policy=policy, audience=principal.audience_id, purpose=purpose,
+        grants_hash=_grants_hash(policy), authorization_session=principal.authorization_session_id,
+        authorization_context=principal.verified_authorization_session, principal=principal,
+    )
+    return decision is not None and decision.level >= LEVEL_FULL
+
+
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 def _decide_path(
     vault_root: Path,
@@ -2237,6 +2281,9 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
+                                   purpose=purpose, content=raw, artifact_copy=artifact_copy):
+        return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
         authorization_context=authorization_context, content=raw if raw is not None else b"",
@@ -2735,6 +2782,9 @@ def annotate_projected_hits(
         rel_path = _hit_path(hit)
         if not rel_path:
             raise ValueError("projected release snapshot is invalid")
+        if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal, purpose=purpose):
+            withheld_paths = withheld_paths | frozenset((rel_path,))
+            continue
         if decision.level >= RELEASE_FLOOR:
             released.append(hit)
             _outcome_for_decision(
@@ -5194,6 +5244,9 @@ def projects_origin_for_caller(
     """Whether this caller reads origin projected (`projects_origin`). A cache
     of anything `prose_for_caller` or `carrier_spans_for_caller` shaped keys on it."""
     who = principal if principal is not None else effective_principal()
+    if raw_protection.is_owner(who):
+        # Nothing is withheld from the owner (`projects_origin`), so skip the policy read.
+        return False
     return projects_origin(vault_root, policy_module.load(vault_root), who)
 
 
@@ -5242,6 +5295,9 @@ def _decide_markdown_snapshot(
     policy: Policy, principal: RequestPrincipal, purpose: str | None, content_hash: str,
 ) -> Decision | None:
     """Decide exact held Markdown without assuming that it is the current file."""
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=principal,
+                                   purpose=purpose, content=raw):
+        return Decision(DISCLOSURE_MIN)
     decision = projection_decision(
         vault_root, rel_path, policy=policy, audience=principal.audience_id,
         purpose=purpose, authorization_context=principal.verified_authorization_session,
@@ -5873,8 +5929,34 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
+
 @_at_release_boundary
 def postfilter(
+    command_name: str,
+    result: Any,
+    vault_root: Path,
+    *,
+    request_kwargs: Mapping[str, Any] | None = None,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> Any:
+    """Release a whole result under an optional request-owned allowance."""
+    with request_budget.checking(checkpoint), (
+        policy_module.outside_request_policy_snapshot() if checkpoint is not None else nullcontext()
+    ):
+        request_budget.checkpoint()
+        value = _postfilter(command_name, result, vault_root, request_kwargs=request_kwargs)
+        request_budget.checkpoint()
+        if checkpoint is not None:
+            # Filtering cannot remove a withheld page's contribution from aggregate counts.
+            with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
+                refusal = owner_only_aggregate(vault_root, checkpoint=checkpoint)
+            checkpoint()
+            if refusal is not None:
+                return refusal
+        return value
+
+
+def _postfilter(
     command_name: str,
     result: Any,
     vault_root: Path,
@@ -5898,6 +5980,12 @@ def postfilter(
         return None
     evidence_projection = (
         result if isinstance(result, dict) and "evidence_version" in result else None
+    )
+    # This operation and response marker are fixed by the episode wire contract.
+    material_projection = (
+        result if command_name == "episode_memory" and isinstance(result, dict)
+        and result.get("operation") == "episode_material"
+        and (request_kwargs or {}).get("action") == "material" else None
     )
     issuance_context = scrubber._issuance_projection_context(result)
     if issuance_context is not None:
@@ -5995,6 +6083,13 @@ def postfilter(
             )
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
+    if material_projection is not None and isinstance(cleaned, dict):
+        from ..episode_recovery import EpisodeInputOwner
+
+        cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
+    from .. import origin_bindings
+
+    cleaned = origin_bindings.release_origin_response(vault_root, cleaned)
     return (canonical_governance._seal_metadata_projection(cleaned, metadata_evidence)
             if metadata_evidence is not None else cleaned)
 
@@ -6101,6 +6196,11 @@ def postfilter_error(
     Mutates in place and returns the same object, so the caller re-raises with
     its original type, error code and traceback intact.
     """
+    from ..cli_ops import _AuditBudgetExhausted
+
+    # Only this fixed internal type contains no content that needs reference scanning.
+    if type(error) is _AuditBudgetExhausted:
+        return error
     vault_root = Path(vault_root)
     gate = _ArtifactReferenceGate(
         vault_root,
@@ -6433,6 +6533,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
     },
     ("episode_memory", "action"): {
         "record": "mutation",
+        "input": "mutation",
+        "material": "structure",
         "inspect": "structure",
         # Typed candidate operations (close-memory-loop 3.3). `candidates`
         # projects identities and outcomes of the caller's own ledger.
@@ -7023,6 +7125,8 @@ def _release_level_for_path_only_snapshot(
     if not content_permits(vault_root, rel_path, who):
         return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
+    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose):
+        return DISCLOSURE_MIN
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=who.audience_id,
         purpose=declared_purpose, authorization_context=who.verified_authorization_session,
@@ -7192,6 +7296,7 @@ class _ArtifactReferenceGate:
 
     def _ensure_index(self) -> None:
         # Structured results need no artifact census unless they carry free text.
+        request_budget.checkpoint()
         if self._indexed:
             return
         self._indexed = True
@@ -7322,6 +7427,7 @@ class _ArtifactReferenceGate:
         return allowed
 
     def gate_text(self, text: str) -> str:
+        request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
             # The token is recognizable even in an orphan/bare-name citation.
@@ -7371,6 +7477,7 @@ class _ArtifactReferenceGate:
         return "".join(pieces)
 
     def gate_payload(self, value: Any, *, scan_strings: bool = False) -> Any:
+        request_budget.checkpoint()
         if isinstance(value, str):
             return self.gate_text(value) if scan_strings else value
         if isinstance(value, Mapping):
@@ -7648,6 +7755,7 @@ def owner_only_aggregate(
     *,
     principal: RequestPrincipal | None = None,
     raw_admitted: bool = False,
+    checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> dict[str, Any] | None:
     """Refuse a whole-vault aggregate without unrestricted content authority.
 
@@ -7668,6 +7776,8 @@ def owner_only_aggregate(
     the caller may not see. When it fires wrongly a restricted caller,
     including an owner with a connector ceiling, loses the aggregate.
     """
+    if checkpoint is not None:
+        checkpoint()
     who = principal if principal is not None else current_principal()
     writer = bound_writer(vault_root)
     if writer is not None and (who is None or (raw_protection.is_owner(who) and unrestricted_content_access(vault_root, who))):
@@ -7675,7 +7785,9 @@ def owner_only_aggregate(
 
         operation = writer._operation
         try:
-            for entry in reserved_paths.list_generic_tree(vault_root, "."):
+            for entry in reserved_paths.list_generic_tree(vault_root, ".", checkpoint=checkpoint):
+                if checkpoint is not None:
+                    checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
                 if entry.identity.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
@@ -7750,7 +7862,7 @@ _PROVEN_WITHHELD: ContextVar[_ProvenWithheld | None] = ContextVar(
 
 
 @contextmanager
-def proven_withheld_scope() -> Iterator[None]:
+def proven_withheld_scope(*, reuse: bool = False) -> Iterator[None]:
     """Hold, for one request, the pages that its reader views reject although they left the vault.
 
     A request served a lexical catalogue older than itself reads pages that have since left the
@@ -7762,7 +7874,12 @@ def proven_withheld_scope() -> Iterator[None]:
     The set belongs to this scope alone. A scope starts empty, also under another, and ends with
     the request: nothing persists across requests, threads or the next request on this thread.
     A thread that copies no context starts with none, as it starts without the request's principal.
+    With `reuse`, a nested consumer keeps the open request's holder and its exclusions.
     """
+    current = _PROVEN_WITHHELD.get()
+    if reuse and current is not None and current.paths is not None:
+        yield
+        return
     held = _ProvenWithheld()
     token = _PROVEN_WITHHELD.set(held)
     try:
@@ -7911,6 +8028,14 @@ class ReaderView:
         """The page predicate's `Admission`, for the catalogue to publish."""
         return admission_of(self._pages)
 
+    def fresh(self, *, withheld: frozenset[str] | None = None) -> ReaderView | None:
+        """Rebuild this caller's authority outside the request's cached policy."""
+        with policy_module.outside_request_policy_snapshot():
+            return reader_view(
+                self._root, principal=self._principal, purpose=self._purpose,
+                unit_identity_only=self._unit_identity_only, withheld=withheld,
+            )
+
     def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
         """Project one actual clipped bundle before it spends a compiler slot."""
         try:
@@ -7972,14 +8097,18 @@ def reader_view(
     argument of the same name. `keep` is a restricted caller's release
     decision that the request already built (`page_filter_over`), so its
     verdicts are reused."""
+    who = principal if principal is not None else current_principal()
     pages = (
-        visible_page_filter(vault_root, principal=principal, purpose=purpose, withheld=withheld)
+        visible_page_filter(vault_root, principal=who, purpose=purpose, withheld=withheld)
         if keep is None
         else page_filter_over(vault_root, keep, withheld=withheld)
     )
     if pages is None:
         return None
-    return ReaderView(vault_root, pages, principal=principal, purpose=purpose, unit_identity_only=unit_identity_only)
+    return ReaderView(
+        vault_root, pages, principal=who if who is not None else effective_principal(),
+        purpose=purpose, unit_identity_only=unit_identity_only,
+    )
 
 
 def release_allows_download(
@@ -8241,6 +8370,7 @@ def _entry_candidate_paths(
     entries therefore had no candidates at all and were kept unconditionally.
     With `directory` in hand a bare name resolves against it.
     """
+    request_budget.checkpoint()
     found: list[str] = []
 
     def _add(value: Any) -> None:
@@ -8389,6 +8519,7 @@ def filter_withheld_entries(
     The compiler can opt into explicit links in scalar metadata. Bare labels
     stay literal; the default projection keeps its existing reference rules.
     """
+    request_budget.checkpoint()
     vault_root = Path(vault_root)
     writer = bound_writer(vault_root)
     operation = writer._operation if writer is not None else None
@@ -8474,6 +8605,7 @@ def filter_withheld_entries(
         decided here — see `_is_vault_item`."""
         # A payload names the same page in many fields; decide it once per
         # call. Every stored verdict already reflects the tombstone check.
+        request_budget.checkpoint()
         cached = verdicts.get(rel_path)
         if cached is not None:
             return cached
@@ -8564,6 +8696,7 @@ def filter_withheld_entries(
         than indexing the whole vault, so the cost is O(depth) directory reads
         on a miss instead of a full walk per result.
         """
+        request_budget.checkpoint()
         cached = resolved_items.get(rel_path, _UNSET)
         if cached is not _UNSET:
             return cached  # type: ignore[return-value]
@@ -8672,6 +8805,7 @@ def filter_withheld_entries(
     def _candidate_paths(entry, directory, location):
         # Only exact producer-bound metadata slots avoid physical-byte proof.
         # A sibling body or another occurrence of the same path remains ordinary.
+        request_budget.checkpoint()
         if metadata_references:
             if isinstance(entry, Mapping):
                 entry = {key: value for key, value in entry.items()
@@ -8690,7 +8824,7 @@ def filter_withheld_entries(
             return candidates
         review_audience = _bridge_review_audience(entry)
         for rel_path in candidates:
-            if not content_permits(vault_root, rel_path, who):
+            if not _independent_content_permits(vault_root, rel_path, who):
                 return None
             if fail_closed:
                 _record_blocked_outcome(who.audience_id)
@@ -8705,6 +8839,8 @@ def filter_withheld_entries(
                 # A bridge-review finding is owner work derived from an exact
                 # release approval. It remains actionable when that approval
                 # is stale; hiding it then would strand the required reapproval.
+                if not content_permits(vault_root, resolved, who):
+                    return None
                 continue
             if not _permitted(resolved):
                 return None
@@ -8723,8 +8859,9 @@ def filter_withheld_entries(
         )
 
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
+        request_budget.checkpoint()
         if isinstance(node, Mapping) and any(
-            not content_permits(vault_root, path, who)
+            not _independent_content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
                 node, directory,
                 reference_markup=_reference_markup if explicit_reference_markup else None,
@@ -8811,6 +8948,7 @@ def filter_withheld_entries(
         A page this misses is decided on a request of its own, and one it adds is decided for nothing:
         a drift between the two costs requests and never a verdict.
         """
+        request_budget.checkpoint()
         if isinstance(node, Mapping):
             here = _directory_of(node)
             here = directory if here is None else here

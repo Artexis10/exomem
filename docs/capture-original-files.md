@@ -73,6 +73,35 @@ Only that login can capture the held file. Treat the token as private, as on a p
 On a cell without this configuration, `transfer_artifact` is not offered. Use a supported client file handle instead.
 On Cloud, `transfer_artifact` prepares held uploads only. It does not issue download links.
 
+## Signed document containers
+
+Capture an ASiC-E `.asice` file through the same original-file interfaces.
+Exomem preserves the container unchanged and gives each supported DOCX or PDF payload its own unchanged original and searchable companion.
+The initial container and payloads publish together. Each payload records the container's path and SHA-256, its member path, and its own SHA-256 and size.
+Use `transfer_artifact(operation="download", artifact=path)` to retrieve each exact original through the existing download interface.
+
+Structural inspection does not verify signatures, certificates, signer identity or trust.
+The companion and capture receipt report `signature_verification: not_verified`, including when signature material is malformed.
+Document extraction uses the existing media jobs and complete text parts. Missing extraction software leaves the originals intact with an actionable processing state.
+
+Unsafe archives, corrupt members, unsupported payload types or exceeded limits retain the unchanged container without publishing partial payloads.
+The `document_container` result reports `inspection_state`, a reason and `next_action`.
+A failed inspection reports an unknown supported-payload count, never a claim that the archive contains zero documents.
+Inspection permits at most 1,024 ZIP entries, 64 document payloads and 256 MiB of expanded bytes, within the shared ZIP limits.
+
+A payload and its text parts inherit the container's current access restrictions.
+Changing the container's restrictions also changes payload search, reads and original downloads.
+Explicit raw protection covers the entire payload subtree.
+
+1. For an older opaque container, call `change_media(operation={"kind": "process", "path": container_path})`; receive payload custody and processing states.
+2. After fixing a processing failure, call `change_media(operation={"kind": "retry", "path": container_path})`; reuse the preserved originals.
+3. For completed payloads needing new extraction, call `change_media(operation={"kind": "reprocess", "path": payload_path})`; retain previous text until replacement succeeds.
+
+Repeated preservation returns `already_stored` without changing companions or repairing missing payloads.
+Explicit processing creates missing payload pairs and can restore missing provenance only when existing bytes match exactly.
+Conflicting bytes or provenance require restoration of the exact original or custody companion before processing can continue.
+No automatic migration inspects older opaque containers.
+
 ## Correct an earlier Source
 
 1. Read the predecessor with `follow_corrections=false`; retain its canonical reference and `content_hash`.

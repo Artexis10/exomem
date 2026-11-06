@@ -24,10 +24,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import yaml
+
 from . import memory_refs
 from .episode_model import EpisodeError
 from .governance import scrubber
-from .vault import slugify_title
+from .vault import _FM_PATTERN, FrontmatterError, parse_frontmatter, slugify_title
 
 EPISODE_KEY_RE = re.compile(r"^ep-[0-9a-f]{32}$")
 CLIENT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
@@ -48,6 +50,8 @@ _FALLBACK_SLUG = "episode"
 _DIGEST_LABEL = "exomem-episode-recap-v1"
 _HOOK_KEY_LABEL = "exomem-episode-key-v1"
 _ORDER_FORMAT = "%Y%m%dt%H%M%S%f"
+# These fields are fixed by the recorder's atomic retirement protocol, not vault vocabulary.
+_RETIREMENT_FIELDS = frozenset({"status", "updated", "superseded_by"})
 
 #: Line and paragraph separators and the bidirectional overrides. Not control
 #: characters to `unicodedata`, but each either breaks the one-line rule or
@@ -149,6 +153,63 @@ def filename_parts(name: str) -> tuple[str, str, str] | None:
     if match is None:
         return None
     return match.group("group"), match.group("order"), match.group("digest")
+
+
+def is_retired_revision(path: str, frontmatter: dict[str, Any], *, audience: str) -> bool:
+    """Recognize the reserved recorder tombstone in this audience's filename group."""
+    key = frontmatter.get("episode")
+    digest = frontmatter.get("episode_digest")
+    parts = filename_parts(path)
+    # Source/episode/superseded are fixed tokens of this recorder protocol.
+    return (
+        frontmatter.get("type") == "source"
+        and frontmatter.get("source_type") == "episode"
+        and frontmatter.get("status") == "superseded"
+        and isinstance(key, str)
+        and EPISODE_KEY_RE.fullmatch(key) is not None
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+        and parts is not None
+        and parts[0] == key_group(key, audience)
+        and parts[2] == digest[:8]
+    )
+
+
+def pre_retirement_content(content: str) -> str | None:
+    """One byte-preserving candidate; only a retained digest can prove it was original."""
+    match = _FM_PATTERN.match(content)
+    if match is None:
+        return None
+    try:
+        before, body, _raw = parse_frontmatter(content, strict=True)
+        block = match.group(1)
+        root = yaml.compose(block, Loader=yaml.SafeLoader)
+        if not isinstance(root, yaml.MappingNode) or root.flow_style:
+            return None
+        spans = []
+        for key, value in root.value:
+            if not isinstance(key, yaml.ScalarNode) or key.value not in _RETIREMENT_FIELDS:
+                continue
+            start = block.rfind("\n", 0, key.start_mark.index) + 1
+            if block[start:key.start_mark.index].strip():
+                return None
+            end = value.end_mark.index
+            if end < len(block) and (end == 0 or block[end - 1] != "\n"):
+                line_end = block.find("\n", end)
+                end = len(block) if line_end == -1 else line_end + 1
+            spans.append((start, end))
+        for start, end in sorted(spans, reverse=True):
+            if end == len(block) and start:
+                # The envelope owns the fence newline; appended fields own this separator.
+                start -= 2 if block[:start].endswith("\r\n") else 1
+            block = block[:start] + block[end:]
+        candidate = content[:match.start(1)] + block + content[match.end(1):]
+        after, candidate_body, _raw = parse_frontmatter(candidate, strict=True)
+    except (FrontmatterError, yaml.YAMLError):
+        return None
+    expected = {key: value for key, value in before.items() if key not in _RETIREMENT_FIELDS}
+    return candidate if after == expected and candidate_body == body else None
 
 
 def _line(value: Any, name: str, maximum: int) -> str:

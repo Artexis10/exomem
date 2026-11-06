@@ -324,6 +324,18 @@ grandfathered backlog with exact counts and bounded samples. Request
 `detail="full"` for raw enumeration. `legacy_sample_limit` accepts 0 through 50
 and changes presentation only.
 
+Budgeted audits return findings only from completed categories. Check
+`metadata.coverage` (also `meta.coverage`) for `corpus_complete`,
+`completed_categories`, `requested_categories`, and `complete`.
+For example, `complete=false` with an empty summary means unknown coverage;
+it does not prove that the vault has no findings. The `budget` block names
+checks that stopped or did not start. Full detail keeps the same deadline.
+
+Every audit report passes fresh authorization before release. If that pass
+cannot finish, `AUDIT_BUDGET_EXHAUSTED` replaces the entire report. Retry with
+fewer categories, such as `categories=["broken_wikilink"]`. The error contains
+no findings, paths, or counts. Unbudgeted local audits keep their existing scope.
+
 Compatibility window: compact success is the default; `response_detail="legacy"`
 and the legacy flat edit shim remain for at least one release. Because these
 changes alter MCP discovery schemas, deployed connectors must be refreshed and

@@ -42,7 +42,7 @@ Today a person must edit YAML by hand to declare any of this. Declaring topics s
 
 ### Modified Capabilities
 
-None. `context-catalogue` membership and `agent-vocabulary-workflow` are still unarchived changes, so this change states its additions as requirements of the new capability instead of modifying them.
+- `context-activation`: extend the canonical topic-membership requirement with project, folder and tag carriers and homes. Preserve its resolution, admission and non-transitivity rules.
 
 ## Impact
 

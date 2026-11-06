@@ -1248,8 +1248,33 @@ def recall_delta_since(
 ) -> RecallDelta:
     """Coalesced projected changes, refusing foreign/reprojected history."""
     current = recall_checkpoint(vault_root, scope)
+    return _recall_delta_since(vault_root, scope, checkpoint, current)
+
+
+def recall_delta_since_live(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint,
+) -> RecallDelta | None:
+    """Read maintained history without a cold walk or policy reprojection."""
+    current = live_recall_checkpoint(vault_root, scope)
+    if current is None:
+        return None
+    return _recall_delta_since(vault_root, scope, checkpoint, current, require_live=True)
+
+
+def _recall_delta_since(
+    vault_root: Path, scope: str, checkpoint: RecallFreshnessCheckpoint,
+    current: RecallFreshnessCheckpoint, *, require_live: bool = False,
+) -> RecallDelta:
     key = _key(vault_root, scope)
     with _lock:
+        if require_live and (
+            not event_indexes_enabled() or key not in _recall_live
+            or _recall_generations.get(key, 0) != current.generation
+            or _recall_identities.get(key) != (
+                current.policy_version, current.access_policy_fingerprint,
+            )
+        ):
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         # A foreign checkpoint is bridgeable only where this process has adopted
         # it against a proof (`adopt_recall_origin`); the origin it was adopted
         # at is then the generation the history is read from, and everything
@@ -1268,7 +1293,19 @@ def recall_delta_since(
             complete = adopted or checkpoint == current
             return RecallDelta(checkpoint, current, complete, frozenset(), frozenset())
         history = _recall_history.get(key, [])
-        if not history or origin < history[0][0]:
+        if not history:
+            return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
+        # Zero-width floors prove adopted snapshots only, not local consumers
+        # whose cached corpus predates a seed's replacement of the registry.
+        history_origin = (
+            history[0][0]
+            if adopted
+            else next(
+                (before for before, after, _paths, _proof in history if before < after),
+                current.generation,
+            )
+        )
+        if origin < history_origin:
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         changed: set[str] = set()
         deleted: set[str] = set()

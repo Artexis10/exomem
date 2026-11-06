@@ -15,7 +15,7 @@ from functools import cache, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import memory_refs, published_admission, state_paths
+from .. import memory_refs, published_admission, request_budget, state_paths
 from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
 
@@ -275,12 +275,14 @@ class _Decide:
         token = _CHECKED_HASHES.set(checked)
         try:
             for path, (args, kwargs) in self.calls.items():
+                request_budget.checkpoint()
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
                     kind, payload = "refused", error
                 except Exception as error:  # noqa: BLE001 - raised again at that page's own turn
                     kind, payload = "raised", error
+                request_budget.checkpoint()
                 answers[path] = (kind, payload, checked.get(path))
         finally:
             _CHECKED_HASHES.reset(token)
@@ -341,6 +343,7 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     if path not in answers:
         calls = {path: ((path,), shared)}
         for other in decisions.pending():
+            request_budget.checkpoint()
             if other == path or other in answers:
                 continue
             try:

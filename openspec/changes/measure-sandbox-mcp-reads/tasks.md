@@ -12,16 +12,23 @@
 
 ## 2. Frozen sandbox and source truth
 
-- [ ] 2.1 Freeze isolated sandbox data and runtime identities; verify copied files and stored rows with counts and source spot checks.
-- [ ] 2.2 Author independent source truth for all nine operation families; verify identities and material without using measured outputs as keys.
-- [ ] 2.3 Prove sandbox isolation and blocked external effects; retain reproducible setup and cleanup evidence outside the repository.
+- [x] 2.1 Freeze isolated sandbox data and runtime identities; verify copied files and stored rows with counts and source spot checks.
+- [x] 2.2 Author independent source truth for all nine operation families; verify identities and material without using measured outputs as keys.
+- [x] 2.3 Prove sandbox isolation and blocked external effects; retain reproducible setup and cleanup evidence outside the repository.
+
+Independent audits verify the retained material, source keys, runtime identity, active watcher, protocol-scoped isolation, and process cleanup.
+The evidence stays outside the repository. It proves the trusted reader protocol; it does not claim OS confinement or full latency acceptance.
 
 ## 3. Matched measurement and diagnosis
 
 - [ ] 3.1 Run matched cases on frozen arms; report per-case differences and confidence intervals with unchanged source keys.
 - [ ] 3.2 Attribute transport, authentication, governance, egress, rendering, store, and serialization costs; report unavailable layers explicitly.
-- [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 target of 100 ms for the six collection-store groups.
+- [ ] 3.3 Establish the paired allowances from matched runs of identical code; verify the private sandbox reaches the configured p95 targets for the six collection-store groups.
 - [ ] 3.4 Repair the largest measured costs without weakening governance; verify each correction through the same instrument and boundary.
+- [x] 3.5 Stage projection for eligible store queries through the existing evaluator; prove eager parity for metadata, selection, response bounds, source versions, continuations, and disclosure outcomes.
+- [x] 3.6 Verify eager fallbacks for unsupported shaping, schema collisions, malformed inputs, and file adapters; measure the candidate through unchanged source cases before claiming a gain.
+
+Tasks 3.5 and 3.6 evidence: PR #2441 ships the staged store projection. `tests/test_collection_store_staged_projection.py` and `tests/test_query_data.py` prove eager parity for metadata, selection, response bounds, source versions and continuations, and the fallbacks for schema collisions and non-scalar fields. Equal disclosure outcomes and the fallbacks for malformed filters, aggregates, child expansion and file adapters hold by construction: staging runs only for a store writer, store authorization records no egress outcomes, and the eligibility check rejects those query shapes. A randomized six-leg private-sandbox comparison on two unchanged source cases measured candidate-minus-base caller means of -89 ms (95% CI -138 to -40) for a records query and -120 ms (-199 to -42) for a records item read. These intervals are conditional on negligible carryover between legs, which the retained evidence could not verify, so they support the repair on those fixed cases only.
 
 ## 4. CI and delivery
 

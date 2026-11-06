@@ -122,6 +122,71 @@ callers and deployments with event-maintained indexes disabled MAY keep their sy
 - **AND** a lag longer than the decision bound, or one whose change history cannot be bridged,
   is reported as incomplete or stale without a decision per path
 
+#### Scenario: Withheld publication between activation selections
+
+- **WHEN** a catalogue publication changes only withheld pages between activation's initial lexical selection and compilation
+- **THEN** compilation may use its captured catalogue checkpoint after proving both selections equivalent under current caller authority
+- **AND** compilation keeps its checkpoint and verdicts separate from earlier selections
+- **AND** the restricted response matches the response without that publication
+- **AND** a visible change, changed authority or invalid selected source retains the existing incomplete or unavailable outcome
+
+#### Scenario: A withheld source leaves a retained consumer publication
+
+- **WHEN** a bounded, bridged consumer delta deletes a source that an existing exact catalogue verdict withheld under the caller's fresh authority
+- **THEN** the retained Graph or direct inbound result may remain complete only when the verdict's full source hash matches that consumer's earlier source
+- **AND** Graph reads the expected hash from the same retained SQL publication and requires its recall checkpoint to match the catalogue view's vault checkpoint
+- **AND** every catalogue verdict uses its own scope checkpoint and exact SQL generation
+- **AND** inbound source records authorize proof only at their proven complete checkpoint, with partial patches invalidating that association
+- **AND** the request pins proved deleted paths before constructing the consuming reader and preserves an outer request's exclusions
+- **AND** retained text, edges, inbound contexts and basename evidence from those paths remain withheld
+- **AND** changed bytes, revoked authority, missing proof, unavailable scope custody and existing unbridgeable or over-bound history keep the incomplete outcome
+
+#### Scenario: Partial graph repair preserves a complete published view
+
+- **WHEN** a partial graph repair changes rows after a complete publication
+- **THEN** a restricted reader may use that publication only with coherent rows and matching immutable resolver topology
+- **AND** each request keeps an independent SQL transaction and deadline
+- **AND** admission and finalization verify durable lineage, current caller authority and selected sources
+- **AND** a foreign write without a complete local bridge retains the existing incomplete or unavailable outcome
+- **AND** repeated replacements preserve the first predecessor, while create-delete cycles retire obsolete absence markers
+- **AND** a complete publication updates metadata and retires predecessors atomically
+
+#### Scenario: Foreign integrity repair invalidates an open correction read
+
+- **WHEN** another process purges graph rows before admission or during hydration
+- **THEN** correction discovery reports unavailable and returns no tentative corrections
+- **AND** admission and finalization check the captured graph incarnation through a fresh connection
+- **AND** the check also applies without a retained process publication
+- **AND** a subsequent complete recovery cannot validate the purged incarnation
+- **AND** ordinary incremental publication keeps its incarnation and may preserve withheld-only correction context
+
+#### Scenario: A foreign resolver input changes before watcher delivery
+
+- **WHEN** a canonical writer changes a resolver input outside the KB before the serving worker observes it
+- **THEN** a later withheld KB write cannot establish continuity from an epoch that omitted that earlier mutation
+- **AND** epoch coverage includes admitted collection manifests, case-insensitive Markdown extensions and membership changes before and after mutations
+- **AND** renames cover both endpoints before source mutation through the existing lifecycle ordering
+- **AND** an input outside the KB uses full recovery instead of entering the KB row queue
+- **AND** a new baseline requires participating writers with complete epoch coverage and a complete post-upgrade publication
+- **AND** the bridge claims no observation of arbitrary filesystem edits before watcher delivery
+
+#### Scenario: A corpus callback proves one canonical epoch
+
+- **WHEN** a complete callback observes the next paths-scoped canonical epoch
+- **THEN** the bridge advances only when the consumer delta names every epoch endpoint with matching classification, target signatures and guarded bytes
+- **AND** two short canonical holds verify the same predecessor and durable epoch around corpus publication
+- **AND** a full checkpoint, generation gap, missing endpoint or source-proof-required history retains the unavailable outcome
+- **AND** a duplicate callback cannot attach a newer local checkpoint to the same canonical epoch
+- **AND** only a successful full-source publication may restore a lost association
+
+#### Scenario: Concurrent correction readers keep independent deadlines
+
+- **WHEN** restricted correction readers need the same retained publication concurrently
+- **THEN** short proof boundaries may queue within each request's deadline without sharing query connections or progress handlers
+- **AND** queries, hydration and release decisions hold neither the reader mutex nor canonical authority
+- **AND** a reader that spends its budget in that queue reports budget exhaustion before fallback work
+- **AND** an active canonical writer retains the existing nonblocking unavailable outcome
+
 #### Scenario: Offline callers keep their synchronous paths
 
 - **WHEN** an explicit offline caller or a deployment with event-maintained indexes disabled reads

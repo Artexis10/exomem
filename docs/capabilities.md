@@ -63,7 +63,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | preserve_artifacts | Direct inputs | preserve_artifacts |
 | preserve_evidence | Direct inputs | preserve_evidence |
 | read_connections | suggest-links, suggest-relations, context, graph-context, inbound-links, resolve-entity, resolve-relation | connect_memory |
-| read_episode | inspect, candidates, coverage | episode_memory |
+| read_episode | material, inspect, candidates, coverage | episode_memory |
 | read_governance | list, explain, simulate, vocabulary-request, vocabulary-status | govern_memory |
 | read_import | scan-only, status, work-item | adopt_vault, adoption_studio |
 | read_media | status, video | process_media, read_media |
@@ -73,7 +73,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | read_review | attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, write-advisory-result, vocabulary, item-context | review_memory, review_item_context |
 | read_schema | inspect, preview, history, infer, validate, diff, validate-document, inventory, resolve, resolve-entity-type, propose-relation, census | schema_memory |
 | recall_context | Direct inputs | activate_context |
-| record_episode | record, prepare, disposition, resume | episode_memory |
+| record_episode | record, input, prepare, disposition, resume | episode_memory |
 | repair_memory | fix, backfill-ids, reconcile, maintenance-job-cancel, structured-files, tag-variants, collections-store-adopt-local, curation-propose, curation-apply, curation-resume, curation-propose-compensation, curation-apply-compensation, curation-revert | maintain_memory |
 | search_memory | Direct inputs | ask_memory |
 | supersede_note | Direct inputs | replace_memory |
@@ -98,7 +98,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, verdict, check_by, as_of, until, id, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason, reason, target_fingerprints, response_detail | Check or edit one semantic unit on a compiled note. |
 | supersede_note | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, bridge_of, bridge_scope, bridge_review, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason, vocabulary_decision, response_detail | Supersede compiled memory with a new version. |
 | capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | title*, content, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title, source_kind, domain, projects, files, adoption, raw_protection, source_identity, expected_sha256, correction, response_detail | Save Source text or original files. |
-| episode_memory | 1 | MCP, REST, CLI | write | yes | - | episode_memory | action*, episode, subject, summary, worked_on, decided, open, said, about, client, candidate, proposal, disposition, reason, input_revision, journal_digest, order, max_leaves, postcommit, response_detail | Save a recap for later sessions. |
+| episode_memory | 1 | MCP, REST, CLI | write | yes | - | episode_memory | action*, episode, subject, summary, worked_on, decided, open, said, about, client, candidate, proposal, disposition, reason, input_revision, journal_digest, materials, material_key, order, max_leaves, postcommit, response_detail | Save a recap for later sessions. |
 | prepare_note | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Prepare a sourced note without saving. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, raw_protection, response_detail | Preserve text as append-only proof. |
 | preserve_artifacts | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, files*, adoption, transcriptions, raw_protection, response_detail | Preserve client file handles as append-only Evidence. |

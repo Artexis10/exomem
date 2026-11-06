@@ -1040,8 +1040,9 @@ def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waite
     """
     vault = _published_vault(tmp_path)
     notes = vault / "Knowledge Base/Notes/Insights"
-    stuck = notes / "stuck.md"
-    stuck.write_text(_page("Stuck", "Stuck links to [[a]]."), encoding="utf-8")
+    # Keep resolver topology published: this case isolates stalled body repair.
+    stuck = notes / "a.md"
+    stuck.write_text(_page("A", "Unrecorded body links to [[b]]."), encoding="utf-8")
     deferred_index.add_graph_receipts(vault, [stuck.relative_to(vault).as_posix()])
     EpistemicGraphIndex(vault).suspend_reads()
     real_clock = time.time
@@ -1049,8 +1050,8 @@ def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waite
     monkeypatch.setattr(deferred_index, "time", SimpleNamespace(time=lambda: real_clock() + waited))
 
     def drainable_write(name: str) -> str:
-        page = notes / f"{name}.md"
-        page.write_text(_page(name, f"{name} links to [[b]]."), encoding="utf-8")
+        page = notes / "b.md"
+        page.write_text(_page("B", f"{name} links to [[a]]."), encoding="utf-8")
         freshness.on_files_changed(vault, changed=[page])
         rel = page.relative_to(vault).as_posix()
         deferred_index.add_graph_receipts(vault, [rel])
