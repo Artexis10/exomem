@@ -170,7 +170,7 @@ The no-effect terminal SHALL NOT inherit a nonretryable failed_step dead end.
 A crash without terminal proof SHALL remain uncertain.
 
 Recovery SHALL inspect same-operation commitment and repair missing terminal receipts through
-curation before reacquiring original custody. Historical commitment SHALL survive missing input and changed or missing output.
+curation before reacquiring original custody. Historical commitment SHALL survive missing input. For an episode leaf with a terminal receipt, and for native preservation and Planning kinds also before receipt repair, it SHALL survive changed or missing output.
 Current readback/coverage SHALL separately require current authorized output and exact binary bytes.
 Legacy receipts/journals SHALL retain normalization and absent fields without synthetic invocation defaults.
 Unsupported strict readers SHALL refuse new extensions before modification.

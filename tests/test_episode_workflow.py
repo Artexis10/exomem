@@ -1498,6 +1498,56 @@ def test_native_source_commit_recovers_after_lost_ack_and_output_deletion(vault,
     assert [item["readback"] for item in covered["receipts"]] == ["unavailable"]
 
 
+def test_a_withheld_preserved_original_reads_back_exactly_like_a_deleted_one(vault, enabled):
+    """Coverage must not tell a caller that an original withheld from it still exists."""
+    from exomem.governance import egress, membership, policy
+
+    client = RequestPrincipal(audience_id="client-a", surface="mcp")
+    originals = {}
+    with request_scope(client):
+        _record(vault)
+        for key in ("hidden", "gone"):
+            preserved = commands.op_preserve_evidence(
+                vault, scope="incoming", category="samples", filename=f"{key}-account.bin",
+                content=f"The {key} account.", description="A retained original.",
+            )
+            prepared = _workflow(vault, action="prepare", candidate=key, proposal=_proposal(
+                "source", [{"leaf_key": "capture", "effect_revision": 1, "kind": "capture-source", "args": {
+                    "original": {"representation": "original", "reference": preserved["ref"],
+                                 "version": preserved["hash"], "size": preserved["size"]},
+                    "title": f"The {key} account", "source_type": "session",
+                }}], title=f"The {key} account",
+            ))
+            leaf = _candidate(prepared, key)["leaves"][0]
+            plan = curation.CurationStore(vault).load_plan(leaf["run_id"])
+            originals[key] = plan["binding_manifest"][0]["prepared"]["allocation"]["artifact"]
+            _workflow(vault, action="disposition", candidate=key, disposition="routed", reason="Keep the original.")
+        executed = _workflow(vault, action="resume", input_revision=1, journal_digest=_reviewed(vault))
+        assert [item["outcome"] for item in executed["executed"]] == ["committed", "committed"]
+
+    (vault / originals["gone"]).unlink()
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "withheld-original.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAE\nname: Withheld original\n"
+        f'paths: ["{originals["hidden"]}"]\n', encoding="utf-8")
+    (governance / "rules" / "withheld-original.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAF\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAE"]\naudience: client-a\nceiling: 0\n', encoding="utf-8")
+    egress.clear_decision_memo()
+    membership.clear_memo()
+    policy._CACHE.clear()  # noqa: SLF001
+
+    with request_scope(client):
+        covered = _workflow(vault, action="coverage")
+
+    by_key = {item["candidate_key"]: item for item in covered["receipts"]}
+    shape = {key: {k: v for k, v in item.items() if k in {"path", "readback"}} for key, item in by_key.items()}
+    assert shape["hidden"] == shape["gone"] == {"path": None, "readback": "unavailable"}
+    assert Path(originals["hidden"]).name not in json.dumps(covered)
+
+
 @pytest.mark.parametrize("route", ["source", "evidence"])
 def test_known_native_preservation_does_not_seal_an_inert_leaf(vault, owner, route):
     from exomem import add

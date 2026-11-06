@@ -328,8 +328,11 @@ def _page_is_there(vault_root: Path, binding: Mapping[str, Any], path: str, keep
             return visible
         if not ((vault_root / path).is_file() and (keep is None or keep(path))):
             return False
+        # A withheld original reads exactly like a deleted one, as the page check above does.
         return item.get("kind") not in curation.PRESERVATION_STEP_KINDS or all(
-            (vault_root / entry["path"]).is_file() for entry in item["prepared"]["core"] if "size" in entry
+            (vault_root / entry["path"]).is_file() and (keep is None or keep(entry["path"]))
+            for entry in item["prepared"]["core"]
+            if "size" in entry
         )
     except (curation.CurationError, KeyError, IndexError, TypeError):
         return False
