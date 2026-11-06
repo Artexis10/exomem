@@ -134,6 +134,30 @@ Unsupported evidence or cache admission falls back to canonical reading, without
 That fallback costs the caller ordinary read latency; it grants no wider access and changes no parent authority.
 The unchanged latency and memory checks qualify the optimization; the design establishes no measured gain.
 
+Prototype an optional native implementation of the complete ordinary-file observation through the existing filesystem owner.
+It must cover root acquisition, ordinary read traversal, descriptor qualification and fresh closing rebind, rather than only the leaf metadata probe.
+Keep path classification, private publication ownership and all policy decisions with their existing Python owners.
+Preserve opening parent admission before opening the leaf for reading.
+Acquire the current closing catalogue and admit closing identities before comparing them with the opening observations.
+Retain no handles or admission verdicts between rows, and preserve cancellation and cleanup on every refusal.
+
+Publish root-independent immutable identity lookup maps when an owner publication changes.
+Each reader must acquire the current representation and bind it to that acquisition's root spelling.
+Keep every candidate owner and logical name, current reachability checks and collision handling.
+Account for replacement overlap and native workspace within existing limits.
+Map and task phases still perform their separate current admissions.
+
+The native candidate must not replace a fresh CONTENT hash with a cached digest and matching metadata.
+The existing witness exception covers only ordinary container-absence classification; physical source proof still checks current full bytes.
+Keep canonical Python behavior when the native implementation is absent or cannot establish its supported filesystem operation.
+Use the existing complete activation fixture to judge the prototype before selecting native packaging for delivery.
+Then apply the unchanged scale checks, with owner startup and exactly three restricted calls and no artificial warmup.
+Retain the candidate only when its result justifies the added native and fallback maintenance.
+
+If retained, define and verify supported Python ABIs, platforms, architectures and wheel installation through the existing distribution and release owners.
+Do not ship a runtime compiler or change the current one-wheel release assumption without updating those owners and their checks.
+The prototype is not a measured gain, a relaxed latency target or permission to omit platform acceptance.
+
 Keep one row reservation through canonical projection, proof completion, packing and transfer to resident state.
 After canonical projection returns, replace completed parser claims with measured live output and capture state before proof completion.
 Measure the whole source projection, capture and memo; include the completed proof before packing.

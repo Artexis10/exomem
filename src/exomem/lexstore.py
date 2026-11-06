@@ -3539,10 +3539,13 @@ class _CompactIdentities:
 
 def _released_size(value: Any, seen=None, *, skip=None, reserve=None, resident_bytes: int = 0,
                    metadata_credit: int = 0, roots: bool = False) -> int:
-    """Measure the owned graph with exact compact identities and admitted visitor scratch."""
+    """Measure the owned graph, admitting transient visitor metadata before growth."""
     from . import bm25 as bm25_module
 
-    seen = seen if seen is not None else _CompactIdentities()
+    owned_seen = seen is None
+    seen = set() if owned_seen else seen
+    table_bytes = sys.getsizeof(seen) if owned_seen else 0
+    identity_bytes = 0
     pending = list(value) if roots else [value]
     size = 0
 
@@ -3558,22 +3561,32 @@ def _released_size(value: Any, seen=None, *, skip=None, reserve=None, resident_b
             identity = id(item)
             if skip is not None and identity in skip or identity in seen:
                 continue
-            admit(getattr(seen, "metadata_bytes", 0))
-            if isinstance(seen, _CompactIdentities):
-                seen.add(identity, reserve=admit)
-            else:
+            if owned_seen:
+                added_bytes = sys.getsizeof(identity)
+                # CPython 3.11/3.13/3.14 set_add_entry grows a table at most fourfold.
+                # Its old table and every retained integer remain live during that allocation.
+                admit(table_bytes + identity_bytes + added_bytes, 4 * table_bytes)
                 seen.add(identity)
+                identity_bytes += added_bytes
+                table_bytes = sys.getsizeof(seen)
+            else:
+                admit(getattr(seen, "metadata_bytes", 0))
+                if isinstance(seen, _CompactIdentities):
+                    seen.add(identity, reserve=admit)
+                else:
+                    seen.add(identity)
+            metadata = table_bytes + identity_bytes if owned_seen else getattr(seen, "metadata_bytes", 0)
             size += sys.getsizeof(item)
             if isinstance(item, (str, bytes, int, float, bool, array, type(None))):
                 continue
             if isinstance(item, MappingProxyType):
                 pending.extend(gc.get_referents(item))
             elif isinstance(item, Mapping):
-                admit(getattr(seen, "metadata_bytes", 0), 4 * (len(pending) + 2 * len(item)) * 8)
+                admit(metadata, 4 * (len(pending) + 2 * len(item)) * 8)
                 pending.extend(item.keys())
                 pending.extend(item.values())
             elif isinstance(item, (tuple, list, set, frozenset)):
-                admit(getattr(seen, "metadata_bytes", 0), 4 * (len(pending) + len(item)) * 8)
+                admit(metadata, 4 * (len(pending) + len(item)) * 8)
                 pending.extend(item)
             elif is_dataclass(item) and not isinstance(item, type):
                 # Row maps hold only registered rows/paths. Reverse sets hold those same paths.
@@ -3588,6 +3601,8 @@ def _released_size(value: Any, seen=None, *, skip=None, reserve=None, resident_b
                 pending.append(vars(item))
         return size
     finally:
+        if owned_seen:
+            seen.clear()
         pending.clear()
         value = item = seen = skip = None
 

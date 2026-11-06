@@ -82,6 +82,72 @@ def test_identity_split_refusal_preserves_existing_membership() -> None:
     assert all(value in identities for value in range(256)) and 256 not in identities
 
 
+def test_transient_visitor_growth_is_admitted_before_it_can_cross_the_lease(monkeypatch) -> None:
+    """A set resize must not allocate its overlapping tables before a small visitor's lease can refuse it."""
+    values = [object() for _ in range(2000)]
+    payload = {id(value): sys.getsizeof(value) for value in values}
+    visitors = []
+    empty_bytes = 0
+
+    class CheckedSet(set):
+        __slots__ = ()
+
+        def __init__(self):
+            nonlocal empty_bytes
+            super().__init__()
+            empty_bytes = sys.getsizeof(self)
+            visitors.append(self)
+
+        def add(self, identity):
+            before = sys.getsizeof(self)
+            live_payload = sum(payload[held] for held in self)
+            live_ids = sum(sys.getsizeof(held) for held in self) + sys.getsizeof(identity)
+            super().add(identity)
+            after = sys.getsizeof(self)
+            overlap = before - empty_bytes if after != before else 0
+            assert lease.reserved >= live_payload + live_ids + after + overlap
+
+    monkeypatch.setattr(lexstore, "set", CheckedSet, raising=False)
+    with runtime_resources.parser_preparation(0, limit_bytes=256 * 1024) as lease:
+        with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+            lexstore._released_size(values, roots=True, reserve=lease.reserve)
+        assert visitors and all(not visitor for visitor in visitors)
+    assert lease.reserved == 0
+
+
+def test_no_growth_reservation_still_observes_the_request_deadline() -> None:
+    expired = False
+    def check():
+        if expired:
+            raise TimeoutError("the preparation request ended")
+    with runtime_resources.parser_preparation(0, check=check) as lease:
+        lease.reserve(4096)
+        expired = True
+        with pytest.raises(TimeoutError):
+            lease.reserve(4096)
+
+
+@pytest.mark.parametrize("limit_owner", ["local", "ancestor"])
+def test_no_growth_reservation_observes_a_lowered_owner_limit(limit_owner) -> None:
+    with runtime_resources.parser_preparation(0) as parent:
+        parent.reserve(4096)
+        with runtime_resources.parser_preparation(0, owner=parent) as child:
+            child.reserve(4096)
+            owner = child if limit_owner == "local" else parent
+            owner.limit = owner.reserved + owner._child_bytes - 1
+            with pytest.raises(runtime_resources.PreparationBudgetExceeded):
+                child.reserve(4096)
+
+
+def test_no_growth_reservation_cannot_ignore_an_overdrawn_global_pool(monkeypatch) -> None:
+    with runtime_resources.parser_preparation(0) as lease:
+        lease.reserve(4096)
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_resources, "SEMANTIC_PREPARATION_BYTES", 4095)
+            with pytest.raises(runtime_resources.PreparationCapacityBusy):
+                lease.reserve(4096)
+
+
 def test_canonical_child_stays_owned_through_return_and_preserves_its_parent(vault: Path) -> None:
     """Closing the internal source context must not orphan its returned data or free the row's claim."""
     path = vault / "Knowledge Base/Notes/Insights/owned-source.md"

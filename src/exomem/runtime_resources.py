@@ -508,6 +508,8 @@ class SemanticPreparation:
             if current.reserved + current._child_bytes + extra > current.limit:
                 raise PreparationBudgetExceeded("semantic preparation budget exceeded")
             current = current.owner
+        if extra == 0 and _preparation_bytes + _released_corpus_bytes <= SEMANTIC_PREPARATION_BYTES:
+            return
         _reclaim_released_corpora(extra)
         with _preparation_lock:
             extra = max(0, amount - self.reserved)

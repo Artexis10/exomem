@@ -43,6 +43,7 @@ Tasks 4.2 and 4.5 remain unqualified; this result does not block the model-free 
 - [ ] 4A.2 Reuse ordered source terms through existing admitted statistics and postings; verify exact fresh/reused ranking and independent-row preservation after edits.
 - [ ] 4A.3 Retain bounded private build progress through validation and aggregation; verify no prefix publication, current caller authority and actual retained memory bounds.
 - [ ] 4A.4 Verify selected-source hydration, method reset and origin-proof fallback; pass unchanged scoped latency and installed-wheel rollback checks before release.
+- [ ] 4A.5 Qualify or withdraw the complete native file-observation prototype on the existing activation fixture; if retained, verify native and fallback behavior and the supported wheel contract before delivery.
 
 The first released-corpus implementation rebuilt every restricted source on each request.
 Release checks exposed preparation cost and an aggregate memory charge that prevented useful discovery at scale.
