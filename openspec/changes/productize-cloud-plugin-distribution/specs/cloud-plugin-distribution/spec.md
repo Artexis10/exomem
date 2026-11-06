@@ -60,7 +60,7 @@ Supported local hook surfaces SHALL use release-owned retrieval, capture and con
 - **AND** JavaScript or model-printed output does not count as trusted tool availability or successful write evidence
 
 ### Requirement: Native provider packaging
-The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP URL and complete resources, including thin registrations of release-owned hooks on supported execution surfaces. The public OpenAI archive SHALL use the portable root manifest and MCP schemas and SHALL exclude app references and lifecycle hooks under the current submission contract, including declarations in compatibility manifests. This submission restriction SHALL NOT disable separately installed local Codex hooks. Both packages SHALL contain valid identity, complete documentation/legal/support links, contained icons, explicit data-handling disclosure and safe deterministic archives.
+The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP URL and complete resources. It SHALL ship as two editions from one definition. The directory edition SHALL contain no command hooks and only the file types that the Claude directory admits from an unverified publisher. The hooked edition SHALL add thin registrations of release-owned hooks on supported execution surfaces and SHALL be listed in the repository's own marketplace under the same plugin name. The public OpenAI archive SHALL use the portable root manifest and MCP schemas and SHALL exclude app references and lifecycle hooks under the current submission contract, including declarations in compatibility manifests. This submission restriction SHALL NOT disable separately installed local Codex hooks. Both packages SHALL contain valid identity, complete documentation/legal/support links, contained icons, explicit data-handling disclosure and safe deterministic archives.
 
 #### Scenario: Public package validation
 - **WHEN** public archives are checked
@@ -68,8 +68,14 @@ The Claude bundle SHALL support Chat, Cowork and Code with a fixed remote MCP UR
 
 #### Scenario: Public submission and local hooks are distinct
 - **WHEN** Claude and OpenAI directory archives are generated
-- **THEN** Claude hook payloads match canonical release bytes and bind writable local state with native-MCP-only activation
+- **THEN** the hooked Claude edition's hook payloads match canonical release bytes and bind writable local state with native-MCP-only activation
 - **AND** OpenAI's directory archive excludes lifecycle hooks while its identical Skills continue to govern context activation
+
+#### Scenario: Claude directory edition omits command hooks
+- **WHEN** the Claude directory edition is generated
+- **THEN** it contains no hook registration or script and only Markdown, text, JSON, YAML, image, licence and readme files
+- **AND** generation fails if a hook or another file type enters that edition
+- **AND** its readme names the install command for the hooked edition from the repository marketplace
 
 #### Scenario: Cloud hooks exclude local credential readers
 - **WHEN** native-MCP Cloud archives are generated from the canonical hook source
