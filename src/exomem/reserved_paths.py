@@ -2427,15 +2427,22 @@ def open_generic_tree(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ):
-    """Yield entries under one held walk; exhaust it before publishing a census."""
+    """Yield entries under one held walk; exhaust it before publishing a census.
+
+    A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
+    unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
+    path and error to it, yields no entry for it and goes on. The completeness check still covers it.
+    """
     with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         entries = _iter_generic_tree_held(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete,
-            markdown_header_limit=markdown_header_limit, checkpoint=checkpoint,
+            markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
+            checkpoint=checkpoint,
         )
         try:
             yield entries
@@ -2469,6 +2476,7 @@ def _iter_generic_tree_held(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> Iterator[GenericTreeEntry]:
 
@@ -2623,15 +2631,24 @@ def _iter_generic_tree_held(
                             with runtime_resources.parser_preparation(info.st_size) as preparation:
                                 preparation.reserve_source(0)
                                 preparation.reserve(preparation.reserved + io.DEFAULT_BUFFER_SIZE)
-                                with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
-                                    markdown = vault.read_frontmatter_header(
-                                        stream, markdown_header_limit, reserve=preparation.reserve_source,
+                                try:
+                                    with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
+                                        markdown = vault.read_frontmatter_header(
+                                            stream, markdown_header_limit, reserve=preparation.reserve_source,
+                                        )
+                                    text = markdown.decode("utf-8")
+                                    frontmatter = vault._FM_PATTERN.match(text)
+                                    preparation.reserve_parser(
+                                        text, yaml_text=frontmatter.group(1) if frontmatter else None,
                                     )
-                                text = markdown.decode("utf-8")
-                                frontmatter = vault._FM_PATTERN.match(text)
-                                preparation.reserve_parser(
-                                    text, yaml_text=frontmatter.group(1) if frontmatter else None,
-                                )
+                                # This file's own header: unterminated, undecodable, or above this one parent's budget.
+                                # A busy shared capacity is no fact about the file, so it still ends the walk.
+                                except (ValueError, runtime_resources.PreparationBudgetExceeded) as error:
+                                    if markdown_header_failed is None:
+                                        raise
+                                    require_current()  # A header that changed while it was read is the walk's failure.
+                                    markdown_header_failed(record.relative_path, error)
+                                    continue
                                 require_current()
                                 yield GenericTreeEntry(
                                     record.relative_path, record.identity, info.st_size,

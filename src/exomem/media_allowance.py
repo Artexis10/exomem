@@ -166,8 +166,9 @@ def bound_references(
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
-    `unreadable` is told of each note whose own header or binding fails, and the walk goes on to name the
-    next one; that caller must treat the census as unknown once told. Without it, the first such note raises.
+    `unreadable` is told of each note that fails on its own: a header that the tree cannot read, decode or
+    prepare within the note's own budget, or one that does not parse or bind. The walk then goes on to the next note, and that caller must treat
+    the census as unknown once told. Without it, the first such note raises.
     """
     metadata: dict[str, str] = {}
     placements: dict[str, dict[str, object]] = {}
@@ -184,9 +185,14 @@ def bound_references(
             if relative.lower().endswith(".md"):
                 yield relative
 
+    def header_failed(relative: str, error: Exception) -> None:
+        assert unreadable is not None
+        unreadable(f"{kb_dirname()}/{relative}", error)
+
     with reserved_paths.open_generic_tree(
         vault, kb_dirname(), select=select, require_complete=True,
         markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
+        markdown_header_failed=None if unreadable is None else header_failed,
     ) as entries:
         for entry in entries:
             path = f"{kb_dirname()}/{entry.relative_path}"
@@ -197,7 +203,7 @@ def bound_references(
                     parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
                     path, store, metadata, vault, placements, placement_versions,
                 )
-            except ValueError as error:  # UnicodeError is a ValueError; a tree or budget failure is not this note's.
+            except ValueError as error:  # This note's header or binding; a tree, budget or I/O failure is not a ValueError.
                 if unreadable is None:
                     raise
                 unreadable(path, error)
