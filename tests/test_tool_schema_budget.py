@@ -53,7 +53,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # edit_note measures 7,210 B and its ceiling rounds to 7,250 B. The total budget is unchanged.
 # The record_episode close step and the `window_days` field on the dispositions kind of
 # read_review add 196 B. record_episode measures 5,493 B and its ceiling rounds to 5,500 B;
-# the complete local wire measures 167,902 B, so the budget stays at 168,000 B.
+# with main's edit_note change, the complete local wire measures 167,985 B, so the budget
+# stays at 168,000 B. The next description change needs a budget increase.
 TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
