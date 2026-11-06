@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import stat
 import time
 import zipfile
@@ -911,7 +912,9 @@ def test_remembered_unclaimed_note_is_rechecked_after_a_same_size_claim_rewrite(
     page = vault / note
     forged = b"---\ntitle: Plain note\ntype: note\ncontainer_member: x\n---\n"
     original = page.read_bytes()
-    # Same size and same inode: only the change time tells the rewrite apart.
+    before = page.stat()
+    # Same size, same inode and the old mtime: only the change time tells the rewrite apart.
     page.write_bytes(forged + b"x" * (len(original) - len(forged)))
+    os.utime(page, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert b"container_member" in page.read_bytes() and page.stat().st_size == len(original)
     assert _refused_everywhere(vault, note, who, compiled)

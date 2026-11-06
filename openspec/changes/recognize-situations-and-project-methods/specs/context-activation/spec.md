@@ -84,7 +84,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 #### Scenario: Released-corpus discovery is off by default
 
 - **WHEN** a restricted caller, or any caller on a vault with an enrolled collection store, activates task context and the operator has not enabled released-corpus discovery
-- **THEN** task context reports `unavailable` with no candidates, carried methods are still revalidated, and the map and ordinary pulls are unchanged
+- **THEN** task context reports `unavailable` with no candidates, held methods are reset, and the map, the turn slice and ordinary pulls are unchanged
 - **AND** an unrestricted caller on a vault without a file release policy, bound writer or enrolled collection store keeps discovery
 
 ### Requirement: Candidate context does not manufacture ongoing intent

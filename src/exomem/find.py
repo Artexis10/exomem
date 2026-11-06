@@ -8418,9 +8418,14 @@ def release_idle_ram_caches() -> dict[str, int]:
     embedding model does not pay for that.
 
     Everything else still goes: the page cache is the large one, and the hot
-    find cache and recall path cache are cheap to refill.
+    find cache and recall path cache are cheap to refill. So does the container
+    module's memo of notes without a claim; one walk refills it.
     """
-    return unload_ram_caches(keep_recall_resolver=True, pages=True)
+    from . import document_containers
+
+    released = unload_ram_caches(keep_recall_resolver=True, pages=True)
+    released["unclaimed_notes"] = document_containers.clear_unclaimed_notes()
+    return released
 
 
 def evict_resolver_caches(vault_root: Path) -> int:

@@ -200,6 +200,8 @@ class GenericFileSnapshot:
     data: bytes
     identity: held_fs.StableIdentity
     mtime: float
+    #: (size, mtime_ns, ctime_ns) from the same handle after the read, or None when the producer has no handle.
+    generation: tuple[int, int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1435,11 +1437,14 @@ def _read_generic_bytes_held(
                 if not isinstance(descriptor, int):
                     raise ReservedPathLeafError("IO_REFUSED")
                 try:
-                    mtime = os.fstat(descriptor).st_mtime
+                    info = os.fstat(descriptor)
                 except OSError as error:
                     raise ReservedPathLeafError("IO_REFUSED") from error
                 _require_current_generic_directory(filesystem, parent)
-                return GenericFileSnapshot(read_result.require(), file.identity, mtime)
+                return GenericFileSnapshot(
+                    read_result.require(), file.identity, info.st_mtime,
+                    (info.st_size, info.st_mtime_ns, info.st_ctime_ns),
+                )
 
 
 

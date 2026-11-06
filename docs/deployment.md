@@ -1437,7 +1437,8 @@ corpus on every request, and that preparation does not yet meet the activation
 latency ceiling at scale. This applies to a restricted caller, such as a shared
 or delegated audience. It also applies to the owner of a vault whose structured
 collections live in the collection store. By default such a request gets
-`task_context.state` of `unavailable`. Carried methods are still revalidated.
+`task_context.state` of `unavailable`, and `task_context.methods.reset` is true
+when the client held methods.
 
 To serve that discovery anyway, add this line to the service environment and
 restart the service as described for the turn slice:
@@ -1448,8 +1449,11 @@ EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS=on
 
 Then call `recall_context` once with a turn that names a known page:
 `task_context.state` is `ready` or `partial`, not `unavailable`. Expect that call
-to take longer on a large vault. A value other than `on` or `off` logs one
-warning, `invalid EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS; using off`.
+to take longer on a large vault. To turn it off again, change the line to
+`EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS=off` and restart in the same way. Do not
+only remove the line, for the reason given for the turn slice. A value other than
+`on` or `off` logs one warning,
+`invalid EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS; using off`.
 
 ### Optional context-fit interpretation
 

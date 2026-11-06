@@ -126,6 +126,7 @@ def test_method_continuation_overflow_resets_before_evicting_held_dependencies()
 
 def test_a_withheld_method_and_a_missing_method_reset_identically(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Revalidation must not reveal a method after its caller loses access."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     twin = _second_vault(tmp_path)
     hidden = _page(vault, "hidden-method", body="- [technique] Inspect optical alignment ^alignment\n")
@@ -368,6 +369,7 @@ def test_restricted_task_admission_precedes_candidate_limits(vault: Path, monkey
 @pytest.mark.parametrize("caller", [_external(), principal.owner_principal(surface="library")], ids=["external", "owner"])
 def test_excerpt_only_sources_do_not_expose_task_hashes_or_metadata(vault: Path, monkeypatch: pytest.MonkeyPatch, caller) -> None:
     """An excerpt permission keeps canonical pull routes without exposing whole-source versions or metadata."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     import hashlib
     import json
 
