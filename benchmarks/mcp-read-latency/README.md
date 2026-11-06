@@ -72,8 +72,11 @@ The interval is corrected for the whole family with Bonferroni: the confidence p
 | Upper bound at or below `B` | `demonstrated` |
 | Otherwise | `inconclusive`: a visible warning, and the run passes |
 
-The contract keeps `allowance_ms` at null until A/A dispatch runs set it. With `B` null the summary
-reports each interval and says `allowance-not-set`. It invents no number.
+An A/A run sets each allowance: dispatch this workflow on the latest release tag, so that head and base
+are the same commit. A group's `allowance_ms` is the smallest 5 ms step at or above the larger absolute
+bound of its A/A interval. Identical code then fails only when its lower bound passes the noise that the
+A/A run measured. A failed nightly gates no pull request or release. With `B` null the summary reports
+each interval and says `allowance-not-set`. It invents no number.
 
 A broken instrument fails the run: a failed case, a missing pair, a contract digest that differs
 between fragments, or a group below the case floor. List groups are reported, not gated.
