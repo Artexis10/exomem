@@ -251,11 +251,22 @@ time. Reachable today on every path that already rebuilds off the write path.
   instead gave ~302 ms and `graph_sync=pending`. It then re-seeded freshness per write,
   which evicts the recall resolver — see 5.7. It now commits through the real
   post-commit fanout and seeds only at setup.
+  Rechecked on 2026-11-06 with the same script: 1,200 pages, two writers, 30 seconds,
+  and `--check --max-blocking 0`. The baseline at `cd05fb01e` completed 52 measured writes;
+  the corrected candidate completed 60. Both runs had zero writes over five seconds.
+  This change reported pending while receipts remained queued, then completed after quiescence.
+  A fresh process confirmed the settled durable outcome with the same isolated state and lease roots.
+  These runs establish convergence; they make no speed-gain claim. Delivery remains open.
 - [ ] 6.2 Graph drift stays at zero across a sustained concurrent-write run.
   Measured by `audit(categories=["graph_drift"])` after the writers stop and the queue
   quiesces, so drift is audited against the Markdown rather than asserted by construction
   from the same code path that produced it.
+  The 2026-11-06 baseline and candidate checks both ended current, with zero queued graph paths and zero drift findings.
+  Delivery remains open.
 - [ ] 6.3 Full suite green; latency gate still green.
+  The local `scripts/semantic_write_latency.py --check` passed canonical commit and public-write checks on `fc0d3d26` and `b5e6b2c9`.
+  Both failed the 8,000-page immediate keyword and hybrid read p95 limits.
+  These matching local failures do not establish a new regression; full release qualification remains open.
 - [ ] 6.4 Live acceptance run explicitly; consumer grep repeated for the seams this
   phase touched.
   Consumer grep done for the seams 5.10 moved: no production code branches on
@@ -378,9 +389,9 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   after a success, replacing the held proof only with a newer success; the interval
   runs from the end of the last attempt and the poll stats before it reads; a promotion
   that raises leaves the standby proving; an unknown drain cause is logged as given;
-  a drain, published or withheld, records its resolver topology only when its queued
-  pages and the carry-forward record account for every change in it; the residue
-  tests compare every edge with a fresh rebuild.
+  the earlier drain gate used queued pages and a carry record to explain topology.
+  Tasks 8.9 and 8.10 replace that gate because it could preserve stale edges.
+  The residue tests compare every edge with a fresh rebuild.
 - [ ] 8.8 **Open, not built.** Evaluate a cheaper route to steady-state convergence than
   7.2: when a whole-vault pass exhausts its stabilization attempts with every movement
   recorded, run the adoption proof against the live sidecar (O(vault) hashing, no build
@@ -388,22 +399,21 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   observed before it. Measure it on the same paired bar that parked 7.2 (longest
   unreadable stretch, write p50 and CPU at one and five writers on the 3,000-page tree)
   before any decision to ship it.
-- [ ] 8.9 **Open, pre-existing, not fixed here.** A drain (published or withheld) that
-  rewrites a page only as affected (its links re-target) also overwrites that page's stored title in
-  `graph_nodes`. When the page's own retitle drains later from its receipt, widening
-  reads the new title as the old one, so pages that still link the old title are
-  missed. The adoption proof fails closed on it (the drain gate counts only queued
-  pages), but the serving graph can carry the stale edge. Keep an affected page's stored
-  title until its own receipt drains, or widen on it when the pass changes it.
-  Since 9.2, a replayed page whose rows such a drain already rewrote proves current and
-  is dropped, so the whole-vault replay no longer heals its old-title dependants by
-  accident. 10.2 narrows this without closing it: see 10.4.
-- [ ] 8.10 **Open, not fixed here.** The carry's exactness check counts a Knowledge Base
-  page that is on disk with no row (or a differing row) and not queued as explained, so a
-  drain can derive an edge to it. If that page is deleted, or retitled and back, before
-  its own receipt drains, adoption can accept a sidecar with an extra edge. Its receipt
-  repairs it, so this matters only when that receipt is lost. Count such a page as
-  explained only when it has a pending graph receipt.
+- [ ] 8.9 Repair an affected page's retitle before overwriting its stored title.
+  The prepared repair adds every unexplained indexed topology change to the drain's roots.
+  It widens changed roots through both title keys and incoming edges before deriving rows.
+  The duplicate-title regression reproduced a missing edge on the prior implementation.
+  Scoped drains, affected retitles, and late refreshes now compare against a fresh rebuild.
+  Body-only edits retain fragment-only widening. Independent review and delivery remain open.
+- [ ] 8.10 Remove partial topology repair that adoption can mistake for complete repair.
+  A temporary title reproduced extra edges and missing edges, including with real pending receipts.
+  Each admitted drain now commits completely repaired rows and their resolver fingerprint together.
+  The carry record is removed. Version 15 requires one full rebuild of older sidecars,
+  because consumed carry can leave damage that source hashes cannot detect.
+  A scoped drain cannot upgrade old rows. Cold adoption also detects a later deletion without a receipt.
+  A local resolver cannot cross a registry seed using an adopted foreign snapshot's history floor.
+  The promotion regression checks incoming links after a newer serving snapshot, ten writes, and a final drain.
+  Independent review, delivery, and installed acceptance remain open.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)
 
@@ -459,11 +469,13 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   tests, red on 41a103bd and green after the fix; the three
   `test_semantic_unit_reconcile.py` failures and the three freshness tests pass again
   with their original setup.
-- [ ] 9.5 **Follow-up, not built here.** `writer_lease._durable_graph_outcome` reports
-  `graph_sync: completed` whenever the acknowledgement covers the committed checkpoint,
-  even when the graph is unavailable and a graph receipt is still queued (a request
-  replay deferral, or the external-pending door). Report `pending` while graph
-  receipts for the committed generation remain queued or availability is withdrawn.
+- [ ] 9.5 Report `pending` while graph receipts remain queued or availability is withdrawn,
+  even when the acknowledgement covers the committed checkpoint.
+  The prepared repair checks the queue and reads the acknowledgement, availability marker,
+  barrier, and schema version in one bounded metadata snapshot.
+  It neither waits for a publication hold nor runs the cold source proof.
+  Real writer terminals cover settled, queued, and withdrawn states; the two pending cases failed before the repair.
+  Independent review and delivery remain open.
 
 ## 10. A drain derives only bytes its resolver has seen
 
@@ -493,17 +505,12 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   Scoped suites (graph, standby, drain, index_sync, file watcher, media, episode,
   semantic-unit and records-recall modules): 62 modules, 1925 passed, 26 skipped,
   0 failed.
-- [ ] 10.4 **Open, not fixed here.** 10.2 does not close 8.9. A drain still rewrites an
-  affected page whose retitle the registry already records and that the batch did not
-  queue, after a `DRAIN_LIMIT` truncation, a path-scoped drain, or a receipt queued
-  after the snapshot. A probe on 10.5 still leaves the old title's linker with its edge
-  to the retitled page when only the queue repairs it. When that write's own late refresh
-  runs, it now takes a whole-vault pass instead (10.5). Two whole-vault doors also remain on this race, both reproduced by a
-  probe on 10.2. First, a dispatch that finds its generation acknowledged while a later
-  registry update left the marker stale registers a rebuild from the predecessor probe
-  (`graph_sync_predecessor_mismatch`, or `graph_sync_predecessor_present_at_genesis` at
-  generation 1). Second, a created page that a drain derived correctly but withheld
-  still declines the write's refresh (`existing_row_with_create`).
+- [ ] 10.4 Complete scoped topology repair under the registry proof from 10.2.
+  Tasks 8.9 and 8.10 now repair a retitled affected page before its old entry disappears,
+  including when a selected receipt limit omits that page.
+  A late refresh must preserve that repair without a whole-vault pass.
+  The existing registry-race guards still reject bytes that the resolver has not seen.
+  Independent review and delivery remain open.
 - [x] 10.5 Review corrections. The acknowledged no-op also requires the stored resolver
   topology to equal the resident resolver's at the live checkpoint. A stale topology
   falls back with `stored_topology_fingerprint_mismatch` (whole-vault), and no resident

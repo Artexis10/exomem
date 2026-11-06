@@ -93,7 +93,8 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-SCHEMA_VERSION = 14
+# Older rows can retain stale edges after their topology history disappears; rebuild them once.
+SCHEMA_VERSION = 15
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
@@ -300,17 +301,6 @@ _BACKGROUND_PROOF_THREAD_NAME = "exomem-graph-proof"
 _AVAILABILITY_FRESHNESS_KEY = "recall_projection_identity"
 _RECALL_CHECKPOINT_KEY = "recall_projection_checkpoint"
 _RESOLVER_TOPOLOGY_KEY = "recall_resolver_topology"
-#: The carry-forward record: for each indexed page a drain rewrote without being
-#: able to record the topology, the resolver entry (present, title) it had before
-#: the first such drain. A later drain, or an adoption, reverts these with its own
-#: pages, so a change split across drains -- `DRAIN_LIMIT` truncation, or a page
-#: landing between the queue snapshot and the drain -- is still explained once the
-#: last part drains. Cleared whenever a fingerprint is recorded.
-_TOPOLOGY_CARRY_KEY = "recall_resolver_topology_carry"
-#: The most pages the carry-forward record holds. Past it the record is dropped
-#: and the stale fingerprint keeps repair on the whole-vault path, as it was
-#: before the record existed.
-TOPOLOGY_CARRY_LIMIT = 256
 _READ_BARRIER_KEY = "read_barrier"
 _GRAPH_SYNC_CHECKPOINT_KEY = "graph_sync_checkpoint"
 #: Present, with this value, only while `graph_dependency_coverage` and
@@ -3661,7 +3651,6 @@ class EpistemicGraphIndex:
                     "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
                 ).fetchall()
             }
-            carry = self._read_topology_carry(conn)
             admitted = resolver_membership | indexed_membership
             pages: dict[str, _ProofPage] = dict(seed.pages) if seed is not None else {}
             to_read = sorted(admitted - pages.keys())
@@ -3790,10 +3779,9 @@ class EpistemicGraphIndex:
             topology_matches = resolver_fingerprint is not None and (
                 _resolver_topology_fingerprint(resolver) == resolver_fingerprint
                 or bool(
-                    carry is not None
-                    and (explained or carry)
+                    explained
                     and self._residue_explains_topology(
-                        conn, resolver, explained, resolver_fingerprint, carry=carry
+                        conn, resolver, explained, resolver_fingerprint
                     )
                 )
             )
@@ -3926,17 +3914,12 @@ class EpistemicGraphIndex:
         conn: sqlite3.Connection,
         resolver: vault_module.WikilinkResolver,
         batch_rels: set[str],
-        carry: dict[str, tuple[bool, str | None]] | None,
     ) -> bool:
         """Whether a drain whose queued pages are `batch_rels` may record `resolver`'s topology.
 
-        True when the stored fingerprint already matches, or when reverting the
-        queued pages' resolver entries to their stored rows, and the carried
-        pages' to their carried entries, reproduces it: then every topology
-        change is a page some drain queued, whose rows it rewrote and whose link
-        dependants it widened to. Pages a pass rewrites only as affected are not
-        passed: nothing widened from their own keys. An unreadable carry record
-        proves nothing.
+        True when the stored fingerprint matches, or reverting the fully widened
+        pages to their pre-pass entries reproduces it. Every resolver change
+        must be repaired before the pass overwrites the entries that explain it.
         """
         row = conn.execute(
             "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
@@ -3946,9 +3929,8 @@ class EpistemicGraphIndex:
         stored = str(row[0])
         if _resolver_topology_fingerprint(resolver) == stored:
             return True
-        return carry is not None and bool(
-            (batch_rels or carry)
-            and self._residue_explains_topology(conn, resolver, batch_rels, stored, carry=carry)
+        return bool(batch_rels) and self._residue_explains_topology(
+            conn, resolver, batch_rels, stored
         )
 
     @staticmethod
@@ -3985,69 +3967,6 @@ class EpistemicGraphIndex:
         )
         return before
 
-    @staticmethod
-    def _read_topology_carry(
-        conn: sqlite3.Connection,
-    ) -> dict[str, tuple[bool, str | None]] | None:
-        """The carry-forward record, `{}` when there is none, None when unreadable."""
-        row = conn.execute(
-            "SELECT value FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,)
-        ).fetchone()
-        if row is None:
-            return {}
-        try:
-            raw = json.loads(str(row[0]))
-            carry = {
-                str(rel): (bool(entry[0]), None if entry[1] is None else str(entry[1]))
-                for rel, entry in raw.items()
-            }
-        except (TypeError, ValueError, AttributeError, IndexError, KeyError):
-            return None
-        return carry if len(carry) <= TOPOLOGY_CARRY_LIMIT else None
-
-    def _carry_after_unowned_drain(
-        self,
-        conn: sqlite3.Connection,
-        resolver: vault_module.WikilinkResolver,
-        batch_rels: set[str],
-        carry: dict[str, tuple[bool, str | None]] | None,
-    ) -> dict[str, tuple[bool, str | None]] | None:
-        """The record after a drain of `batch_rels` that may not record the topology.
-
-        Read from the pre-pass rows. The first entry per page wins: a page queued
-        again has rows the earlier drain already rewrote. Only queued, indexed
-        pages enter -- affected pages were never widened from their own keys and
-        a page outside the indexed corpus has no row to revert to -- so neither
-        can ever be explained by the record.
-
-        None drops the record, leaving the whole-vault path in charge: past the
-        bound, or when this drain's resolver holds a change no indexed page
-        explains. The second is a change outside the indexed corpus, such as a
-        retitled page the resolver sees. This pass rewrites affected pages under
-        that change, so if it were later reverted, a record kept now would
-        explain the fingerprint again over rows derived under the reverted
-        topology. Reverting every indexed page that disagrees with the resolver,
-        with this batch and the record, must reproduce the stored fingerprint.
-        """
-        merged = dict(carry or {})
-        for rel in sorted(batch_rels):
-            if rel in merged or not rel.startswith(kb_prefix()):
-                continue
-            merged[rel] = self._stored_resolver_entry(conn, rel)
-        if len(merged) > TOPOLOGY_CARRY_LIMIT:
-            return None
-        row = conn.execute(
-            "SELECT value FROM graph_meta WHERE key = ?", (_RESOLVER_TOPOLOGY_KEY,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        explained = set(batch_rels) | self._indexed_pages_differing(conn, resolver)
-        if not self._residue_explains_topology(
-            conn, resolver, explained, str(row[0]), carry=merged
-        ):
-            return None
-        return merged
-
     def _indexed_pages_differing(
         self, conn: sqlite3.Connection, resolver: vault_module.WikilinkResolver
     ) -> set[str]:
@@ -4083,32 +4002,12 @@ class EpistemicGraphIndex:
         return differing
 
     @staticmethod
-    def _write_topology_carry(
-        conn: sqlite3.Connection, carry: dict[str, tuple[bool, str | None]] | None
-    ) -> None:
-        if not carry:
-            conn.execute("DELETE FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,))
-            return
-        conn.execute(
-            "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-            (
-                _TOPOLOGY_CARRY_KEY,
-                json.dumps(
-                    {rel: list(entry) for rel, entry in sorted(carry.items())},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
-        )
-
-    @staticmethod
     def _write_resolver_topology(conn: sqlite3.Connection, fingerprint: str) -> None:
-        """Record a fingerprint the rows now embody; the carry it subsumes goes."""
+        """Record the resolver fingerprint embodied by the repaired rows."""
         conn.execute(
             "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
             (_RESOLVER_TOPOLOGY_KEY, fingerprint),
         )
-        conn.execute("DELETE FROM graph_meta WHERE key = ?", (_TOPOLOGY_CARRY_KEY,))
 
     def _residue_explains_topology(
         self,
@@ -4116,8 +4015,6 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         residue: set[str],
         stored_fingerprint: str,
-        *,
-        carry: dict[str, tuple[bool, str | None]] | None = None,
     ) -> bool:
         """Whether reverting the residue's resolver entries reproduces the stored topology.
 
@@ -4128,19 +4025,8 @@ class EpistemicGraphIndex:
         which the drain widens to the pages whose links it re-targets. A page
         outside the indexed corpus has no stored title to put back, so any
         change to one still declines.
-
-        Carried pages revert to their carried entry, which is what the stored
-        fingerprint saw before a drain rewrote their rows. A carried page outside
-        `residue` whose row no longer matches the resolver moved again after that
-        drain, and that move was never widened, so it explains nothing.
         """
         entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
-        for rel, entry in (carry or {}).items():
-            if rel not in residue and self._stored_resolver_entry(
-                conn, rel
-            ) != self._live_resolver_entry(resolver, rel):
-                return False
-            entries[rel] = entry
         present = [(rel, title) for rel, (exists, title) in sorted(entries.items()) if exists]
         absent = [rel for rel, (exists, _title) in sorted(entries.items()) if not exists]
         before = resolver.fork()
@@ -7407,7 +7293,6 @@ class EpistemicGraphIndex:
                         topology_snapshot,
                         set(stored_entries),
                         resolver=resolver,
-                        owns_topology=True,
                     )
                     if widened is None:
                         refusal = "stored_topology_unreadable"
@@ -7753,7 +7638,6 @@ class EpistemicGraphIndex:
         rels: set[str],
         *,
         resolver: vault_module.WikilinkResolver,
-        owns_topology: bool = False,
     ) -> set[str] | None:
         """Find topology dependants from complete persisted raw dependencies.
 
@@ -7763,17 +7647,10 @@ class EpistemicGraphIndex:
         incremental refresh already widens on that model (`_refresh_paths_locked`
         re-derives `_fragment_dependants` alone while no stored entry moved).
 
-        `owns_topology` is `_drain_owns_topology` for these `rels`: every
-        difference between the resolver and the stored topology is then a queued
-        page, so a queued page whose existence and title the stored row already
-        records moved no resolution or existence. Only the pages that moved
-        widen to every linker by key and to every page with a stored edge to
-        them; the others widen to their fragment dependants. A queued page
-        with no row counts as moved: no row says
-        whether it existed, and a linker's edge to a Records page that exists
-        is suppressed, so the page's later deletion moves that edge. Without
-        `owns_topology` any difference may be outside `rels`, and every queued
-        page widens by key.
+        Callers prove complete topology ownership before committing rows. A
+        changed entry widens by its keys and stored incoming edges; an unchanged
+        entry needs only its fragment dependants. Version 15 excludes rows
+        derived under an unrecorded intermediate topology.
         """
         opened_snapshot = not conn.in_transaction
         if opened_snapshot:
@@ -7796,7 +7673,6 @@ class EpistemicGraphIndex:
                 unindexed.add(rel)
             elif not (self.vault_root / rel).exists():
                 vanished.add(rel)
-
             # A changed non-KB target that has no persisted file row cannot
             # supply its prior title. It may have removed an ambiguity, so the
             # graph cannot safely claim bounded topology recovery.
@@ -7808,8 +7684,7 @@ class EpistemicGraphIndex:
         moved = {
             rel
             for rel in rels
-            if not owns_topology
-            or rel in unindexed
+            if rel in unindexed
             or rel in vanished
             or self._stored_resolver_entry(conn, rel) != self._live_resolver_entry(resolver, rel)
         }
@@ -7867,12 +7742,12 @@ class EpistemicGraphIndex:
         return found
 
     def drain_paths(self, paths: list[Path]) -> dict[str, Any]:
-        """Re-derive the graph for exactly these paths and republish availability.
+        """Repair these paths and their topology dependants, then republish availability.
 
         The proportional counterpart to `rebuild_all`, and the reason the durable
-        queue is worth having: work is O(changed), so the window a concurrent
-        writer can invalidate shrinks by orders of magnitude instead of growing
-        with the vault.
+        queue is worth having: work follows changed pages and their dependants.
+        The window a concurrent writer can invalidate shrinks instead of
+        growing with the vault.
 
         Every identity it samples is the event-maintained one. Using
         `_recall_projection_identity` here -- the direct-disk walk the full
@@ -7958,30 +7833,36 @@ class EpistemicGraphIndex:
                 # relies on it read the same rows.
                 if not probe.in_transaction:
                     probe.execute("BEGIN")
-                # Decided on the pre-pass rows, which still carry the stored
-                # titles; inside the publication hook the rows already hold the
-                # new ones, and reverting to them would prove nothing. Only the
-                # queued pages explain topology: widening follows their keys,
-                # so an affected page's own retitle was never widened. Decided
-                # before the widening, which narrows to what moved only when
-                # these pages explain every change.
-                carry = self._read_topology_carry(probe)
-                owns_topology = self._drain_owns_topology(
-                    probe, resolver, queued_rels, carry
-                )
-                affected = self._topology_affected_sources(
-                    probe, queued_rels, resolver=resolver, owns_topology=owns_topology
-                )
-                carry_after = (
-                    None
-                    if owns_topology or affected is None
-                    else self._carry_after_unowned_drain(probe, resolver, queued_rels, carry)
-                )
+                version = probe.execute(
+                    "SELECT value FROM graph_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                affected: set[str] | None = None
+                widened_rels = set(queued_rels)
+                owns_topology = False
+                # Old rows can hide stale edges after their carry was consumed.
+                # Only a full rebuild may cross this version boundary.
+                if version is not None and version[0] == str(SCHEMA_VERSION):
+                    owns_topology = self._drain_owns_topology(probe, resolver, widened_rels)
+                    if not owns_topology:
+                        widened_rels.update(self._indexed_pages_differing(probe, resolver))
+                        owns_topology = self._drain_owns_topology(
+                            probe, resolver, widened_rels
+                        )
+                    if owns_topology:
+                        affected = self._topology_affected_sources(
+                            probe, widened_rels, resolver=resolver
+                        )
             finally:
                 probe.close()
-            if affected is None:
+            if affected is None or not owns_topology:
+                committed = graph_sync.read_checkpoint(self.vault_root)
+                deferred_index.mark_graph_full_rebuild(
+                    self.vault_root, generation=0 if committed is None else committed.generation
+                )
                 return {**report, "requires_rebuild": 1}
-            batch = sorted({*paths, *(self.vault_root / rel for rel in affected)})
+            batch = sorted({
+                *paths, *(self.vault_root / rel for rel in affected | widened_rels)
+            })
             if not self._registry_describes(recorded, batch):
                 # A write's bytes land before its corpus publication; rows derived
                 # here would come from a resolver that never saw them.
@@ -8042,53 +7923,16 @@ class EpistemicGraphIndex:
                     # restore readability nor acknowledge, even a checkpoint
                     # it fully covers; the drain that empties the queue does.
                     withheld = "queued"
+                # Rows and their complete resolver topology commit together,
+                # even when unrelated movement withholds public availability.
+                self._write_resolver_topology(conn, _resolver_topology_fingerprint(resolver))
                 if withheld is not None:
-                    # The vault moved elsewhere under the pass, or work outside
-                    # it is still owed. Every row it wrote is proven against
-                    # its own bytes, which the resolver's checkpoint describes,
-                    # so the rows land and their receipts retire; the movement
-                    # queued its own. The marker, lineage and acknowledgement
-                    # describe the whole projection, and wait for a drain that
-                    # the vault holds still for and that leaves nothing queued.
-                    #
-                    # The resolver topology is not one of them: it describes
-                    # the rows, and the two proofs that read it -- a
-                    # topology-changing refresh and a replacement's adoption --
-                    # rebuild the old resolver from these rows' titles. Left
-                    # behind, a page this drain created had rows the stored
-                    # topology did not know, and the next adoption declined a
-                    # snapshot that matched the disk. Same value the published
-                    # branch writes, in the same transaction as the rows, and
-                    # under the same condition: only when this batch's rows
-                    # account for every topology change in the resolver.
-                    if owns_topology:
-                        self._write_resolver_topology(
-                            conn, _resolver_topology_fingerprint(resolver)
-                        )
-                    else:
-                        # Carried forward so a later drain can explain it; past
-                        # the bound, dropped (the whole-vault path, as before).
-                        self._write_topology_carry(conn, carry_after)
                     return
-                if not owns_topology:
-                    self._write_topology_carry(conn, carry_after)
                 self._publish_available_marker_in_transaction(
                     conn,
                     before,
                     checkpoint=checkpoint,
                     graph_checkpoint=coverage.acknowledges,
-                    # The resolver this drain derived under, but only when its
-                    # rows account for every topology change in it. A change
-                    # this batch did not widen -- a retitled page outside the
-                    # indexed corpus, or a queued page it did not dequeue --
-                    # would otherwise be stamped as derived, and the next
-                    # adoption would accept edges no pass ever re-targeted. Left
-                    # alone, the stale fingerprint fails closed: the next
-                    # topology-changing write takes the whole-vault rebuild
-                    # (stored_topology_fingerprint_mismatch).
-                    topology=(
-                        _resolver_topology_fingerprint(resolver) if owns_topology else None
-                    ),
                 )
                 published = True
 
