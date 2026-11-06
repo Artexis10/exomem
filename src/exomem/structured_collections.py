@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, unquote
 
-from . import item_keys, memory_refs, query_compat, reserved_paths, vault
+from . import call_spans, item_keys, memory_refs, query_compat, reserved_paths, vault
 from .collection_profiles import profile_for
 from .planning_values import PlanningValues, Unavailable
 
@@ -1341,7 +1341,8 @@ def discover_legacy_trackers(
             continue
         _safe_path, relative = safe
         try:
-            tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
+            with call_spans.span("records.inventory_legacy_inspect"):
+                tracker = inspect_legacy_tracker(root, candidate, authorize_path=authorize)
         except CollectionError:
             continue
         trackers.append(tracker)
