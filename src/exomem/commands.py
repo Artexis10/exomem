@@ -55,6 +55,7 @@ from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
+from . import capture_carrier as capture_carrier_module
 from . import capabilities as capabilities_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
@@ -6888,6 +6889,14 @@ def op_activate_context(
                                     seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
                                 )
                             )
+                        # Owed before the body runs, so its characters come out of the map's budget
+                        # and a full map cannot starve it.
+                        capture_policy = capture_carrier_module.owed(
+                            vault_root,
+                            continuity=continuity,
+                            session=session,
+                            room=requested_chars - read_next_action.MAX_CHARS,
+                        )
                         packet = _op_activate_context_body(
                             vault_root,
                             turn,
@@ -6903,11 +6912,14 @@ def op_activate_context(
                             observation_timings=observation_timings,
                             trigger=trigger,
                             intent_resolution=intent_resolution,
+                            reserved_chars=capture_carrier_module.size(capture_policy.block) if capture_policy else 0,
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
                             packet["budget"]["limit_chars"] = requested_chars
                         read_next_action.attach(packet)
+                        # Outside the packet cache, like `continuity`: the live disposition is read per request.
+                        capture_carrier_module.for_packet(vault_root, packet, capture_policy, session=session)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -7322,15 +7334,19 @@ def _op_activate_context_body(
     observation_timings: find_types.FindTimings | None = None,
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
+    reserved_chars: int = 0,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
-    has to wrap this function's many early returns."""
+    has to wrap this function's many early returns.
+
+    `reserved_chars` is room the wrapper spends after this returns, beyond the
+    next-action move: it comes out of the packet's own budget."""
     timings = observation_timings or (find_types.FindTimings() if include_timings else None)
     from . import read_next_action
 
-    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS
+    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS - reserved_chars
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
 

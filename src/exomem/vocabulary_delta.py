@@ -240,15 +240,10 @@ def for_packet(vault_root: Path, packet: dict[str, Any], *, session: str | None 
         owed = pending(vault_root, session=session, limit=room)
         block = deliver(owed, vault_root, session=session) if owed is not None else None
         if block is not None:
-            packet["vocabulary_delta"] = block
-            held = packet.setdefault("budget", {})
-            held["used_chars"] = used + size(block)
-            if "serialized_chars" in held:
-                # The packet grew after its length was measured; the field names what is sent.
-                from . import context_views
+            from . import context_views
 
-                held.pop("serialized_chars")
-                held["serialized_chars"] = context_views.serialized_chars(packet)
+            packet["vocabulary_delta"] = block
+            context_views.count_attached(packet, size(block))
     except Exception:  # noqa: BLE001 - optional guidance never breaks an activation
         log.debug("vocabulary delta unavailable (non-fatal)", exc_info=True)
         packet.pop("vocabulary_delta", None)

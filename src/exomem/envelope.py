@@ -75,6 +75,15 @@ RANGES: dict[str, tuple[str, ...]] = {
     "structural_suggestions": ("off", "advisory"),
 }
 
+#: One plain sentence per `RANGES["proactive_capture"]` value, for the activation `capture_policy`
+#: block. Keyed on the closed range the spec fixes (a unit test pins key parity), not on vocabulary:
+#: a model needs the disposition in words, and the key set cannot grow without a spec change.
+PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
+    "silent": "save durable material without asking, then report the write in one line",
+    "advisory": "offer the save in one line and stop",
+    "off": "write only on an explicit request",
+}
+
 #: The two classes whose disposition is not configurable at all.
 FIXED: dict[str, str] = {
     "hygiene_writes": "silent",

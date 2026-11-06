@@ -203,9 +203,29 @@ _GLOBAL_STANCE_CAPTURE = (
     "Authorize each promoted unit; keep scoped rules local. "
 )
 
+#: The durable-baseline doctrine that `balanced` and `maximal` share word for word, and the
+#: activation `capture_policy` block repeats. Product doctrine, not vault data: one source, so
+#: bootstrap and the per-turn carrier cannot state different classes or routes.
+_BASELINE_CAPTURE = (
+    "Capture stable preferences, recurring routines, historical baselines, or durable "
+    "affiliations only when stability or recurrence and reusable comparison, interpretation, "
+    "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
+    "there, else one concise compiled observation; Records only for a compatible existing "
+    "measurement. Fleeting preferences, one-offs, incidental associations, trivia, and "
+    "tentative claims stay quiet."
+)
+
+#: The first two sentences of the artifact-adoption rule: what a selected draft is worth as a
+#: save. The activation block carries them with the baseline doctrine; the rest stays in bootstrap.
+_ADOPTION_TRIGGER = (
+    "Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
+    "keeps exact bytes as Source/Evidence by role, never MIME."
+)
+
 _ARTIFACT_ADOPTION_CAPTURE = (
-    " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
-    "keeps exact bytes as Source/Evidence by role, never MIME. No handle: non-committing "
+    " "
+    + _ADOPTION_TRIGGER
+    + " No handle: non-committing "
     "handoff. Delivery needs an Evidence receipt/Record; no remote byte inference. "
     "Missing collection: structural_suggestions."
 )
@@ -382,13 +402,9 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + "Capture at a stepping stone: a durable conclusion, central or recurring "
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
-            "mid-thought exploration, tangents, or unresolved questions. Capture stable "
-            "preferences, recurring routines, historical baselines, or durable affiliations "
-            "only when stability or recurrence and reusable comparison, interpretation, or "
-            "decision value are clear. Route a uniquely resolved Entity facet or affiliation "
-            "there, else one concise compiled observation; Records only for a "
-            "compatible existing measurement. Fleeting preferences, one-offs, incidental "
-            "associations, trivia, and tentative claims stay quiet. A concise observation or "
+            "mid-thought exploration, tangents, or unresolved questions. "
+            + _BASELINE_CAPTURE
+            + " A concise observation or "
             "narrow Entity facet follows proactive_capture. Route stated intent to "
             "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
@@ -417,13 +433,9 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + "Capture at every stepping stone; treat the bar for 'durable' as low: "
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
             "a fact about a central or recurring entity, or a method you actually ran and "
-            "how it turned out. Capture stable preferences, recurring routines, historical "
-            "baselines, "
-            "or durable affiliations only when stability or recurrence and reusable comparison, "
-            "interpretation, or decision value are clear. Route a uniquely resolved Entity "
-            "facet or affiliation there, else one concise compiled observation; "
-            "Records only for a compatible existing measurement. Fleeting preferences, one-offs, "
-            "incidental associations, trivia, and tentative claims stay quiet. A concise observation "
+            "how it turned out. "
+            + _BASELINE_CAPTURE
+            + " A concise observation "
             "or narrow Entity facet follows proactive_capture. When torn between "
             "capturing and letting it pass, capture. "
             "Prefer a real page over a mental note; do not wait to be asked. "
@@ -742,6 +754,21 @@ def effective_capture(authored_capture: dict[str, str], prominence_level: str) -
         }
         for kind in ("durable_intent", "observed_outcomes")
     }
+
+
+def capture_policy_text(disposition: str) -> str:
+    """The live capture authority in plain words, for the activation `capture_policy` block.
+
+    Branches only on the closed `proactive_capture` range. Under `off` it carries the meaning
+    alone: no class list, so a quiet vault is not handed doctrine it may not act on. The classes
+    are the constants bootstrap serves, so the two carriers cannot drift.
+    """
+    from . import envelope
+
+    meaning = f"proactive_capture is {disposition}: {envelope.PROACTIVE_CAPTURE_MEANING[disposition]}."
+    if disposition == "off":
+        return meaning
+    return f"{meaning} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER}"
 
 
 def capture_policy_projection() -> dict:

@@ -1231,6 +1231,16 @@ def serialized_chars(packet: Mapping[str, Any]) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
+def count_attached(packet: dict[str, Any], chars: int) -> None:
+    """Count a block attached after the packet's budget was measured, and re-measure its length."""
+    held = packet.setdefault("budget", {})
+    held["used_chars"] = int(held.get("used_chars") or 0) + chars
+    if "serialized_chars" in held:
+        # The packet grew after its length was measured; the field names what is sent.
+        held.pop("serialized_chars")
+        held["serialized_chars"] = serialized_chars(packet)
+
+
 def _map_description() -> str:
     """The map's description line. It names the call that reads a ref, spelled as the serving surface spells it."""
     return f"Index of what exists. Read a ref with {capabilities.active_call_text('read_memory', {'path': '<ref>'})}."
