@@ -350,7 +350,6 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if classified.disposition is reserved_paths.PathDisposition.ORDINARY:
         parent, leaf = reserved_paths._leaf_spelling(path)
         path = PurePosixPath(parent, leaf).as_posix()
-        classified = reserved_paths.classify_logical(path)
     page_path = path if path.lower().endswith(".md") else path + ".md"
     staged = _OVERLAY.get().get(page_path)
     if raw is None:
@@ -374,7 +373,9 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
 
             if find_corpus.CACHE.container_absence_enabled():
                 classification_cache = find_corpus.CACHE
-                current = reserved_paths.inspect_generic_version(root, page_path)
+                current = reserved_paths._inspect_generic_version_spelling(
+                    root, page_path, (parent, leaf) if page_path == path else None,
+                )
                 if current is not None:
                     fact = classification_cache.container_absence(root / page_path, current.vault_identity)
                     if fact is not None and fact.version == current.version:

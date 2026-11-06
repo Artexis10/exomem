@@ -1510,10 +1510,17 @@ def inspect_generic_version(vault_root: Path, value: object) -> GenericFileVersi
     As with read_bounded_guarded_generation, shared mmap writes and writes
     spanning the racy window remain outside the timestamp witness.
     """
+    return _inspect_generic_version_spelling(vault_root, value, None)
+
+
+def _inspect_generic_version_spelling(
+    vault_root: Path, value: object, spelling: tuple[str, str] | None,
+) -> GenericFileVersion | None:
+    """Reuse only call-local lexical validation; acquire every physical observation afresh."""
     request_budget.checkpoint()
     try:
         with _generic_identity_catalogue_scope(vault_root, value) as identities:
-            parent_path, leaf = _leaf_spelling(value)
+            parent_path, leaf = _leaf_spelling(value) if spelling is None else spelling
             started = time.time_ns()
             with held_fs.read_version_probe(
                 Path(vault_root), parent_path, leaf,
