@@ -12,10 +12,17 @@ from dataclasses import replace
 import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
-from test_governance_egress import _external, _through_dispatcher, write_rule, write_scope
+from test_governance_egress import (
+    _external,
+    _receipt_records,
+    _through_dispatcher,
+    write_rule,
+    write_scope,
+)
 
 from exomem import reserved_paths
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
 from exomem.governance import egress
@@ -337,6 +344,45 @@ def test_inventory_counts_omit_a_withheld_row_and_its_hold(vault):
     assert _as(vault, _external(), observe) == absent
     owner = _as(vault, owner_principal(), observe)
     assert (owner[0]["committed"], owner[0]["held"]) == (2, 1)
+
+
+@pytest.mark.parametrize("mutation", [False, True])
+def test_manifest_discovery_preserves_a_nested_mutations_row_authority(vault, mutation, tmp_path, monkeypatch):
+    """A visible manifest permits discovery, but a withheld row still blocks whole-collection writes."""
+    from test_collection_store_governance import _record_writer
+
+    _add_secret(vault)
+    who = _record_writer(vault, tmp_path, monkeypatch, deny_protected=False)
+    with preview_store(vault.root, vault.handle) as writer, request_scope(who):
+        with writer.read_snapshot(mutation=mutation):
+            if mutation:
+                with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+                    writer.discover_collections()
+            else:
+                manifests, errors = writer.discover_collections()
+                assert [manifest.collection_id for manifest in manifests] == [CID]
+                assert errors == ()
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_inventory_rejects_corrupt_row_authority_before_releasing_counts(vault, warm):
+    """Manifest discovery must not let a census release counts from invalid row metadata."""
+    if warm:
+        result = _as(vault, owner_principal(), lambda: _call(vault, "record_memory", action="inspect"))
+        assert result["collections"][0]["committed"] == 1
+    before = len(_receipt_records(vault.root))
+    metadata = json.loads(vault.connection.execute(
+        "SELECT governance_json FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0])
+    metadata["projects"] = ["different"]
+    vault.connection.execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+                             (json.dumps(metadata), CID, KEY))
+
+    with (preview_store(vault.root, vault.handle), request_scope(owner_principal()),
+          pytest.raises(OpError, match="COLLECTION_NOT_FOUND")):
+        _through_dispatcher(vault.root, "record_memory", action="inspect")
+    events = _receipt_records(vault.root)[before:]
+    assert not any(outcome["decision"] == "released"
+                   for event in events for outcome in event.get("outcomes", []))
 
 
 def test_the_records_inventory_sweeps_every_file_but_the_store_views_for_trackers(routed, monkeypatch):

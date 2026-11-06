@@ -412,7 +412,9 @@ class CollectionWriter:
                     raise collections.CollectionError(
                         "COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect"
                     )
-                manifest = self._collection(cid)[1]
+                # Read discovery already admitted the manifest; row admission belongs to the census.
+                manifest = (self._collection(cid)[1] if self._operation.mutation
+                            else self._collection_manifest(self._collection_row(cid))[0])
                 manifests.append(self._operation.field_plan(manifest).manifest)
             return tuple(manifests), ()
 
