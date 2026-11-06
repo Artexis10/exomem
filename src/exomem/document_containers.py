@@ -337,8 +337,9 @@ _UNCLAIMED_LOCK = threading.Lock()
 _UNCLAIMED: OrderedDict[
     tuple[Path, str] | tuple[Path, str, str], tuple[str, tuple[int, int], tuple[int, int, int]] | None
 ] = OrderedDict()
-# `resolved_vault_path` returns a new `Path` on every call, so each key used to hold its own copy of the
-# vault root: about half of the memo's RAM at its bound. Keys share one equal root object instead. The map
+# `resolved_vault_path` returns a new `Path` per call, or per resolution scope inside one, so at worst each
+# key held its own copy of the vault root: about half of the memo's RAM at its bound. Keys share one equal
+# root object instead. The map
 # only shares objects and decides nothing, so emptying it at any time is safe; it is bounded to a few roots.
 _UNCLAIMED_ROOTS: dict[Path, Path] = {}
 _UNCLAIMED_ROOTS_MAX = 64
