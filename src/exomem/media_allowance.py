@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -17,11 +17,29 @@ MEDIA_ALLOWANCE_EXCEEDED = "MEDIA_ALLOWANCE_EXCEEDED"
 ALLOWANCE_REFUSAL_CODES = (MEDIA_ALLOWANCE_UNKNOWN, MEDIA_ALLOWANCE_EXCEEDED)
 
 
+# An unknown census names this many unreadable notes at most, in path order: enough for the owner to start
+# on, small enough that a vault with many damaged notes grows neither the ledger row nor the status.
+BLOCKERS_SHOWN = 5
+# A reason is the walk's own message about a note; the cap keeps a long parser message off the status.
+REASON_MAX_CHARS = 160
+
+
+@dataclass(frozen=True, slots=True)
+class Blocker:
+    """One note that stopped the census: its vault-relative path and why it could not be read."""
+
+    path: str
+    reason: str
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceUsage:
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] | None
     observed_at: str
     live_paths: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    # Why the census is unknown, when notes explain it: the first few by path, and how many there were in all.
+    blockers: tuple[Blocker, ...] = ()
+    blockers_total: int = 0
 
     @property
     def used_bytes(self) -> int | None:
@@ -74,6 +92,8 @@ class AllowanceDecision:
     allowance_bytes: int | None
     observed_at: str
     code: str | None
+    blockers: tuple[Blocker, ...] = ()
+    blockers_total: int = 0
 
 
 def admission(
@@ -91,7 +111,18 @@ def admission(
         code = MEDIA_ALLOWANCE_UNKNOWN
     elif projected > allowance:
         code = MEDIA_ALLOWANCE_EXCEEDED
-    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code)
+    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code,
+                             usage.blockers, usage.blockers_total)
+
+
+def describe_blockers(blockers: tuple[Blocker, ...] | list[Blocker], total: int) -> str:
+    """The unreadable notes in one sentence for a refusal or a status: each path and reason, then what is left over."""
+    if not blockers:
+        return ""
+    shown = "; ".join(f"{blocker.path} ({blocker.reason})" for blocker in blockers)
+    more = f"; and {total - len(blockers)} more" if total > len(blockers) else ""
+    noun = "note" if total == 1 else "notes"
+    return f"{total} {noun} could not be read: {shown}{more}"
 
 
 def _binding(
@@ -142,12 +173,14 @@ def _binding(
 
 
 def bound_references(
-    vault: Path, store: originals.StoreBinding,
+    vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
     """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
-    unknown census: a failed read never ends the walk early and reads as complete.
+    unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
+    `unreadable` is told of each note whose own header or binding fails, and the walk goes on to name the
+    next one; that caller must treat the census as unknown once told. Without it, the first such note raises.
     """
     metadata: dict[str, str] = {}
     placements: dict[str, dict[str, object]] = {}
@@ -169,14 +202,21 @@ def bound_references(
         markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
     ) as entries:
         for entry in entries:
-            if entry.markdown is None:
-                raise ValueError("companion header was not read")
             path = f"{kb_dirname()}/{entry.relative_path}"
-            bound = _binding(
-                parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
-                path, store, metadata, vault, placements, placement_versions,
-            )
-            del entry
+            try:
+                if entry.markdown is None:
+                    raise ValueError("companion header was not read")
+                bound = _binding(
+                    parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
+                    path, store, metadata, vault, placements, placement_versions,
+                )
+            except ValueError as error:  # UnicodeError is a ValueError; a tree or budget failure is not this note's.
+                if unreadable is None:
+                    raise
+                unreadable(path, error)
+                continue
+            finally:
+                del entry
             if bound is not None:
                 yield path, bound[0], bound[1]
     for metadata_path, version in placement_versions.items():
@@ -201,18 +241,34 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
     vault = Path(vault_root).resolve()
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] = {}
     live_paths: dict[tuple[str, str, str], str] = {}
+    blockers: list[Blocker] = []
+    blocked = 0
+
+    def blocked_by(path: str, error: Exception) -> None:
+        nonlocal blocked
+        blocked += 1
+        blockers.append(Blocker(path, str(error)[:REASON_MAX_CHARS] or type(error).__name__))
+        blockers.sort(key=lambda item: item.path)
+        del blockers[BLOCKERS_SHOWN:]
+
     try:
         store = originals.binding_for(vault)
         if store is None:
             raise ValueError("no selected media store")
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
-            for path, binary, reference in bound_references(vault, store):
+            for path, binary, reference in bound_references(vault, store, unreadable=blocked_by):
                 key = _key(reference)
                 if key in versions:
-                    _consistent(versions[key], (binary, reference))
+                    try:
+                        _consistent(versions[key], (binary, reference))
+                    except ValueError as error:
+                        blocked_by(path, error)
+                        continue
                 versions[key] = (binary, reference)
                 if not trash_metadata.is_trash_path(path):
                     live_paths.setdefault(key, binary.path)
-    except UNREADABLE:
+    except UNREADABLE:  # The walk itself failed, so any note named so far is not the whole reason: name none.
         return ReferenceUsage(None, datetime.now(UTC).isoformat())
+    if blocked:  # Notes that failed one by one: the census is unknown, and says which notes and why.
+        return ReferenceUsage(None, datetime.now(UTC).isoformat(), {}, tuple(blockers), blocked)
     return ReferenceUsage(versions, datetime.now(UTC).isoformat(), live_paths)

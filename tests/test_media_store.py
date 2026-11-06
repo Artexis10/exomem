@@ -3531,3 +3531,95 @@ def test_the_retained_status_reports_the_census_the_latch_and_the_originals_too_
     assert (after["census"]["evicted"], after["census"]["bytes"]) == (2, 700)
     assert after["drained"] is False
     assert after["above_hydration_capacity"] == {"count": 1}
+
+
+def _malformed_notes(vault: Path, count: int) -> list[str]:
+    """`count` notes whose header cannot be read, and their vault-relative paths in path order."""
+    from exomem.kbdir import kb_dirname
+
+    folder = vault / kb_dirname() / "Damaged"
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for number in range(count):
+        (folder / f"note-{number}.md").write_bytes(b"---\nvalue: [\n---\n")
+        paths.append(f"{kb_dirname()}/Damaged/note-{number}.md")
+    return paths
+
+
+def test_an_unknown_allowance_names_the_unreadable_notes_in_the_status_and_in_the_refusal(
+        vault: Path, selected_store, monkeypatch):
+    """Catches an unknown media usage that tells the owner nothing to repair: no note, no reason, no count."""
+    from exomem import media_store
+
+    _recorded_by_a_batch(vault)
+    damaged = _malformed_notes(vault, 7)
+    member = _filed(vault, 2, category="next")[1]
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, member, batch=media_store.OffloadBatch(vault))
+    allowance = _window_status(vault)["media_allowance"]
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert allowance["blocked_total"] == 7
+    assert [item["path"] for item in allowance["blocked_by"]] == damaged[:5]  # Bounded, in path order.
+    assert all(item["reason"] for item in allowance["blocked_by"])
+    for text in (str(refused.value), allowance["unknown"]):
+        assert all(path in text for path in damaged[:5]) and damaged[5] not in text and "7 notes" in text
+    assert "used_bytes" not in allowance
+
+
+def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, selected_store, monkeypatch):
+    """Catches a partial list of notes presented as the whole reason, when the walk stopped for another cause."""
+    from exomem import media_allowance, media_store
+
+    _malformed_notes(vault, 1)
+    monkeypatch.setattr(media_allowance, "_binding", lambda *args: (_ for _ in ()).throw(OSError("disk")))
+    census = media_store.take_census(vault)
+
+    assert census.used_bytes is None and census.blockers == () and census.blockers_total == 0
+
+
+def test_the_status_reports_the_two_meters_without_counting_a_cached_original_twice(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a vault figure that charges the volume for cached copies, or a media figure that leaves them out."""
+    _window_policy(selected_store, monkeypatch)
+    cached = _stored(vault, "cached", 300)
+    evicted = _stored(vault, "evicted", 500)
+    from exomem import media_store
+
+    assert media_store.evict(vault, evicted)
+    size = cached.stat().st_size
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 10_000, cached))
+    both = _stored_census(vault)
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert status["vault_storage"] == {"bytes": 10_000, "cached_bytes": size, "volume_bytes": _WINDOW_VOLUME}
+    assert status["media_storage"]["used_bytes"] == both  # Both stored originals, once each.
+    assert status["media_storage"]["allowance_bytes"] == 10_000_000
+    assert both > size
+
+
+def _stored_census(vault: Path) -> int:
+    """The bytes that a fresh census counts, from the references alone."""
+    from exomem import media_allowance
+
+    used = media_allowance.reference_usage(vault).used_bytes
+    assert used is not None
+    return used
+
+
+def test_the_meters_say_unknown_with_a_reason_when_their_readings_fail(vault: Path, selected_store, monkeypatch):
+    """Catches a failed census or ledger read that shows as 0 bytes used or 0 bytes cached."""
+    from exomem import media_store
+
+    _window_policy(selected_store, monkeypatch)
+    _stored(vault, "cached", 300)
+    _malformed_notes(vault, 1)
+    monkeypatch.setattr(media_store, "cached_bytes", lambda _vault: (_ for _ in ()).throw(
+        media_store.MediaStoreError("MEDIA_LEDGER_UNREADABLE", "the media ledger cannot be read: locked")))
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert "bytes" not in status["vault_storage"] and "locked" in status["vault_storage"]["unknown"]
+    assert "used_bytes" not in status["media_storage"] and status["media_storage"]["unknown"]

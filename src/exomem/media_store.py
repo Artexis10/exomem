@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import sys
 import shutil
 import sqlite3
 import subprocess
@@ -617,9 +618,11 @@ def _record_census(ledger: MediaJobStore, usage: media_allowance.ReferenceUsage)
     """
     with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
         conn.execute(
-            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at) VALUES (1, ?, ?) "
-            "ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, observed_at=excluded.observed_at",
-            (usage.used_bytes, usage.observed_at),
+            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at, blockers, blockers_total) "
+            "VALUES (1, ?, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, "
+            "observed_at=excluded.observed_at, blockers=excluded.blockers, blockers_total=excluded.blockers_total",
+            (usage.used_bytes, usage.observed_at,
+             json.dumps([[item.path, item.reason] for item in usage.blockers]), usage.blockers_total),
         )
 
 
@@ -629,6 +632,8 @@ class RecordedCensus:
 
     used_bytes: int | None
     observed_at: str
+    blockers: tuple[media_allowance.Blocker, ...] = ()
+    blockers_total: int = 0
 
     def older_than(self, seconds: float) -> bool:
         """Whether the census is older than `seconds`; a time that cannot be read counts as older."""
@@ -645,7 +650,7 @@ def take_census(vault: Path) -> RecordedCensus:
     usage = media_allowance.reference_usage(vault)
     with suppress(*_LEDGER_UNREADABLE):  # The reading is still returned; only the record is lost.
         _record_census(MediaJobStore(vault), usage)
-    return RecordedCensus(usage.used_bytes, usage.observed_at)
+    return RecordedCensus(usage.used_bytes, usage.observed_at, usage.blockers, usage.blockers_total)
 
 
 def recorded_census(vault: Path) -> RecordedCensus | None:
@@ -660,10 +665,18 @@ def recorded_census(vault: Path) -> RecordedCensus | None:
         with closing(ledger._connect(readonly=True)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_owner_census'").fetchone() is None:
                 return None
-            row = conn.execute("SELECT used_bytes, observed_at FROM media_owner_census").fetchone()
+            columns = {str(column["name"]) for column in conn.execute("PRAGMA table_info(media_owner_census)")}
+            row = conn.execute("SELECT * FROM media_owner_census").fetchone()
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
-    return None if row is None else RecordedCensus(None if row["used_bytes"] is None else int(row["used_bytes"]), str(row["observed_at"]))
+    if row is None:
+        return None
+    # A ledger from before the blockers were recorded has no such columns: an unknown census names no note.
+    named = json.loads(row["blockers"] or "[]") if "blockers" in columns else []
+    return RecordedCensus(
+        None if row["used_bytes"] is None else int(row["used_bytes"]), str(row["observed_at"]),
+        tuple(media_allowance.Blocker(path, reason) for path, reason in named),
+        int(row["blockers_total"]) if "blockers_total" in columns else 0)
 
 
 def _offload_admission(
@@ -820,9 +833,14 @@ def _refusal_code(
     return row["code"]
 
 
-def _require_allowance(ledger: MediaJobStore, snapshot: OriginalSnapshot, code: str | None) -> None:
+def _require_allowance(
+    ledger: MediaJobStore, snapshot: OriginalSnapshot, code: str | None,
+    blockers: tuple[media_allowance.Blocker, ...] = (), blockers_total: int = 0,
+) -> None:
     if code is not None:
-        refusal = MediaStoreError(code, "the current media allowance does not admit this original")
+        why = media_allowance.describe_blockers(blockers, blockers_total)
+        refusal = MediaStoreError(code, "the current media allowance does not admit this original"
+                                  + (f": {why}" if why else ""))
         _refuse(ledger, snapshot, refusal, None)
         raise refusal
 
@@ -879,8 +897,12 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
             code = _refusal_code(vault, row, snapshot, config, usage=usage)
             if code is None:
                 continue
-            result.append({"path": row["binary_rel"], "original_state": snapshot.state,
-                           "code": code, "ciphertext_size": row["ciphertext_size"]})
+            entry = {"path": row["binary_rel"], "original_state": snapshot.state,
+                     "code": code, "ciphertext_size": row["ciphertext_size"]}
+            if code in media_allowance.ALLOWANCE_REFUSAL_CODES and usage is not None and usage.blockers:
+                entry["blocked_by"] = [{"path": item.path, "reason": item.reason} for item in usage.blockers]
+                entry["blocked_total"] = usage.blockers_total
+            result.append(entry)
     return result, coverage
 
 
@@ -932,7 +954,9 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
         refusal = _refused(ledger, snapshot, config, usage=census())
         if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
-            _require_allowance(ledger, snapshot, refusal)
+            # `_refused` has already admitted this original once; the second reading shares the batch's census.
+            decision, _reuse = _offload_admission(vault, snapshot, usage=census())
+            _require_allowance(ledger, snapshot, refusal, decision.blockers, decision.blockers_total)
         if refusal is not None:
             return None
         if not snapshot.offloadable:
@@ -967,7 +991,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
         decision, reuse = _offload_admission(vault, snapshot, usage=census())
-        _require_allowance(ledger, snapshot, decision.code)
+        _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
         name_key = Path(str(config["name_key_path"])).read_bytes()
         if len(name_key) < 32:
             raise ValueError("the media name key requires at least 32 bytes")
@@ -990,7 +1014,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
                     usage=census(),
                 )
-                _require_allowance(ledger, snapshot, decision.code)
+                _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
                 _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
             if reuse is not None:
                 reference = reuse.reference
@@ -1031,7 +1055,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reference, select_reuse=False, usage=census(),
                 )
-                _require_allowance(ledger, snapshot, decision.code)
+                _require_allowance(ledger, snapshot, decision.code, decision.blockers, decision.blockers_total)
                 if batch is not None:
                     # Charged before the write: a failed write leaves the batch over-counting, never under.
                     batch.charge(ledger, snapshot, reference)
@@ -1473,6 +1497,24 @@ def occupancy(vault: Path, bounds: media_capacity.Bounds, *, eviction_idle_secon
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return Occupancy(evictable, pending[0], pending[1], pinned)
+
+
+def cached_bytes(vault: Path) -> int:
+    """The bytes on the volume of originals that the store also holds (D12): the ledger's cached rows, each read from the volume.
+
+    One source for "cached": a row that is not evicted is a stored original that a hydration or a confirm left
+    on the volume. Raises `MediaStoreError` when the ledger cannot be read; a missing ledger caches nothing.
+    """
+    vault = Path(vault).resolve()
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        return 0
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            return _volume_bytes(vault, (row[0] for row in conn.execute("SELECT binary_rel FROM media_cache WHERE evicted = 0")),
+                                 sys.maxsize)[1]
+    except _LEDGER_UNREADABLE as error:
+        raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
 
 
 def evicted_bytes(vault: Path) -> int:
