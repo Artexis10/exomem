@@ -1783,3 +1783,35 @@ def test_a_temporary_title_is_fully_repaired_before_its_receipt_drains(
     assert deferred_index.list_graph_paths(root) == []
     assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
     _assert_matches_a_fresh_rebuild(root)
+
+
+def test_a_graph_schema_bump_settles_the_snapshot_so_the_upgrade_proceeds(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older build's sidecar never becomes adoptable, so waiting on it only fails the upgrade.
+
+    The 2026-11-06 upgrade raised the graph schema by one. The standby declined
+    with `graph_sync_snapshot_unusable`, waited on `graph_snapshot` until its warm
+    budget expired and was discarded, so the release could not be installed.
+    """
+    root = handoff_vault
+    conn = sqlite3.connect(epistemic_graph.sidecar_path(root))
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE graph_meta SET value = ? WHERE key = 'schema_version'",
+                (str(epistemic_graph.SCHEMA_VERSION - 1),),
+            )
+    finally:
+        conn.close()
+    _enter_standby(monkeypatch)
+
+    assert service_standby.prove_graph_snapshot(root) is False
+    assert service_standby.adoption_record()["reason"] == "graph_sync_snapshot_unusable"
+    assert service_standby.cutover_components()["graph_snapshot"] == "ready"
+
+    record = service_standby.promote(root, migrated=False)
+    assert record["snapshot"] == "unproven"
+    assert "graph_handoff" not in service_standby.carried_warm_components(), (
+        "the promoted worker must rebuild the older build's graph, not inherit it"
+    )

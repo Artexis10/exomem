@@ -222,7 +222,14 @@ def cutover_components() -> dict[str, str]:
     from . import readiness
 
     with _lock:
-        snapshot_ready = _proved_token is not None
+        # Settled, not adopted, for the reason `semantic_corpus` is below. A
+        # snapshot proved unusable by this build, such as one from an older
+        # graph schema, never becomes adoptable. The promoted worker rebuilds it
+        # whether it cut over or cold started. Promotion records it `unproven`
+        # and carries no graph handoff.
+        snapshot_ready = _proved_token is not None or bool(
+            _adoption is not None and _adoption.conclusive
+        )
         corpus_settled = _corpus_attempted
         catalogue_built = _detached_built
         collections_settled = _collections_settled
