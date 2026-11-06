@@ -169,6 +169,44 @@ The internal storage slice retains accepted events beneath the existing curation
 
 #### Principal-bound input recovery
 
+**Material binding increment (3.12).** Add `episode_memory` actions `input` and
+`material`, rendered as `record_episode` and `read_episode` operation kinds.
+`input` requires an existing episode, its current input revision and journal digest,
+and one version-1 `materials` envelope. Append through the existing principal-bound
+input/CAS owner; do not preserve another Source or execute a destination effect.
+The envelope holds zero to eight uniquely keyed items within 16 KiB, sorted by key.
+Each item names an original whole-page companion, a readable page or exact unit,
+or both. Optional producer attribution is caller-authored, never authenticated identity.
+Reject unknown fields. Empty items explicitly clears bindings; omission on later
+recaps inherits the latest explicit envelope across the existing 64-revision bound,
+without copying or refreshing it. Inspection exposes that binding's original input revision.
+Writes retain the existing terminal mutation receipt; read candidates for current state.
+
+Seal declared original SHA and size from the released canonical companion separately
+from the reading's material version, exact unit fingerprint and span. Companion edits
+cannot invalidate unchanged original bytes. Pairing remains caller-authored and grants
+neither equivalence nor independent-origin support. An optional `dataset_rows` locator
+uses one bounded nullable record path and up to 32 unique zero-based row indices.
+Verify it against a staged original through `query_data.load_rows_bytes`, retaining
+that owner's exact raw SHA, size, record kind and resolved path. No other locator
+grammar or inferred media timestamp enters this increment.
+
+`material` selects one stable binding revision and key. Recover reading and original
+independently: retained-input release/version checks and the existing 8192-byte budget
+govern reading; current native `artifact_recovery` staging governs original bytes.
+Successful authorized descriptors may prove stale declared identity. Unified recovery
+refusals stay content-free unavailable. Missing and withheld references are identical,
+including attribution; projections expose unchecked handles without staging binaries.
+Return no bytes, capabilities or cached authority in episode JSON.
+
+A stale CAS refuses before sealing or writing. A byte-equivalent replacement under
+current guards writes no revision. Lost acknowledgements require inspecting public
+state before another mutation; no transparent replay receipt is promised.
+Legacy evidence normalization, hashes and absent fields remain unchanged. Extended
+journals require this reader-capable release, including supported rollback; older
+strict readers must refuse without changing them. Source/Evidence/Planning adapters,
+proposal association, origin accounting and ordinary mixed-journey acceptance remain open.
+
 The input owner facade binds every call to the current resolved canonical audience, not a client brand, transport, conversation or authorization-session identifier. Its version-2 journal envelope includes that audience in the root seal and storage identity while retaining the pure model's logical episode identity. Store version-2 journals within an audience-hash directory so later bounded pending-work discovery need not scan other audiences' journals; this slice adds no listing surface. Different audiences may use the same logical episode key without sharing history. An unbound or unresolved caller fails closed; an ownerless version-1 journal is never adopted by its first reader. The internal version-1 store remains a trusted-only compatibility seam.
 
 The first facade accepts a canonical page or exact semantic-unit reference and resolves it under the current principal before recording a server-observed version digest. It stores references and digests, not another copy of source text. Recovery repeats exact resolution, lifecycle, release and version checks against the same immutable page snapshot. Missing, ambiguous, withheld or superseded evidence is unavailable, except for the bounded recorder compatibility proof below; changed evidence is stale. Neither state returns original text, alternative matches or current replacement content. Full-page input and exact-unit input have a finite response byte cap; truncation must not masquerade as complete recovery. Digest-only conversation input remains explicitly unrecoverable.

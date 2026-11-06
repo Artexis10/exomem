@@ -626,6 +626,7 @@ def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
         compute_started.set()
 
     monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(server_runtime, "_warm_request_path", lambda _root: None)
     monkeypatch.setattr(
         server_runtime,
         "_start_file_watcher",

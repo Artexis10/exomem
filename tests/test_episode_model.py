@@ -13,6 +13,45 @@ def test_start_episode_derives_an_identity() -> None:
     assert state["episode_id"]
 
 
+def test_recaps_inherit_one_material_binding_without_copying_or_refreshing_it() -> None:
+    from exomem import episode_model as model
+
+    material = {"version": 1, "items": [{
+        "key": "display", "original": {
+            "reference": "exomem://memory/12345678-1234-5678-1234-567812345678",
+            "sha256": "a" * 64, "size": 40,
+        },
+    }]}
+    state = model.start_episode("material-history", {"excerpt": "First recap."})
+    bound = model.append_input_revision(state, {"excerpt": "First recap.", "materials": material})
+    later = model.append_input_revision(bound, {"excerpt": "Later recap."})
+    assert "materials" not in later["input_revisions"][-1]["evidence"]
+    assert model.material_binding(later) == (2, material)
+    with pytest.raises(model.EpisodeError, match="EPISODE_REVISION_UNCHANGED"):
+        model.append_input_revision(later, {"excerpt": "Later recap.", "materials": material})
+    cleared = model.append_input_revision(later, {
+        "excerpt": "Later recap.", "materials": {"version": 1, "items": []},
+    })
+    assert model.material_binding(cleared) == (4, {"version": 1, "items": []})
+    assert model.material_binding(state) is None
+
+
+@pytest.mark.parametrize("envelope", [
+    {"version": 2, "items": []},
+    {"version": 1, "items": [], "extra": True},
+    {"version": 1, "items": [{"key": "display"}]},
+    {"version": 1, "items": [{"key": "display", "original": {
+        "reference": "exomem://memory/12345678-1234-5678-1234-567812345678#unit",
+        "sha256": "a" * 64, "size": 40,
+    }}]},
+])
+def test_invalid_material_journal_evidence_cannot_be_replayed(envelope) -> None:
+    from exomem import episode_model as model
+
+    with pytest.raises(model.EpisodeError, match="EPISODE_MATERIAL_INVALID"):
+        model.start_episode("material-history", {"excerpt": "Recap.", "materials": envelope})
+
+
 def _input(*, excerpt: str = "A supported observation.") -> dict[str, str]:
     return {"excerpt": excerpt}
 

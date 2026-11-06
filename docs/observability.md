@@ -77,9 +77,11 @@ relation.
 
 A committed write that leaves graph work behind reports it as `graph_sync`
 `pending` with a code: `GRAPH_SYNC_REPAIR_QUEUED` when the affected pages are on
-the durable queue and a drain will converge them, `GRAPH_SYNC_REBUILD_IN_PROGRESS`
-when a whole-vault pass is running. Both are healthy. Neither requires rereading
-the written note or running maintenance.
+the durable queue and a drain will converge them, or `GRAPH_SYNC_REBUILD_IN_PROGRESS`
+when a whole-vault pass is running. `GRAPH_SYNC_UNAVAILABLE` means that the graph
+has withdrawn availability even though its acknowledgement covers the write.
+These outcomes leave the canonical write successful. Pending graph work alone
+requires neither rereading the written note nor running maintenance.
 
 Behind that terminal the dispatch chose one of six repairs, and the log says
 which:

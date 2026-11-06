@@ -456,4 +456,5 @@ def inspect(vault_root: Path, *, episode: Any) -> dict[str, Any]:
         "latest_source_ref": latest,
         "recovery_current": "unchecked",
         "coverage_current": "unchecked",
+        **({"materials": history["materials"]} if "materials" in history else {}),
     }

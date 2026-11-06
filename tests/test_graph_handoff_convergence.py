@@ -47,6 +47,7 @@ from exomem import (
     readiness,
     service_standby,
 )
+from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.epistemic_graph import EpistemicGraphIndex
 
@@ -672,7 +673,7 @@ def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_topology_affected_sources",
-        lambda self, conn, rels, *, resolver, owns_topology=False: set(),
+        lambda self, conn, rels, *, resolver: set(),
         raising=True,
     )
     (root / GENERATED / "fresh-target.md").write_text(_note(501, []), encoding="utf-8")
@@ -1518,7 +1519,7 @@ def test_rows_an_unpublished_drain_landed_carry_their_topology(
 
 
 @pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
-def test_a_drain_does_not_record_topology_it_did_not_widen(
+def test_a_drain_lands_no_rows_for_unexplained_outside_topology(
     vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
 ) -> None:
     """M2 review: the fingerprint describes rows, so it moves only with the rows it covers.
@@ -1541,6 +1542,7 @@ def test_a_drain_does_not_record_topology_it_did_not_widen(
     edited = root / GENERATED / "generated-note-0002.md"
     edited.write_text(edited.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
     freshness.rebaseline(root)
+    before = _graph_rows(root)
     real_identity = epistemic_graph._incremental_projection_identity
     calls = iter(range(1_000_000))
 
@@ -1553,7 +1555,9 @@ def test_a_drain_does_not_record_topology_it_did_not_widen(
     monkeypatch.setattr(
         epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
     )
-    assert report["published"] is (not withheld)
+    assert report["requires_rebuild"] == 1
+    assert _graph_rows(root) == before
+    assert deferred_index.graph_full_rebuild_pending(root) is not None
 
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
     if adoption.adopted:
@@ -1567,17 +1571,10 @@ def _titled(title: str, extra: str) -> str:
 
 
 @pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
-def test_a_drain_does_not_own_an_affected_page_s_own_retitle(
+def test_a_drain_repairs_an_affected_page_s_own_retitle(
     vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
 ) -> None:
-    """M2 review: widening follows the queued pages' keys, so only they explain topology.
-
-    `linker` is rewritten as a page whose link now resolves to the created
-    `fresh-target`, but its own retitle on disk was never queued and nothing
-    widened to `mentioner`, which still links the old title. Owning that
-    retitle would stamp the fingerprint over a `mentioner -> linker` edge a
-    rebuild drops.
-    """
+    """A drain must repair an affected page's old title before overwriting its rows."""
     linker = f"{GENERATED}/linker.md"
     root = _build_small(
         vault,
@@ -1604,10 +1601,8 @@ def test_a_drain_does_not_own_an_affected_page_s_own_retitle(
     )
 
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
-    if adoption.adopted:
-        _assert_matches_a_fresh_rebuild(root)
-    assert adoption.adopted is False
-    assert adoption.reason == "resolver_topology_mismatch"
+    assert adoption.adopted, adoption.reason
+    _assert_matches_a_fresh_rebuild(root)
 
 
 def test_a_body_edit_of_a_linked_page_does_not_re_derive_its_linkers(vault: Path) -> None:
@@ -1665,9 +1660,6 @@ def test_a_deleted_page_that_was_never_indexed_still_re_derives_its_linkers(vaul
     _assert_matches_a_fresh_rebuild(root)
 
 
-_CARRY_KEY = "recall_resolver_topology_carry"
-
-
 def _meta(root: Path, key: str) -> str | None:
     connection = sqlite3.connect(epistemic_graph.sidecar_path(root))
     try:
@@ -1711,148 +1703,83 @@ def _created_pair(vault: Path, names: tuple[str, ...] = ("fresh-a", "fresh-b")) 
 
 
 @pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
-def test_a_split_pair_of_created_pages_records_topology_after_the_second_drain(
+def test_a_scoped_drain_repairs_all_changed_topology_before_rewriting_sources(
     vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
 ) -> None:
-    """Carry-forward: `[a]` cannot explain `b`, but `[b]` plus `a`'s carried entry can.
-
-    Without the carry, `a`'s row holds its new entry once `[a]` lands, so `[b]`'s
-    revert never reproduces the stored fingerprint, which stays stuck until a
-    whole-vault publication: the livelock again, with edges that already equal a
-    rebuild.
-    """
+    """A source can depend on both created pages, even when only one receipt was selected."""
     root, (a, b) = _created_pair(vault)
     stored = _fingerprint(root)
 
     _drain_as(root, monkeypatch, [a], withheld)
-    assert _fingerprint(root) == stored, "[a] cannot explain b"
-    assert _meta(root, _CARRY_KEY) is not None, "[a]'s pre-pass entry must be carried"
 
-    _drain_as(root, monkeypatch, [b], withheld)
-    assert _fingerprint(root) != stored, "[b] plus the carry explains every change"
-    assert _meta(root, _CARRY_KEY) is None, "a recorded fingerprint clears the carry"
-
+    assert _fingerprint(root) != stored
     adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
-    assert adoption.adopted is True, adoption.reason
+    assert adoption.adopted, adoption.reason
+    assert adoption.residue == ()
     _assert_matches_a_fresh_rebuild(root)
 
 
-def test_an_adoption_between_split_drains_uses_the_carry(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A standby proving between `[a]` and `[b]` explains `a` from the carry, `b` as residue."""
-    root, (a, b) = _created_pair(vault)
-    _drain_as(root, monkeypatch, [a], True)
-
-    adoption = EpistemicGraphIndex(root).adopt_published_snapshot()
-    assert adoption.adopted is True, adoption.reason
-    assert list(adoption.residue) == [f"{GENERATED}/fresh-b.md"]
-    _drain_to_empty(root)
-    _assert_matches_a_fresh_rebuild(root)
-
-
-def test_a_requeued_page_keeps_its_first_carried_entry(
+def test_a_retitle_after_a_withheld_drain_needs_no_historical_topology_record(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, (a, b) = _created_pair(vault)
     _drain_as(root, monkeypatch, [a], True)
-    first = _meta(root, _CARRY_KEY)
     a.write_text(_titled("Fresh A Retitled", ""), encoding="utf-8")
     freshness.rebaseline(root)
     _drain_as(root, monkeypatch, [a], True)
-    assert _meta(root, _CARRY_KEY) == first, "a re-queue must not overwrite the first entry"
-
-    _drain_as(root, monkeypatch, [b], True)
-    assert _meta(root, _CARRY_KEY) is None
-    assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
-    _assert_matches_a_fresh_rebuild(root)
-
-
-def test_the_topology_carry_clears_on_a_whole_vault_publication(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root, (a, _b) = _created_pair(vault)
-    _drain_as(root, monkeypatch, [a], True)
-    assert _meta(root, _CARRY_KEY) is not None
-    EpistemicGraphIndex(root).rebuild_all()
-    assert _meta(root, _CARRY_KEY) is None
-
-
-def test_an_overflowing_topology_carry_falls_back_to_the_whole_vault_path(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(epistemic_graph, "TOPOLOGY_CARRY_LIMIT", 1, raising=True)
-    root, (a, b, c) = _created_pair(vault, ("fresh-a", "fresh-b", "fresh-c"))
-    stored = _fingerprint(root)
-    _drain_as(root, monkeypatch, [a], True)
-    assert _meta(root, _CARRY_KEY) is not None
-    _drain_as(root, monkeypatch, [b], True)
-    assert _meta(root, _CARRY_KEY) is None, "past the bound the record is dropped"
-    _drain_as(root, monkeypatch, [c], True)
-    # Without a and b's entries nothing can explain them: the fingerprint stays,
-    # the proof fails closed, and a whole-vault pass is the repair, as before.
-    assert _fingerprint(root) == stored
-    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
-    assert adoption.adopted is False
-    assert adoption.reason == "resolver_topology_mismatch"
-
-
-def test_a_topology_carry_survives_a_restart(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from exomem import find as find_module
-
-    root, (a, b) = _created_pair(vault)
-    stored = _fingerprint(root)
-    _drain_as(root, monkeypatch, [a], True)
-    # A new process: nothing process-local survives, only the sidecar.
     find_module.evict_resolver_caches(root)
     epistemic_graph.clear_publication_memos()
     freshness.rebaseline(root)
 
     _drain_as(root, monkeypatch, [b], False)
-    assert _fingerprint(root) != stored
+
     assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
     _assert_matches_a_fresh_rebuild(root)
 
 
-@pytest.mark.parametrize("withheld", [True, False], ids=["withheld", "published"])
-def test_a_carry_is_not_recorded_over_an_unexplained_non_kb_change(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, withheld: bool
+def test_a_scoped_drain_cannot_hide_a_later_deletion_without_a_receipt(vault: Path) -> None:
+    """A cold adoption must find deletion residue after a scoped drain discovered an unqueued page."""
+    root, (a, b) = _created_pair(vault)
+    EpistemicGraphIndex(root).drain_paths([a])
+    b.unlink()
+    find_module.evict_resolver_caches(root)
+    epistemic_graph.clear_publication_memos()
+    freshness.rebaseline(root)
+
+    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=True)
+
+    assert adoption.adopted, adoption.reason
+    assert adoption.residue == (str(b.relative_to(root)),)
+    index_sync.drain_graph_work(root)
+    assert deferred_index.list_graph_paths(root) == []
+    _assert_matches_a_fresh_rebuild(root)
+
+
+@pytest.mark.parametrize("ambiguous", [False, True], ids=["extra-edge", "missing-edge"])
+def test_a_temporary_title_is_fully_repaired_before_its_receipt_drains(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, ambiguous: bool
 ) -> None:
-    """A carry may only stand for indexed work that will itself be drained.
-
-    `[fresh-a]` is drained while a page outside the indexed corpus is retitled, so
-    the affected `linker` is rewritten with a `linker -> outsider` edge through
-    the new title. The retitle is then reverted. Had `[fresh-a]` recorded a
-    carry, the next adoption would match with no residue, and the next drain
-    would stamp the fingerprint, over an edge a full rebuild drops.
-    """
-    outsider = "Outside/outsider.md"
-    root = _build_small(
-        vault,
-        {
-            outsider: "---\ntitle: Outsider Title\n---\n\nbody\n",
-            LINKER: _note(500, []) + "\nSee [[fresh-a]] and [[Renamed Outsider]].\n",
-        },
-    )
-    stored = _fingerprint(root)
-    created = root / GENERATED / "fresh-a.md"
-    created.write_text(_note(501, []), encoding="utf-8")
-    (root / outsider).write_text("---\ntitle: Renamed Outsider\n---\n\nbody\n", encoding="utf-8")
+    """Restoring a title must repair edges created or removed under its temporary value."""
+    target = f"{GENERATED}/title-target.md"
+    original = _titled("Original Destination", "A target.")
+    pages = {
+        target: original,
+        LINKER: _note(500, []) + "\nSee [[fresh-a]] and [[Transient Destination]].\n",
+    }
+    if ambiguous:
+        pages[f"{GENERATED}/other-target.md"] = _titled("Transient Destination", "Other target.")
+    root = _build_small(vault, pages)
+    a = root / GENERATED / "fresh-a.md"
+    a.write_text(_note(501, []), encoding="utf-8")
+    (root / target).write_text(_titled("Transient Destination", "A target."), encoding="utf-8")
     freshness.rebaseline(root)
-    _drain_as(root, monkeypatch, [created], withheld)
-    assert _meta(root, _CARRY_KEY) is None, "an unexplained non-KB change drops the carry"
+    deferred_index.add_graph(root, [str(a.relative_to(root)), target])
 
-    (root / outsider).write_text("---\ntitle: Outsider Title\n---\n\nbody\n", encoding="utf-8")
-    edited = root / GENERATED / "generated-note-0002.md"
-    edited.write_text(edited.read_text(encoding="utf-8") + "\n- edit\n", encoding="utf-8")
+    _drain_as(root, monkeypatch, [a], True)
+    (root / target).write_text(original, encoding="utf-8")
     freshness.rebaseline(root)
-    _drain_as(root, monkeypatch, [edited], withheld)
-    assert _fingerprint(root) == stored, "no drain may stamp the fingerprint over the stale edge"
+    index_sync.drain_graph_work(root)
 
-    adoption = EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False)
-    if adoption.adopted:
-        _assert_matches_a_fresh_rebuild(root)
-    assert adoption.adopted is False
-    assert adoption.reason == "resolver_topology_mismatch"
+    assert deferred_index.list_graph_paths(root) == []
+    assert EpistemicGraphIndex(root).adopt_published_snapshot(apply_residue=False).adopted
+    _assert_matches_a_fresh_rebuild(root)

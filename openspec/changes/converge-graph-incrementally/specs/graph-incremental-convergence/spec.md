@@ -70,6 +70,12 @@ restate it.
 - **WHEN** the live acceptance script validates a response whose graph is converging
 - **THEN** it accepts `pending` as a valid outcome rather than rejecting the response
 
+#### Scenario: Acknowledgement does not hide outstanding repair
+
+- **WHEN** the sidecar acknowledges a committed write but graph repair remains queued or availability is withdrawn
+- **THEN** the successful write reports `graph_sync: "pending"` with a stable reason code
+- **AND** shaping the terminal neither runs the cold source proof nor waits for graph work
+
 ### Requirement: A process does not exit with a graph rebuild in flight
 
 Taking the rebuild off the write path SHALL NOT mean a process may end while one
@@ -354,6 +360,43 @@ proof.
 - **THEN** the graph is not reported current and the epoch is not advanced
 - **AND** the drains that empty the queue make the graph current with no whole-vault
   pass
+
+### Requirement: A drain preserves complete topology repair
+
+A drain SHALL account for every resolver topology difference before rewriting source rows.
+It SHALL widen roots with changed resolver entries or no stored row through their raw dependencies and stored incoming edges.
+An unchanged entry SHALL widen only to fragment dependants.
+It SHALL widen affected pages whose resolver entries changed before overwriting their old entries.
+The rows and the resolver fingerprint SHALL commit atomically, including when public availability remains withheld.
+
+A selected receipt limit SHALL NOT truncate required topology repair.
+If indexed roots cannot explain the resolver topology, the drain SHALL land no rows and record full-rebuild demand.
+Older sidecars that lack this invariant SHALL require a full rebuild before incremental repair or adoption.
+An adopted foreign snapshot's history floor SHALL NOT authorize a local resolver checkpoint from before a registry seed.
+
+#### Scenario: A scoped drain reaches an affected retitle
+
+- **WHEN** a scoped drain reaches a retitled source before that source's own receipt drains
+- **THEN** it repairs links that use the source's old and new titles before overwriting the stored title
+- **AND** the resulting rows equal a fresh rebuild
+
+#### Scenario: A title returns after an intermediate drain
+
+- **WHEN** a target takes a temporary title and returns to its original title across drains
+- **THEN** repair restores edges that the temporary topology added or removed
+- **AND** an empty repair queue cannot hide an edge difference from a fresh rebuild
+
+#### Scenario: An older sidecar receives a scoped drain
+
+- **WHEN** a scoped drain finds a sidecar written before the complete-topology invariant
+- **THEN** it preserves the receipts and records full-rebuild demand
+- **AND** it leaves the old schema version unchanged until a full rebuild replaces the sidecar
+
+#### Scenario: Promotion follows a newer serving snapshot
+
+- **WHEN** a standby re-proves a newer snapshot and the watcher seed admits a page absent from its old resolver
+- **THEN** the old local resolver checkpoint cannot use the adopted snapshot's history floor
+- **AND** later writes and drains preserve the new page's incoming links without a whole-vault rebuild
 
 ### Requirement: A queued repair is not rescheduled as a whole-vault rebuild
 
