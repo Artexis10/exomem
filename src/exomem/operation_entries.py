@@ -796,7 +796,9 @@ def _maintenance_rows():
     from .curation import CURATION_ACTIONS, READ_ONLY_ACTIONS
 
     rows = [_row("audit", "check_memory", ("categories", "detail", "legacy_sample_limit")),
-            _row("collections-store", "check_memory", ("collection",))]
+            # The store preflight is read-only and checks the whole vault: the handler takes dry_run=true
+            # and no collection, so the schema implies the one and does not offer the other.
+            _row("collections-store", "check_memory", ("dry_run",), constraints=(_literal("dry_run", True, implied=True),))]
     for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
                                                 ("backfill-ids", "dry_run", True, ()),
                                                 ("reconcile", "dry_run", False, ("rebuild_graph",))):
