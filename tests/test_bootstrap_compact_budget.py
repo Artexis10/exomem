@@ -127,6 +127,15 @@ def test_compact_is_materially_smaller_than_full(payloads):
 # ------------------------------------------------------------------ what was trimmed
 
 
+def test_compact_page_status_leaves_the_frozen_client_note_to_full(payloads):
+    """The compact core sits at its ceiling, so the migration note for a frozen client rides full."""
+    compact = payloads["compact"]["workflow"]["page_status"]
+    full = payloads["full"]["workflow"]["page_status"]
+    assert "historical inactive-label" in full
+    assert "historical inactive-label" not in compact
+    assert "Statusless pages are publicly live" in compact
+
+
 def test_compact_omits_unselected_pack_guidance(payloads):
     """Only the selected pack's instructions can apply; the rest are dead weight."""
     available = payloads["reference"]["knowledge_packs"]["available"]

@@ -1754,7 +1754,11 @@ def op_bootstrap(
             "lifecycle": entity_lifecycle,
         },
         "workflow": {
-            "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
+            "page_status": (
+                semantic_authoring_module.STATUS_CLASSIFICATION_RULE_COMPACT
+                if profile == "compact"
+                else semantic_authoring_module.STATUS_CLASSIFICATION_RULE
+            ),
             "requested": requested_workflow,
             "loop": [
                 "reuse bootstrap policy; load only if missing or stale",
@@ -1843,7 +1847,13 @@ def op_bootstrap(
             },
             "preflight": {
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
-                "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
+                "near_duplicate_warnings": (
+                    "if they fire, consider edit or replace instead of a parallel page; a write advisory "
+                    "carries a review ref and fingerprint, so a dismissed or snoozed signal stays quiet "
+                    "until it changes"
+                    if profile == "compact"
+                    else "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class"
+                ),
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",

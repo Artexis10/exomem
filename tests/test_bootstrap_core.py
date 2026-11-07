@@ -143,6 +143,25 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         lambda core: "Route stated intent to Planning and observed outcome to Records"
         in core["engagement"]["contract"]["capture"],
     ),
+    # The next three each prevent a failure the blind acceptance run of 2026-11-07 showed. The same
+    # sentences ride the activation `capture_policy` block, so bootstrap and the block cannot differ.
+    # Confirmed relation: the agent wrote a facet and never opened the relation queue.
+    "check-the-relation-queue-before-an-affiliation-facet": (
+        CARRYING,
+        lambda core: "check the relation queue" in core["engagement"]["contract"]["capture"],
+    ),
+    # Selected draft: the agent read "not write consent" as a ban and kept nothing.
+    "keep-the-selected-draft-under-proactive-capture": (
+        CARRYING,
+        lambda core: "Keep the exact bytes of the one the user selects or sends"
+        in core["engagement"]["contract"]["capture"],
+    ),
+    # Reported delivery: the agent never searched for the Evidence receipt.
+    "reported-delivery-links-its-evidence-receipt": (
+        CARRYING,
+        lambda core: "search for the artifact's Evidence receipt"
+        in core["engagement"]["contract"]["capture"],
+    ),
     "filter-only-lookup": (
         prominence.CANON,
         lambda core: "filter-only" in core["routing"]["filter_only"],

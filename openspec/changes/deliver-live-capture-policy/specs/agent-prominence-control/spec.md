@@ -31,3 +31,4 @@ Bootstrap, workflow effective capture, the delegation envelope and the activatio
 #### Scenario: The activation block states the same permission as the envelope
 - **WHEN** an activation packet carries a `capture_policy` block, at any level, under an envelope override and under the unreadable-record floor
 - **THEN** the block's disposition equals the delegation envelope's proactive capture class in the same request scope
+- **AND** the block's `link_acceptance`, when it carries one, equals the delegation envelope's link acceptance class in the same request scope

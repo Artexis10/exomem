@@ -51,7 +51,10 @@ def size(block: dict[str, str]) -> int:
 
 
 def block() -> dict[str, str]:
-    """The disposition this request is under, and what it means, as bootstrap would serve it."""
+    """The dispositions this request is under, and what they mean, as bootstrap would serve them.
+
+    Under `off` the block is the proactive disposition alone: nothing to route, so no second class.
+    """
     from . import envelope, prominence
 
     engagement = prominence.resolved()
@@ -59,7 +62,11 @@ def block() -> dict[str, str]:
         level=engagement["level"], capture_gate=engagement["contract"]["effective_capture"]
     )
     disposition = served["classes"]["proactive_capture"]["disposition"]
-    return {"disposition": disposition, "say": prominence.capture_policy_text(disposition)}
+    link_acceptance = served["classes"]["link_acceptance"]["disposition"]
+    say = prominence.capture_policy_text(disposition, link_acceptance)
+    if disposition == "off":
+        return {"disposition": disposition, "say": say}
+    return {"disposition": disposition, "link_acceptance": link_acceptance, "say": say}
 
 
 def _digest(served: dict[str, str]) -> str:

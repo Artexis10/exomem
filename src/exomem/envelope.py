@@ -84,6 +84,15 @@ PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
     "off": "write only on an explicit request",
 }
 
+#: One plain sentence per `RANGES["link_acceptance"]` value, for the same block. Keyed on the closed
+#: range the spec fixes (a unit test pins key parity), not on vocabulary: the queue route is only
+#: right for the vault's own setting, and the key set cannot grow without a spec change.
+LINK_ACCEPTANCE_MEANING: dict[str, str] = {
+    "off": "accept a queued relation only on an explicit request",
+    "advisory": "name a matching queued relation and stop",
+    "confirm-shortcut": "accept a matching queued relation on the user's exact confirmation",
+}
+
 #: The two classes whose disposition is not configurable at all.
 FIXED: dict[str, str] = {
     "hygiene_writes": "silent",
