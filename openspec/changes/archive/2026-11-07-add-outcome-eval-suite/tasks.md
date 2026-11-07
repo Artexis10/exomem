@@ -20,4 +20,4 @@
 ## 4. Proof and delivery
 
 - [x] 4.1 Test that an actor environment cannot reach live state or the user's MCP configuration, that a judge item carries no arm identity, and that CL-Bench scoring agrees with an oracle replay.
-- [ ] 4.2 Run scoped tests, the full suite, strict OpenSpec validation and the privacy gate; deliver one PR with an independent review.
+- [x] 4.2 Run scoped tests, the full suite, strict OpenSpec validation and the privacy gate; deliver one PR with an independent review.
