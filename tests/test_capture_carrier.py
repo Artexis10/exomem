@@ -41,6 +41,11 @@ def _bootstrap_disposition(vault) -> str:
     return served["engagement"]["envelope"]["classes"]["proactive_capture"]["disposition"]
 
 
+def _bootstrap_link_acceptance(vault) -> str:
+    served = _invoke("bootstrap", vault, profile="compact")
+    return served["engagement"]["envelope"]["classes"]["link_acceptance"]["disposition"]
+
+
 @pytest.mark.parametrize("disposition", envelope.RANGES["proactive_capture"])
 def test_the_block_states_the_disposition_that_bootstrap_serves(served, disposition) -> None:
     envelope.set_disposition("proactive_capture", disposition)
@@ -52,6 +57,43 @@ def test_the_block_states_the_disposition_that_bootstrap_serves(served, disposit
     assert block["disposition"] == bootstrapped == disposition
     assert block["say"].startswith(f"proactive_capture is {disposition}:")
     assert (disposition == "off") == ("Capture stable preferences" not in block["say"])
+
+
+@pytest.mark.parametrize("link_acceptance", envelope.RANGES["link_acceptance"])
+def test_the_block_states_the_link_acceptance_that_bootstrap_serves(served, link_acceptance) -> None:
+    """A vault override of `link_acceptance` must not be read as the level's derived default."""
+    envelope.set_disposition("link_acceptance", link_acceptance)
+
+    with request_scope(CALLER):
+        block = _activate(served)["capture_policy"]
+        bootstrapped = _bootstrap_link_acceptance(served)
+
+    assert block["link_acceptance"] == bootstrapped == link_acceptance
+    assert f"link_acceptance is {link_acceptance}: " in block["say"]
+
+
+def test_a_changed_link_acceptance_is_owed_again_to_a_holder_of_the_old_block(served) -> None:
+    with request_scope(CALLER):
+        first = _activate(served)
+        held = _activate(served, continuity=first["continuity"])
+        envelope.set_disposition("link_acceptance", "confirm-shortcut")
+        changed = _activate(served, continuity=first["continuity"])
+
+    assert first["capture_policy"]["link_acceptance"] == "advisory"
+    assert "capture_policy" not in held
+    assert changed["capture_policy"]["link_acceptance"] == "confirm-shortcut"
+
+
+def test_the_quiet_block_states_no_link_acceptance(served) -> None:
+    """Under `off` the block is the meaning alone, so it names no second class."""
+    envelope.set_disposition("proactive_capture", "off")
+    envelope.set_disposition("link_acceptance", "confirm-shortcut")
+
+    with request_scope(CALLER):
+        block = _activate(served)["capture_policy"]
+
+    assert set(block) == {"disposition", "say"}
+    assert "link_acceptance" not in block["say"]
 
 
 def test_the_block_withholds_what_an_unreadable_preference_withholds(served, monkeypatch) -> None:
@@ -211,17 +253,32 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
 
 
 def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> None:
-    """Silent carries the longest text. The hook renders it under its header; one block, 800 bytes."""
+    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,200 bytes."""
     from test_retrieve_nudge_working_set import hook
 
-    rendered = hook._capture_policy_text(
-        {"disposition": "silent", "say": prominence.capture_policy_text("silent")}
-    )
+    rendered = hook._capture_policy_text(prominence.capture_policy("silent", "confirm-shortcut"))
 
     assert rendered.isascii()
-    assert 0 < len(rendered.encode("ascii")) <= 800
+    assert 0 < len(rendered.encode("ascii")) <= 1200
+
+
+@pytest.mark.parametrize("disposition", ("advisory", "silent"))
+def test_a_carrying_block_names_the_relation_adoption_and_delivery_routes(disposition) -> None:
+    """The round-3 miss: each of these routes was reachable but nothing at the point of decision named it."""
+    say = prominence.capture_policy(disposition, "confirm-shortcut")["say"]
+
+    assert "relation queue" in say
+    assert "Keep the exact bytes of the one the user selects or sends" in say
+    assert "search for the artifact's Evidence receipt" in say
+    assert "delivery Record" in say
 
 
 def test_every_disposition_the_envelope_allows_has_a_meaning() -> None:
     """A new range value without a sentence would silently disable the carrier, which never raises."""
     assert set(envelope.PROACTIVE_CAPTURE_MEANING) == set(envelope.RANGES["proactive_capture"])
+
+
+def test_a_proactive_meaning_is_one_sentence_so_the_hooks_fallback_keeps_all_of_it() -> None:
+    """An over-cap block is cut at its first ". "; a longer meaning would be cut with it."""
+    for meaning in envelope.PROACTIVE_CAPTURE_MEANING.values():
+        assert ". " not in meaning

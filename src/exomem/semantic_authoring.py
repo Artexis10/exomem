@@ -20,11 +20,18 @@ from . import note_types, semantic_language_registry
 AUTHORING_CONTRACT_VERSION = 10
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
+#: What the compact bootstrap core serves about page status. It leaves out the migration note for a
+#: frozen client (the full profile carries that) and the semantic-unit sentence, which the core
+#: already serves as `capture_semantics.minimum_unit`. The compact core sits at its byte ceiling.
+STATUS_CLASSIFICATION_RULE_COMPACT = (
+    "Statusless pages are publicly live. Canonical meanings need no private definitions. "
+    "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
+)
+
 STATUS_CLASSIFICATION_RULE = (
     "Validation now uses page status classes, not historical inactive-label lists. "
     "Live compiled results require a semantic unit; pending results may stay unit-free until activation. "
-    "Statusless pages are publicly live. Canonical meanings need no private definitions. "
-    "Admitted unknown labels are live with review debt; unavailable classification refuses only dependent operations."
+    + STATUS_CLASSIFICATION_RULE_COMPACT
 )
 
 OBSERVATION_UPDATE_GUIDANCE = (

@@ -804,7 +804,7 @@ def test_a_served_capture_policy_leads_the_injection_and_is_not_retrieved_memory
 ) -> None:
     from exomem import prominence
 
-    policy = {"disposition": "silent", "say": prominence.capture_policy_text("silent")}
+    policy = prominence.capture_policy("silent", "advisory")
     _serve(monkeypatch, {**_packet(), "capture_policy": policy})
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
@@ -823,7 +823,7 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
 ) -> None:
     from exomem import prominence
 
-    policy = {"disposition": "silent", "say": prominence.capture_policy_text("silent")}
+    policy = prominence.capture_policy("silent", "advisory")
     _serve(monkeypatch, _packet())
     plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
     # One character short of the policy and the whole block together: the block must give way.
@@ -838,6 +838,22 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
     assert len(context) <= cap
 
 
+def test_a_policy_longer_than_the_hook_was_built_for_still_states_its_disposition() -> None:
+    """Version skew: a newer server may send more than an installed hook can render. Dropping the
+    whole block would leave the agent with no capture authority at all; the lead sentence survives."""
+    from exomem import prominence
+
+    say = prominence.capture_policy("silent", "confirm-shortcut")["say"]
+    policy = {"disposition": "silent", "say": say + " " + "More guidance. " * 200}
+
+    rendered = hook._capture_policy_text(policy)
+
+    assert rendered.startswith(hook._CAPTURE_POLICY_HEADER + "\n")
+    assert say.split(". ", 1)[0] + "." in rendered
+    assert len(rendered) <= hook._CAPTURE_POLICY_MAX_CHARS
+    assert "More guidance" not in rendered
+
+
 def test_a_packet_without_a_capture_policy_renders_as_before(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -848,7 +864,7 @@ def test_a_packet_without_a_capture_policy_renders_as_before(
 
     _serve(monkeypatch, _packet())
     plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
-    policy = {"disposition": "silent", "say": prominence.capture_policy_text("silent")}
+    policy = prominence.capture_policy("silent", "advisory")
     _serve(monkeypatch, {**_packet(), "capture_policy": policy})
     led = _context(_run(monkeypatch, capsys, _event(session_id="other"), tmp_path / "home"))
 
@@ -864,7 +880,7 @@ def test_a_capture_policy_is_rendered_when_the_turn_resolved_nothing(
 ) -> None:
     from exomem import prominence
 
-    policy = {"disposition": "advisory", "say": prominence.capture_policy_text("advisory")}
+    policy = prominence.capture_policy("advisory", "advisory")
     abstained = _packet(abstained=True, reason="index_warming", units=[], pointers=[], current_state=[])
     _serve(monkeypatch, {**abstained, "capture_policy": policy})
 

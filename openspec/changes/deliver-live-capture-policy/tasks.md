@@ -26,7 +26,7 @@
 
 ## 7. Round A on real models
 
-- [ ] 7.1 Run five sessions on the candidate: three positive and two negative cases. Run two positive cases hookless as residual evidence.
+- [x] 7.1 Run five sessions on the candidate: three positive and two negative cases. Run two positive cases hookless as residual evidence. Result on candidate 4611400c1: hooked B1, B3 and B7 wrote; B2 and B9 wrote nothing; the block rendered first in all five; hookless B3 and B7 made no Exomem call and no write (residual evidence).
 
 ## 8. Acceptance handoff
 
@@ -35,3 +35,11 @@
 ## 9. Archive
 
 - [ ] 9.1 After merge and round A, synchronize the deltas into the canonical specs and archive this change with `openspec archive`.
+
+## 10. Round-3 repair
+
+- [x] 10.1 Add `envelope.LINK_ACCEPTANCE_MEANING`; reword `_BASELINE_CAPTURE` and `_ADOPTION_TRIGGER`; add `_DELIVERY_CAPTURE`; make `prominence.capture_policy` take the vault's `link_acceptance`.
+- [x] 10.2 Carry `link_acceptance` in `capture_carrier.block()`; raise the hook cap to 1,600 characters with a lead-sentence fallback; regenerate the plugin hook copies.
+- [x] 10.3 Add the three `CORE_RULES` entries and the carrier tests; watch each fail on 49e03a6b2. Recover the 250 compact-core bytes from the compact profile and measure every level and surface cell.
+- [x] 10.4 Pass `vault_root` to `stage_artifact` in both adoption paths, so a held upload (`exomem-held:`) is redeemed, and put a refused adoption's hold back for a retry. Before this, `preserve_artifacts` with an `adoption` envelope on a held handle failed with `HELD_UPLOAD_UNAVAILABLE` (round-3 case A1). This fix rides in the same batch.
+- [ ] 10.5 Run the repair round on the merged candidate: B8, A1, A4, B7 and A2. When all pass, run the full 13-case acceptance.

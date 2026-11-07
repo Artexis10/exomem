@@ -170,9 +170,10 @@ _WORKING_SET_MAX_CHARS = 4000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in under 800
-# characters. This bound only stops a malformed packet from spending the render ceiling.
-_CAPTURE_POLICY_MAX_CHARS = 900
+# The server sends its live capture policy at most once per session or policy change, in at most 1,200
+# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
+# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+_CAPTURE_POLICY_MAX_CHARS = 1600
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
@@ -1691,6 +1692,13 @@ def _capture_policy_text(block: object) -> str:
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
+    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
+        return text
+    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+    # with the live disposition as one sentence; its first sentence end is the cut.
+    lead = say.strip().split(". ", 1)[0]
+    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
     return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
 
 

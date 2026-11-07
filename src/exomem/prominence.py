@@ -211,23 +211,32 @@ _BASELINE_CAPTURE = (
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
     "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Fleeting preferences, one-offs, incidental associations, trivia, and "
-    "tentative claims stay quiet."
+    "measurement. Before an affiliation facet, check the relation queue: a confirmed match goes "
+    "to link_acceptance instead. Fleeting preferences, one-offs, incidental associations, "
+    "trivia, and tentative claims stay quiet."
 )
 
-#: The first two sentences of the artifact-adoption rule: what a selected draft is worth as a
-#: save. The activation block carries them with the baseline doctrine; the rest stays in bootstrap.
+#: What a selected or sent draft is worth as a save, positive rule first. The activation block
+#: carries it with the baseline doctrine; the prohibition and the rest stay in bootstrap.
 _ADOPTION_TRIGGER = (
-    "Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
-    "keeps exact bytes as Source/Evidence by role, never MIME."
+    "Generated drafts stay ephemeral. Keep the exact bytes of the one the user selects or "
+    "sends, once, under proactive_capture: Source/Evidence by role, never MIME."
+)
+
+#: The route for a delivery the user reports: find the receipt the adoption left, then link it.
+#: Shared like the doctrine above, so the block and bootstrap give one route.
+_DELIVERY_CAPTURE = (
+    "Reported delivery: search for the artifact's Evidence receipt, then append one "
+    "delivery Record linking it to the compatible existing collection; no remote byte "
+    "inference."
 )
 
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
-    + " No handle: non-committing "
-    "handoff. Delivery needs an Evidence receipt/Record; no remote byte inference. "
-    "Missing collection: structural_suggestions."
+    + " Selection is not write consent. No handle: non-committing handoff. "
+    + _DELIVERY_CAPTURE
+    + " Missing collection: structural_suggestions."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -756,19 +765,26 @@ def effective_capture(authored_capture: dict[str, str], prominence_level: str) -
     }
 
 
-def capture_policy_text(disposition: str) -> str:
-    """The live capture authority in plain words, for the activation `capture_policy` block.
+def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
+    """The activation `capture_policy` block: the live capture authority in plain words.
 
-    Branches only on the closed `proactive_capture` range. Under `off` it carries the meaning
-    alone: no class list, so a quiet vault is not handed doctrine it may not act on. The classes
-    are the constants bootstrap serves, so the two carriers cannot drift.
+    Branches only on the closed `proactive_capture` range. Under `off` the block is the meaning
+    alone: no class list and no second disposition, so a quiet vault is not handed doctrine it may
+    not act on. The routes are the constants bootstrap serves, so the two carriers cannot drift.
+    `link_acceptance` is required: the queue route is only right for the vault's own setting,
+    never a default.
     """
     from . import envelope
 
     meaning = f"proactive_capture is {disposition}: {envelope.PROACTIVE_CAPTURE_MEANING[disposition]}."
     if disposition == "off":
-        return meaning
-    return f"{meaning} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER}"
+        return {"disposition": disposition, "say": meaning}
+    link = f"link_acceptance is {link_acceptance}: {envelope.LINK_ACCEPTANCE_MEANING[link_acceptance]}."
+    return {
+        "disposition": disposition,
+        "link_acceptance": link_acceptance,
+        "say": f"{meaning} {link} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
+    }
 
 
 def capture_policy_projection() -> dict:
