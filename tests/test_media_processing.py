@@ -1741,6 +1741,32 @@ def test_targeted_retry_resolves_matching_completed_transcript_without_extractio
     assert media_jobs.status(vault)["jobs"] == []
 
 
+def test_targeted_retry_of_a_completed_photo_keeps_the_clip_stage_its_failed_job_owes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-photo.jpg", data=b"\xff\xd8\xff")
+    reconciled, store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: ocr:test"
+    ).replace("processing_state: pending", "processing_state: completed")
+    sidecar.write_text(completed + "\n## Extracted text\n\nA caption read from the photo.\n", encoding="utf-8")
+    before = sidecar.read_bytes()
+    failed = store.get_by_binary(binary)
+    assert failed is not None and failed.do_ocr and failed.do_clip
+
+    retried = media_processing.retry_media(vault, binary)
+
+    # The failed write was the transcript's, and the page proves it landed; the CLIP stage is still owed.
+    assert (retried.state, retried.requeued) == (media_jobs.PENDING, 1)
+    assert sidecar.read_bytes() == before
+    owed = store.get_by_binary(binary)
+    assert owed is not None and owed.state == media_jobs.PENDING and owed.last_error is None
+    assert owed.do_clip and not owed.do_ocr
+
+
 def test_targeted_retry_keeps_completed_transcript_without_provenance_unresolved(
     vault: Path,
 ) -> None:

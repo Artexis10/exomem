@@ -581,9 +581,9 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
         "DELETE FROM jobs WHERE " + match + " AND do_clip = 0 AND do_reembed = 0 AND do_offload = 0", params
     ).rowcount
     kept = conn.execute(
-        "UPDATE jobs SET do_ocr = 0, state = 'pending', last_error = NULL, blocked_reason = NULL, "
-        "blocked_context = NULL, memory_stops = 0, memory_soft_stops = 0, updated_at = ? WHERE "
-        + match,
+        "UPDATE jobs SET do_ocr = 0, reprocess = 0, state = 'pending', last_error = NULL, "
+        "blocked_reason = NULL, blocked_context = NULL, memory_stops = 0, memory_soft_stops = 0, "
+        "updated_at = ? WHERE " + match,
         (time.time(), *params),
     ).rowcount
     return int(deleted + kept)
@@ -1186,6 +1186,19 @@ class MediaJobStore:
                     "WHERE " + match + " AND do_offload = 1", params,
                 ).rowcount
                 return int(deleted + kept)
+        finally:
+            conn.close()
+
+    def drop_completed_extraction(self, job: MediaJob) -> int:
+        """Drop the extraction stage of a job whose sidecar already holds its transcript.
+
+        A CLIP, re-embed or offload stage the job still owes stays queued, and the job leaves its
+        failed state to run it. A job with nothing left goes, and a job claimed since is left alone.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                return _drop_ocr_stage(conn, "id = ? AND claim_revision = ?", (job.id, job.claim_revision))
         finally:
             conn.close()
 
