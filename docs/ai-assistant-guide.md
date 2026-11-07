@@ -285,17 +285,19 @@ rest were trimmed. Two cases return a count with no `warnings`: an upload
 receipt, whose warnings are already per-file rows under `files`, and a mutation
 recovered from a portable receipt, which deliberately retains no leaf content.
 
-A compiled-note write may also return `structure_suggestion`. It is advisory
-feedback that recurring durable material on the written page now sits outside
-its own declared scope, carrying `kind`, a `strength` of `strong` or `moderate`,
-deterministic `reasons`, the number of durable units in the group, and at most
-six `cluster_terms`. Every value comes from the page named in the same response,
+A compiled-note write may also return `structure_suggestion` of kind
+`note_cohesion` while the written page has reached a size step that nobody has
+answered. It carries `units`, `step_units`, `next_step_units`, the review item's
+`ref` and `fingerprint`, and one `question`: does this page answer more than one
+independent question? Every value comes from the page named in the same response,
 so it discloses nothing about any other page. It never changes `status`,
-`mutated`, `warnings_count`, mutation identity, or replay, and a detection
-failure omits the field rather than affecting the write. The runtime detects
-only; it never reorganises the vault. Agents should normally raise a `strong`
-suggestion with the user in ordinary domain language, prefer an existing
-suitable destination, and ask before restructuring.
+`mutated`, `warnings_count`, mutation identity, or replay, and a failure to
+compute it omits the field rather than affecting the write. The runtime counts
+size and asks; it never judges the page or reorganises the vault. To keep the page
+whole, dismiss the item through `triage_memory` with a reason that starts
+`intentional:`; it stays quiet until the next size step. To split it, propose a
+plan through the curation lane and ask the user to confirm the exact plan. A hub
+by design carries a breadth tag. The same items sit in due-state as a backlog.
 
 Use `response_detail="full"` when an agent
 needs the previous leaf diagnostics nested under `diagnostics`.

@@ -667,7 +667,7 @@ def test_the_teaching_lines_survive_a_reduced_surface(vault: Path) -> None:
 
 #: The advisory fields the DEFAULT compact response can actually carry. Each is
 #: proved elsewhere against a real response rather than asserted here:
-#: `structure_suggestion` by tests/test_structure_promotion.py, `due_state` by
+#: `structure_suggestion` by tests/test_note_cohesion.py, `due_state` by
 #: `test_the_default_compact_response_carries_the_block` above, and `warnings` /
 #: `warnings_count` by tests/test_mutation_terminal.py.
 _DEFAULT_COMPACT_ADVISORY_FIELDS = frozenset(

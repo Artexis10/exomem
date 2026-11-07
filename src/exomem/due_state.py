@@ -116,7 +116,8 @@ log = logging.getLogger(__name__)
 # 4 moves `SIDE_FAMILY` to its own file. v3 code would read a v4 main file as
 # "no candidates", so the bump makes a rolled-back runtime rebuild instead.
 # 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
-SCHEMA_VERSION = 5
+# 6 adds `note_cohesion`, for the same reason as 3.
+SCHEMA_VERSION = 6
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -135,7 +136,7 @@ _SIDE_KEY = "side_files"
 #: five-slot `top` that a due prediction needs.
 SOURCE_BACKLOG = "unprocessed_source"
 
-#: The second backlog family: a conversation recap whose live revision holds a Decided line
+#: The episode backlog family: a conversation recap whose live revision holds a Decided line
 #: that no recap cited by a live page holds. It is a sibling of `SOURCE_BACKLOG`, not part of
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
 EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
@@ -156,14 +157,18 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
-    # Last: backlogs rather than obligations (see `SOURCE_BACKLOG`).
+    # Last: backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
+    "note_cohesion",
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
 )
 
-#: The backlog categories: the rows a write refreshes through the Sources it cites, and
-#: the rows that sort after every dated obligation.
-BACKLOG_CATEGORIES: tuple[str, ...] = (SOURCE_BACKLOG, EPISODE_BACKLOG)
+#: The backlog families, in served order after every dated obligation; a write's own
+#: due-state block leaves them out. `note_cohesion` reports a size step this system chose,
+#: not an authored date, and it leads because a page that outgrew its subject is nearer to
+#: work than a capture or a recap nobody compiled. The Source backlog leads the episode
+#: backlog. Counts are exact; nothing here is capped.
+BACKLOG_CATEGORIES: tuple[str, ...] = ("note_cohesion", SOURCE_BACKLOG, EPISODE_BACKLOG)
 
 #: The categories a single write can soundly settle in full on its own.
 DELTA_CATEGORIES: tuple[str, ...] = (
@@ -174,6 +179,7 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "unreflected_observations",
     "artifact_role_promotion",
     "transient_state_review",
+    "note_cohesion",
 )
 
 #: The subset a PAGE write settles. `unreflected_outcomes` is not one of them:
@@ -188,6 +194,7 @@ PAGE_DELTA_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "artifact_role_promotion",
     "transient_state_review",
+    "note_cohesion",
 )
 
 #: The remainder: what a STRUCTURED write settles, keyed by plan-item path rather
@@ -701,6 +708,18 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
             else {}
         ),
     }
+
+
+def entry_for(vault_root: Path, finding: Any) -> dict[str, Any] | None:
+    """The stored entry one finding yields, for a carrier that must share the projection's identity.
+
+    A write-time carrier asks "has this been triaged?" of the review-state store. It
+    composes the answer's key here so the item id and fingerprint it reads are the ones
+    the projection stored and the triage surface records.
+    """
+    return _entry(
+        vault_root, finding, review_state_module.refs_for_paths(vault_root, [finding.path])
+    )
 
 
 def observation_facets_component(
@@ -2086,6 +2105,7 @@ def apply_write_deltas(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
+        findings.extend(audit_module._check_note_cohesion(vault_root, pages))
         # Page-local half of a split category: these pages' own pointers only.
         findings.extend(_page_local_supersession(vault_root, pages))
     # One grouping, so the Source rows and the page rows share one review-ref lookup.
@@ -4182,11 +4202,11 @@ def _served_entries_uncached(
     # for is reported with a floor date internally, and left to sort naively it
     # would outrank every genuinely overdue prediction in a five-slot `top`.
     # The backlogs sort after every obligation for the same reason: an import of
-    # thousands of old captures must not push a due prediction out. The Source
-    # backlog leads the episode backlog.
+    # thousands of old captures, or a vault of long notes, must not push a due
+    # prediction out. The backlogs keep the order of `BACKLOG_CATEGORIES`.
     rows.sort(
         key=lambda row: (
-            BACKLOG_CATEGORIES.index(row["category"]) + 1 if row["category"] in BACKLOG_CATEGORIES else 0,
+            _backlog_rank(row["category"]),
             row["due_since"] == _NO_DATE,
             row["due_since"],
             order[row["category"]],
@@ -4194,6 +4214,11 @@ def _served_entries_uncached(
         )
     )
     return rows, horizon, asked, role_token
+
+
+def _backlog_rank(category: str) -> int:
+    """0 for an obligation, then the category's place in `BACKLOG_CATEGORIES`."""
+    return BACKLOG_CATEGORIES.index(category) + 1 if category in BACKLOG_CATEGORIES else 0
 
 
 def _candidate_rank(entry: Mapping[str, Any], row: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -4380,6 +4405,9 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
         "question_aging": lambda root, pages, *, today, now: (
             audit_module._check_question_aging(root, pages, today=today)
         ),
+        "note_cohesion": lambda root, pages, *, today, now: (
+            audit_module._check_note_cohesion(root, pages)
+        ),
         "supersession_integrity": _page_local_supersession,
         "unreflected_observations": lambda root, pages, *, today, now: (
             audit_module._check_unreflected_observations(root, pages, now=now)
@@ -4475,8 +4503,8 @@ def served(
     # Reserve one bounded display slot for promotion delivery; backlog cannot starve it.
     leading = [row for row in promoted if row.get("new_family")]
     trailing = [row for row in promoted if not row.get("new_family")]
-    authored = [row for row in rows if row["category"] not in BACKLOG_CATEGORIES]
-    backlog = [row for row in rows if row["category"] in BACKLOG_CATEGORIES]
+    authored = [row for row in rows if not _backlog_rank(row["category"])]
+    backlog = [row for row in rows if _backlog_rank(row["category"])]
     before_notice = max(0, TOP_LIMIT - len(leading) - bool(trailing))
     rows = [*leading, *authored[:before_notice], *trailing, *authored[before_notice:], *backlog]
     if not rows:
@@ -4533,15 +4561,17 @@ def _affected_block(
     if not paths:
         return None
     paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
-    # A write's own advice leaves the backlogs out: a Source or a recap is outstanding from
-    # the moment it is created, so every import would answer with advice about itself.
-    # The backlog reaches the agent through the global block and `review_memory`.
+    # A write's own advice leaves the backlogs out. A Source or a recap is outstanding
+    # from the moment it is created, so every import would answer with advice about
+    # itself; a page at a size step has its own carrier, the `note_cohesion` question in
+    # the same response. The backlogs reach the agent through the global block and
+    # `review_memory`.
     result = block([
         row
         for row in served_entries(
             vault_root, today=today, paths=paths, recover=False, payload=payload,
         )
-        if row["category"] not in BACKLOG_CATEGORIES
+        if not _backlog_rank(row["category"])
     ])
     return {**result, "scope": DUE_STATE_AFFECTED_PATHS} if result else None
 
