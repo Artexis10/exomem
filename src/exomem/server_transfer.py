@@ -345,6 +345,7 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
                     description=target.get("description"),
                     max_bytes=int(record["length"]),
                     raw_protection=bool(target.get("raw_protection")),
+                    media_pending=True,
                 )
             except preserve_module.PreserveError as exc:
                 stored = _stored_already(vault_root, record) if exc.code == "ARTIFACT_EXISTS" else None
@@ -1093,6 +1094,7 @@ def register_transfer_routes(
                     text=text,
                     max_bytes=max_bytes,
                     raw_protection=raw_protection,
+                    media_pending=True,
                 )
         except preserve_module.PreserveError as exc:
             status = {

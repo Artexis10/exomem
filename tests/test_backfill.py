@@ -6,6 +6,7 @@ import io
 
 import numpy as np
 import pytest
+from test_media_processing import _handle_stat
 
 from exomem import backfill, embeddings, extract, preserve
 
@@ -79,7 +80,7 @@ def test_backfill_records_the_hints_of_a_page_stored_pending(vault, monkeypatch:
 
     stats = backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)
 
-    info = (vault / stored.path).stat()
+    info = _handle_stat(vault / stored.path)
     body = (vault / stored.sidecar_path).read_text("utf-8")
     assert stats.extracted == 1
     assert "born pending receipt" in body

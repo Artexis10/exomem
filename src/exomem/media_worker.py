@@ -1066,6 +1066,19 @@ class MediaWorker:
                 dropped,
             )
 
+    def present_runtime_requeue(self, job: _Job) -> bool:
+        """Show the media of a job that `requeue_runtime_blocks` is about to return as pending.
+
+        A completed transcript never showed the block (`mark_processing_unavailable` leaves it
+        alone), so it stays as it is. Call this while the row is still blocked: a write after the
+        claim would make the child's extraction stale.
+        """
+        try:
+            return self._holds_completed_transcript(job) or self._present_pending(job)
+        except Exception:  # noqa: BLE001 - a sidecar that cannot be shown must not strand the requeue
+            log.warning("media worker: pending presentation failed for %s", job.sidecar_path.name, exc_info=True)
+            return False
+
     def _present_pending(self, job: _Job) -> bool:
         """Show a blocked job's media as pending. True once no sidecar shows the block."""
         try:
@@ -1085,7 +1098,9 @@ class MediaWorker:
                     next_action=media_jobs.WAIT_ACTION,
                 )
         except (OSError, UnicodeError, OpError, preserve.PreserveError):
-            # Kept blocked; the next supervisor start presents it again.
+            # The page keeps its blocked text. The engine caller then keeps the job blocked, so the next
+            # start shows it again. The requeue caller returns the job to pending anyway, and the job's
+            # own result replaces the page when it completes.
             log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
             return False
 
@@ -1371,8 +1386,9 @@ class MediaWorker:
 
     def _reprocesses_completed(self, job: _Job) -> bool:
         """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""
-        if not (job.reprocess and job.do_ocr):
-            return False
+        return job.reprocess and job.do_ocr and self._holds_completed_transcript(job)
+
+    def _holds_completed_transcript(self, job: _Job) -> bool:
         from . import media_processing
 
         try:

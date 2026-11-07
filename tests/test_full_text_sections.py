@@ -723,6 +723,58 @@ def test_a_match_in_the_first_part_of_a_source_names_it_and_opens_read_memory_th
     assert PLANTED in hit["passage"]["text"] and window["body"].startswith(hit["passage"]["text"])
 
 
+def test_a_projected_hit_with_no_text_match_in_a_long_source_names_neither_part_nor_passage(
+    governed, monkeypatch
+) -> None:
+    """A title match is a hit on the Source, as direct search finds it, with nothing in the text to anchor."""
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+
+    [hit] = _projected_find(governed, "report.txt", _owner())["hits"]
+
+    assert hit["path"] == page_rel
+    assert "matched_part" not in hit and "passage" not in hit
+
+
+def test_a_semantic_projected_hit_in_a_long_source_names_part_one_without_a_passage(vault, monkeypatch) -> None:
+    """The vector lane ranks the Source with no stored chunk: the text matched, but nothing anchors a passage.
+
+    Offline `find` cannot run the vector lane, so this drives the projected runtime at its boundary with a
+    fixed query vector and a measured vector for the catalog row of a real parted Source.
+    """
+    from test_governance_projected_runtime_lanes import _runtime, _vector
+
+    from exomem import embeddings
+    from exomem.governance import catalog_publication, principal, projection_runtime, projections
+    from exomem.governance.policy import Policy
+
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    key = projections.ProjectionNamespaceKey("f" * 64, projections.PROJECTOR_SCHEMA_VERSION, 1)
+    item = catalog_publication.catalog_item(
+        vault_root=vault, path=stub.sidecar_path, source=(vault / stub.sidecar_path).read_text(encoding="utf-8"),
+        policy=Policy(fingerprint=key.policy_fingerprint), target_key=key,
+    )
+    [row] = item.variants
+    assert row.parts and row.head is not None
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        vault,
+        _runtime((item,), vectors=(_vector(row, (1.0, 0.0)),)),
+        query="unmatched",
+        limit=1,
+        mode="vector",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    [hit] = result.hits
+    assert hit.vector_rank == 1
+    assert (hit.matched_part, hit.passage) == (1, None)
+
+
 def test_a_passage_across_withheld_carriers_counts_stored_characters(governed, monkeypatch) -> None:
     carrier = "<!-- exomem-origin:v1 SECRETNOTE -->"
     page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, lead=f"{carrier} ")
