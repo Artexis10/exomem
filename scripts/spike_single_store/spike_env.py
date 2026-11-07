@@ -60,15 +60,47 @@ def snapshot(run_root: Path, name: str = "base") -> None:
 
 def restore(run_root: Path, name: str = "base") -> None:
     paths = layout(run_root)
-    if paths["work"].exists():
-        shutil.rmtree(paths["work"])
-    shutil.copytree(run_root / name, paths["work"], symlinks=True)
+    src, dst = run_root / name, paths["work"]
+    if not dst.exists():
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        _delta_restore(src, dst)
     # Lock and lease directories are ephemeral. A copy inherits its parent's
     # Windows ACL, which Exomem refuses; Exomem recreates them privately.
     for ephemeral in ("writer-lease", "mutation-locks"):
         target = paths["state"] / ephemeral
         if target.exists():
             shutil.rmtree(target)
+
+
+def _delta_restore(src: Path, dst: Path) -> None:
+    """Make `dst` equal `src`, copying only files whose size or mtime differ.
+
+    Copies keep mtimes (copy2), so an untouched file compares equal; a trial
+    rewrites only a few pages and the state databases.
+    """
+    wanted = set()
+    for dirpath, _dirnames, filenames in os.walk(src):
+        rel_dir = Path(dirpath).relative_to(src)
+        (dst / rel_dir).mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            rel = rel_dir / name
+            wanted.add(rel)
+            a, b = src / rel, dst / rel
+            try:
+                sa, sb = a.stat(), b.stat()
+                if (sa.st_size, sa.st_mtime_ns) == (sb.st_size, sb.st_mtime_ns):
+                    continue
+            except FileNotFoundError:
+                pass
+            shutil.copy2(a, b)
+    for dirpath, dirnames, filenames in os.walk(dst, topdown=False):
+        rel_dir = Path(dirpath).relative_to(dst)
+        for name in filenames:
+            if rel_dir / name not in wanted:
+                (dst / rel_dir / name).unlink()
+        if not (src / rel_dir).exists():
+            shutil.rmtree(dst / rel_dir, ignore_errors=True)
 
 
 def run_child(run_root: Path, module: str, *args: str, timeout: float | None = None,
