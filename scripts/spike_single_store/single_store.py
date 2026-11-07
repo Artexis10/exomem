@@ -301,7 +301,7 @@ class Store:
         cur = self.conn.execute("SELECT * FROM graph_edges WHERE source_path = ?", (path,))
         names = [d[0] for d in cur.description]
         needle = link.lower()
-        return any(needle in json.dumps(dict(zip(names, r)), default=str).lower()
+        return any(needle in json.dumps(dict(zip(names, r)), default=str, ensure_ascii=False).lower()
                    for r in cur.fetchall())
 
     # -- projection ------------------------------------------------------------

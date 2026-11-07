@@ -15,6 +15,7 @@ import argparse
 import base64
 import json
 import os
+import signal
 import sqlite3
 import sys
 import threading
@@ -59,7 +60,7 @@ class Visibility:
     def graph_edge(self, path: str, link: str) -> bool:
         needle = link.lower()
         for edge in self.graph.edges(source_path=path) or []:
-            if needle in json.dumps(edge, default=str).lower():
+            if needle in json.dumps(edge, default=str, ensure_ascii=False).lower():
                 return True
         return False
 
@@ -119,6 +120,16 @@ def _result_path(result) -> str | None:
 def run(args) -> None:
     vault = layout(args.run_root)["vault"]
     from exomem import call_spans, product_invoke
+
+    if os.environ.get("SPIKE_KILL_BEFORE_FANOUT"):
+        # Deterministic crash window: the Markdown commit is durable and the
+        # derived fan-out has not started. This is the window store mode removes.
+        from exomem import vault as vault_module
+
+        def _die(*_a, **_k):
+            os.kill(os.getpid(), signal.SIGKILL)
+
+        vault_module.post_commit_batch_fanout = _die
 
     _ready(vault)
     t_rt = time.perf_counter()
@@ -347,6 +358,17 @@ def check(args) -> None:
         lex, graph = _minus_baseline(args.run_root, lexical_drift(vault), graph_drift(vault))
         report["after_first_read"] = _summary(lex, graph)
         report["after_first_read_paths"] = {"lex": lex}
+    # Today's own graph audit may not report a page the kill left without graph
+    # rows; count the rows of the pages that were missing from the lexical index.
+    from exomem import epistemic_graph
+
+    if report["before_paths"]["lex"]["missing"]:
+        con = sqlite3.connect(f"file:{epistemic_graph.sidecar_path(vault)}?mode=ro", uri=True)
+        report["graph_rows_of_missing_pages"] = {
+            rel: {"nodes": con.execute("SELECT count(*) FROM graph_nodes WHERE path = ?", (rel,)).fetchone()[0],
+                  "edges": con.execute("SELECT count(*) FROM graph_edges WHERE source_path = ?", (rel,)).fetchone()[0]}
+            for rel in report["before_paths"]["lex"]["missing"]}
+        con.close()
     args.out.write_text(json.dumps(report, indent=1, default=str))
     print(json.dumps({"before": report["before"], "after": report["after"],
                       "torn": len(report["torn"])}), flush=True)
