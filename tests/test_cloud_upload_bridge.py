@@ -158,8 +158,8 @@ async def _tool(client, name, arguments, origin):
     return payload.get("result", payload) if payload.get("success", True) else payload
 
 
-def _prepare_arguments():
-    return {"operation": "upload", "lane": "source", "hold": True,
+def _prepare_arguments(lane="source"):
+    return {"operation": "upload", "lane": lane, "hold": True,
             "expected_sha256": hashlib.sha256(ORIGINAL).hexdigest()}
 
 
@@ -248,6 +248,52 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
     [receipt] = owned["files"]
     assert receipt["outcome"] == "stored" and receipt["hash"] == digest
     assert (vault / receipt["stored_path"]).read_bytes() == ORIGINAL
+
+
+def _hold_evidence_through_the_cli(key, app, tmp_path, capsys):
+    """The agent's `exomem attach`: a held handle for the original, issued to LOGIN_A."""
+    descriptor = _run(app, lambda client: _tool(
+        client, "transfer_artifact", _prepare_arguments("evidence"), _mcp_origin(key, LOGIN_A)))
+    (tmp_path / "handoff.json").write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(ORIGINAL)
+    assert _attach_main(
+        ["original.bin", "--handoff-file", str(tmp_path / "handoff.json"), "--root", str(tmp_path)],
+        transport=_Gateway(key, app),
+    ) == 0
+    return json.loads(capsys.readouterr().out)["file"]
+
+
+def _adopt(app, key, handle, **handle_fields):
+    adoption = {"key": "client:chosen-draft", "trigger": "user selected the draft",
+                "selected_file_id": handle["file_id"]}
+    arguments = {"scope": "client-work", "category": "drafts", "adoption": adoption,
+                 "files": [{**handle, **handle_fields}]}
+    origin = _mcp_origin(key, LOGIN_A)
+    return _run(app, lambda client: _tool(client, "preserve_artifacts", arguments, origin))
+
+
+def test_adopting_a_held_upload_stores_its_exact_bytes_as_evidence(cell, tmp_path, capsys):
+    key, app, vault = cell
+    handle = _hold_evidence_through_the_cli(key, app, tmp_path, capsys)
+
+    adopted = _adopt(app, key, handle)
+
+    [receipt] = adopted["files"]
+    assert receipt["outcome"] == "stored", receipt
+    assert (vault / receipt["stored_path"]).read_bytes() == ORIGINAL
+
+
+def test_a_refused_adoption_leaves_the_held_upload_to_retry(cell, tmp_path, capsys):
+    key, app, vault = cell
+    handle = _hold_evidence_through_the_cli(key, app, tmp_path, capsys)
+
+    # A file name that sanitizes to nothing is refused after the hold was claimed.
+    [refused] = _adopt(app, key, handle, file_name="...")["files"]
+    [retried] = _adopt(app, key, handle, file_name="draft.bin")["files"]
+
+    assert (refused["outcome"], refused["code"]) == ("failed", "INVALID_PRESERVE")
+    assert retried["outcome"] == "stored", retried
+    assert (vault / retried["stored_path"]).read_bytes() == ORIGINAL
 
 
 def test_another_logins_proof_cannot_spend_a_ticket(cell):

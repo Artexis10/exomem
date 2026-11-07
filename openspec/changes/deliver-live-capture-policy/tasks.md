@@ -41,4 +41,5 @@
 - [x] 10.1 Add `envelope.LINK_ACCEPTANCE_MEANING`; reword `_BASELINE_CAPTURE` and `_ADOPTION_TRIGGER`; add `_DELIVERY_CAPTURE`; make `capture_policy_text` take the vault's `link_acceptance`.
 - [x] 10.2 Carry `link_acceptance` in `capture_carrier.block()`; raise the hook cap to 1,600 characters with a lead-sentence fallback; regenerate the plugin hook copies.
 - [x] 10.3 Add the three `CORE_RULES` entries and the carrier tests; watch each fail on 49e03a6b2. Recover the 250 compact-core bytes from the compact profile and measure every level and surface cell.
-- [ ] 10.4 Run the repair round on the merged candidate: B8, A1, A4, B7 and A2. When all pass, run the full 13-case acceptance.
+- [x] 10.4 Pass `vault_root` to `stage_artifact` in both adoption paths, so a held upload (`exomem-held:`) is redeemed, and put a refused adoption's hold back for a retry. Before this, `preserve_artifacts` with an `adoption` envelope on a held handle failed with `HELD_UPLOAD_UNAVAILABLE` (round-3 case A1). This fix rides in the same batch.
+- [ ] 10.5 Run the repair round on the merged candidate: B8, A1, A4, B7 and A2. When all pass, run the full 13-case acceptance.

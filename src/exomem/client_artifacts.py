@@ -1266,6 +1266,7 @@ def _capture_source_adoption(
                 selected,
                 adoption_budget(),
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
+                vault_root=vault_root,
                 lane="source",
                 index=selected_index,
             )
@@ -1343,10 +1344,8 @@ def _capture_source_adoption(
         return finished
     finally:
         if artifact is not None:
-            try:
-                artifact.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # A held upload is spent only by storing it; any refusal after the claim puts it back.
+            _release_staged(vault_root, {selected_index: artifact}, outcomes)
 
 
 def _preserve_evidence_adoption(
@@ -1399,6 +1398,7 @@ def _preserve_evidence_adoption(
                 selected,
                 budget,
                 batch_deadline=_monotonic() + _BATCH_DEADLINE_SECONDS,
+                vault_root=vault_root,
                 lane="evidence",
                 index=selected_index,
             )
@@ -1492,10 +1492,8 @@ def _preserve_evidence_adoption(
         return _finish_adoption(outcomes)
     finally:
         if artifact is not None:
-            try:
-                artifact.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # A held upload is spent only by storing it; any refusal after the claim puts it back.
+            _release_staged(vault_root, {selected_index: artifact}, outcomes)
 
 
 def capture_source_artifacts(
