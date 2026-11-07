@@ -423,7 +423,7 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   The duplicate-title regression reproduced a missing edge on the prior implementation.
   Scoped drains, affected retitles, and late refreshes now compare against a fresh rebuild.
   Body-only edits retain fragment-only widening.
-- [ ] 8.10 Remove partial topology repair that adoption can mistake for complete repair.
+- [x] 8.10 Remove partial topology repair that adoption can mistake for complete repair.
   A temporary title reproduced extra edges and missing edges, including with real pending receipts.
   Each admitted drain now commits completely repaired rows and their resolver fingerprint together.
   The carry record is removed. Version 15 requires one full rebuild of older sidecars,
@@ -433,7 +433,16 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   The promotion regression checks incoming links after a newer serving snapshot, ten writes, and a final drain.
   The reviewed repair is merged.
   v0.162.0 contains the repair and passed release qualification (task 6.3).
-  Installed acceptance on the personal service remains open.
+  Installed acceptance on the personal service passed on 2026-11-07 with v0.163.0.
+  The managed upgrade to v0.162.0 had failed: the standby held cutover on the
+  older-schema sidecar until its warm budget expired. #2495 settles that wait.
+  v0.163.0 then installed through the managed upgrade at 07:45Z.
+  The promoted worker registered one whole-vault rebuild with reason
+  `graph_sync_snapshot_unusable` at 07:46Z and published it at 08:37Z.
+  The rebuild took 51.5 minutes, beside a reconcile preview and the post-install index backlog.
+  The sidecar then reported schema version 15, and `/health/ready` reported
+  `graph_sync` as `current` with an empty graph queue.
+  The next write drained incrementally about one second after its commit.
 
 ## 9. Replayed paths outside the recall delta (0.96.0 live latency)
 
