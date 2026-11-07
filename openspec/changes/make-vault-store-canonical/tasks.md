@@ -1,10 +1,11 @@
 ## 1. Store schema, migration and rollback
 
 - [ ] 1.1 Add `store_pages`, the projection manifest and queue, held corrections, unit rows, canonicity records and the audit trail to the per-vault collection store database, beside the lexical catalogue and graph tables.
-- [ ] 1.2 Extend `collection_store/migration.py` with an offline page migration that loads exact bytes and current derived rows.
-- [ ] 1.3 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
-- [ ] 1.4 Add rollback with its preconditions (drain projection, refuse on unexported held items, export audit and canonicity records) and a drill that rebuilds file mode from the projection and compares search and graph answers.
-- [ ] 1.5 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; build the replica from a staging database filled in one read transaction; refuse to start or activate store mode while multi-host writer-lease coordination is configured; amend to file mode the knowledge-stays-out, knowledge-writes-continue and whole-file replica clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`.
+- [ ] 1.2 Define one ownership rule for the files the store owns (D1), shared by migration, the reconcile sweep and the projector, so none of them treats another's files as created or deleted.
+- [ ] 1.3 Extend `collection_store/migration.py` with an offline page migration that loads exact bytes and current derived rows.
+- [ ] 1.4 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
+- [ ] 1.5 Add rollback with its preconditions (drain projection, refuse on unexported held items, export audit and canonicity records) and a drill that rebuilds file mode from the projection and compares search and graph answers.
+- [ ] 1.6 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; build the replica from a staging database filled in one read transaction; refuse to start or activate store mode while multi-host writer-lease coordination is configured; amend to file mode the knowledge-stays-out, knowledge-writes-continue and whole-file replica clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`.
 
 ## 2. Write path
 
@@ -20,9 +21,9 @@
 
 ## 4. Projection and outside edits
 
-- [ ] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status.
+- [ ] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path.
 - [ ] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
-- [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review.
+- [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
 
 ## 5. Stage 2: semantic units and canonicity
 
