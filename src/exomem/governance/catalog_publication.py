@@ -105,8 +105,6 @@ class PreparedPolicyProjection:
     manifest: projection_store.VariantStoreManifest
     evidence: bytes
     ready_at: int
-    #: Part pages whose text the full catalog had no room for, as `fit_parts` reports them.
-    parts_left_out: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +126,6 @@ class PreparedMarkdownCatalogPublication:
     target_publication: schema_v4.TuplePublicationResult
     activated_at: int
     mutation_count: int
-    #: Part pages whose text the full catalog had no room for, as `fit_parts` reports them.
-    parts_left_out: tuple[str, ...] = ()
 
 
 _VECTOR_EXTRACTOR_VERSION = "projected-text-v1"
@@ -493,7 +489,7 @@ def catalog_item(
     same batch is about to write, by vault-relative path; `part_folder` is where the page's
     parts are now when the page is about to move away from them.
     """
-    from .. import extraction_parts
+    from .. import extraction_parts, preserve
 
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -516,6 +512,9 @@ def catalog_item(
                 )
             )
         )
+        parts = extraction_parts.stored_parts(
+            vault_root, path, source, pending=pending, folder=part_folder
+        )
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
                 item_identity=path,
@@ -525,9 +524,8 @@ def catalog_item(
                 projector_schema_version=target_key.projector_schema_version,
                 full_search_fields=search_fields(parsed),
             ),
-            extraction_parts.stored_parts(
-                vault_root, path, source, pending=pending, folder=part_folder
-            ),
+            parts,
+            head=preserve.extracted_text(source) if parts else "",
         )
         return projection_store.ProjectionItemVariants(
             item_identity=path,
@@ -543,12 +541,12 @@ def catalog_item(
 
 def fit_parts(
     items: tuple[projection_store.ProjectionItemVariants, ...],
-) -> tuple[tuple[projection_store.ProjectionItemVariants, ...], tuple[str, ...]]:
-    """`items` with the part documents that fit in the catalog's capacity, and the parts left out.
+) -> tuple[projection_store.ProjectionItemVariants, ...]:
+    """`items` with the part documents that fit in the catalog's capacity.
 
     Each part counts as one catalog identity. Items keep their parts in identity order until
     the catalog is full; an item past that point keeps the parts that still fit, and its
-    Source stays searchable by its own text. The parts left out are named by their page path.
+    Source stays searchable by its own text. A warning names the first part page left out.
     """
     budget = projections.MAX_GOVERNED_CATALOG_ITEMS - len(items)
     kept: dict[str, int] = {}
@@ -572,7 +570,9 @@ def fit_parts(
                 item_identity=item.item_identity,
                 content_hash=item.content_hash,
                 variants=tuple(
-                    replace(variant, parts=variant.parts[:keep]) if len(variant.parts) > keep else variant
+                    replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
+                    if len(variant.parts) > keep
+                    else variant
                     for variant in item.variants
                 ),
                 scope_ids=item.scope_ids,
@@ -584,7 +584,7 @@ def fit_parts(
             len(left_out),
             left_out[0],
         )
-    return tuple(fitted), tuple(left_out)
+    return tuple(fitted)
 
 
 def _normalize_markdown_mutations(
@@ -1416,7 +1416,7 @@ def prepare_policy_projection(
                     target_key=key,
                 )
             )
-        fitted_items, parts_left_out = fit_parts(tuple(target_items))
+        fitted_items = fit_parts(tuple(target_items))
         target_items = list(fitted_items)
         membership_changed = any(
             before.scope_ids != after.scope_ids
@@ -1538,7 +1538,6 @@ def prepare_policy_projection(
             manifest=manifest,
             evidence=evidence,
             ready_at=ready_at,
-            parts_left_out=parts_left_out,
         )
     except CatalogPublicationError:
         raise
@@ -1796,7 +1795,7 @@ def _prepare_markdown_batch(
         republished += 1
     if not normalized and not normalized_removals and not republished:
         return None
-    target_items, parts_left_out = fit_parts(tuple(by_identity.values()))
+    target_items = fit_parts(tuple(by_identity.values()))
     try:
         descriptor = projection_store.catalog_descriptor_bytes(
             target_key, target_items
@@ -1877,7 +1876,6 @@ def _prepare_markdown_batch(
         target_publication=target_publication,
         activated_at=publication_time,
         mutation_count=len(normalized) + len(normalized_removals) + republished,
-        parts_left_out=parts_left_out,
     )
 
 

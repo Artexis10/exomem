@@ -197,37 +197,57 @@ def _document(
         variant,
         Counter(tokens),
         len(tokens),
-        frozenset(token for token in folded.split() if token),
+        frozenset(folded.split()),
         text if folded == text else folded,
         part,
     )
 
 
-def part_passage(part: projections.ProjectionPart, query: str) -> dict[str, object]:
-    """`{"matched_part", "passage"}` for a hit that matched `part`, from the catalog's text alone.
+def matched_passage(
+    variant: projections.ProjectionVariant,
+    part: projections.ProjectionPart | None,
+    query: str,
+) -> dict[str, object]:
+    """`{"matched_part", "passage"}` for a hit on `variant`, from the catalog's text alone.
 
-    `passage.offset` counts the Source's whole stored text, so it opens a `read_memory` window
-    at the match. The hit names its part without a passage when the part holds no literal match
-    of the query, or no stored start because a release strip changed its text.
+    A hit on a variant that holds parts names the part that matched: `part`, or part 1 when
+    the variant's own fields matched. `passage.offset` counts the Source's whole stored text,
+    so it opens a `read_memory` window at the match. The hit names its part without a passage
+    when the part holds no literal match of the query, or when no stored position maps into
+    it because a release strip changed its text. A hit on any other variant has neither.
     """
-    found = _passage(part, query)
-    if found is None or part.start is None:
-        return {"matched_part": part.number}
-    return found
+    if part is not None:
+        found = None if part.start is None else _passage(part, query)
+        return found or {"matched_part": part.number}
+    if not variant.parts:
+        return {}
+    head = variant.head
+    found = (
+        None
+        if head is None
+        else _passage_in(variant.search_fields["body"][head.begin : head.end], 1, 0, head.carrier_spans, query)
+    )
+    return found or {"matched_part": 1}
 
 
 def _passage(part: projections.ProjectionPart, query: str) -> dict[str, object] | None:
+    return _passage_in(part.text, part.number, part.start or 0, part.carrier_spans, query)
+
+
+def _passage_in(
+    text: str, number: int, base: int, cuts: tuple[tuple[int, int], ...], query: str
+) -> dict[str, object] | None:
     from .. import find_parts
 
     return find_parts.passage_in(
-        part.text,
-        number=part.number,
-        base=part.start or 0,
+        text,
+        number=number,
+        base=base,
         chunk=None,
         title=None,
         # As `find` normalizes a query before it anchors a passage on it.
         query_norm=query.lower().strip(),
-        cuts=part.carrier_spans,
+        cuts=cuts,
     )
 
 

@@ -204,15 +204,20 @@ def test_moving_a_source_moves_its_parts_with_it(vault, monkeypatch) -> None:
     assert [hit.path for hit in hits] == [new_page.relative_to(vault).as_posix()]
 
 
-def _adopted_parted_source(vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "") -> tuple[str, str]:
+def _adopted_parted_source(
+    vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "", *, planted_at: int = 55, lead: str = ""
+) -> tuple[str, str]:
     """A text file dropped into a project folder and extracted by the worker into several parts.
 
     Outside Sources/ and Evidence/, so its page may be edited, trashed and moved alone, and its
-    origin carriers are withheld from other audiences.
+    origin carriers are withheld from other audiences. A part holds about 11 of the 60
+    paragraphs, each of which starts with `lead`; paragraph `planted_at` ends with `PLANTED`.
     """
     monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
     text = "\n\n".join(
-        f"paragraph {number} " + "alpha beta gamma " * 20 + (f"{PLANTED} {beside_planted}" if number == 55 else "")
+        f"{lead}paragraph {number} "
+        + "alpha beta gamma " * 20
+        + (f"{PLANTED} {beside_planted}" if number == planted_at else "")
         for number in range(60)
     ).strip()
     binary = vault / "Knowledge Base" / "Projects" / "demo" / "report.txt"
@@ -595,9 +600,10 @@ def test_a_catalog_published_before_parts_gains_them_when_the_projector_refresh_
     for rows in state_paths.vault_state_dir(vault).rglob("rows.sqlite"):
         os.chmod(rows, 0o600)
         with sqlite3.connect(rows) as connection:
-            for operation in ("insert", "update", "delete"):
-                connection.execute(f"DROP TRIGGER projection_variant_parts_no_{operation}")
-            connection.execute("DROP TABLE projection_variant_parts")
+            for table in ("projection_variant_parts", "projection_variant_heads"):
+                for operation in ("insert", "update", "delete"):
+                    connection.execute(f"DROP TRIGGER {table}_no_{operation}")
+                connection.execute(f"DROP TABLE {table}")
             connection.execute("PRAGMA user_version=2")
 
     assert projector_refresh.converge(vault) == "refreshed"
@@ -630,7 +636,9 @@ def test_a_projector_refresh_measures_no_unchanged_projection_text_again(vault, 
         policy=policy, target_key=old_key,
     )
     # The row as the release before parts published it: the same projection text, no parts.
-    active_items = (replace(current, variants=tuple(replace(variant, parts=()) for variant in current.variants)),)
+    active_items = (
+        replace(current, variants=tuple(replace(variant, parts=(), head=None) for variant in current.variants)),
+    )
     vector_family = _vector_family(old_key)
     vectors = projection_measurement_store.stage_measurement_store(
         vault, namespace=verified_namespace(old_key, active_items), family=vector_family,
@@ -703,3 +711,48 @@ def test_a_full_catalog_publishes_a_source_without_the_parts_that_do_not_fit(gov
     assert _projected_find(governed, PLANTED, _owner())["hits"] == []
     first_left_out = extraction_parts.part_path(Path(page_rel), 3).as_posix()
     assert any(first_left_out in record.getMessage() for record in caplog.records)
+
+
+def test_a_match_in_the_first_part_of_a_source_names_it_and_opens_read_memory_there(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, planted_at=2)
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    window = _as_owner(commands.op_read_memory, governed, path=page_rel, offset=hit["passage"]["offset"])
+
+    assert (hit["path"], hit["matched_part"], hit["passage"]["part"]) == (page_rel, 1, 1)
+    assert PLANTED in hit["passage"]["text"] and window["body"].startswith(hit["passage"]["text"])
+
+
+def test_a_passage_across_withheld_carriers_counts_stored_characters(governed, monkeypatch) -> None:
+    carrier = "<!-- exomem-origin:v1 SECRETNOTE -->"
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, lead=f"{carrier} ")
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    passage = hit["passage"]
+    part = extraction_parts.text_of_part(
+        (governed / extraction_parts.part_path(Path(page_rel), passage["part"])).read_text(encoding="utf-8")
+    )
+    base = extraction_parts.part_start(
+        governed, governed / page_rel, preserve.extracted_text((governed / page_rel).read_text(encoding="utf-8")),
+        passage["part"],
+    )
+    stored = part[passage["offset"] - base : passage["offset"] - base + passage["length"]]
+    window = _as_owner(commands.op_read_memory, governed, path=page_rel, offset=passage["offset"])
+
+    # A carrier before the passage moves where it starts, and one inside it adds to its length.
+    assert carrier in part[: passage["offset"] - base] and carrier in stored
+    assert "SECRETNOTE" not in passage["text"] and stored.replace(carrier, "") == passage["text"]
+    assert window["body"].startswith(passage["text"])
+
+
+def test_a_part_too_large_to_search_ends_the_parts_of_its_source_without_refusing_writes(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, planted_at=15)
+    third = governed / extraction_parts.part_path(Path(page_rel), 3)
+    content = third.read_text(encoding="utf-8")
+    third.write_text(content.removesuffix("\n") + " brindlewick" * 100_000 + "\n", encoding="utf-8")  # 1.2 MB
+
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Tag the report", tags=["report"])
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    assert (hit["path"], hit["matched_part"]) == (page_rel, 2)
+    assert _projected_find(governed, "brindlewick", _owner())["hits"] == []

@@ -316,7 +316,7 @@ def _catalog_items(
             reserved_paths.ReservedPathLeafError,
         ) as error:
             raise ForwardMigrationUnavailable from error
-    return catalog_publication.fit_parts(tuple(items))[0]
+    return catalog_publication.fit_parts(tuple(items))
 
 
 def _policy_seed(

@@ -1119,6 +1119,7 @@ def _wire_hit(
     rerank_score: float | None = None,
     rerank_raw_score: float | None = None,
     rerank_input_rank: int | None = None,
+    variant: projections.ProjectionVariant | None = None,
     part: projections.ProjectionPart | None = None,
     query: str = "",
 ) -> Hit:
@@ -1167,7 +1168,7 @@ def _wire_hit(
         status=fields.get("status"),
         snapshot_hash=selection.content_hash,
         decision=decision,
-        **(projected_retrieval.part_passage(part, query) if part is not None else {}),
+        **(projected_retrieval.matched_passage(variant, part, query) if variant is not None else {}),
     )
 
 
@@ -2125,6 +2126,7 @@ def _find_projected_hits_pinned(
                     if identity in reranked_by_identity
                     else None
                 ),
+                variant=selected_variants.get(identity),
                 part=matched_parts.get(identity),
                 query=query,
             )

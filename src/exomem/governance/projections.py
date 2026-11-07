@@ -13,6 +13,7 @@ import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from types import MappingProxyType
 from typing import Any
 
@@ -33,6 +34,8 @@ MAX_GOVERNED_GRAPH_EDGES = 262_144
 
 _NAMESPACE_DOMAIN = b"exomem.authorization-projection-namespace-key.v1"
 _VARIANT_DOMAIN = b"exomem.authorization-projection.v1\0"
+_PART_DOMAIN = b"exomem.authorization-projection-part.v1"
+_HEAD_DOMAIN = b"exomem.authorization-projection-head.v1"
 _HEX = frozenset("0123456789abcdef")
 _MEASUREMENT_LANES = frozenset({"lexical", "vector", "rerank", "clip", "graph"})
 _OPTION_STRING_KEYS = frozenset({"notice", "constraint", "abstract", "bridge"})
@@ -261,6 +264,25 @@ class MeasurementKey:
         _bounded_text(self.model_version, "model_version", maximum=256)
 
 
+def _carrier_spans(spans: object, *, mapped: bool) -> tuple[tuple[int, int], ...]:
+    """`spans` as ordered disjoint ranges of stored text; only text whose positions map has any."""
+    checked: list[tuple[int, int]] = []
+    for span in spans if isinstance(spans, (tuple, list)) else (None,):
+        if (
+            not isinstance(span, (tuple, list))
+            or len(span) != 2
+            or any(type(value) is not int for value in span)
+            or not ((checked[-1][1] if checked else 0) <= span[0] < span[1] <= _MAX_SAFE_INTEGER)
+        ):
+            raise ProjectionCanonicalizationError(
+                "projection carrier spans must be ordered disjoint ranges"
+            )
+        checked.append((span[0], span[1]))
+    if checked and not mapped:
+        raise ProjectionCanonicalizationError("text without a stored position maps no carrier span")
+    return tuple(checked)
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionPart:
     """One further part of a Source's extracted text, held as content of its full-text variant.
@@ -277,43 +299,56 @@ class ProjectionPart:
     #: The ranges of the stored part text that `text` lacks: the origin carriers withheld
     #: from it, as `provenance.carrier_cuts` gives them.
     carrier_spans: tuple[tuple[int, int], ...] = ()
+    #: The SHA-256 of the part, computed once: a row digest frames it, so a write that
+    #: digests the catalog again does not encode the part's text again.
+    digest: bytes = dataclass_field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self.number) is not int or not 2 <= self.number <= _MAX_SAFE_INTEGER:
             raise ProjectionCanonicalizationError("a projection part number must be 2 or more")
         if not isinstance(self.text, str):
             raise ProjectionCanonicalizationError("a projection part holds text")
-        require_supported_capacity(searchable_bytes=len(self.text.encode("utf-8")))
+        try:
+            encoded = self.text.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ProjectionCanonicalizationError("a projection part holds an invalid Unicode scalar") from error
+        require_supported_capacity(searchable_bytes=len(encoded))
         if self.start is not None and (
             type(self.start) is not int or not 0 <= self.start <= _MAX_SAFE_INTEGER
         ):
             raise ProjectionCanonicalizationError("a projection part start must be a position")
-        spans: list[tuple[int, int]] = []
-        for span in self.carrier_spans:
-            if (
-                not isinstance(span, (tuple, list))
-                or len(span) != 2
-                or any(type(value) is not int for value in span)
-                or not ((spans[-1][1] if spans else 0) <= span[0] < span[1] <= _MAX_SAFE_INTEGER)
-            ):
-                raise ProjectionCanonicalizationError(
-                    "projection part carrier spans must be ordered disjoint ranges"
-                )
-            spans.append((span[0], span[1]))
-        if spans and self.start is None:
-            raise ProjectionCanonicalizationError(
-                "a projection part without a start maps no carrier span"
-            )
-        object.__setattr__(self, "carrier_spans", tuple(spans))
+        spans = _carrier_spans(self.carrier_spans, mapped=self.start is not None)
+        object.__setattr__(self, "carrier_spans", spans)
+        position = canonical_jcs([self.number, self.start, [list(span) for span in spans]])
+        object.__setattr__(
+            self, "digest", hashlib.sha256(_framed(_PART_DOMAIN, (position, encoded))).digest()
+        )
 
-    def value(self) -> dict[str, object]:
-        """The part as the closed JCS value that row digests bind."""
-        return {
-            "number": self.number,
-            "text": self.text,
-            "start": self.start,
-            "carrier_spans": [list(span) for span in self.carrier_spans],
-        }
+
+@dataclass(frozen=True, slots=True)
+class ProjectionHead:
+    """Where part 1 of a Source's extracted text lies in the body of its full-text variant.
+
+    `body[begin:end]` is that text as the variant serves it, and `carrier_spans` are the
+    ranges of the stored text that it lacks, so a match in it maps to a stored position.
+    """
+
+    begin: int
+    end: int
+    carrier_spans: tuple[tuple[int, int], ...] = ()
+    digest: bytes = dataclass_field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.begin) is not int
+            or type(self.end) is not int
+            or not 0 <= self.begin < self.end <= _MAX_SAFE_INTEGER
+        ):
+            raise ProjectionCanonicalizationError("a projection head must be a range of its body")
+        spans = _carrier_spans(self.carrier_spans, mapped=True)
+        object.__setattr__(self, "carrier_spans", spans)
+        value = canonical_jcs([self.begin, self.end, [list(span) for span in spans]])
+        object.__setattr__(self, "digest", hashlib.sha256(_framed(_HEAD_DOMAIN, (value,))).digest())
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +364,8 @@ class ProjectionVariant:
     #: The further parts of the Source's extracted text, numbered from 2 without a gap.
     #: They are text of this row, not of the variant identity, so stored vectors stay valid.
     parts: tuple[ProjectionPart, ...] = ()
+    #: Where part 1 lies in the body, when the variant holds parts and part 1 maps to it.
+    head: ProjectionHead | None = None
 
     def __post_init__(self) -> None:
         _digest(self.projection_variant_id, "projection_variant_id")
@@ -377,6 +414,12 @@ class ProjectionVariant:
             raise ProjectionCanonicalizationError("only a full-text variant holds parts")
         if tuple(part.number for part in self.parts) != tuple(range(2, len(self.parts) + 2)):
             raise ProjectionCanonicalizationError("variant parts must run from 2 without a gap")
+        if self.head is not None and (
+            not isinstance(self.head, ProjectionHead)
+            or not self.parts
+            or self.head.end > len(self.search_fields.get("body", ""))
+        ):
+            raise ProjectionCanonicalizationError("a variant head must lie in the body of a variant with parts")
 
 
 def part_count(variants: Iterable[ProjectionVariant]) -> int:
@@ -391,15 +434,19 @@ def part_count(variants: Iterable[ProjectionVariant]) -> int:
 def with_parts(
     variants: Iterable[ProjectionVariant],
     stored_parts: Sequence[tuple[int, str, int]],
+    *,
+    head: str = "",
 ) -> tuple[ProjectionVariant, ...]:
     """`variants` with the further parts of their Source's text on each full-text variant.
 
-    `stored_parts` are `(number, text, start)` as the vault stores them, numbered from 2.
-    Each part goes through what the variant's body went through: its origin carriers are
-    withheld for the Source, then the variant's release strip applies. A part the strip
-    changes keeps no start; a part the strip cannot clear ends the run of parts there.
+    `stored_parts` are `(number, text, start)` as the vault stores them, numbered from 2, and
+    `head` is the stored text of part 1. Each part goes through what the variant's body went
+    through: its origin carriers are withheld for the Source, then the variant's release strip
+    applies. A part the strip changes keeps no start; a part the strip cannot clear, or one
+    over the per-document capacity, ends the run of parts there. The variant places part 1 in
+    its body when the text of part 1, as it went through the same steps, occurs there once.
     """
-    by_strip: dict[bytes, tuple[ProjectionPart, ...]] = {}
+    by_strip: dict[bytes, tuple[tuple[ProjectionPart, ...], _Mapped | None]] = {}
     built: list[ProjectionVariant] = []
     for variant in variants:
         if variant.decision_level != 6 or not stored_parts:
@@ -408,34 +455,72 @@ def with_parts(
         release_strip = json.loads(variant.value_jcs)["release_strip"]
         key = canonical_jcs(release_strip)
         if key not in by_strip:
-            by_strip[key] = _variant_parts(variant.item_identity, stored_parts, release_strip)
-        parts = by_strip[key]
-        built.append(replace(variant, parts=parts) if parts else variant)
+            strip = tuple(bridges.StripIdentity(**entry) for entry in release_strip)
+            by_strip[key] = (
+                _variant_parts(variant.item_identity, stored_parts, strip),
+                _projected(variant.item_identity, head, strip),
+            )
+        parts, first = by_strip[key]
+        if parts:
+            built.append(replace(variant, parts=parts, head=_head_in(variant, first)))
+        else:
+            built.append(variant)
     return tuple(built)
+
+
+@dataclass(frozen=True, slots=True)
+class _Mapped:
+    """Stored text as a variant serves it, with the stored ranges it lacks, or no position."""
+
+    text: str
+    position_maps: bool
+    cuts: tuple[tuple[int, int], ...]
+
+
+def _projected(item_identity: str, stored: str, strip: tuple[bridges.StripIdentity, ...]) -> _Mapped | None:
+    """`stored` as a variant with release `strip` serves it, or None when the strip cannot clear it."""
+    # Projected text serves other audiences: withhold code-hidden carriers too, as for a body.
+    spans = provenance.withheld_spans(stored, owner_path=item_identity)
+    text = provenance.remove_carriers(stored, spans) if spans else stored
+    cuts = provenance.carrier_cuts(stored, spans) if spans else ()
+    if strip:
+        stripped = bridges.strip_provenance({"body": text}, strip)
+        body = stripped.get("body") if isinstance(stripped, Mapping) else None
+        if not isinstance(body, str):
+            return None
+        if body != text:
+            return _Mapped(body, False, ())
+    return _Mapped(text, True, cuts)
 
 
 def _variant_parts(
     item_identity: str,
     stored_parts: Sequence[tuple[int, str, int]],
-    release_strip: list[dict[str, str]],
+    strip: tuple[bridges.StripIdentity, ...],
 ) -> tuple[ProjectionPart, ...]:
-    strip = tuple(bridges.StripIdentity(**entry) for entry in release_strip)
     parts: list[ProjectionPart] = []
     for number, stored, start in stored_parts:
-        # Projected text serves other audiences: withhold code-hidden carriers too, as for a body.
-        spans = provenance.withheld_spans(stored, owner_path=item_identity)
-        text = provenance.remove_carriers(stored, spans) if spans else stored
-        position: int | None = start
-        cuts = provenance.carrier_cuts(stored, spans) if spans else ()
-        if strip:
-            stripped = bridges.strip_provenance({"body": text}, strip)
-            body = stripped.get("body") if isinstance(stripped, Mapping) else None
-            if not isinstance(body, str):
-                break
-            if body != text:
-                text, position, cuts = body, None, ()
-        parts.append(ProjectionPart(number, text, position, cuts))
+        served = _projected(item_identity, stored, strip)
+        if served is None:
+            break
+        try:
+            part = ProjectionPart(number, served.text, start if served.position_maps else None, served.cuts)
+        except ProjectionCapacityExceeded:
+            # A part too large for one search document ends the run of parts, as a gap does.
+            break
+        parts.append(part)
     return tuple(parts)
+
+
+def _head_in(variant: ProjectionVariant, first: _Mapped | None) -> ProjectionHead | None:
+    """Where part 1 lies in the variant's body, or None when no single place holds it."""
+    body = variant.search_fields.get("body", "")
+    if first is None or not first.position_maps or not first.text:
+        return None
+    begin = body.find(first.text)
+    if begin == -1 or body.find(first.text, begin + 1) != -1:
+        return None
+    return ProjectionHead(begin, begin + len(first.text), first.cuts)
 
 
 def _validate_variant_value(
