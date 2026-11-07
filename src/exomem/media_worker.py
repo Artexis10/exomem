@@ -1098,7 +1098,9 @@ class MediaWorker:
                     next_action=media_jobs.WAIT_ACTION,
                 )
         except (OSError, UnicodeError, OpError, preserve.PreserveError):
-            # Kept blocked; the next supervisor start presents it again.
+            # The page keeps its blocked text. The engine caller then keeps the job blocked, so the next
+            # start shows it again. The requeue caller returns the job to pending anyway, and the job's
+            # own result replaces the page when it completes.
             log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
             return False
 
