@@ -1791,6 +1791,72 @@ def test_targeted_retry_allows_one_fresh_attempt_for_matching_pending_sidecar(
     assert reported["error"] is None
 
 
+def _store_with_pending_page(vault: Path, payload: bytes) -> Path:
+    """A media original stored the way `preserve_artifacts` does: its page already pending."""
+    import io
+
+    from exomem import preserve
+
+    return preserve.preserve_stream(
+        vault, scope="Audio", category="raw", filename="born.m4a",
+        stream=io.BytesIO(payload), media_pending=True,
+    )
+
+
+def test_reconciling_and_retrying_a_page_stored_pending_commits_no_second_page(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    born = sidecar.read_bytes()
+    frontmatter, _body = _frontmatter_and_body(sidecar)
+    assert frontmatter["binary_mtime_ns"] is None
+    assert frontmatter["binary_ctime_ns"] is None
+
+    reconciled, _store = _mark_ambiguous_terminal_job(vault, binary)
+    retried = media_processing.retry_media(vault, binary)
+
+    assert reconciled.state == media_jobs.PENDING
+    assert retried.requeued == 1
+    assert sidecar.read_bytes() == born
+
+
+def test_a_page_stored_pending_follows_the_bytes_that_replace_its_original(vault: Path) -> None:
+    media_processing = _media_processing()
+    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    binary.write_bytes(b"\x00\x00\x00\x18ftypM4A replaced bytes")
+
+    media_processing.reconcile_media(vault, binary)
+
+    frontmatter, _body = _frontmatter_and_body(sidecar)
+    assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert frontmatter["binary_mtime_ns"] == _handle_stat(binary).st_mtime_ns
+
+
+@pytest.mark.parametrize(
+    ("mtime_line", "ctime_line", "awaits"),
+    [
+        ("binary_mtime_ns: null\n", "binary_ctime_ns: null\n", False),
+        ("binary_mtime_ns: null\n", "binary_ctime_ns: 1700000000000000001\n", True),
+        ("binary_mtime_ns: null\n", "", True),
+    ],
+    ids=["both-null", "one-null", "one-missing"],
+)
+def test_two_null_hints_make_a_pending_shaped_page_and_one_null_or_missing_hint_does_not(
+    vault: Path, mtime_line: str, ctime_line: str, awaits: bool
+) -> None:
+    """A page with one hint missing, or only one null, is still a stub to render."""
+    media_processing = _media_processing()
+    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
+    text = (vault / stored.sidecar_path).read_text(encoding="utf-8").replace(
+        "binary_mtime_ns: null\n", mtime_line
+    ).replace("binary_ctime_ns: null\n", ctime_line)
+
+    assert media_processing.awaits_reconciliation(vault, vault / stored.path, text) is awaits
+
+
 def test_targeted_retry_blocks_when_binary_changes_after_initial_provenance(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

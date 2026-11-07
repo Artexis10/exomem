@@ -143,13 +143,23 @@ class ExtractionRequest:
 
 
 @dataclass(frozen=True)
-class _BinaryProvenance:
+class _PageFacts:
+    """What a pending page records about its original."""
+
     relative_path: str
     original_filename: str
     sha256: str
     size: int
-    mtime_ns: int
-    ctime_ns: int
+    # None is "not read yet". `_read_provenance` always sets both hints. `render_pending_page`
+    # and `_render_pending_sidecar` (for a page that still holds both as null) pass None.
+    mtime_ns: int | None
+    ctime_ns: int | None
+
+
+@dataclass(frozen=True)
+class _BinaryProvenance(_PageFacts):
+    """The facts read from the open original, with the identity that revalidates it."""
+
     device: int
     inode: int
 
@@ -179,6 +189,9 @@ _IDENTITY_FIELDS = (
 )
 # Cache hints only: filesystem timestamps move without the bytes changing.
 _TIMESTAMP_FIELDS = ("binary_mtime_ns", "binary_ctime_ns")
+_UNTIMED_PROVENANCE_FIELDS = tuple(
+    field for field in _PROVENANCE_FIELDS if field not in _TIMESTAMP_FIELDS
+)
 
 
 def classify_media(path: str | Path) -> str | None:
@@ -953,8 +966,10 @@ def _is_pending_sidecar_shape(
         and frontmatter.get("processing_state") == "pending"
         and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
         and _is_nonnegative_int(frontmatter.get("binary_size"))
-        and _is_nonnegative_int(frontmatter.get("binary_mtime_ns"))
-        and _is_nonnegative_int(frontmatter.get("binary_ctime_ns"))
+        and (
+            _hints_unread(frontmatter)
+            or all(_is_nonnegative_int(frontmatter.get(field)) for field in _TIMESTAMP_FIELDS)
+        )
     )
 
 
@@ -1091,7 +1106,8 @@ def _pending_sidecar_matches_current_provenance(
     ):
         return False
     values = _provenance_values(provenance, frontmatter=frontmatter)
-    return all(frontmatter.get(field) == values[field] for field in _PROVENANCE_FIELDS)
+    fields = _UNTIMED_PROVENANCE_FIELDS if _hints_unread(frontmatter) else _PROVENANCE_FIELDS
+    return all(frontmatter.get(field) == values[field] for field in fields)
 
 
 def _block_ambiguous_retry(
@@ -1584,6 +1600,21 @@ def _read_provenance(
     )
 
 
+def read_timestamp_hints(binary: Path) -> tuple[int, int] | None:
+    """The mtime and ctime of `binary` as `_read_provenance` reads them: from the open handle.
+
+    Reconciliation compares the handle's values with a page's hints. `Path.stat` reports another
+    ctime on Windows, so a caller that records hints for a page reads them here. The result is
+    None when the file cannot be opened; the page then keeps its hints unread.
+    """
+    try:
+        with binary.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _verify_binary_identity(
     binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
 ) -> None:
@@ -1641,13 +1672,21 @@ def _render_pending_sidecar(
         if isinstance(candidate_receipt, Mapping):
             adoption_receipt = candidate_receipt
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
-            rendered = original
-            pending_fields = _pending_fields(provenance, frontmatter=frontmatter)
-            if frontmatter.get("processing_state") == media_jobs.BLOCKED:
-                pending_fields = pending_fields[1:]
-            for field, value in pending_fields:
-                rendered = preserve._set_frontmatter_field(rendered, field, str(value))
-            return rendered
+
+            def render(facts: _PageFacts) -> str:
+                fields = _pending_fields(facts, frontmatter=frontmatter)
+                if frontmatter.get("processing_state") == media_jobs.BLOCKED:
+                    fields = fields[1:]
+                return _set_fields(original, fields)
+
+            if _hints_unread(frontmatter):
+                # A page committed with its original (`render_pending_page`) is current as it
+                # is: its hints are not identity (`_TIMESTAMP_FIELDS`), and a second commit
+                # for them is what that page exists to avoid. Changed bytes are not current.
+                unread = render(replace(provenance, mtime_ns=None, ctime_ns=None))
+                if unread == original:
+                    return unread
+            return render(provenance)
         preserved_notes = _preservable_notes(
             body if raw_frontmatter is not None else original
         )
@@ -1671,8 +1710,7 @@ def _render_pending_sidecar(
         rendered = document_containers.annotate(rendered, "container_member", container_binding)
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
-    for field, value in _pending_fields(provenance):
-        rendered = preserve._set_frontmatter_field(rendered, field, str(value))
+    rendered = _set_fields(rendered, _pending_fields(provenance))
     if preserved_notes:
         rendered = (
             rendered.rstrip("\n")
@@ -1731,8 +1769,55 @@ def _original_filename(frontmatter: dict[str, object] | None, fallback: str) -> 
     return value if isinstance(value, str) and value and _preserve_module()._sanitize_filename(value) == value else fallback
 
 
+def render_pending_page(
+    stub: str, *, relative_path: str, original_filename: str, sha256: str, size: int
+) -> str:
+    """`stub` as `reconcile_media` renders it once it has read the stored original.
+
+    For a caller that commits the original and its stub together and reconciles straight
+    after: that reconcile finds the page current and only queues the job, instead of
+    committing the page a second time. The original is not on disk yet, and renaming it into
+    place moves its ctime, so no timestamp read beforehand can be exact. Both hints are null,
+    "not read yet" (`_hints_unread`), and reconciliation leaves them so.
+    """
+    facts = _PageFacts(relative_path, original_filename, sha256, size, mtime_ns=None, ctime_ns=None)
+    return _set_fields(stub, _pending_fields(facts))
+
+
+def _set_fields(content: str, fields: tuple[tuple[str, object], ...]) -> str:
+    set_field = _preserve_module()._set_frontmatter_field
+    for field, value in fields:
+        content = set_field(content, field, str(value))
+    return content
+
+
+def _hints_unread(frontmatter: dict[str, object]) -> bool:
+    """Whether the page holds both timestamp hints as null, as `render_pending_page` leaves them.
+
+    A missing hint is not unread: it stays a malformed page, as before.
+    """
+    return all(field in frontmatter and frontmatter[field] is None for field in _TIMESTAMP_FIELDS)
+
+
+def _hint_value(hint: int | None) -> int | str:
+    return "null" if hint is None else hint
+
+
+def record_read_hints(page: str, *, mtime_ns: int, ctime_ns: int) -> str:
+    """`page` with the timestamp hints of its original, when the page holds them as unread.
+
+    A caller that completes a page stored by `render_pending_page` passes the hints it has
+    verified, so that no completed page keeps null hints and none is repaired later. A page
+    that records its hints is returned as it is.
+    """
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(page)
+    if raw_frontmatter is None or not _hints_unread(frontmatter):
+        return page
+    return _set_fields(page, (("binary_mtime_ns", mtime_ns), ("binary_ctime_ns", ctime_ns)))
+
+
 def _pending_fields(
-    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+    provenance: _PageFacts, *, frontmatter: dict[str, object] | None = None,
 ) -> tuple[tuple[str, object], ...]:
     return (
         ("processing_state", "pending"),
@@ -1740,8 +1825,8 @@ def _pending_fields(
         ("original_filename", yaml_scalar(_original_filename(frontmatter, provenance.original_filename))),
         ("binary_sha256", provenance.sha256),
         ("binary_size", provenance.size),
-        ("binary_mtime_ns", provenance.mtime_ns),
-        ("binary_ctime_ns", provenance.ctime_ns),
+        ("binary_mtime_ns", _hint_value(provenance.mtime_ns)),
+        ("binary_ctime_ns", _hint_value(provenance.ctime_ns)),
     )
 
 
@@ -1823,7 +1908,7 @@ def _backfill_completed_provenance(
 
 
 def _provenance_values(
-    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+    provenance: _PageFacts, *, frontmatter: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Provenance as parsed frontmatter would carry it, for comparison."""
     return {

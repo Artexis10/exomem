@@ -1804,6 +1804,22 @@ def _png(tmp_path: Path, file_id: str, filename: str):  # noqa: ANN202
     return _staged(tmp_path, file_id, filename, b"\x89PNG\r\n\x1a\n" + file_id.encode())
 
 
+def _force_media_sidecar_commit(
+    monkeypatch: pytest.MonkeyPatch, vault: Path
+) -> None:
+    """Make media reconciliation commit the sidecar a second time.
+
+    A fresh image is stored already pending, so reconciliation has no page to write.
+    An unavailable media runtime still has it rewrite the sidecar as blocked, and
+    that commit is what the fan-out tests below judge.
+    """
+    monkeypatch.setitem(
+        media_processing_module._RUNTIME_UNAVAILABLE,  # noqa: SLF001
+        str(vault.resolve()),
+        ("media worker is not running", "start the media worker"),
+    )
+
+
 _ADOPTION = {
     "key": "media-fanout-adoption",
     "trigger": "selected",
@@ -1831,6 +1847,7 @@ def test_media_fanout_never_runs_inside_the_guard_or_before_the_terminal(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    _force_media_sidecar_commit(monkeypatch, vault)
     watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
 
     terminal = writer_lease.invoke_command(
@@ -1897,6 +1914,7 @@ def test_terminal_persistence_failure_does_not_run_media_fanout(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    _force_media_sidecar_commit(monkeypatch, vault)
     watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
 
     original_persist = manager.idempotency._persist_completed_from_canonical
@@ -1967,6 +1985,7 @@ def test_a_fast_acknowledgement_session_carries_the_media_sidecar(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    _force_media_sidecar_commit(monkeypatch, vault)
     watch = _watch_media_fanout(monkeypatch, manager, "proof.png.md")
 
     terminal = writer_lease.invoke_command(
@@ -1982,6 +2001,61 @@ def test_a_fast_acknowledgement_session_carries_the_media_sidecar(
     assert terminal["status"] == "committed"
     assert watch.fanouts == []
     assert terminal["derived_sync"] in {"pending", "completed", "failed"}
+
+
+def test_a_fresh_image_is_one_canonical_commit_with_its_media_job_queued(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each item pays the derived-custody cost of one commit, not of two."""
+    import hashlib
+
+    from exomem import client_artifacts, deferred_index, media_jobs, writer_lease
+    from exomem.vault import parse_frontmatter
+
+    monkeypatch.setenv("EXOMEM_FAST_DURABLE_ACK", "1")
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _png(tmp_path, file["file_id"], f"{file['file_id']}.png"),
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state")
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+
+    terminal = writer_lease.invoke_command(
+        _command("preserve_artifacts"),
+        vault,
+        scope="case",
+        category="raw",
+        files=[
+            {"download_url": f"https://files.example/{index}", "file_id": f"file-{index}"}
+            for index in range(2)
+        ],
+        idempotency_key="one-commit-per-image",
+    )
+
+    assert terminal["summary"] == {"stored": 2, "already_stored": 0, "failed": 0}
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM derived_batches").fetchone() == (2,)
+    queued = {job["path"] for job in media_jobs.status(vault)["jobs"]}
+    assert queued == {row["path"] for row in terminal["files"]}
+    for row in terminal["files"]:
+        binary = vault / row["path"]
+        page = binary.with_name(binary.name + ".md")
+        frontmatter, _body, _raw = parse_frontmatter(page.read_text())
+        assert frontmatter["processing_state"] == "pending"
+        assert frontmatter["extracted_by"] == "pending"
+        assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+        assert frontmatter["binary_mtime_ns"] is None
+        stored = page.read_text()
+        # A later explicit reconcile finds the page current: no further commit.
+        result = media_processing_module.reconcile_media(vault, binary)
+        assert result is not None
+        assert result.state == media_jobs.PENDING
+        assert page.read_text() == stored
 
 
 def test_one_artifact_batch_publishes_each_pending_custody_once(
@@ -2101,6 +2175,7 @@ def test_default_media_fanout_reports_non_graph_component_outcome(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    _force_media_sidecar_commit(monkeypatch, vault)
 
     report = (
         index_sync.IndexSyncReport(
@@ -2171,6 +2246,7 @@ def test_media_fanout_does_not_retire_readded_background_demand(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    _force_media_sidecar_commit(monkeypatch, vault)
 
     def interleaved_fanout(
         root, replaced, index_reports, _semantic_states, **_kwargs  # noqa: ANN001

@@ -66,6 +66,7 @@ _EPISODE_RECEIPT_FIELDS = (
     "recovery",
     "ledger",
     "about_skipped",
+    "compile",
 )
 _EPISODE_WORKFLOW_FIELDS = (
     "operation",

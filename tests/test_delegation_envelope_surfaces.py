@@ -14,11 +14,13 @@ from pathlib import Path
 import pytest
 from _nag_governance_helpers import overdue_prediction, scratch_page
 
-from exomem import commands, envelope, prominence
+from exomem import commands, envelope, prominence, review_state
 
 pytestmark = pytest.mark.reads_repository_docs
 
 FAMILY = "prediction_window"
+#: Families that ship with a disposition are listed in the family block until the owner sets one.
+SHIPPED = set(review_state.DEFAULT_DISPOSITIONS)
 FAMILY_REF = f"exomem://review/family/{FAMILY}"
 QUIET_WHY = "too_frequent: fires more than it helps in this vault"
 
@@ -51,9 +53,10 @@ def test_the_dispositions_view_carries_two_structurally_separate_blocks(
     envelope_classes = view["envelope"]["classes"]
 
     # The family block holds the family and only families.
-    assert [row["family"] for row in family_rows] == [FAMILY]
-    assert family_rows[0]["disposition"] == "quiet"
-    assert family_rows[0]["reason"] == "too_frequent"
+    assert {row["family"] for row in family_rows} == {FAMILY, *SHIPPED}
+    quieted = next(row for row in family_rows if row["family"] == FAMILY)
+    assert quieted["disposition"] == "quiet"
+    assert quieted["reason"] == "too_frequent"
     assert not set(envelope.ACTION_CLASSES) & {row["family"] for row in family_rows}
 
     # The envelope block holds the classes and only classes.
@@ -79,10 +82,10 @@ def test_the_view_says_which_off_is_which(config, vault: Path) -> None:
 def test_the_envelope_block_is_present_even_when_no_family_is_quiet(
     config, vault: Path
 ) -> None:
-    """The two blocks are independent; an empty family list is not an empty view."""
+    """The two blocks are independent; a family list with no owner decision is not an empty view."""
     view = commands.op_review_memory(vault, mode="dispositions")
 
-    assert view["dispositions"] == []
+    assert {row["family"] for row in view["dispositions"]} == SHIPPED, "only the shipped defaults"
     assert set(view["envelope"]["classes"]) == set(envelope.ACTION_CLASSES)
     assert view["envelope"]["level"] == prominence.resolve()
 
@@ -254,8 +257,6 @@ def test_a_hookless_session_can_quiet_a_real_family_and_the_envelope_stands(
     legible afterwards, and resets — while not one envelope class moves, because
     a family decision and a class disposition are different vocabularies.
     """
-    from exomem import review_state
-
     prominence.write_prominence("maximal")
     envelope_before = commands.op_review_memory(vault, mode="dispositions")["envelope"]
 
@@ -278,14 +279,14 @@ def test_a_hookless_session_can_quiet_a_real_family_and_the_envelope_stands(
     assert rows[STRUCTURAL_FAMILY]["origin"] == "manual"
     assert rows[STRUCTURAL_FAMILY]["reason"] == "intentional"
     assert rows[STRUCTURAL_FAMILY]["why"] == STRUCTURAL_WHY
-    assert set(rows) == {STRUCTURAL_FAMILY}, "no other family was touched"
+    assert set(rows) == {STRUCTURAL_FAMILY, *SHIPPED}, "no other family was touched"
     assert view["envelope"] == envelope_before
 
     cleared = commands.op_triage_memory(vault, ref=STRUCTURAL_FAMILY_REF, action="normal")
     assert cleared["disposition"] == "normal"
     assert cleared["cleared"] is True
     after = commands.op_review_memory(vault, mode="dispositions")
-    assert after["dispositions"] == []
+    assert {row["family"] for row in after["dispositions"]} == SHIPPED
     assert after["envelope"] == envelope_before
 
 
@@ -328,8 +329,6 @@ def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
 
 def test_the_envelope_is_unmoved_by_every_family_disposition(config, vault: Path) -> None:
     """Every registered family, one at a time, against every envelope class."""
-    from exomem import review_state
-
     prominence.write_prominence("balanced")
     before = envelope.resolved()
 

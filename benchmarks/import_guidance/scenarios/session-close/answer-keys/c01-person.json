@@ -1,0 +1,12 @@
+{
+  "reference": "The person reported a lasting change in how Tavi Brennock works: she now keeps the early morning for focus time, takes no meetings before 10:00, and wants the 1:1 agenda in her inbox by the evening before. This belongs on Tavi Brennock's person page (for example under Working preferences), alongside her existing preferences, which stay. The Thursday 1:1 itself is a one-off and needs no page. No other page should change.",
+  "must_change": [
+    "Entities/People/Tavi Brennock.md"
+  ],
+  "must_not_change": [
+    "Entities/People/Corin Haldane.md",
+    "Entities/Organizations/Harbourview Co-op.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

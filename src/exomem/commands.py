@@ -8921,7 +8921,9 @@ def op_episode_memory(
     unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
-    retiring the previous one; identical retry writes nothing.
+    retiring the previous one; identical retry writes nothing. The response's
+    `compile` block gives the ref and uncited Decided count. Compile or explicitly
+    dismiss every Decided item before citing the recap from updated compiled notes.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.
@@ -9686,6 +9688,7 @@ def op_review_memory(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     family: str | None = None,
+    window_days: int | None = None,
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
@@ -9723,7 +9726,12 @@ def op_review_memory(
             consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
+        window_days: Dispositions effect window in days, 1 to 90; default 7.
     """
+    if window_days is not None and mode != "dispositions":
+        raise ValueError(
+            "INVALID_REVIEW_ARGUMENTS: window_days is only supported by dispositions mode"
+        )
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(
@@ -9829,7 +9837,7 @@ def op_review_memory(
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
-        return _dispositions_view(vault_root)
+        return _dispositions_view(vault_root, window_days)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10230,15 +10238,22 @@ def _set_family_disposition(
     return {"ref": review_state_module.family_ref(family), **recorded}
 
 
-def _dispositions_view(vault_root: Path) -> dict:
+def _dispositions_view(vault_root: Path, window_days: int | None = None) -> dict:
     """Every family with a non-default disposition, and what it has cost.
 
     The manual dismissal count rides along because a disposition without one is
     half the story: "you quieted this family, and you had put down N of its
     items by hand before you did" is what makes the decision legible later.
+    `window_days` sets the effect window; a value out of range is refused before
+    anything is read.
     """
     from .governance import egress
 
+    window = (
+        review_state_module.effect_window()
+        if window_days is None
+        else review_state_module.effect_window(window_days)
+    )
     store = review_state_module.ReviewStateStore(vault_root)
     payload = store.load()
     dispositions = payload.get("dispositions") or {}
@@ -10247,8 +10262,16 @@ def _dispositions_view(vault_root: Path) -> dict:
     refusal = egress.owner_only_aggregate(Path(vault_root))
     registered = review_state_module.registered_families()
     rows = []
-    for family in sorted(dispositions):
-        record = dispositions[family]
+    # A family that ships with a disposition is listed until its owner sets one.
+    records = {
+        **{
+            family: {"disposition": default, "why": "ships with this disposition until `normal` is set", "origin": "default"}
+            for family, default in review_state_module.DEFAULT_DISPOSITIONS.items()
+        },
+        **dispositions,
+    }
+    for family in sorted(records):
+        record = records[family]
         if not isinstance(record, dict):
             continue
         if family not in registered:
@@ -10282,7 +10305,7 @@ def _dispositions_view(vault_root: Path) -> dict:
 
     return {
         "dispositions": rows,
-        "effect": refusal if refusal is not None else _effect_block(vault_root, payload),
+        "effect": refusal if refusal is not None else _effect_block(vault_root, payload, window),
         "registered_families": sorted(review_state_module.registered_families()),
         "reason_codes": list(review_state_module.REASON_CODES),
         "note": (
@@ -10308,20 +10331,27 @@ def _dispositions_view(vault_root: Path) -> dict:
     }
 
 
-def _effect_block(vault_root: Path, payload: dict) -> dict:
-    """Per-family effect over the last week, from records that already exist.
+def _effect_block(
+    vault_root: Path,
+    payload: dict,
+    effect_window: tuple[Any, Any, dict[str, Any]],
+) -> dict:
+    """Per-family effect over the chosen window, from records that already exist.
 
     The current set comes from the stored due-state projection and the
     dreamer's sidecar, never from an audit: a family neither holds reports
     `cleared` and `open` as unknown. When the sidecar cannot be read, every
     upkeep family is listed with the counts it holds as unknown, and the block
     says why: an absent family would read as one that surfaced nothing.
+
+    These records prove current state, not an action after surfacing, so every
+    family reports `acted` as unknown.
     """
     import datetime as dt
 
     from . import dreamer_families, dreamer_store, due_state
 
-    since, until, window = review_state_module.effect_window()
+    since, until, window = effect_window
     current: dict[str, set[str]] = {}
     projection = due_state.load(vault_root)
     for category, pages in ((projection or {}).get("categories") or {}).items():
@@ -10353,6 +10383,14 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
                 current.setdefault(family, set())
                 stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
                 extra.append((family, cid, fingerprint, stamp))
+    episode_family = due_state.EPISODE_BACKLOG
+    if projection is not None and any(
+        isinstance(entry, dict) and entry.get("family") == episode_family
+        for entry in (payload.get("surfaced") or {}).values()
+    ):
+        # An empty category is absent from the projection; its recorded surfacing
+        # still needs a known empty current set for the cleared count.
+        current.setdefault(episode_family, set())
     counts = review_state_module.effect_counts(
         payload,
         since=since,
@@ -10366,7 +10404,8 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
         "window": window,
         "sources": {
             "surfaced": (
-                "identities first stamped on the first-surfaced ledger in the window; "
+                "a lower bound: identities first stamped on the first-surfaced ledger in "
+                "the window, so an item shown where nothing is recorded is not counted; "
                 "for upkeep families, first deliveries recorded in the dreamer's sidecar"
             ),
             "dismissed": "manual dismiss decisions updated in the window, counted by item",
@@ -10374,7 +10413,12 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "cleared": (
                 "surfaced in the window, no decision recorded, and no longer in the "
                 "family's current set (the stored due-state projection, or the "
-                "dreamer's open candidates); unknown where only an audit could list it"
+                "dreamer's open candidates); unknown where only an audit "
+                "could list it"
+            ),
+            "acted": (
+                "unknown: current citation or queue state does not prove an action "
+                "after surfacing; no matching mutation receipt is recorded here"
             ),
             "open": "surfaced in the window, no decision recorded, still in the current set",
         },

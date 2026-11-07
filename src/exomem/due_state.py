@@ -115,8 +115,9 @@ log = logging.getLogger(__name__)
 # outstanding" until the next reconcile, so the version change forces the rebuild.
 # 4 moves `SIDE_FAMILY` to its own file. v3 code would read a v4 main file as
 # "no candidates", so the bump makes a rolled-back runtime rebuild instead.
-# 5 adds `note_cohesion`, for the reason 3 gives: a v4 projection holds none.
-SCHEMA_VERSION = 5
+# 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
+# 6 adds `note_cohesion`, for the same reason as 3.
+SCHEMA_VERSION = 6
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -135,11 +136,10 @@ _SIDE_KEY = "side_files"
 #: five-slot `top` that a due prediction needs.
 SOURCE_BACKLOG = "unprocessed_source"
 
-#: The two backlog families, in served order after every dated obligation. `note_cohesion`
-#: reports a size step this system chose, not an authored date, and it sorts ahead of the
-#: Source backlog because a page that outgrew its subject is nearer to work than a capture
-#: nobody compiled. Counts are exact; nothing here is capped.
-BACKLOG_CATEGORIES: tuple[str, ...] = ("note_cohesion", SOURCE_BACKLOG)
+#: The episode backlog family: a conversation recap whose live revision holds a Decided line
+#: that no recap cited by a live page holds. It is a sibling of `SOURCE_BACKLOG`, not part of
+#: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
+EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
@@ -157,10 +157,18 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "collection_candidate",
     "artifact_role_promotion",
     "transient_state_review",
-    # Backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
+    # Last: backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
     "note_cohesion",
     SOURCE_BACKLOG,
+    EPISODE_BACKLOG,
 )
+
+#: The backlog families, in served order after every dated obligation; a write's own
+#: due-state block leaves them out. `note_cohesion` reports a size step this system chose,
+#: not an authored date, and it leads because a page that outgrew its subject is nearer to
+#: work than a capture or a recap nobody compiled. The Source backlog leads the episode
+#: backlog. Counts are exact; nothing here is capped.
+BACKLOG_CATEGORIES: tuple[str, ...] = ("note_cohesion", SOURCE_BACKLOG, EPISODE_BACKLOG)
 
 #: The categories a single write can soundly settle in full on its own.
 DELTA_CATEGORIES: tuple[str, ...] = (
@@ -1762,9 +1770,9 @@ def _cited_source_paths(
 
 
 def _source_findings(
-    vault_root: Path, source_paths: list[str], *, resolver: Callable[[], Any]
+    vault_root: Path, source_paths: list[str], episode_paths: list[str], *, resolver: Callable[[], Any]
 ) -> list[Any]:
-    """The `SOURCE_BACKLOG` findings of these Sources; a compiled Source has none."""
+    """The backlog findings of these Sources and recap revisions; a compiled one has none."""
     from . import audit as audit_module
     from . import find as find_module
 
@@ -1772,13 +1780,25 @@ def _source_findings(
         return find_module._CACHE.get(vault_root / path, vault_root)
 
     pages = [page for page in map(lookup, source_paths) if page is not None]
-    if not pages:
-        return []
+    revisions = [page for page in map(lookup, episode_paths) if page is not None]
     # The projection stores no excerpt, so the delta does not build one.
-    return audit_module._check_unprocessed_sources(
-        vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver,
-        source_context=False,
-    )
+    return [
+        *(
+            audit_module._check_unprocessed_sources(
+                vault_root, pages, today=_FAR_FUTURE, lookup=lookup, resolver=resolver,
+                source_context=False,
+            )
+            if pages
+            else ()
+        ),
+        *(
+            audit_module._check_uncompiled_episodes(
+                vault_root, revisions, lookup=lookup, resolver=resolver
+            )
+            if revisions
+            else ()
+        ),
+    ]
 
 
 @_owner_local
@@ -1829,13 +1849,13 @@ def _source_half(
     page_of: Mapping[str, Any],
     *,
     resolver: Callable[[], Any],
-) -> tuple[list[str], list[Any]]:
-    """The Sources these writes can change, and the `SOURCE_BACKLOG` findings of each.
+) -> tuple[list[str], list[str], list[Any]]:
+    """The Sources and the recap revisions these writes can change, and the backlog findings of each.
 
     This is the only part of a write's delta that needs the wikilink resolver: a
     claim in `sources:` resolves to a path through it.
     """
-    from . import note_types
+    from . import episode_coverage, note_types
 
     type_basis = note_types.Basis(vault_root)
     source_paths = sorted(
@@ -1849,27 +1869,36 @@ def _source_half(
             )
         )
     )
-    return source_paths, _source_findings(vault_root, source_paths, resolver=resolver)
+    # A citation of one recap changes the coverage of its episode's live revision.
+    episode_paths = sorted(episode_coverage.revision_paths(vault_root, source_paths))
+    return source_paths, episode_paths, _source_findings(
+        vault_root, source_paths, episode_paths, resolver=resolver
+    )
 
 
 def _backlog_rows(
     categories: Mapping[str, Any],
     source_paths: list[str],
-    source_entries: Mapping[str, list[dict[str, Any]]],
+    episode_paths: list[str],
+    grouped: Mapping[str, Mapping[str, list[dict[str, Any]]]],
     today: dt.date,
 ) -> dict[str, Any]:
-    """The `SOURCE_BACKLOG` rows after these Sources take their recomputed entries.
+    """Both backlogs' rows after these Sources and recap revisions take their recomputed entries.
 
     Rows of the Sources a write's pages cite, not of the pages: a live note
     compiles a Source, a draft or a retired note does not.
     """
-    backlog = dict(categories.get(SOURCE_BACKLOG) or {})
-    for path in source_paths:
-        if path in source_entries:
-            backlog[path] = _bucket(source_entries[path], today)
-        else:
-            backlog.pop(path, None)
-    return backlog
+    rows: dict[str, Any] = {}
+    for family, paths in ((SOURCE_BACKLOG, source_paths), (EPISODE_BACKLOG, episode_paths)):
+        backlog = dict(categories.get(family) or {})
+        entries = grouped.get(family) or {}
+        for path in paths:
+            if path in entries:
+                backlog[path] = _bucket(entries[path], today)
+            else:
+                backlog.pop(path, None)
+        rows[family] = backlog
+    return rows
 
 
 @dataclass(slots=True)
@@ -1903,16 +1932,16 @@ def _apply_source_half(
         write.path: find_module._CACHE.get(vault_root / write.path, vault_root)
         for write in writes
     }
-    source_paths, findings = _source_half(
+    source_paths, episode_paths, findings = _source_half(
         vault_root, writes, page_of, resolver=lambda: snapshot
     )
-    source_entries = _entries_from_findings(vault_root, findings).get(SOURCE_BACKLOG) or {}
+    grouped = _entries_from_findings(vault_root, findings)
     with _LOCK:
         current = _load_shared(vault_root)
         if current is None:
             return
         categories = dict(current.get("categories") or {})
-        categories[SOURCE_BACKLOG] = _backlog_rows(categories, source_paths, source_entries, today)
+        categories.update(_backlog_rows(categories, source_paths, episode_paths, grouped, today))
         _save_unless_unchanged(vault_root, current, {**current, "categories": categories})
 
 
@@ -2055,9 +2084,10 @@ def apply_write_deltas(
 
     findings: list[Any] = []
     source_paths: list[str] = []
+    episode_paths: list[str] = []
     source_deferred = False
     try:
-        source_paths, source_findings = _source_half(
+        source_paths, episode_paths, source_findings = _source_half(
             vault_root, writes, page_of, resolver=resolver
         )
         findings.extend(source_findings)
@@ -2080,7 +2110,6 @@ def apply_write_deltas(
         findings.extend(_page_local_supersession(vault_root, pages))
     # One grouping, so the Source rows and the page rows share one review-ref lookup.
     grouped = _entries_from_findings(vault_root, findings)
-    source_entries = grouped.get(SOURCE_BACKLOG) or {}
 
     with _LOCK:
         current = _load_shared(vault_root) or payload
@@ -2124,7 +2153,7 @@ def apply_write_deltas(
                 else:
                     pages_map.pop(rel, None)
             categories[category] = pages_map
-        categories[SOURCE_BACKLOG] = _backlog_rows(categories, source_paths, source_entries, today)
+        categories.update(_backlog_rows(categories, source_paths, episode_paths, grouped, today))
         updated = {
             "version": SCHEMA_VERSION,
             "computed_on": today.isoformat(),
@@ -4065,7 +4094,15 @@ def _served_entries_uncached(
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     candidate_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    # The episode backlog is the owner's compiler queue: its stored rows count lines against the
+    # owner's view of the citing pages, so a count served to a restricted caller would move with a
+    # page withheld from it. That caller gets the family from its own audit, which reads the page as absent.
+    owner_queue = not categories.get(EPISODE_BACKLOG) or egress_module.owner_only_aggregate(
+        vault_root, principal=principal
+    ) is None
     for category in PROJECTION_CATEGORIES:
+        if category == EPISODE_BACKLOG and not owner_queue:
+            continue
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by
             # another route, so a quiet family contributes nothing to `total`,
@@ -4166,7 +4203,7 @@ def _served_entries_uncached(
     # would outrank every genuinely overdue prediction in a five-slot `top`.
     # The backlogs sort after every obligation for the same reason: an import of
     # thousands of old captures, or a vault of long notes, must not push a due
-    # prediction out.
+    # prediction out. The backlogs keep the order of `BACKLOG_CATEGORIES`.
     rows.sort(
         key=lambda row: (
             _backlog_rank(row["category"]),
@@ -4524,10 +4561,10 @@ def _affected_block(
     if not paths:
         return None
     paths = frozenset(path.replace("\\", "/").lstrip("/") for path in paths)
-    # A write's own advice leaves the backlogs out. A Source is outstanding from the
-    # moment it is created, so every import would answer with advice about itself; a
-    # page at a size step has its own carrier, the `note_cohesion` question in the
-    # same response. The backlogs reach the agent through the global block and
+    # A write's own advice leaves the backlogs out. A Source or a recap is outstanding
+    # from the moment it is created, so every import would answer with advice about
+    # itself; a page at a size step has its own carrier, the `note_cohesion` question in
+    # the same response. The backlogs reach the agent through the global block and
     # `review_memory`.
     result = block([
         row

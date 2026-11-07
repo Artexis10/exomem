@@ -31,3 +31,82 @@ Limits:
 - The first commit in the two review scenarios is refused whatever arguments the agent sends. The real product would accept a commit that carries the hash.
 - The agent has the tools a scenario serves, not the whole product surface, and the compact bootstrap reply stands in for the session profile.
 - The judge model is the same family as the agents.
+
+## Session-close suite
+
+This suite tests whether a capture session saves durable facts in their existing canonical pages and preserves unrelated knowledge. It also tests restraint, recap production and citation adherence. Every enabled recall probe then asks a fresh actor what the canonical pages say. Capture success never selects which recall probes run.
+
+`session_close.py` drives real actors against each arm's real stdio server. `session_seed.py` initializes an isolated vault with that arm's scaffold and the same invented seed pages. `session_score.py` reads independent keys only after generation. It exports blind views for a native Codex evaluator and imports structured judgments. Generation starts no judge.
+
+Layout:
+
+- `scenarios/session-close/cNN-*.json` contains only inputs: `id`, `title`, `suite`, `seed`, `engagement`, `turns` and optional `recall_turn`.
+- `session_of` inherits the seed and capture turns. Each case enables its own recall question explicitly.
+- `scenarios/session-close/seeds/<seed>/` contains invented canonical pages with fixed memory IDs.
+- `scenarios/session-close/answer-keys/<case-id>.json` contains the independent scorer-only object. A missing, null or malformed key refuses scoring.
+- Each key has `reference`, `must_change`, `must_not_change`, `recap` and `new_pages`. The scorer rejects page paths outside the seed. `new_pages: none` still permits the recap Source.
+
+`--client-mode plugin` is the default. It appends the arm's skill and installs its Stop and UserPromptSubmit hooks. Omitting `--hook-turn` keeps those hooks; that flag adds a separate synthetic close ask. `--client-mode tool-only` keeps the same strict real MCP server, stages no plugin hooks, and appends no skill. It requests `disableAllHooks: true` in the supplied settings file. Combining tool-only with `--hook-turn` is rejected before launch.
+
+The [official hook setting](https://code.claude.com/docs/en/settings-reference#disableallhooks) does not override managed hooks or force-enabled managed plugin hooks. Settings record the requested configuration. A complete connected tool-only trace must report zero observed hook starts and completed invocations. Observed hooks or unavailable observations leave no-hook acceptance unknown; capture and fresh counts remain separate. Raw evidence stays available, and the harness does not retry automatically. Real-model evidence must establish the observed client behavior.
+
+Capture and fresh rows retain `client_mode`, the actual argv, supplied settings, hook starts and completed invocation counts. Work directories include the mode. Native identity, scored rows, denominators and paired intervals keep modes separate; historical rows without a mode mean plugin. Blind judge views expose neither mode nor actor identity.
+
+The native Claude route remains the default. For the maintained credits launcher, supply `--credits-account`, `--credits-budget-usd` and `--credits-reason` together. These options apply only to session-close. Empty account or reason values and nonpositive or nonfinite budgets fail before executable discovery.
+
+The adapter resolves `harness` on PATH without a shell. It uses `claude-credits run --stream-json` with the existing `--budget` option; the launcher owns framing, model and session flags. The remaining actor flags preserve strict MCP access, tool restrictions, settings, hook events and the selected client mode.
+
+The budget is the maximum requested for **each independent process**, including fresh recall. It is neither a decision-wide cap nor spending authority. The evaluation owner still agrees the total budget and reconciles costs. The maintained launcher must ship its literal duplex support before a programme run selects this route. Missing launchers and failed payer launches never fall back to subscription Claude.
+
+Capture and fresh evidence record `transport`, the requested `credits_account`, `credits_budget_usd` and actual argv. Credits runs leave the discovered native `cli_version` unset. Each stage records `actor_version` only from its actual init event, without treating the wrapper's version as the actor's version. The adapter adds no account catalog or cost policy.
+
+The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
+
+For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format and resolve seed identifiers against the shipped seeds. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.
+
+1. Select both checkouts with `--product-root`, the actor with `--model`, and the number of repeats with `--repeats`.
+2. Run the existing `run` command with `--suite session-close` and an output directory outside every repository to capture raw runs.
+3. Add `--dry-run` to seed and validate without starting actors, or `--hook-turn` to append the arm's own close prompt.
+4. Run `session-score` on `runs.jsonl` with both arm labels and `--out` to prepare the native judge files.
+5. Give only `judge-views.jsonl` to the native Codex evaluator; keep `private/judge-map.json` outside its packet.
+6. Run `session-score` with the same `--out` and `--judgments` to import the returned judgments and write the report.
+
+The default preparation, also selected by `--prepare-judge`, starts no model. Each shuffled item contains an opaque `id`, its blind `prompt` and `answer_schema`. The evaluator returns JSONL objects with that `id` and `structured_output` matching the supplied schema. The scorer reuses the existing rubric and boolean-outcome parser. The separate private map binds each ID to its run, stage and exact prompt, including the reference and rubric. Preparation omits capture items whose outcomes are already deterministic because no material page changed. Changed evidence, missing results, malformed results and duplicate IDs leave semantic judgments unknown. The reader never starts a replacement judge. Deterministic failures and transport-unknown probes remain in the report, even when they need no semantic judgment.
+
+`--automatic-judge` explicitly selects the legacy Claude CLI path; `--judge-model` applies only there. The native path never discovers or starts Claude.
+
+Only run actors or judging under an agreed evaluation protocol and budget. The no-model checks establish harness behavior; they do not establish a model improvement.
+
+Each capture actor uses strict MCP configuration, no shell tools and no session persistence. Both client modes keep the empty isolated working directory and the project-only setting-source floor. The server imports the arm's source and keeps its vault, state, logs and caches in the run directory. The hooks use that actor's isolated hook home. The initial capture actor retains its context across the scripted turns.
+
+After capture exits, the harness retains its before/after snapshots, page diff, replies, session identity and paired tool requests and replies. It also retains raw stream, connectivity, errors, usage, cost, hook counts and compile diagnostics. Capture's `observed` field always comes from these capture snapshots.
+
+If `recall_turn` exists, the harness launches a new actor and stdio server against the same vault and external state. It never reseeds. The fresh actor gets one question, a fresh working directory and hook home, and no capture transcript, resume token or summary. Its raw stream, identity, question, answer, paired requests and replies, connectivity, errors, usage and cost live under `fresh`. Fresh before/after snapshots expose any probe writes separately. A failed probe leaves capture evidence intact and produces an unknown recall result.
+
+The deterministic checks retain required page changes, forbidden changes, recap adherence, citation adherence and extra-page restraint. Citation adherence applies only when a recap exists and a compiled page changed. It does not excuse missing entity work.
+
+The capture judge reads the turns, independent reference, canonical page diffs and final required pages. J1 checks factual correctness. J2 checks justified scope and preservation of unrelated knowledge, permitting semantic-unit representation required by the product. J3 checks semantic completeness, including qualifications, rationale, temporal status and rightful canonical placement. Missing required page work fails J3 even when the shown edits and citations are correct. Separate checks assess recap production and citation; their absence alone does not fail J1–J3. The blind view excludes arm, model and compile diagnostics.
+
+Recall is scored separately. The scorer projects actual served text and its own path from the product's response schemas. It preserves lifecycle and truncation fields. The union of the independent key’s `must_change` and `must_not_change` paths defines the seeded canonical pages. The blind reference judge decides which retrieved content supports the answer. A recap cannot substitute for canonical content. R2 judges whether the retrieved canonical content, excerpts or units contain the relevant reference facts and support the answer. The judge must not assume unseen content.
+
+Supported content:
+
+- `read_memory`: page `body/path`; exact units with `status: found`, `unit.content/parent.path` and optional `parent_context.markdown`.
+- `search_memory`: direct hit lists or `hits` envelopes; page `excerpt/path` and semantic-unit `content` or `excerpt` with `parent_path`.
+- Deep search packs: `claims[path].lede/sections` and `semantic_units` entries with their own `parent.path` and unit excerpts.
+- `recall_context` or `activate_context`: `units[].text/provenance.path`, `current_state[].statement/path` and `map.items[].state.statement/state.path`.
+
+Anchors, enclosing map paths, titles and pointers do not supply canonical prose. Recognized empty or locator-only results fail. Failed transport and unrecognized structures remain unknown. The raw full tool replies stay in the run. The blind view omits arm, model, compile diagnostics and citation counts.
+
+The report gives separate known, unknown and inapplicable denominators for canonical correctness, restraint, recap production by required/optional/forbidden policy, applicable citation adherence and every input-enabled recall probe. Canonical correctness covers cases that owe an update; restraint covers cases that owe no update. It averages paired repeats and models within each case before it bootstraps cases. A 95% interval that includes zero means no change. For recap production, a reported success means a recap exists; production on forbidden cases is unwanted.
+
+Limits:
+
+- The first actor waits for initial index warming using the existing driver behavior. The no-model stdio integration follows the product's retry hints instead of adding a sleep.
+- The no-model integration records a recap, commits a governed canonical edit, closes the first client/server, then finds and reads that edit through a new client/server.
+- Some legacy seed notes lack semantic units. Current governed edits must add a semantic unit; the integration does so without changing those seed fixtures.
+- Entity updates carry no compiled-note citation claim. Cases c02, c09, c10 and c11 exercise compiled-note citation adherence.
+- `order` records the page's final write time, so it cannot reconstruct earlier writes to that page.
+- The harness stages the engagement reference in the system prompt, where an ordinary actor may read it on demand.
+- The shell-free actor cannot trigger the landing-based Stop check. `--hook-turn` measures an explicit close prompt instead.
+- Real-model runs covered session-close cases on the plugin client with its hook turn, one run per case. The closure of task 4.1 in the archived `add-session-close-compilation` OpenSpec change reports which cases ran, their results and what did not run.

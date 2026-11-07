@@ -1,0 +1,13 @@
+{
+  "id": "c11-mixed",
+  "title": "A repair-table routine and its coordinator both change",
+  "suite": "session-close",
+  "seed": "c11",
+  "engagement": "balanced",
+  "turns": [
+    "I am planning the next monthly repair table with Elin Dacre. Can you pull up the routine and what we know about working with Elin?",
+    "We agreed on two lasting changes. In the repair-table routine, test every borrowed tool on Thursday evening instead of Friday morning, because Friday leaves no time to replace a broken one. Keep every other step. Elin also told me that she now wants supply requests in one shared document by Tuesday noon, rather than separate messages. Her other working preferences still hold.",
+    "That's all for today, thanks."
+  ],
+  "recall_turn": "What routine should I follow for the monthly repair table, and what are Elin Dacre's working preferences?"
+}

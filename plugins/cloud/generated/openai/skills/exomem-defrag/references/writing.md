@@ -21,8 +21,7 @@ Resolve entity candidates against the active entity registry and selected knowle
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
   editing frontmatter around the registry rule.
-  A single incidental mention, unresolved identity, or transient participant
-  stays in source/note context.
+  Apply the entity eligibility rule in [engagement](engagement.md).
 
 ### Names in another script
 
@@ -494,6 +493,8 @@ Read-only recall and review follow the live retrieval policy.
 When new evidence changes a durable conclusion, inspect each affected claim and its sources.
 Distinguish what someone attested from what the evidence establishes.
 Use the suitable existing home; a correction does not need another page by default.
+Reconcile each affected current proposition and its explanation with the revised scope.
+A later exception does not complete a correction while other current wording still overstates it.
 
 1. Read the affected units and parent hashes; the exact propositions are visible.
 2. Judge each proposition against the evidence; its support and uncertainty are explicit.

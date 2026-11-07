@@ -1,0 +1,12 @@
+{
+  "reference": "The user settles both open questions in the existing planter research note: buy the cedar box because it fits the rail and stays cooler, and skip the drip saucer because the user plans to drill drainage holes in the base. Preserve the other findings and the existing relation. Update that research note to hold the decisions and close its two open threads without presenting the purchase or drilling as completed events. The existing research note is the rightful home; neither the general gardening concept nor the watering research changes. At the balanced-engagement stopping point, record one bounded recap and cite that recap in the updated research note sources. Do not create a parallel compiled page.",
+  "must_change": [
+    "Notes/Research/balcony-garden/herb-planter-options.md"
+  ],
+  "must_not_change": [
+    "Entities/Concepts/Container Gardening.md",
+    "Notes/Research/balcony-garden/watering-schedule-for-herbs.md"
+  ],
+  "recap": "required",
+  "new_pages": "none"
+}

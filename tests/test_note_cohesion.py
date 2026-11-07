@@ -182,7 +182,7 @@ def test_a_stored_quiet_for_a_removed_family_is_not_offered_as_a_decision(vault:
 
     view = commands.op_review_memory(vault, mode="dispositions")
 
-    assert [row["family"] for row in view["dispositions"]] == []
+    assert "scope_divergence_semantic" not in [row["family"] for row in view["dispositions"]]
 
 
 def test_a_quiet_family_withholds_the_question_and_leaves_the_item_open(vault: Path) -> None:

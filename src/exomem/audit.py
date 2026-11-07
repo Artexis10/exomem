@@ -11,6 +11,9 @@ Checks (all read-only; no writes ever):
   anywhere in `Knowledge Base/`
 - `unprocessed_source`: `type: source` page that no live note compiles: no page
   its `ingested_into:` names is live and cites it in its own `sources:`
+- `uncompiled_episode` (optional): conversation recap whose live revision has a
+  Decided line that no recap cited by a live page holds (citation only; items
+  unassessed)
 - `unresolved_source_citation`: compiled page whose explicit `sources:` claim
   does not resolve to authorized governed Source or Evidence material
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
@@ -109,6 +112,7 @@ from . import (
     call_spans,
     capabilities,
     contradiction_stance,
+    episode_coverage,
     homes,
     indexes,
     lifecycle_statuses,
@@ -129,6 +133,7 @@ from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
 from . import provenance as provenance_module
+from . import review_state as review_state_module
 from . import vault as vault_module
 from .collection_store import ownership
 from .collection_store.preview import canonical_read, selected_writer
@@ -194,6 +199,9 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
     "path_variants",
+    # Every past recap with a Decided line is uncited after an upgrade, so a default
+    # audit would list each one with a compile instruction. Run it only on request.
+    review_state_module.EPISODE_BACKLOG,
 )
 TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
     "semantic_malformed_unit",
@@ -249,6 +257,10 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # not yet have (f21 stays withheld).
     "entity_recurrence",
     "collection_candidate",
+    # A third kind of backlog, held back for the second reason above: a conversation
+    # recap with a Decided line that no live page cites is a threshold the product
+    # chose, and the family ships dark (`review_state.DEFAULT_DISPOSITIONS`).
+    review_state_module.EPISODE_BACKLOG,
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -652,13 +664,21 @@ def audit(
     with stage('orphan_entity') as run:
         if run:
             findings.extend(_check_orphan_entities(vault_root, pages))
+    @lru_cache(maxsize=1)
+    def backlog_resolver() -> vault_module.WikilinkResolver:
+        # One snapshot, built on first use, for both backlog checks.
+        return find_module.writer_resolver_snapshot(vault_root)
+
     with stage('unprocessed_source') as run:
         if run:
             findings.extend(
                 _check_unprocessed_sources(
-                    vault_root, pages, today=today, source_context=source_context
+                    vault_root, pages, today=today, source_context=source_context, resolver=backlog_resolver
                 )
             )
+    with stage(review_state_module.EPISODE_BACKLOG) as run:
+        if run:
+            findings.extend(_check_uncompiled_episodes(vault_root, pages, resolver=backlog_resolver))
     with stage('unresolved_source_citation') as run:
         if run:
             findings.extend(_check_unresolved_source_citations(vault_root, pages))
@@ -2946,9 +2966,10 @@ def _check_unprocessed_sources(
         request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.captured_source):
             continue
-        # A conversation recap is not a backlog item: every conversation writes
-        # one, and the recap with its episode ledger is already the coverage
-        # record, so a finding per conversation would only be noise.
+        # A conversation recap is not a Source backlog item: every conversation writes
+        # one, and a dismissal of recaps would arm the quiet offer for real Sources. Its
+        # own family is `uncompiled_episode`. `EPISODE_KIND` is the server-reserved
+        # source kind, not a vocabulary entry.
         if page.frontmatter.get("source_type") == source_taxonomy.EPISODE_KIND:
             continue
         # A superseded Source (such as the page that keeps a replaced extraction) was
@@ -3028,6 +3049,61 @@ def _check_unprocessed_sources(
     # Oldest first — drain the worst rot first. Capture-unknown (-1) sinks last.
     rows.sort(key=lambda t: t[0], reverse=True)
     return [f for _, f in rows]
+
+
+@call_spans.timed("audit.uncompiled_episodes")
+def _check_uncompiled_episodes(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    lookup: Callable[[str], find_module.ParsedPage | None] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
+) -> list[AuditFinding]:
+    """One finding per episode whose live recap holds a Decided line that no cited revision holds.
+
+    Coverage is citation only (`episode_coverage`): a revision is cited when a live
+    page the caller can see names it in `sources:`. `lookup` finds that page and
+    defaults to `pages`, so a citing page the caller cannot see reads as absent.
+    """
+    rows: list[AuditFinding] = []
+    for coverage in episode_coverage.survey(
+        vault_root, pages, lookup=lookup, resolver=resolver, status_basis=status_basis
+    ):
+        if not coverage.open:
+            continue
+        captured = _parse_fm_date(coverage.captured)
+        rows.append(
+            AuditFinding(
+                category=review_state_module.EPISODE_BACKLOG,
+                severity="info",
+                path=coverage.path,
+                detail=(
+                    f"Recap has {len(coverage.open)} of {coverage.decided} decided item(s) "
+                    f"in no recap {episode_coverage.WORDING}"
+                ),
+                proposed_fix=(
+                    "Compile or explicitly dismiss every Decided item, then cite this "
+                    "recap from the compiled notes you updated; otherwise dismiss the item."
+                ),
+                meta={
+                    "episode": coverage.key,
+                    "live_ref": coverage.ref,
+                    "captured": coverage.captured,
+                    # The capture date, or the floor the projection sorts last. No grace
+                    # period: the consumer filters by age.
+                    "due_since": (captured or dt.date.min).isoformat(),
+                    "decided": coverage.decided,
+                    "open": len(coverage.open),
+                    # The live revision's path names its content (the filename holds the digest).
+                    "signal_version": content_hash(
+                        "\x1f".join((coverage.path, *coverage.open, "", *coverage.citing))
+                    )[:16],
+                },
+            )
+        )
+    rows.sort(key=lambda row: str(row.meta["due_since"]))
+    return rows
 
 
 def _parse_fm_date(value) -> dt.date | None:

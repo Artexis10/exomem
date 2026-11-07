@@ -4441,6 +4441,7 @@ def commit_recovery(
                 census_guard.recheck(root)
             if preflight.recovery_sidecar_guard is not None:
                 preflight.recovery_sidecar_guard.recheck(root)
+            from . import extraction_parts
             from .governance import catalog_publication, graph_producer
 
             catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
@@ -4480,6 +4481,11 @@ def commit_recovery(
                     content_paths=preflight.catalog_content_paths,
                     graph_replacement_provider=graph_replacement_provider,
                     now=preflight.catalog_publication_now,
+                    # A restored page's part pages leave Trash only after the catalog is ready.
+                    part_folders={
+                        item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
+                        for item in preflight.entries
+                    },
                 )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
