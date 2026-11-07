@@ -14,6 +14,7 @@ are returned to the host. Inline mode preserves a deterministic test/debug path.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import hashlib
 import inspect
@@ -443,6 +444,10 @@ class MediaWorker:
         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
         self._child_started_at = 0.0
         self._engine_waits: list[_Job] = []
+        #: The rows `requeue_runtime_blocks` handed over, taken one per step, and how many of them
+        #: have returned to the queue so far. A deque: the start thread appends while the supervisor pops.
+        self._runtime_requeues: collections.deque[_Job] = collections.deque()
+        self._runtime_requeued = 0
         # The last pressure reading was high; the supervisor then reads it every pass
         # so the memory-blocked retry backs off only while pressure lasts.
         self._pressure_high = False
@@ -1077,6 +1082,57 @@ class MediaWorker:
             return self._holds_completed_transcript(job) or self._present_pending(job)
         except Exception:  # noqa: BLE001 - a sidecar that cannot be shown must not strand the requeue
             log.warning("media worker: pending presentation failed for %s", job.sidecar_path.name, exc_info=True)
+            return False
+
+    def requeue_runtime_blocks(self) -> None:
+        """Return the work that a start without a media runtime blocked to the queue, one row at a time.
+
+        Call it once this start has recorded its runtime as available and run its startup reconcile.
+        The supervisor takes one row per pass, so the start does not wait one page commit per row and
+        a stop leaves at most the row in hand. Inline mode has no supervisor and takes every row here.
+        """
+        store = self._store
+        if store is None:
+            if not media_jobs.job_store_path(self._vault_root).exists():
+                return
+            store = MediaJobStore(self._vault_root, create=False)
+        self._runtime_requeues.extend(store.runtime_blocked_jobs())
+        if self._execution_mode == "process":
+            self._wake.set()
+            return
+        while self._requeue_next_runtime_block(store):
+            pass
+
+    def _requeue_next_runtime_block(self, store: MediaJobStore) -> bool:
+        """Requeue the next row that `requeue_runtime_blocks` handed over. True while rows remain."""
+        try:
+            job = self._runtime_requeues.popleft()
+        except IndexError:
+            return False
+        self._runtime_requeued += self._requeue_runtime_block(store, job)
+        if self._runtime_requeues:
+            return True
+        if self._runtime_requeued:
+            log.info("media worker: requeued %d job(s) a start without a media runtime blocked", self._runtime_requeued)
+        self._runtime_requeued = 0
+        return False
+
+    def _requeue_runtime_block(self, store: MediaJobStore, job: _Job) -> bool:
+        """Show a handed-over row's media as pending while the row is still blocked, then requeue it.
+
+        The row is read again first, so a row that changed since the handover keeps its page. An error
+        leaves the row blocked for the next start with a runtime, and the rows after it still run.
+        Before the page is shown, the page still says blocked; after it, that one page is ahead of its
+        row, as a stop at that point leaves it.
+        """
+        try:
+            current = store.current_runtime_block(job)
+            if current is None:
+                return False
+            self.present_runtime_requeue(current)
+            return store.requeue_runtime_block(current)
+        except Exception:  # noqa: BLE001 - one row's ledger error must not strand the rows after it
+            log.warning("media worker: requeue of %s deferred to the next start", job.sidecar_path.name, exc_info=True)
             return False
 
     def _present_pending(self, job: _Job) -> bool:
@@ -2071,7 +2127,10 @@ class MediaWorker:
                     idle_signature = None
                     relaunch_after = max(relaunch_after, _clock() + _authority_recheck_seconds(exc.code))
                     log.info("media worker: dispatch deferred after %s", exc.code)
-                if self._wake.wait(_SUPERVISE_POLL_SECONDS):
+                # One handed-over row per pass, after the child watch above. The next pass starts at once
+                # while rows remain, and a stop ends the sweep after the row in hand.
+                requeuing = not self._stop_event.is_set() and self._requeue_next_runtime_block(self._store)
+                if self._wake.wait(0 if requeuing else _SUPERVISE_POLL_SECONDS):
                     # Cleared only once it has fired, so a wake that lands
                     # after a timed-out wait is still seen on the next one. A
                     # second enqueue between the wait and the clear wrote the

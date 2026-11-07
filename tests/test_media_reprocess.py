@@ -6,6 +6,7 @@ the atomic commit are real.
 """
 
 import os
+import time
 
 import pytest
 
@@ -530,8 +531,9 @@ def test_a_reprocess_a_paused_start_blocked_runs_with_its_language_after_a_start
     engine = _Engine(monkeypatch)
     binary, sidecar, worker = _completed(vault, "rec.mp3")
     media_processing.reprocess_media(vault, binary, language="et")
-    # The supervisor would start a media child; the test runs the child itself.
-    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    # The supervisor requeues the request but starts no media child; the test runs the child itself.
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda _self: None)
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     started = None
     try:
         monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
@@ -541,6 +543,10 @@ def test_a_reprocess_a_paused_start_blocked_runs_with_its_language_after_a_start
         monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
         started = server_runtime._start_media_worker(vault)
         assert started is not None
+        deadline = time.monotonic() + 10
+        while media_jobs.MediaJobStore(vault).runtime_blocked_jobs():
+            assert time.monotonic() < deadline, "the supervisor did not requeue the paused request"
+            time.sleep(0.02)
         (resumed,) = media_jobs.status(vault)["jobs"]
     finally:
         if started is not None:
