@@ -148,6 +148,7 @@ tests/test_memorybench_provider_sources.py
 tests/test_memorybench_recording_proxy.py
 tests/test_memorybench_setup.py
 tests/test_operator_site_cohort.py
+tests/test_outcome_eval_harness.py
 tests/test_protocol_budget.py
 tests/test_protocol_canary.py
 tests/test_protocol_cli.py
