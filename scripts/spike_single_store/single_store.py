@@ -359,35 +359,94 @@ class Store:
         return stop, thread
 
     # -- outside edits -----------------------------------------------------------
-    def reconcile(self) -> dict:
-        """Import Markdown that differs from the manifest; hold it if the store moved."""
+    def reconcile(self, *, full_hash: bool = False) -> dict:
+        """Import outside changes behind the base-revision check; hold the rest.
+
+        A file whose size and mtime match the manifest is skipped unless
+        `full_hash` is set: an edit can keep both, so a periodic sweep hashes
+        every file. A manifest path missing from disk is an outside delete and
+        is held, unless a new file in the same sweep carries its exact bytes,
+        which makes it a rename.
+        """
         manifest = {r[0]: r[1:] for r in self.conn.execute(
             "SELECT path, hash, rev, size, mtime_ns FROM store_manifest")}
         pending = {r[0] for r in self.conn.execute("SELECT path FROM store_projection")}
-        out = {"scanned": 0, "hashed": 0, "imported": 0, "held": 0, "unchanged_touch": 0}
+        out = {"scanned": 0, "hashed": 0, "imported": 0, "held": 0, "unchanged_touch": 0,
+               "held_deletions": 0, "moves": 0}
+        seen: set[str] = set()
+        new_files: dict[str, tuple[bytes, os.stat_result]] = {}
         for p in (self.vault / "Knowledge Base").rglob("*"):
             if not p.is_file() or p.suffix not in STORED_SUFFIXES or p.name.startswith("."):
                 continue
             rel = p.relative_to(self.vault).as_posix()
+            seen.add(rel)
             out["scanned"] += 1
             st = p.stat()
             m = manifest.get(rel)
-            if m and (st.st_size, st.st_mtime_ns) == (m[2], m[3]):
+            if m and not full_hash and (st.st_size, st.st_mtime_ns) == (m[2], m[3]):
                 continue
             data = p.read_bytes()
             out["hashed"] += 1
             if m and sha(data) == m[0]:
-                out["unchanged_touch"] += 1
+                if (st.st_size, st.st_mtime_ns) != (m[2], m[3]):
+                    out["unchanged_touch"] += 1
                 continue
-            row = self.conn.execute("SELECT rev FROM store_pages WHERE path=?", (rel,)).fetchone()
-            store_rev = row[0] if row else None
-            base_rev = m[1] if m else None
-            if store_rev == base_rev and rel not in pending:
-                self.put(rel, data, op="outside-edit", disk_stat=st)
-                out["imported"] += 1
+            if m is None:
+                new_files[rel] = (data, st)
+                continue
+            self._import_or_hold(rel, data, st, m[1], pending, out)
+        missing = [rel for rel in manifest if rel not in seen and rel not in pending]
+        by_hash = {manifest[rel][0]: rel for rel in missing}
+        for rel, (data, st) in new_files.items():
+            old = by_hash.pop(sha(data), None)
+            if old is not None:
+                self.move(old, rel, data, st)
+                missing.remove(old)
+                out["moves"] += 1
             else:
-                with self.write_lock:
-                    self.conn.execute("INSERT INTO store_held VALUES (?,?,?,?,?,?)",
-                                      (rel, base_rev, store_rev, sha(data), data, time.time()))
-                out["held"] += 1
+                self.put(rel, data, op="outside-create", disk_stat=st)
+                out["imported"] += 1
+        with self.write_lock:
+            for rel in missing:
+                row = self.conn.execute("SELECT rev FROM store_pages WHERE path=?", (rel,)).fetchone()
+                self.conn.execute("INSERT INTO store_held VALUES (?,?,?,?,?,?)",
+                                  (rel, manifest[rel][1], row[0] if row else None, "deleted", None,
+                                   time.time()))
+                out["held_deletions"] += 1
         return out
+
+    def _import_or_hold(self, rel, data, st, base_rev, pending, out) -> None:
+        row = self.conn.execute("SELECT rev FROM store_pages WHERE path=?", (rel,)).fetchone()
+        store_rev = row[0] if row else None
+        if store_rev == base_rev and rel not in pending:
+            self.put(rel, data, op="outside-edit", disk_stat=st)
+            out["imported"] += 1
+        else:
+            with self.write_lock:
+                self.conn.execute("INSERT INTO store_held VALUES (?,?,?,?,?,?)",
+                                  (rel, base_rev, store_rev, sha(data), data, time.time()))
+            out["held"] += 1
+
+    def move(self, old: str, new: str, data: bytes, st: os.stat_result) -> None:
+        """Record an outside rename: the new path imports, the old path's rows go."""
+        self.put(new, data, op="outside-move", disk_stat=st)
+        with self.write_lock:
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                row = c.execute("SELECT rowid FROM pages WHERE path=?", (old,)).fetchone()
+                if row:
+                    self.lex._delete_rowid(c, row[0])
+                else:
+                    self.lex._delete_semantic_units(c, old)
+                for table, column in (("graph_edges", "source_path"), ("graph_nodes", "path"),
+                                      ("graph_parent_refs", "path"), ("graph_dependencies", "source_path"),
+                                      ("graph_dependency_coverage", "source_path"),
+                                      ("store_pages", "path"), ("store_manifest", "path")):
+                    c.execute(f"DELETE FROM {table} WHERE {column} = ?", (old,))
+                c.execute("INSERT INTO store_audit(path, rev, op, ts) VALUES (?,?,?,?)",
+                          (old, None, f"moved-to:{new}", time.time()))
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
