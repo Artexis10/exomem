@@ -3,7 +3,7 @@
 - [x] 1.1 Drive CL-Bench `database_exploration` through its Task API with arms N, F and E, scored by upstream code.
 - [x] 1.2 Build the planted wrong-note suite: governed and plain vaults with identical page bodies, a read-only answerer and a blind judge.
 - [x] 1.3 Build the Harvey LAB suite: task sampling, document conversion, arms S, W and WG, and a blind criteria judge.
-- [ ] 1.4 Add the primary arms as shipped (CL-Bench P, LAB WP: plugin, skills, hooks and the balanced custom-instruction block) and keep the bare-MCP, hook-only and graph-off arms as labelled ablations.
+- [x] 1.4 Add the primary arms as shipped (CL-Bench P, LAB WP: plugin, skills, hooks and the balanced custom-instruction block) and keep the bare-MCP, hook-only and graph-off arms as labelled ablations.
 
 ## 2. One command and the gate
 
@@ -19,5 +19,5 @@
 
 ## 4. Proof and delivery
 
-- [ ] 4.1 Test that an actor environment cannot reach live state or the user's MCP configuration, that a judge item carries no arm identity, and that CL-Bench scoring agrees with an oracle replay.
+- [x] 4.1 Test that an actor environment cannot reach live state or the user's MCP configuration, that a judge item carries no arm identity, and that CL-Bench scoring agrees with an oracle replay.
 - [ ] 4.2 Run scoped tests, the full suite, strict OpenSpec validation and the privacy gate; deliver one PR with an independent review.
