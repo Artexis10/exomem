@@ -182,4 +182,7 @@ return at once.
   retries the run lock's refusal until its wait budget ends (40 s by default).
   In the service, that retry slows a running reconcile job to its progress
   floor meanwhile. → A `maintain_memory` reconcile write from a request
-  surface runs only as a job, and a job thread is not a foreground request.
+  surface runs as a job, and a job thread is not a foreground request. The
+  advanced `reconcile` tool is a request-surface write that is not a job, so
+  its retry can slow a running job for up to that 40 s budget. The refusal
+  itself does not change.
