@@ -7666,6 +7666,7 @@ def _op_activate_context_body(
                     known_generation=(held_map or {}).get("map_generation"),
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
+                    spent_after=reserved_chars,
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):

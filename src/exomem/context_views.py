@@ -1256,6 +1256,7 @@ def activation_packet(
     turn_leads: Callable[[CallerView], TurnLeads] | None = None, known_generation: str | None = None,
     packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
+    spent_after: int = 0,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1266,16 +1267,20 @@ def activation_packet(
 
     `known_generation` is the map generation the caller holds. When it equals the generation of the map this
     caller is served now, the block repeats no item (`unchanged`); the slice is still served.
+
+    `spent_after` is room the caller spends on a block of its own once this returns. `max_chars` already
+    leaves it out, and the slice keeps the share it would have of `max_chars + spent_after`, so the block
+    costs the map's index and never the leads that the turn reached.
     """
     if purpose is not None:
         with principal_module.request_scope(principal_module.effective_principal().with_purpose(purpose)):
             return _activation_packet(
                 vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-                packet_limit=packet_limit, task_context=task_context,
+                packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
             )
     return _activation_packet(
         vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
-        packet_limit=packet_limit, task_context=task_context,
+        packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
     )
 
 
@@ -1285,6 +1290,7 @@ def _activation_packet(
     known_generation: str | None = None,
     packet_limit: int | None = None,
     task_context: Callable[..., dict[str, Any]] | None = None,
+    spent_after: int = 0,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1323,8 +1329,8 @@ def _activation_packet(
         stance_chars = stance.chars(stance_block) if stance_block is not None else 0
         available_chars = max_chars - stance_chars
         # Task invalidation keeps its fixed share even when no complete slice line fits.
-        reserve = (int(available_chars * TURN_SLICE_SHARE) if task_context is not None
-                   else (0 if turn_leads is None else _slice_reserve(available_chars)))
+        reserve = (int((available_chars + spent_after) * TURN_SLICE_SHARE) if task_context is not None
+                   else (0 if turn_leads is None else _slice_reserve(available_chars + spent_after)))
         map_chars = available_chars - reserve - len(description) - 1
         compiled = None
         if view is None:
