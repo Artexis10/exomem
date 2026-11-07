@@ -5762,6 +5762,79 @@ def test_a_job_that_always_outruns_the_watchdog_ends_over_budget_and_the_queue_m
     assert (shown["processing_state"], shown["processing_retryable"]) == (media_jobs.BLOCKED, False)
 
 
+def test_a_watchdog_stop_that_meets_a_held_job_ledger_counts_once_the_ledger_is_free(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+    import subprocess
+    import sys
+
+    from exomem import media_brakes
+
+    # With a stop limit of one, the first stop that counts puts the file over budget. A stop the
+    # exit returned uncounted would run the file, and stop it, a second time.
+    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
+    monkeypatch.setenv(media_brakes.STOP_LIMIT_ENV, "1")
+    monkeypatch.setenv("EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(media_worker, "_MEMORY_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(media_worker, "_MEMORY_RECOVERY_SECONDS", 1.0)
+    result = _preserve_media_stub(vault, filename="long-scan.mp3")
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"
+        )
+    )
+    children: list[subprocess.Popen] = []
+
+    def launch_child(self):
+        assert self._store.claim_next() is not None
+        children.append(
+            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        )
+        self._store.set_worker(children[-1].pid, 1.0)
+        return children[-1]
+
+    # Another writer of the ledger, as a second process or a long migration would be.
+    holder = sqlite3.connect(media_jobs.job_store_path(vault), isolation_level=None, check_same_thread=False)
+    held = threading.Event()
+    refused = threading.Event()
+    running_jobs = media_jobs.MediaJobStore.running_jobs
+
+    def running_jobs_once_another_writer_holds_the_ledger(store: media_jobs.MediaJobStore):
+        # The stop's record asks for the jobs its child ran; the child is dead by then.
+        if not held.is_set():
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+        try:
+            return running_jobs(store)
+        except sqlite3.OperationalError:
+            refused.set()
+            raise
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", launch_child)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "running_jobs", running_jobs_once_another_writer_holds_the_ledger)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    try:
+        assert refused.wait(timeout=15)
+        holder.rollback()
+        settled = _wait_until(lambda: media_jobs.status(vault)["over_budget_count"] == 1, seconds=15.0)
+        supervising = worker._thread.is_alive()
+    finally:
+        if holder.in_transaction:
+            holder.rollback()
+        holder.close()
+        worker.stop()
+        for child in children:
+            child.kill()
+
+    assert settled, f"children {len(children)}; jobs {media_jobs.status(vault)['jobs']}"
+    assert supervising
+    assert len(children) == 1
+
+
 def test_no_child_starts_when_the_next_job_does_not_fit(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # 2.3 GiB anonymous memory plus the default 640 MiB budget passes 80% of 3 GiB;
     # a child would only find no room and exit, every 15 seconds.

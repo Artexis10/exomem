@@ -2483,7 +2483,9 @@ class MediaJobStore:
 
     def current_runtime_block(self, job: MediaJob) -> MediaJob | None:
         """A job from `runtime_blocked_jobs` as it is now, or None once it changed since."""
-        conn = self._connect()
+        # Read-only: the caller holds the vault's mutation boundary, and a WAL reader does not wait for a
+        # ledger writer. The write connection of `runtime_blocked_jobs` already migrated the ledger.
+        conn = self._connect(readonly=True)
         try:
             row = conn.execute(
                 f"SELECT * FROM jobs WHERE {_SAME_RUNTIME_BLOCK_SQL}",
