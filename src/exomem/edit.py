@@ -827,6 +827,14 @@ def apply_section_edit(
                     "`create_missing=true`."
                 ),
             )
+        # The title becomes one heading line. A multi-line argument would write whatever heading
+        # its later lines parse as, and an empty one writes a bare `##`.
+        if not want_title or "\n" in heading.strip() or "\r" in heading.strip():
+            raise EditError(
+                code="INVALID_EDIT",
+                missing=["heading"],
+                reason="`heading` must be one non-empty line to create a section.",
+            )
         # Append a new level-2 section (the scaffold's convention) with `content`.
         if resolver is None:
             resolver = find_module.shared_resolver(vault_root)

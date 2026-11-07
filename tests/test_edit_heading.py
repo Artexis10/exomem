@@ -133,6 +133,20 @@ def test_a_missing_heading_refuses_and_names_the_flag_that_adds_it(vault) -> Non
     assert p.read_bytes() == before
 
 
+@pytest.mark.parametrize("heading", ["Observations\n\n## Injected\ntext", ""], ids=["multi-line", "empty"])
+def test_a_section_is_never_created_under_a_heading_that_is_not_one_line(vault, heading) -> None:
+    p = _seed(vault)
+    before = p.read_bytes()
+
+    with pytest.raises(ValueError, match="INVALID_EDIT"):
+        commands.op_edit_memory(
+            vault, path=NOTE_REL, why="record a fact",
+            operation=_section_operation(heading=heading, create_missing=True),
+        )
+
+    assert p.read_bytes() == before
+
+
 def test_heading_mutually_exclusive_with_new_body(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
     with pytest.raises(edit_module.EditError) as ei:

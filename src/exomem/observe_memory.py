@@ -19,6 +19,7 @@ from . import (
     note_types,
     origin_bindings,
     provenance,
+    semantic_authoring,
     semantic_contract,
     semantic_index,
     semantic_language_registry,
@@ -81,6 +82,7 @@ def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
 
 def _entity_observation_remediation(rel_path: str) -> str:
     """The exact edit that adds one compact unit line to an Entity page, which observe_memory does not write."""
+    section = semantic_authoring.build_semantic_authoring_contract().compact["canonical_section"]
     call = capabilities.active_call_text(
         "edit_memory",
         {
@@ -88,7 +90,7 @@ def _entity_observation_remediation(rel_path: str) -> str:
             "why": "<reason>",
             "operation": {
                 "kind": "edit_section",
-                "heading": "Observations",
+                "heading": section,
                 "new_string": "<one compact unit line>",
                 "create_missing": True,
                 "expected_hash": "<content_hash>",
@@ -97,7 +99,7 @@ def _entity_observation_remediation(rel_path: str) -> str:
     )
     return (
         "An Entity page stays structural, so add the observation as a compact unit line under "
-        f"`## Observations` with {call}. Take `expected_hash` from a whole-page read of the page."
+        f"`{section}` with {call}. Take `expected_hash` from a whole-page read of the page."
     )
 
 

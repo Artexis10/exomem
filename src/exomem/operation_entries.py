@@ -1043,8 +1043,12 @@ def spell_call(
 
 def call_text(command: str, arguments: Mapping[str, Any], shape: str) -> str:
     """A call in prose: the tool name and its arguments, as `tool(key='value', ...)`."""
-    tool, spelled = spell_call(command, arguments, shape)
-    return f"{tool}({', '.join(f'{key}={value!r}' for key, value in spelled.items())})"
+    return format_call(*spell_call(command, arguments, shape))
+
+
+def format_call(tool: str, arguments: Mapping[str, Any]) -> str:
+    """A spelled call in prose: `tool(key='value', ...)`."""
+    return f"{tool}({', '.join(f'{key}={value!r}' for key, value in arguments.items())})"
 
 
 def call_route(command: str, arguments: Mapping[str, Any], shape: str) -> dict[str, Any]:
