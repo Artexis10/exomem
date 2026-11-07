@@ -36,12 +36,14 @@ def actor_record(
 
 
 def observed(init: dict | None) -> dict:
-    """What the CLI's first ``init`` event reported: the model it ran and the tools it served."""
+    """What the CLI's first ``init`` event reported: the model it ran, the tools, skills and plugins it served."""
     init = init or {}
     return {
         "model_reported": init.get("model"),
         "tools": sorted(init.get("tools") or []),
         "mcp_servers": init.get("mcp_servers"),
+        "skills": sorted(init.get("skills") or []),
+        "plugins": init.get("plugins"),
     }
 
 

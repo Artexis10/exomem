@@ -10,10 +10,15 @@ arm:
   which is upstream's stateless baseline.
 - ``F``: a plain memory folder in the workspace, with upstream's own Claude
   memory instruction.
-- ``E``: Exomem over MCP on a fresh disposable vault. The workspace resets per
-  question, so Exomem is the only thing that persists.
-- ``EH``: ``E`` plus the shipped Exomem Claude hook at its default activation
-  packet; each turn records the characters the hook injected.
+- ``P``: Exomem as its users get it, the primary Exomem arm. The shipped Claude plugin (skills
+  and hooks) at its default prominence, the documented balanced custom-instruction block, the
+  Skill tool and the full Exomem tool surface over a fresh disposable vault. The task prompt
+  carries no memory instruction. The workspace resets per question, so Exomem is the only thing
+  that persists. Each turn records the characters the hooks injected.
+- ``E``: ablation. Exomem over MCP alone on a fresh disposable vault, with our memory
+  instruction in the task prompt. The workspace resets per question.
+- ``EH``: diagnostic. ``E`` plus the shipped plugin at its default activation; each turn
+  records the characters the hooks injected.
 
 Every arm has the same built-in file tools, scoped to its workspace. The
 ``oracle`` and ``wrong`` actors play no model: they prove the grader before any
@@ -51,7 +56,16 @@ from epistemic.journeys.f27_replay import (
 from membench.utility.switch_eval.session import hook_push
 
 from .. import record
-from ..isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT, claude_env, hook_env, mcp_server
+from ..isolation import (
+    ACTOR_EFFORT,
+    ACTOR_MODEL,
+    REPO_ROOT,
+    SHIPPED_PROMINENCE,
+    claude_env,
+    hook_env,
+    lay_instruction_block,
+    mcp_server,
+)
 from ..workspace import RUN_ROOT, pin, require_pinned_checkout
 
 UPSTREAM = pin("clbench").checkout()
@@ -76,7 +90,10 @@ FILE_TOOLS = "Read,Write,Edit,Glob,Grep"
 class ArmSpec:
     arm_id: str
     persists: str  # "none" | "folder" | "exomem"
-    hook: bool = False  # the shipped Claude plugin's hooks run beside the memory
+    plugin: bool = False  # the shipped Claude plugin (skills and hooks) loads beside the memory
+    #: Exomem as its users get it: the balanced instruction block and the Skill tool, and the task
+    #: prompt carries no memory instruction. Needs ``plugin``.
+    shipped: bool = False
 
     @property
     def exomem(self) -> bool:
@@ -86,8 +103,9 @@ class ArmSpec:
 ARMS = {
     "N": ArmSpec("N", "none"),
     "F": ArmSpec("F", "folder"),
+    "P": ArmSpec("P", "exomem", plugin=True, shipped=True),
     "E": ArmSpec("E", "exomem"),
-    "EH": ArmSpec("EH", "exomem", hook=True),
+    "EH": ArmSpec("EH", "exomem", plugin=True),
 }
 
 
@@ -145,6 +163,8 @@ class QuestionLog:
     init: dict | None = None
     #: One entry per user turn sent: hook event name -> characters that hook injected.
     hook_chars: list[dict[str, int]] = field(default_factory=list)
+    #: Tools the CLI refused for want of permission. A denied tool cripples an arm without another trace.
+    permission_denials: list[str] = field(default_factory=list)
 
 
 def injected_chars(event: dict) -> int:
@@ -237,6 +257,8 @@ class ClaudeSession:
                         "model",
                         "tools",
                         "mcp_servers",
+                        "skills",
+                        "plugins",
                         "permissionMode",
                         "apiKeySource",
                         "cwd",
@@ -255,6 +277,9 @@ class ClaudeSession:
                     if isinstance(value, int):
                         log.usage[key] = log.usage.get(key, 0) + value
                 log.notional_cost_usd += float(event.get("total_cost_usd") or 0.0)
+                log.permission_denials += [
+                    str(d.get("tool_name", "?")) for d in event.get("permission_denials") or []
+                ]
                 if event.get("is_error"):
                     log.faults.append(
                         f"result error: {event.get('subtype')}: {event.get('result')}"
@@ -293,29 +318,36 @@ class ClaudeActor:
         self.effort = effort
         self.product_python = product_python
         self.envelope = envelope or discover_agent_envelope()
+        # The shipped arm's task prompt says nothing about memory: the plugin and the block do.
         self.memory_instruction = (
-            EXOMEM_MEMORY_INSTRUCTION
+            None
+            if spec.shipped
+            else EXOMEM_MEMORY_INSTRUCTION
             if spec.exomem
             else memory_instruction.format(memory_dir=str(self.work / "memory"))
         )
         self.mcp_config = arm_dir / "mcp.json"
         servers = {"exomem": mcp_server(arm_dir, product_python)} if spec.exomem else {}
         self.mcp_config.write_text(json.dumps({"mcpServers": servers}, indent=2))
+        self.block = arm_dir / "custom-instructions.txt"
+        self.block_record = lay_instruction_block(self.block) if spec.shipped else None
         # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's memory.
         allowed = ["Read(./**)", "Write(./**)", "Edit(./**)"]
+        if spec.shipped:
+            allowed.append("Skill")
         if spec.exomem:
             allowed.append("mcp__exomem")
         self.arm = Arm(
             arm_id=spec.arm_id,
-            prominence="instruction",
-            tools=FILE_TOOLS,
+            prominence=SHIPPED_PROMINENCE if spec.shipped else "instruction",
+            tools=f"{FILE_TOOLS},Skill" if spec.shipped else FILE_TOOLS,
             allowed_tools=",".join(allowed),
-            uses_plugin=spec.hook,
-            uses_custom_instructions=False,
+            uses_plugin=spec.plugin,
+            uses_custom_instructions=spec.shipped,
             configure_ref="membench.outcome.clbench",
         )
         self.env, self.removed_env = claude_env()
-        if spec.hook:
+        if spec.plugin:
             # The hooks are child processes of the CLI: their state and every Exomem path stay in the arm.
             self.env.update(hook_env(arm_dir))
         self._reset_work()
@@ -337,8 +369,8 @@ class ClaudeActor:
             model=self.model,
             max_turns=None,
             first=True,
-            append_system_prompt_file=None,
-            plugin_dir=PLUGIN_DIR if self.spec.hook else None,
+            append_system_prompt_file=self.block if self.spec.shipped else None,
+            plugin_dir=PLUGIN_DIR if self.spec.plugin else None,
         )
         protected = [UPSTREAM, self.arm_dir / "vault", self.arm_dir / "exomem-state"]
         argv += [
@@ -350,13 +382,14 @@ class ClaudeActor:
         return argv
 
     def prompt(self, pending: str | None, turn: dict) -> str:
-        """Upstream's Claude-system prompt shape: feedback, question, schema, memory instruction."""
+        """Upstream's Claude-system prompt shape: feedback, question, schema, and the memory instruction when the arm has one."""
         parts = []
         if pending:
             parts.append(f"FEEDBACK FROM PREVIOUS ACTION: {pending}\n")
         parts.append(turn["prompt"])
         parts.append(turn["schema_instruction"])
-        parts.append("\n\n" + self.memory_instruction)
+        if self.memory_instruction:
+            parts.append("\n\n" + self.memory_instruction)
         return "\n".join(parts)
 
     def play_question(self, env: Env, turn: dict, log: QuestionLog, pending: str | None) -> dict:
@@ -497,13 +530,14 @@ def run_cell(cell: CellSpec) -> Path:
                 "env_removed": list(actor.removed_env),
                 "memory_instruction": actor.memory_instruction,
                 "retrieval": "lexical" if actor.spec.exomem else None,
-                "hook": {
+                "plugin": {
                     "plugin_dir": str(PLUGIN_DIR),
                     "activation": "shipped default: no EXOMEM_RETRIEVE_INJECT override",
                     "hook_home": str(arm_dir / "hook-home"),
                 }
-                if actor.spec.hook
+                if actor.spec.plugin
                 else None,
+                "instruction_block": actor.block_record,
             }
         (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 

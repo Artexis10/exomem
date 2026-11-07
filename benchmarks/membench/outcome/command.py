@@ -23,8 +23,8 @@ SUITES = ("clbench", "lab", "planted")
 PLANTED_ARMS = ("E", "P")
 #: The comparisons each suite reports when both arms ran: (treatment, baseline).
 PAIRS = {
-    "clbench": ("F-N", "E-N", "EH-N", "E-F", "EH-F", "EH-E"),
-    "lab": ("W-S", "WG-W"),
+    "clbench": ("F-N", "P-N", "E-N", "EH-N", "P-F", "E-F", "EH-F", "P-E", "EH-E"),
+    "lab": ("WP-S", "W-S", "WP-W"),
     "planted": ("E-P",),
 }
 #: CL-Bench's decision schedule: upstream's default schedule at seed 42, three independent orderings.
@@ -286,7 +286,12 @@ def report_suite(
     """The unstamped report of runs of one suite. Lab and planted judge first; CL-Bench needs no judge."""
     run_dir = runs_dir() / run_ids[0]
     have = arms or read_record(run_dir)["arms"] or list(suite_arms(suite))
-    wanted = present(PAIRS[suite], have)
+    pairs = PAIRS[suite]
+    if suite == "lab":
+        # WG ablates the arm whose vault it copied: W in runs before WP existed, WP since.
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        pairs += (f"WG-{manifest.get('wg_copy_of', 'W')}",)
+    wanted = present(pairs, have)
     if suite == "clbench":
         from .clbench import report
 

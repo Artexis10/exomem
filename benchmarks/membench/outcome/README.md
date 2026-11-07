@@ -9,18 +9,30 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
 
 - **clbench** is CL-Bench `database_exploration` (upstream scoring, family f35). The actor answers
   a sequence of questions about an unknown database. Arm `N` keeps nothing between questions. Arm
-  `F` keeps a plain memory folder. Arm `E` keeps an Exomem vault. Arm `EH` is `E` plus the shipped
-  Exomem Claude plugin directory, with its hooks at their default activation. The suite answers whether
-  memory lowers the queries and raises the score across a sequence, and whether Exomem beats a folder.
+  `F` keeps a plain memory folder. Arm `P` is Exomem as its users get it, the primary Exomem arm:
+  the shipped Claude plugin (skills and hooks) at its default prominence, the documented
+  balanced custom-instruction block, the Skill tool, the full Exomem tool surface and a task
+  prompt that says nothing about memory. Arm `E` is an ablation: Exomem over MCP alone, with
+  our memory instruction in the task prompt. Arm `EH` is a diagnostic: `E` plus the plugin. The
+  suite answers whether memory lowers the queries and raises the score across a sequence, and
+  whether Exomem as shipped beats a folder.
 - **lab** is Harvey LAB multi-document synthesis (family f36). The actor writes one deliverable per
-  matter. Arm `S` reads the documents. Arm `W` gets an Exomem vault compiled from those documents
-  beforehand. Arm `WG` is `W` with the graph index off, an ablation. A blind judge scores each
-  deliverable against the task's own criteria. The suite answers whether a compiled vault helps on
-  long, multi-document work.
+  matter. Arm `S` reads the documents. Arm `WP` is Exomem as its users get it, the primary Exomem
+  arm: a compile session builds a vault from the documents, then a fresh task session writes the
+  deliverable. Both sessions get the plugin, the balanced block, the Skill tool and the full
+  Exomem tool surface, and the task prompt says nothing about memory. Arm `W` is an ablation:
+  Exomem over MCP alone, with the task prompt telling the actor its memory holds notes. Arm `WG`
+  is `WP` with the graph index off, run on a copy of `WP`'s compiled vault, an ablation. A blind
+  judge scores each deliverable against the task's own criteria. The suite answers whether a
+  compiled vault helps on long, multi-document work.
 - **planted** is the planted wrong-note suite (family f37). A vault holds a stale or wrong note and
   its correction. Arm `E` records the correction as Exomem governance. Arm `P` holds the same pages
   without it. A blind judge reads each answer against the case key. The suite answers whether
   governance keeps the agent from trusting the stale value.
+
+The plugin arms (`P`, `EH`, `WP`, `WG`) run the plugin's hooks with no service credential. The
+hooks keep their state inside the arm directory. The report records the characters the hooks
+injected, and any tool the CLI refused for want of permission.
 
 ## Where data and evidence live
 
@@ -42,8 +54,8 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
   amendment receipt froze. Either failure is a one-line refusal. Its report says
   `"evidence": "decision"`. CL-Bench runs upstream's `default` schedule at seed 42, run indexes
   1, 2 and 3.
-- **panel** is the release panel. It runs the Exomem arms on a fixed slice: CL-Bench `E` and `EH` at
-  run index 0, the LAB dev matters with `W`, and the planted dev cases with `E`. It is evidence and
+- **panel** is the release panel. It runs the Exomem arms on a fixed slice: CL-Bench `P` and `E` at
+  run index 0, the LAB dev matters with `WP`, and the planted dev cases with `E`. It is evidence and
   never a gate. If the actor's CLI version or reported model differs from the previous panel, the
   control arms (`N`, `F`, `S`, `P`) run too, and the `.md` names the change.
 

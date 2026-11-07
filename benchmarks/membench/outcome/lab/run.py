@@ -1,21 +1,24 @@
-"""Run Harvey LAB matters under three memory arms with subscription Claude sessions.
+"""Run Harvey LAB matters under four memory arms with subscription Claude sessions.
 
 Each session is a fresh headless Claude Code process that writes one deliverable
 for the task's instructions. What differs between arms is what the session can
 use besides the converted documents:
 
 - ``S``: nothing. Read, Write, Edit, Glob and Grep over the task folder.
-- ``W``: Exomem over MCP on a fresh disposable vault. A compile session first
-  captures each document as a Source and writes the notes a later task would
-  need, without seeing the task. A fresh task session then gets the same file
-  tools plus Exomem's read tools and a sentence that its memory holds notes
-  from this matter.
-- ``WG``: the W task session again on a copy of W's vault and state taken right
-  after the compile, with ``EXOMEM_DISABLE_GRAPH_INDEX=1``. A diagnostic
-  ablation of one product component, not a product configuration.
+- ``WP``: Exomem as its users get it, the primary Exomem arm, over a fresh disposable vault.
+  A compile session first captures each document as a Source and writes the notes a later task
+  would need, without seeing the task. A fresh task session then writes the deliverable. Both
+  sessions get the shipped Claude plugin (skills and hooks), the documented balanced
+  custom-instruction block, the Skill tool, the full Exomem tool surface and the file tools.
+  The task prompt is the plain task and says nothing of memory.
+- ``W``: ablation. Exomem over MCP alone: the compile session gets the full Exomem tools, and
+  the task session gets Exomem's read tools and a sentence that its memory holds notes from
+  this matter. No plugin, no instruction block, no Skill tool.
+- ``WG``: ablation. The WP task session again on a copy of WP's vault and state taken right
+  after the compile, with ``EXOMEM_DISABLE_GRAPH_INDEX=1``. A diagnostic of one product
+  component, not a product configuration.
 
-The task prompt is the same in every arm. ``judge`` scores the deliverables.
-``membench outcome run lab`` drives this module.
+``judge`` scores the deliverables. ``membench outcome run lab`` drives this module.
 """
 
 from __future__ import annotations
@@ -26,9 +29,13 @@ import subprocess
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
+    PLUGIN_DIR,
+    AgentEnvelope,
     Arm,
     build_turn_argv,
     discover_agent_envelope,
@@ -37,20 +44,52 @@ from epistemic.journeys.f27_replay import (
 
 from .. import record
 from ..clbench.run import ClaudeSession, QuestionLog
-from ..isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT, claude_env, mcp_server, server_pins
+from ..isolation import (
+    ACTOR_EFFORT,
+    ACTOR_MODEL,
+    REPO_ROOT,
+    SHIPPED_PROMINENCE,
+    claude_env,
+    hook_env,
+    lay_instruction_block,
+    mcp_server,
+    server_pins,
+)
 from ..workspace import RUN_ROOT, require_pinned_checkout
 from .prepare import CASES, UPSTREAM, slug
 
 SESSION_TIMEOUT_SECONDS = 1800.0
 SERVER_EXIT_SECONDS = 60.0
 
-ARMS = ("S", "W", "WG")
+
+@dataclass(frozen=True)
+class ArmSpec:
+    exomem: bool = False
+    #: Exomem as its users get it: the plugin, the balanced instruction block, the Skill tool and
+    #: the full Exomem tool surface in every session, and a task prompt that says nothing of memory.
+    shipped: bool = False
+    #: A compile session fills the vault before the task session.
+    compiles: bool = False
+    #: A diagnostic ablation of one product component, not a product configuration.
+    graph_off: bool = False
+
+
+SPECS = {
+    "S": ArmSpec(),
+    "WP": ArmSpec(exomem=True, shipped=True, compiles=True),
+    "W": ArmSpec(exomem=True, compiles=True),
+    "WG": ArmSpec(exomem=True, shipped=True, graph_off=True),
+}
+ARMS = tuple(SPECS)
+#: An arm that copies another arm's compiled vault instead of compiling its own.
+COPIES = {"WG": "WP"}
 FILE_TOOLS = "Read,Write,Edit,Glob,Grep"
 # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's files.
 FILE_ALLOWS = ("Read(./**)", "Write(./**)", "Edit(./**)")
 EXOMEM_READ_ALLOWS = tuple(
     f"mcp__exomem__{tool}" for tool in ("recall_context", "search_memory", "read_memory")
 )
+SHIPPED_ALLOWS = ("Skill", "mcp__exomem")
 
 TASK_PROMPT = (
     "{instructions}\n\n"
@@ -85,15 +124,21 @@ class Lab:
         model: str,
         effort: str,
         product_python: Path | None = None,
+        envelope: AgentEnvelope | None = None,
     ) -> None:
         self.run_dir = run_dir
         self.task_slugs = task_slugs
         self.model = model
         self.effort = effort
         self.product_python = product_python
-        self.envelope = discover_agent_envelope()
+        self.envelope = envelope or discover_agent_envelope()
         self.env, self.removed_env = claude_env()
-        self.product = record.product_record(run_dir, product_python)
+        #: The instruction block of the shipped arms, laid once by ``run_lab``.
+        self.block = run_dir / "custom-instructions.txt"
+
+    @cached_property
+    def product(self) -> dict:
+        return record.product_record(self.run_dir, self.product_python)
 
     def protected(self, task_slug: str, arm: str) -> list[Path]:
         """Paths a session must not read: the rubric, every other run, and every other arm's files."""
@@ -110,14 +155,16 @@ class Lab:
             own / "transcripts",
         ]
 
-    def argv(self, mcp_config: Path, allowed: list[str], protected: list[Path]) -> list[str]:
+    def argv(
+        self, mcp_config: Path, allowed: list[str], protected: list[Path], *, shipped: bool = False
+    ) -> list[str]:
         arm = Arm(
             arm_id="lab",
-            prominence="instruction",
-            tools=FILE_TOOLS,
+            prominence=SHIPPED_PROMINENCE if shipped else "instruction",
+            tools=f"{FILE_TOOLS},Skill" if shipped else FILE_TOOLS,
             allowed_tools=",".join(allowed),
-            uses_plugin=False,
-            uses_custom_instructions=False,
+            uses_plugin=shipped,
+            uses_custom_instructions=shipped,
             configure_ref="membench.outcome.lab",
         )
         argv = build_turn_argv(
@@ -129,8 +176,8 @@ class Lab:
             model=self.model,
             max_turns=None,
             first=True,
-            append_system_prompt_file=None,
-            plugin_dir=None,
+            append_system_prompt_file=self.block if shipped else None,
+            plugin_dir=PLUGIN_DIR if shipped else None,
         )
         return argv + [
             "--effort",
@@ -139,12 +186,24 @@ class Lab:
             ",".join(f"Read(/{p}/**)" for p in protected),
         ]
 
-    def play(self, name: str, argv: list[str], cwd: Path, transcript: Path, prompt: str) -> dict:
+    def env_for(self, arm_dir: Path, session: str, *, shipped: bool = False) -> dict[str, str]:
+        """A session's environment. A shipped session's hooks keep their state in a home of its own under the arm."""
+        return {**self.env, **hook_env(arm_dir, session)} if shipped else self.env
+
+    def play(
+        self,
+        name: str,
+        argv: list[str],
+        env: dict[str, str],
+        cwd: Path,
+        transcript: Path,
+        prompt: str,
+    ) -> dict:
         """One fresh session, one user turn. Timeouts and exits are recorded as faults, not raised."""
         refuse_unsafe_out_dir(cwd)
         transcript.parent.mkdir(exist_ok=True)
         log = QuestionLog(question_id=name, index=0)
-        session = ClaudeSession(argv, self.env, cwd, transcript)
+        session = ClaudeSession(argv, env, cwd, transcript)
         start = time.monotonic()
         try:
             reply = session.send(prompt, log, SESSION_TIMEOUT_SECONDS)
@@ -165,21 +224,9 @@ class Lab:
             "reply": reply,
             "timed_out": timed_out,
             # A denied file or Exomem tool would cripple the arm without any other trace.
-            "permission_denials": denied_tools(transcript),
+            "permission_denials": log.permission_denials,
             "log": log.__dict__,
         }
-
-
-def denied_tools(transcript: Path) -> list[str]:
-    names: list[str] = []
-    for line in transcript.read_text().splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "result":
-            names += [d.get("tool_name", "?") for d in event.get("permission_denials") or []]
-    return names
 
 
 # --------------------------------------------------------------------------
@@ -238,10 +285,14 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
     """One arm of one task. ``snapshot_to`` names the arm that gets a copy of this arm's compiled vault."""
     task_slug = slug(case["task_id"])
     arm_dir = lab.run_dir / task_slug / arm
-    arm_dir.mkdir(parents=True, exist_ok=True)  # WG's directory already holds the snapshot
-    if arm == "WG" and not (arm_dir / "exomem-state").exists():
-        # Without the snapshot ``mcp_server`` would lay a fresh empty vault and WG would measure nothing.
-        return write_result(lab, case, arm, {}, None, [], ["no snapshot of W's vault: WG not run"])
+    arm_dir.mkdir(
+        parents=True, exist_ok=True
+    )  # a copying arm's directory already holds the snapshot
+    spec = SPECS[arm]
+    if arm in COPIES and not (arm_dir / "exomem-state").exists():
+        # Without the snapshot ``mcp_server`` would lay a fresh empty vault and the arm would measure nothing.
+        fault = f"no snapshot of {COPIES[arm]}'s vault: {arm} not run"
+        return write_result(lab, case, arm, {}, None, [], [fault])
     work = arm_dir / "work"
     lay_work_dir(prepared_task, work, output=True)
     task_prompt = TASK_PROMPT.format(
@@ -251,27 +302,31 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
     sessions: dict[str, dict] = {}
     faults: list[str] = []
 
-    if arm == "S":
-        mcp_config = arm_dir / "mcp.json"
+    mcp_config = arm_dir / "mcp.json"
+    if not spec.exomem:
         mcp_config.write_text(json.dumps({"mcpServers": {}}, indent=2))
-        allowed = list(FILE_ALLOWS)
+        allowed = compile_allowed = list(FILE_ALLOWS)
     else:
         server = mcp_server(arm_dir, lab.product_python)
-        if arm == "WG":
+        if spec.graph_off:
             server["env"]["EXOMEM_DISABLE_GRAPH_INDEX"] = "1"
-        mcp_config = arm_dir / "mcp.json"
         mcp_config.write_text(json.dumps({"mcpServers": {"exomem": server}}, indent=2))
-        allowed = [*FILE_ALLOWS, *EXOMEM_READ_ALLOWS]
-        task_prompt += f"\n\n{MEMORY_SENTENCE}"
+        if spec.shipped:
+            allowed = compile_allowed = [*FILE_ALLOWS, *SHIPPED_ALLOWS]
+        else:
+            allowed = [*FILE_ALLOWS, *EXOMEM_READ_ALLOWS]
+            compile_allowed = [*FILE_ALLOWS, "mcp__exomem"]
+            task_prompt += f"\n\n{MEMORY_SENTENCE}"
 
-    if arm == "W":
+    if spec.compiles:
         # The compile session has its own folder: no task, no output folder, nothing to carry over.
         compile_work = arm_dir / "compile-work"
         lay_work_dir(prepared_task, compile_work, output=False)
         pages_before = count_pages(arm_dir / "vault")
         sessions["compile"] = lab.play(
             f"{task_slug}:{arm}:compile",
-            lab.argv(mcp_config, [*FILE_ALLOWS, "mcp__exomem"], protected),
+            lab.argv(mcp_config, compile_allowed, protected, shipped=spec.shipped),
+            lab.env_for(arm_dir, "compile", shipped=spec.shipped),
             compile_work,
             arm_dir / "transcripts" / "compile.jsonl",
             COMPILE_PROMPT,
@@ -283,12 +338,13 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
         if snapshot_to:
             try:
                 snapshot(arm_dir, lab.run_dir / task_slug / snapshot_to)
-            except Exception as exc:  # noqa: BLE001 - WG is skipped and the fault stays visible
+            except Exception as exc:  # noqa: BLE001 - the copying arm is skipped and the fault stays visible
                 faults.append(f"snapshot for {snapshot_to} failed: {exc}")
 
     sessions["task"] = lab.play(
         f"{task_slug}:{arm}:task",
-        lab.argv(mcp_config, allowed, protected),
+        lab.argv(mcp_config, allowed, protected, shipped=spec.shipped),
+        lab.env_for(arm_dir, "task", shipped=spec.shipped),
         work,
         arm_dir / "transcripts" / "task.jsonl",
         task_prompt,
@@ -344,7 +400,8 @@ def run_task(lab: Lab, prepared: Path, task_id: str, arms: list[str]) -> None:
     print(f"{task_id}: arms {','.join(arms)}", flush=True)
     for arm in arms:
         try:
-            run_arm(lab, case, prepared_task, arm, "WG" if arm == "W" and "WG" in arms else None)
+            copy_to = next((c for c, source in COPIES.items() if source == arm and c in arms), None)
+            run_arm(lab, case, prepared_task, arm, copy_to)
         except Exception:  # noqa: BLE001 - one arm's failure must not stop the others
             error = traceback.format_exc()
             write_result(lab, case, arm, {}, None, [], [f"arm crashed: {error.splitlines()[-1]}"])
@@ -385,11 +442,15 @@ def run_lab(
     unknown = set(task_ids) - set(prepared_manifest["tasks"])
     if unknown:
         raise SystemExit(f"not in {prepared}: {sorted(unknown)}")
-    if not set(arms) <= set(ARMS) or ("WG" in arms and "W" not in arms):
-        raise SystemExit(f"--arms takes {ARMS}; WG needs W, whose vault it copies")
+    if not set(arms) <= set(ARMS):
+        raise SystemExit(f"--arms takes {ARMS}")
+    for copier, source in COPIES.items():
+        if copier in arms and source not in arms:
+            raise SystemExit(f"--arms: {copier} needs {source}, whose vault it copies")
     arms = [a for a in ARMS if a in arms]
     run_dir.mkdir(parents=True, exist_ok=True)
     lab = Lab(run_dir, [slug(t) for t in task_ids], model, effort, product_python)
+    shipped_arms = [a for a in arms if SPECS[a].shipped]
     manifest = {
         "run_id": run_dir.name,
         "prepared": prepared,
@@ -407,13 +468,22 @@ def run_lab(
         "prompts": {
             "task": TASK_PROMPT,
             "memory_sentence": MEMORY_SENTENCE,
+            "memory_sentence_arms": [a for a in arms if SPECS[a].exomem and not SPECS[a].shipped],
             "compile": COMPILE_PROMPT,
         },
         "file_tools": FILE_TOOLS,
-        "allowed": {"file": list(FILE_ALLOWS), "exomem_read": list(EXOMEM_READ_ALLOWS)},
-        # Isolation pins disable embeddings: the W arms retrieve lexically.
+        "allowed": {
+            "file": list(FILE_ALLOWS),
+            "exomem_read": list(EXOMEM_READ_ALLOWS),
+            "shipped": list(SHIPPED_ALLOWS),
+        },
+        "shipped_arms": shipped_arms,
+        "plugin_dir": str(PLUGIN_DIR) if shipped_arms else None,
+        "instruction_block": lay_instruction_block(lab.block) if shipped_arms else None,
+        # Isolation pins disable embeddings: the Exomem arms retrieve lexically.
         "exomem_retrieval": "lexical",
         "wg_ablation": "EXOMEM_DISABLE_GRAPH_INDEX=1",
+        "wg_copy_of": COPIES["WG"],
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     with ThreadPoolExecutor(max_workers=jobs) as pool:

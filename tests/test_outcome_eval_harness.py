@@ -13,10 +13,11 @@ from pathlib import Path
 import pytest
 from epistemic.journeys.f27_replay import AgentEnvelope
 from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, run_cell
-from membench.outcome.isolation import child_env, server_pins
+from membench.outcome.isolation import child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
 from membench.outcome.lab import judge as lab_judge
 from membench.outcome.lab.prepare import slug
+from membench.outcome.lab.run import FILE_ALLOWS, SHIPPED_ALLOWS, Lab
 from membench.outcome.planted import judge as planted_judge
 from membench.outcome.planted.answer import answer_actor
 from membench.outcome.workspace import head_of, pin
@@ -46,6 +47,7 @@ def paths_outside(env: dict[str, str], root: Path) -> list[str]:
     ]
 
 
+@pytest.mark.reads_repository_docs  # the shipped arms read the instruction block out of docs/prominence.md
 def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
     """An actor started from a shell that has a live Exomem set up must not write to or read from it."""
     for name, value in LIVE_ENV.items():
@@ -55,7 +57,7 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
     # Per surface: its directory, the environments the actor runs with, the Exomem servers' own
     # environments (which also fix the state root), the actor's argv and its MCP config file.
     surfaces = {}
-    for arm in ("E", "EH"):
+    for arm in ("P", "E", "EH"):
         arm_dir = tmp_path / arm
         actor = ClaudeActor(
             ARMS[arm], arm_dir, "model-under-test", "high", "memory {memory_dir}", envelope=ENVELOPE
@@ -68,6 +70,17 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
             actor.argv(),
             actor.mcp_config,
         )
+    # LAB's shipped arm: the compile and the task session each start the plugin's hooks.
+    lab_dir = tmp_path / "lab-run"
+    lab = Lab(lab_dir, ["matter"], "model-under-test", "high", envelope=ENVELOPE)
+    wp_dir = lab_dir / "matter" / "WP"
+    surfaces["lab WP"] = (
+        lab_dir,
+        [lab.env_for(wp_dir, session, shipped=True) for session in ("compile", "task")],
+        [mcp_server(wp_dir)["env"]],
+        lab.argv(wp_dir / "mcp.json", [*FILE_ALLOWS, *SHIPPED_ALLOWS], [], shipped=True),
+        None,
+    )
     answer_dir = tmp_path / "planted-E"
     argv, env, mcp_config = answer_actor(answer_dir, "model-under-test", "high", None, ENVELOPE)
     server = json.loads(mcp_config.read_text())["mcpServers"]["exomem"]["env"]
@@ -97,8 +110,16 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
                 f"{name} would also load the operator's MCP servers"
             )
             assert Path(argv[argv.index("--mcp-config") + 1]).is_relative_to(root)
-    # A hook is a child of the actor: its home must be the arm's own.
-    assert Path(surfaces["clbench EH"][1][0]["EXOMEM_HOOK_HOME"]).is_relative_to(tmp_path / "EH")
+    # A hook is a child of the actor: its home must be the arm's own. So must the instruction block.
+    for name in ("clbench P", "clbench EH", "lab WP"):
+        root, envs, _servers, argv, _config = surfaces[name]
+        assert "--plugin-dir" in argv, f"{name} would not load the plugin"
+        assert all(Path(env["EXOMEM_HOOK_HOME"]).is_relative_to(root) for env in envs), name
+    for name in ("clbench P", "lab WP"):
+        root, _envs, _servers, argv, _config = surfaces[name]
+        block = Path(argv[argv.index("--append-system-prompt-file") + 1])
+        assert block.is_relative_to(root), f"{name} reads its instruction block from outside"
+    assert "--plugin-dir" not in surfaces["clbench E"][3], "the E ablation would load the plugin"
 
 
 def test_judge_input_never_names_the_arm(tmp_path, monkeypatch):

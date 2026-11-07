@@ -7,19 +7,24 @@ module adds the two that keep a hook or writer from reaching a running service.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 from collection_ingest.mcp_session import isolated_env
-from epistemic.journeys.f27_replay import environment_floor
+from epistemic.journeys.f27_replay import custom_instructions_block, environment_floor
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The actor model and effort every suite runs unless the operator names another.
 ACTOR_MODEL = "claude-sonnet-5-5"
 ACTOR_EFFORT = "high"
+
+#: The prominence the plugin and its docs ship as the default. The documented block for it is
+#: appended to the system prompt of an arm that plays Exomem as its users get it.
+SHIPPED_PROMINENCE = "balanced"
 
 #: Non-EXOMEM keys the server itself needs from the pins.
 _SERVER_KEYS = frozenset(
@@ -78,11 +83,31 @@ def claude_env() -> tuple[dict[str, str], tuple[str, ...]]:
     return env, removed
 
 
-def hook_env(root: Path) -> dict[str, str]:
-    """What the shipped Claude hooks inherit: the arm's own pins and hook home, no live service route."""
+def hook_env(root: Path, session: str | None = None) -> dict[str, str]:
+    """What the shipped Claude hooks inherit: the arm's own pins and hook home, no live service route.
+
+    The hook keeps its cooldowns in the hook home. ``session`` gives one session its own home,
+    for sessions that must each start from the hook's initial state.
+    """
     pins = {k: v for k, v in server_pins(root).items() if k.startswith("EXOMEM_")}
-    pins["EXOMEM_HOOK_HOME"] = str(root / "hook-home")
+    home = root / "hook-home"
+    pins["EXOMEM_HOOK_HOME"] = str(home / session if session else home)
     return pins
+
+
+def lay_instruction_block(path: Path) -> dict:
+    """Write the documented custom-instruction block for the shipped prominence to ``path``.
+
+    Read out of the doc that publishes it at run time, so the arm cannot drift from what users
+    are told. Returns the record a manifest keeps: the prominence, where it was read, its digest.
+    """
+    block, citation = custom_instructions_block(SHIPPED_PROMINENCE)
+    path.write_text(block, encoding="utf-8")
+    return {
+        "prominence": SHIPPED_PROMINENCE,
+        "source": citation,
+        "sha256": hashlib.sha256(block.encode()).hexdigest(),
+    }
 
 
 def product_python_of(product_python: Path | None) -> str:

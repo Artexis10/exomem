@@ -19,7 +19,7 @@ from pathlib import Path
 from recall_parity.scoring import percentile_bootstrap_ci
 
 BOOTSTRAP_SEED = 20261107
-DEFAULT_PAIRS = ("F-N", "E-N", "E-F", "EH-E")
+DEFAULT_PAIRS = ("F-N", "P-N", "E-N", "P-F", "E-F", "P-E", "EH-E")
 
 
 Rows = dict[tuple[int | None, str], dict]
@@ -46,11 +46,14 @@ def arm_summary(rows: Rows) -> dict:
     usage: dict[str, int] = {}
     tools: dict[str, int] = {}
     injected: dict[str, int] = {}
+    denied: dict[str, int] = {}
     for log in logs:
         for k, v in log["usage"].items():
             usage[k] = usage.get(k, 0) + v
         for k, v in log["tool_uses"].items():
             tools[k] = tools.get(k, 0) + v
+        for tool in log.get("permission_denials", []):
+            denied[tool] = denied.get(tool, 0) + 1
         for turn in log.get("hook_chars", []):
             for event, chars in turn.items():
                 injected[event] = injected.get(event, 0) + chars
@@ -74,6 +77,8 @@ def arm_summary(rows: Rows) -> dict:
         "tool_uses": dict(sorted(tools.items())),
         # Characters the shipped hook added to the context, by hook event; empty where no hook ran.
         "hook_chars": dict(sorted(injected.items())),
+        # Tools the CLI refused for want of permission; any entry means the arm ran crippled.
+        "permission_denials": dict(sorted(denied.items())),
     }
 
 

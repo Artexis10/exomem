@@ -22,7 +22,7 @@ from .judging import JudgeSpec
 
 DOCS = REPO_ROOT / "docs" / "benchmarks" / "outcome"
 #: The Exomem arms of the panel, and the controls that explain an actor change.
-PANEL = {"clbench": ("E", "EH"), "lab": ("W",), "planted": ("E",)}
+PANEL = {"clbench": ("P", "E"), "lab": ("WP",), "planted": ("E",)}
 CONTROLS = {"clbench": ("N", "F"), "lab": ("S",), "planted": ("P",)}
 #: What each suite measures per case, read out of the per-case report.
 MEASURES = {
@@ -114,7 +114,7 @@ def run_panel(
         else "only with --controls (no earlier panel)"
     )
     print(
-        f"panel {version}: CL-Bench E,EH on the default schedule at run index 0; LAB dev W; planted dev E. "
+        f"panel {version}: CL-Bench P,E on the default schedule at run index 0; LAB dev WP; planted dev E. "
         f"Control arms run {again}.",
         flush=True,
     )
