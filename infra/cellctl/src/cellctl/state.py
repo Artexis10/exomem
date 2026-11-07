@@ -322,6 +322,9 @@ class ClusterObservation:
     # Every export and import object of the cell in the staging bucket: all versions, hidden ones
     # and unfinished uploads included. It holds for every cell, old or new.
     staging_objects_absent_confirmed: bool = False
+    # add-cloud-media-store D9: the edge may still admit the deleted cell. reconcile.py sets it from the
+    # edge's exact-set evidence; a cell that stays admitted keeps `deleting`.
+    media_revocation_pending: bool = False
 
 
 @dataclass

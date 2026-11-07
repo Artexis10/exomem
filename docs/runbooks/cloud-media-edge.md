@@ -22,6 +22,10 @@ canary has served real traffic.
   With the edge off, cellctl runs on a schema with or without the columns.
 - The edge's bucket and its application key are separate from cellctl's backup key.
   Create a bucket key limited to the media bucket.
+- cellctl meters each cell's stored bytes with a second key for the same bucket. It can only list.
+  Terraform creates it with the edge key, in `infra/terraform/durability/media.tf`.
+- The key watcher's pinned set lists both keys and the bucket's settings. Pin them as
+  "Pin the media keys" in `cloud-key-custody.md` says, right after the Terraform apply.
 
 ## Create the Secrets
 
@@ -37,9 +41,14 @@ directory when you finish.
 5. Create the bucket-key Secret:
    `kubectl -n exomem-cloud create secret generic exomem-media-edge-b2 --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
 
+6. Create the list-key Secret for cellctl. Take the values from the `cloud_media_list_application_key_id` and
+   `cloud_media_list_application_key` outputs of `infra/terraform/durability`:
+   `kubectl -n exomem-cloud create secret generic exomem-cloud-media-list --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
+
 The private key goes only to cellctl. The edge receives the public key and the
-bucket key, and never a cell's keys. For a managed deployment, deliver the same
-three Secrets through the static-secret procedure instead of `kubectl`.
+bucket key, and never a cell's keys. cellctl receives the list key, which cannot read or change a file.
+For a managed deployment, deliver the same four Secrets through the static-secret
+procedure instead of `kubectl`.
 
 ## Turn it on for the canary
 
@@ -47,7 +56,11 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 2. Pick a free address in the Service range for the edge. Record it.
 3. Set these values and deploy the chart:
    `mediaEdge.enabled=true`, `mediaEdge.endpoint=http://<address>:8769`,
-   `mediaEdge.bucket=<bucket>`, `mediaEdge.cellIds=["<canary>"]`.
+   `mediaEdge.bucket=<bucket>`, `mediaEdge.bucketId=<bucket id>`, `mediaEdge.cellIds=["<canary>"]`.
+   Take the bucket name and ID from the `cloud_media_bucket_name` and `cloud_media_bucket_id` outputs.
+   `mediaEdge.physicalHeadroom` defaults to 2: cellctl alerts when a cell's prefix holds more than
+   `mediaEdge.storePolicy.allowance_bytes` times that factor. It is a starting figure. Change it from
+   the readings in the cellctl log line `holds <n> media byte(s)` once a canary has run for a month.
 4. Check that `exomem-media-edge` is Ready and that its Service address matches `mediaEdge.endpoint`.
 5. Check that ConfigMap `exomem-media-edge-active-set` lists the canary in `active-set.json`.
 6. Wait for cellctl to re-render the canary. Check that its Secret `cell-credentials` has the keys
@@ -55,11 +68,31 @@ three Secrets through the static-secret procedure instead of `kubectl`.
 7. Check that the canary's namespace carries the label that opens the network to the edge:
    `kubectl get namespace exo-cell-<canary> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
    Expect `true`.
-8. Read `/v1/generation` on the edge. It must report the generation in the ConfigMap.
-   The edge reports a generation only after it drains the requests of the earlier set.
+8. Read `/v1/generation` on the edge. `loaded` must equal the generation in the ConfigMap, and `set_sha256` must equal
+   the SHA-256 of the ConfigMap's `active-set.json` value. `bucket` must equal `mediaEdge.bucket`.
+   The edge reports `generation` only after it drains the requests of the earlier set.
 
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
+
+## Read the physical meter
+
+After each backup of a cell that has a media store, cellctl lists that cell's prefix
+`cells/<cell>/` in the media bucket with the list key. It logs the bytes of all upload versions, the count of
+unfinished large files and the count of hide entries. The figure is the operator's. It is not the owner's allowance,
+and a failed listing leaves it unknown, never 0.
+
+Two platform alerts name the cell and no content:
+
+- `media-hide-entry-<cell_id>` fires on any hide entry. The edge cannot write one, so a credential other than
+  the edge's touched the bucket. Check the key watcher, then the provider's event log.
+- `media-over-allowance-<cell_id>` fires when the prefix holds more than the allowance times
+  `mediaEdge.physicalHeadroom`. Kept versions count in full until the follow-on change destroys them, so a
+  cell that rewrites its originals grows this figure without growing the owner's.
+
+Both alerts resolve on the next listing that shows neither, and when the cell is deleted. A restart of cellctl
+forgets that an alert fired: it fires again at the next listing, but it does not resolve one that was
+fixed during the restart. Resolve that one at the receiver.
 
 ## Replace one cell's credential
 
@@ -67,8 +100,9 @@ the canary reads and writes media through the edge.
 2. Deploy the chart.
 3. Check that the ConfigMap lists the cell with a higher version and that the generation rose.
 
-The old credential stops working when the edge reports the new generation. Treat a
-revocation as finished only when `/v1/generation` reports that number.
+The old credential stops working when the edge loads the new set. Treat a revocation as
+finished only when `/v1/generation` reports that generation as `loaded` and as `generation`,
+with the digest of the published set. A higher generation with another digest is not the published set.
 
 ## Undo
 
@@ -113,7 +147,7 @@ counts its evicted originals.
     `kubectl get namespace exo-cell-<cell> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
     Expect no output.
 11. Check that the ConfigMap no longer lists the cell and that `/v1/generation` reports
-    the new number.
+    the new number and the digest of the published set.
 
 Expected result: the cell serves its local files and keeps its store identity alone, so
 it reads no original as deleted. It has no key, credential or edge access.
@@ -145,6 +179,15 @@ edge off.
 Expected result: the upgrade succeeds, and no cell has `8769` in its egress. The state
 volume `exomem-media-edge-state` stays after `mediaEdge.enabled=false`. Delete it by hand
 only after `/v1/pending` on the edge reported `0` before you turned it off.
+
+## Delete a cell that used the media store
+
+`cellctl` retires the cell's content keys first, then drops the cell from the active set. It reports the cell
+`deleted` only after the edge shows that exact set (`GET /v1/generation`), so the alert
+`cell-storage-cleanup-pending-<cell_id>` means the edge no longer admits the cell. A cell that stays `deleting`
+with the edge up means the edge has not loaded the new set: read the active set and the edge's evidence as in
+"Turn the edge off". Then delete the cell's objects with the media mode of the clean-up script. See
+"Media bucket of a deleted cell" in `cloud-key-custody.md`.
 
 ## Roll back the chart
 

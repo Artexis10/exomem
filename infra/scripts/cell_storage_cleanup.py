@@ -8,27 +8,35 @@ answers it.
 Run it once per account for every deleted cell, `--account founder` and `--account cell-data`:
 the database no longer says which account holds the cell's key. It lists the account's
 application keys and deletes each key whose name prefix is exactly `cells/<cell id>/`. It never
-deletes a key it did not find in the provider's listing.
+deletes a key it did not find in the provider's listing. `--account media` is the third target:
+the founder account's media bucket (`add-cloud-media-store` D9), which holds no per-cell key.
 - cell-data: it also counts the cell's current backup files in the locked bucket, and hides them
   once a 7-day grace has passed. It never deletes a file version there: hiding adds a marker, and
   the compliance lock keeps every version until its retention ends.
 - founder: the old cloud bucket has no lock, so `--apply` also deletes every file version under
   `cells/<cell id>/` in the bucket named by `--bucket-id`, hidden ones included, with no grace.
+- media: the media bucket has no lock and its objects are the only copy, so it has the same 7-day grace
+  as cell-data. `--apply` after the grace deletes every file version under `cells/<cell id>/` and
+  cancels every unfinished large file there with the provider's cancel call, which the delete call does
+  not replace for an upload that never finished. It counts unfinished files apart from versions. It lists
+  no key and deletes none.
 
 The grace starts at the operator's own first dry run, never at a time that cellctl or the
-database holds: both are inputs that a compromised cellctl controls. The first cell-data dry run
-prints `first_dry_run=<today, UTC>`; keep that date and pass it as `--first-dry-run` on every
-later run. `--apply` for cell-data refuses to run without it. The operator confirms that the
+database holds: both are inputs that a compromised cellctl controls. The first cell-data or media
+dry run prints `first_dry_run=<today, UTC>`; keep that date and pass it as `--first-dry-run` on every
+later run. `--apply` for cell-data or media refuses to run without it. The operator confirms that the
 database row says `desired_state = 'deleted'` before `--apply` (see the runbook).
 
 Dry-run by default. `--apply` acts. Output is value-free (account label, counts, dates) because
 the terminal may be shared. A later dry run that shows `keys_found=0` and `files_found=0` is the
-proof that the clean-up is complete. For founder, `files_found` counts file versions.
+proof that the clean-up is complete. For founder and media, `files_found` counts file versions, and
+for media the proof also needs `unfinished_found=0`.
 
 Environment: CELL_CLEANUP_B2_KEY_ID and CELL_CLEANUP_B2_APPLICATION_KEY, the operator's key for
 the chosen account. It needs listKeys and deleteKeys; for cell-data it also needs listFiles and
 writeFiles (hiding a file is a write); for founder it also needs listBuckets, listFiles and
-deleteFiles.
+deleteFiles; for media it needs listFiles, deleteFiles and writeFiles (cancelling an upload is a
+write), restricted to the media bucket, and no key capability.
 
 Exit status: 0 when the run finished (a dry run included), 1 when a provider call failed, 2 when
 the arguments or the environment are invalid.
@@ -56,7 +64,9 @@ PAGE_SIZE = 1000
 MAX_PAGES = 100
 # How long a deleted cell's backups stay visible after the operator's first dry run.
 HIDE_GRACE = timedelta(days=7)
-ACCOUNTS = ("founder", "cell-data")
+ACCOUNTS = ("founder", "cell-data", "media")
+# The accounts whose files wait out the grace: the locked bucket's backups and the media bucket's only copy.
+GRACE_ACCOUNTS = ("cell-data", "media")
 
 # An operator types this id. Its form is fixed by cellctl's namespace rule `exo-cell-[a-z2-7]{16}`
 # (the key watcher keeps the same copy), so a regex over it checks a format, not a meaning.
@@ -139,11 +149,34 @@ def file_versions(session: Session, bucket_id: str, prefix: str) -> list[dict[st
         for entry in page["files"]:
             if not entry["fileName"].startswith(prefix):  # a delete never leaves the cell's prefix
                 raise ValueError("the version listing left the prefix")
-            versions.append({"fileName": entry["fileName"], "fileId": entry["fileId"]})
+            versions.append({"fileName": entry["fileName"], "fileId": entry["fileId"], "action": entry.get("action")})
         if page.get("nextFileName") is None:
             return versions
         cursor = {"startFileName": page["nextFileName"], "startFileId": page["nextFileId"]}
     raise ValueError("the version listing did not end")
+
+
+def clean_up_media(
+    session: Session, *, cell_id: str, apply: bool, bucket_id: str, first_dry_run: date, today: date,
+    out: TextIO,
+) -> None:
+    """The founder account's media bucket: no key to delete, and the versions and unfinished uploads
+    under the cell's prefix are counted on every run and removed only once the grace is over."""
+    prefix = f"cells/{cell_id}/"
+    # `action` is the provider's own closed value: "start" marks an upload that was never finished.
+    entries = file_versions(session, bucket_id, prefix)
+    unfinished = [entry for entry in entries if entry["action"] == "start"]
+    versions = [entry for entry in entries if entry["action"] != "start"]
+    grace_ends = first_dry_run + HIDE_GRACE
+    due = apply and today >= grace_ends
+    for entry in unfinished if due else []:
+        session.post("b2_cancel_large_file", {"fileId": entry["fileId"]})
+    for entry in versions if due else []:
+        session.post("b2_delete_file_version", {"fileName": entry["fileName"], "fileId": entry["fileId"]})
+    print(f"account=media mode={'apply' if apply else 'dry-run'} files_found={len(versions)} "
+          f"files_deleted={len(versions) if due else 0} unfinished_found={len(unfinished)} "
+          f"unfinished_cancelled={len(unfinished) if due else 0} delete={'due' if today >= grace_ends else 'waiting'} "
+          f"first_dry_run={first_dry_run.isoformat()} grace_ends={grace_ends.isoformat()}", file=out)
 
 
 def clean_up(
@@ -162,7 +195,7 @@ def clean_up(
     if first_dry_run is None:
         versions = file_versions(session, bucket_id, prefix)
         for version in versions if apply else []:
-            session.post("b2_delete_file_version", version)
+            session.post("b2_delete_file_version", {"fileName": version["fileName"], "fileId": version["fileId"]})
         print(f"files_found={len(versions)} files_deleted={len(versions) if apply else 0}", file=out)
         return
     grace_ends = first_dry_run + HIDE_GRACE
@@ -189,9 +222,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--account", choices=ACCOUNTS, required=True)
     parser.add_argument("--apply", action="store_true", help="act; the default is a dry run")
     parser.add_argument("--first-dry-run", type=_iso_date, metavar="YYYY-MM-DD",
-                        help="cell-data: the UTC date of your own first dry run for this cell; the grace runs from it")
+                        help="cell-data and media: the UTC date of your own first dry run for this cell; the grace runs from it")
     parser.add_argument("--bucket-id", help="the bucket's ID: the locked backup bucket for cell-data, "
-                        "the old cloud bucket for founder")
+                        "the old cloud bucket for founder, the media bucket for media")
     return parser
 
 
@@ -211,8 +244,8 @@ def main(
             (not _CELL_ID.fullmatch(args.cell_id), "the cell id is not 16 characters of a-z and 2-7"),
             (not args.bucket_id, "--bucket-id is required"),
             (args.first_dry_run is not None and args.first_dry_run > today, "--first-dry-run is in the future"),
-            (args.account == "cell-data" and args.apply and args.first_dry_run is None,
-             "cell-data --apply needs --first-dry-run, the date your own first dry run printed"),
+            (args.account in GRACE_ACCOUNTS and args.apply and args.first_dry_run is None,
+             f"{args.account} --apply needs --first-dry-run, the date your own first dry run printed"),
             (not env.get("CELL_CLEANUP_B2_KEY_ID") or not env.get("CELL_CLEANUP_B2_APPLICATION_KEY"),
              "CELL_CLEANUP_B2_KEY_ID and CELL_CLEANUP_B2_APPLICATION_KEY must be set"),
         ) if failed
@@ -223,9 +256,14 @@ def main(
     try:
         session = Session(opener or urllib.request.build_opener(), env["CELL_CLEANUP_B2_KEY_ID"],
                           env["CELL_CLEANUP_B2_APPLICATION_KEY"])
-        first_dry_run = (args.first_dry_run or today) if args.account == "cell-data" else None
-        clean_up(session, label=args.account, cell_id=args.cell_id, apply=args.apply, bucket_id=args.bucket_id,
-                 first_dry_run=first_dry_run, today=today, out=out)
+        first_dry_run = args.first_dry_run or today  # a first run starts the grace today; --apply refused it above
+        if args.account == "media":
+            clean_up_media(session, cell_id=args.cell_id, apply=args.apply, bucket_id=args.bucket_id,
+                           first_dry_run=first_dry_run, today=today, out=out)
+        else:
+            clean_up(session, label=args.account, cell_id=args.cell_id, apply=args.apply,
+                     bucket_id=args.bucket_id, first_dry_run=first_dry_run if args.account == "cell-data" else None,
+                     today=today, out=out)
     except (OSError, http.client.HTTPException, ValueError, KeyError) as exc:
         # The type only: a provider message could carry an ID.
         print(f"cleanup stopped: {type(exc).__name__}; rerun it, every step is safe to repeat", file=out)

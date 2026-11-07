@@ -25,6 +25,9 @@ run "media_storage_is_absent_until_selected" {
       output.cloud_media_bucket_id == null &&
       output.cloud_media_edge_application_key_id == null &&
       output.cloud_media_edge_application_key == null &&
+      length(b2_application_key.cellctl_media_list) == 0 &&
+      output.cloud_media_list_application_key_id == null &&
+      output.cloud_media_list_application_key == null &&
       length(b2_bucket.cloud_backups) == 1
     )
     error_message = "Enabling Cloud backups must not create media storage or an edge credential."
@@ -69,5 +72,25 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
       toset(b2_application_key.cloud_media_edge[0].capabilities) == toset(["readFiles", "writeFiles"])
     )
     error_message = "The edge must access only the media bucket, with read/write access and no listing, key management or permanent deletion."
+  }
+
+  assert {
+    condition = (
+      length(b2_application_key.cellctl_media_list) == 1 &&
+      b2_application_key.cellctl_media_list[0].bucket_id == null &&
+      b2_application_key.cellctl_media_list[0].bucket_ids == toset(["mock-media-bucket"]) &&
+      toset(b2_application_key.cellctl_media_list[0].capabilities) == toset(["listBuckets", "listFiles"])
+    )
+    error_message = "cellctl's media key must list only the media bucket: no read, write or delete, and no key management."
+  }
+
+  assert {
+    condition = (
+      !contains(flatten([
+        b2_application_key.cloud_media_edge[0].capabilities,
+        b2_application_key.cellctl_media_list[0].capabilities,
+      ]), "deleteFiles")
+    )
+    error_message = "No service holds deleteFiles on the media bucket; the operator deletes with a short-lived key."
   }
 }

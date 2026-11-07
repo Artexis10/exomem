@@ -318,14 +318,19 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT hide, list or delete.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT hide, list or delete.
 
-The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
+The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL report its loaded generation, the SHA-256 of the loaded set's validated bytes and its bucket name beside the settled generation. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
 The edge SHALL persist provider write intent before dispatch and retain unresolved intents across restart.
 It SHALL distinguish the loaded generation from the drained generation and SHALL NOT acknowledge a drain while an earlier write remains uncertain.
 Timeout, cancellation or a missing object response SHALL NOT prove that a provider write cannot finish.
 Uncertain uploads SHALL remain visible by cell without preventing unrelated requests under the loaded active set.
+The edge SHALL finish a multipart upload only for a file ID that a persisted intent holds.
+An unfinished file that no intent names SHALL NOT become a version and SHALL NOT hold a generation open.
+
+cellctl SHALL treat a revocation as observed only when the edge's loaded generation equals the generation cellctl published, the reported set digest equals the SHA-256 of the set cellctl published, the reported bucket equals the configured bucket, and the settled generation is at least the published one.
+When the published active set is unreadable, cellctl SHALL plan the next generation above the edge's loaded generation.
 
 A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
 
@@ -347,6 +352,27 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 - **AND** a missing HEAD does not release the obligation
 - **AND** unrelated requests continue under the loaded active set
 
+#### Scenario: The reply to a large upload's start call is lost
+
+- **WHEN** the provider starts a large file but the edge never receives the reply
+- **THEN** the edge answers 503, writes no intent, and its settled generation advances
+- **AND** after a restart no version exists for that file, and the edge never finishes it
+
+#### Scenario: An upload is cut after its parts
+
+- **WHEN** a client disconnects after the edge stored the parts of a large file but before the edge persisted an intent for it
+- **THEN** the edge never calls the provider's finish operation for that file ID
+
+#### Scenario: A newer set is not the published set
+
+- **WHEN** the edge reports a loaded generation above the published one with a different digest, or the published digest with another bucket
+- **THEN** cellctl does not count the revocation as observed
+
+#### Scenario: The clock goes back while the published set is unreadable
+
+- **WHEN** the published active set is unreadable and the planned generation would fall below the edge's loaded generation
+- **THEN** cellctl plans above the edge's loaded generation, never counts a lower one as loaded, and stops waiting once the edge reports the exact set
+
 #### Scenario: A compromised cell tries to destroy history
 
 - **WHEN** a caller asks the edge to delete a file version
@@ -359,36 +385,21 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 ### Requirement: No stored version that a retained backup references is destroyed
 
-Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions.
+Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions. The bucket SHALL stay in the founder account.
 
-Each backup SHALL write a reference manifest for its snapshot, computed from the clone it backs up. The manifest SHALL list every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It SHALL be stored in the cell's backup prefix, keyed by snapshot ID.
+This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold a key that reads and writes it. the change `collect-released-media` SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
 
-Only cellctl's key-management authority SHALL destroy versions. It SHALL destroy them only within a backup hold, after that hold's backup and prune succeed, and only a version that meets all of these:
-- it appears in a listing of the cell's media prefix that cellctl completed before it took the capture of the newest retained snapshot;
-- no retained snapshot's manifest names it or lists its object name under a protection record;
-- every retained snapshot of the cell has a readable manifest.
-
-No age or time cutoff SHALL decide destruction. cellctl SHALL delete the manifests of pruned snapshots.
+No age or time cutoff SHALL decide destruction.
 
 #### Scenario: A stopped cell keeps an old backup
 
 - **WHEN** a cell's retained snapshots include one taken months ago that references a version the vault no longer references
-- **THEN** that version stays until that snapshot is pruned
-
-#### Scenario: A sidecar is deleted while its clone is being backed up
-
-- **WHEN** a clone captures a sidecar, the owner then deletes that sidecar, and restic backs up the clone afterwards
-- **THEN** the snapshot's manifest names the version, and the version is not destroyed while that snapshot is retained
+- **THEN** that version stays, because nothing destroys versions of a live cell
 
 #### Scenario: An old backup is restored into the same cell
 
 - **WHEN** a cell is restored from its oldest retained backup and later backups follow
-- **THEN** every restored reference reads its pinned version, and no version that any retained manifest names is destroyed
-
-#### Scenario: A snapshot has no manifest
-
-- **WHEN** any retained snapshot of a cell lacks a readable manifest
-- **THEN** cellctl destroys no version of that cell
+- **THEN** every restored reference reads its pinned version
 
 ### Requirement: Owners retrieve originals only with their own authority
 
@@ -426,6 +437,9 @@ Each cell SHALL have a media allowance, separate from its volume size, set as a 
 The owner allowance SHALL count original plaintext bytes, including versions referenced by sidecars in trash until trash is emptied.
 Multiple live or trash references to one version SHALL count once.
 The operator's physical meter SHALL count provider ciphertext bytes separately.
+Once per backup hold, cellctl SHALL list each cell's media prefix with its list-only key, sum the content lengths of the upload versions, and count unfinished large files.
+It SHALL raise an alert for any hide entry, and for a prefix whose bytes exceed the cell's allowance times a configured headroom factor.
+A failed listing page SHALL report the physical figure as unknown, never as zero, and SHALL NOT change the owner figure.
 
 The owner meter SHALL require complete canonical reference custody, including Trash, and SHALL report unknown when that custody is incomplete.
 It SHALL exclude registry-owned private state without reusing recall exclusions.
@@ -488,50 +502,55 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 
 ### Requirement: Deleting originals and cells removes their stored objects
 
-An original that the owner deletes SHALL leave the media store once the vault no longer references its version and every retained snapshot whose manifest names that version has been pruned, as the retention requirement allows.
+This change SHALL NOT destroy the version of an original that the owner deletes. The version stays in the media store until the change `collect-released-media` ships, and the physical meter counts it.
 
-When a cell row becomes `deleted`, cellctl SHALL retire its media content keys under `cloud-cell-key-custody`, independently of provider cleanup.
+When a cell row is set to `deleted`, cellctl SHALL retire its media content keys under `cloud-cell-key-custody`, independently of provider cleanup.
 Live-copy absence and retention evidence SHALL continue to govern the key-destruction claim.
 Cleanup MAY retain only the non-content credentials it needs.
-Its provider steps SHALL:
-1. remove the cell from the edge's active set;
-2. observe that the edge has loaded that set;
-3. abort every unfinished multipart upload under the cell's prefix;
-4. delete every object version under the prefix.
 
-cellctl SHALL report `deleted` only after the versions and bundle are absent and the existing cell deletion proof holds.
-A failed listing or an unobserved edge generation MUST NOT count as done.
+cellctl SHALL keep a deleted cell's observed state at `deleting` while the previously published active set lists the cell, or the cell has a `media_store` record in its custody observation, or cellctl cannot read the previously published active set, until the edge's exact-set evidence shows a set that omits the cell.
+cellctl SHALL record the time of the first wait in that `media_store` record, because the next pass publishes a set that no longer lists the cell. When the evidence matches, cellctl SHALL persist the revoked generation, the set digest and the observation time in the same record. The record SHALL survive a restart.
+A cell that a readable active set never listed SHALL NOT wait.
+Then cellctl SHALL report the cell `deleted` and the existing cleanup alert SHALL fire.
+cellctl SHALL hold no `deleteFiles` on the media bucket and SHALL NOT delete media objects.
+An unreadable, older or different edge set MUST NOT count as observed.
+
+The operator's cleanup script SHALL have a media mode for the founder bucket.
+It SHALL delete nothing until seven days have passed since the operator's own first dry run for that cell.
+After that, `--apply` SHALL cancel every unfinished large file under `cells/<cell>/` and delete every file version there, and SHALL report unfinished files apart from versions.
+A dry run that finds no version and no unfinished file SHALL be the proof of absence.
 
 #### Scenario: The provider is unreachable during deletion
 
 - **WHEN** a deleted cell's media provider is unreachable
-- **THEN** content-key retirement proceeds independently and unknown live-copy removal remains pending
-- **AND** provider cleanup retries without reporting the cell deleted or claiming an unsupported destruction date
-
-#### Scenario: An owner deletes a recording
-
-- **WHEN** an owner deletes a recording, empties trash, and the backups that referenced it are later pruned
-- **THEN** its version is destroyed in the next backup hold after the last such snapshot is pruned
-
-#### Scenario: An upload is confirmed but not yet referenced
-
-- **WHEN** a backup captures the cell between a confirmed upload and the write of its reference into the sidecar
-- **THEN** the captured ledger holds the synced protection record, the manifest lists the object name, and the version is not destroyed
-
-#### Scenario: An offload reuses a version that another sidecar is about to drop
-
-- **WHEN** an offload selects a version that a live sidecar references, that sidecar is deleted before the next capture, and the offload publishes its own reference after the capture
-- **THEN** the captured protection record names the object, and the version is not destroyed
+- **THEN** content-key retirement proceeds independently and the cleanup alert is not suppressed
+- **AND** cellctl claims no destruction date
 
 #### Scenario: A tenant deletes their account
 
 - **WHEN** a cell row is set to `deleted`
-- **THEN** the edge stops accepting the cell's credential before any version is deleted, and every version under its media prefix and its wrapped media key bundle are absent before the row reports `deleted`
+- **THEN** the cell stays `deleting` until the edge reports an exact set that omits it, and then cellctl reports it `deleted` with the cleanup alert
+- **AND** the edge refuses the cell's credential from that observation on
 
-#### Scenario: The version listing fails during deletion
+#### Scenario: The edge is unreadable during deletion
 
-- **WHEN** the media bucket's version listing fails during cell deletion
-- **THEN** the row stays `deleting` and the check is retried
+- **WHEN** a cell that an active set listed is being deleted and the edge's evidence is unreadable, behind or from a different set
+- **THEN** the row stays `deleting` and cellctl retries the check
+
+#### Scenario: Cellctl restarts after the revocation was observed
+
+- **WHEN** cellctl restarts after it recorded the revocation of a cell
+- **THEN** the record is still in the cell's custody observation and the cell does not wait again
+
+#### Scenario: The operator cleans up before the grace has passed
+
+- **WHEN** the operator applies the media cleanup for a cell before seven days have passed since the first dry run
+- **THEN** the script deletes nothing and reports the remaining time
+
+#### Scenario: The operator cleans up after the grace
+
+- **WHEN** the operator applies the media cleanup after the grace
+- **THEN** the script cancels unfinished large files, deletes every version under the cell's prefix, and a final dry run reports zero
 
 ### Requirement: The media store is off by default and drains on disable
 

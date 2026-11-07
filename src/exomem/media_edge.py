@@ -260,6 +260,9 @@ class MediaEdge:
         self.loaded: int | None = None
         self.cells: dict[str, int] = {}
         self._raw: bytes | None = None
+        # The digest of the bytes that produced `loaded`, not of the file as last read: a rejected
+        # file must not make the edge claim a set it did not load.
+        self.loaded_sha256: str | None = None
         self.inflight: dict[int, int] = {}
         self._writing: set[str] = set()
         self._live: set[str] = set()
@@ -305,6 +308,7 @@ class MediaEdge:
             log.error("the active set file does not advance the generation; the loaded set stays in force")
             return
         self.loaded, self.cells = generation, cells
+        self.loaded_sha256 = hashlib.sha256(raw).hexdigest()
 
     def settled(self) -> int | None:
         """The newest generation whose earlier requests and writes have all settled."""
@@ -489,6 +493,10 @@ class MediaEdge:
             pass
 
     async def _store_large(self, cell, generation, key, size, sha256, part, reader: _Body) -> str:
+        # No intent exists before the start call returns, and none is needed: finish is only ever
+        # called for a file ID that a persisted intent holds (below and in `_resolve`). A lost reply,
+        # or a crash before the intent, leaves an unfinished file that can never become a version.
+        # The bucket's lifecycle rule and the operator's cleanup bound those files (design D6).
         file_id = await self.provider.start_large(key, {_SHA256_INFO: sha256})
         try:
             digest, part_sha1, sent = hashlib.sha256(), [], 0
@@ -603,7 +611,10 @@ class MediaEdge:
             settled = self.settled()
             if settled is None:
                 raise Reply(503, _UNAVAILABLE)
-            await response.json(200, {"generation": settled})
+            # cellctl confirms a revocation only when `loaded`, `set_sha256` and `bucket` all match what
+            # it published; a higher generation alone could belong to another set or another deployment.
+            await response.json(200, {"generation": settled, "loaded": self.loaded,
+                                      "set_sha256": self.loaded_sha256, "bucket": self.config.bucket})
         elif path == PENDING_PATH and method == "GET":
             # Every pod the policy admits may ask, so the answer names no cell. The recovery pass
             # logs the pending writes by cell for the operator.
