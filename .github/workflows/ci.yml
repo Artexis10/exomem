@@ -1107,6 +1107,7 @@ jobs:
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
           src/exomem/structure_promotion.py
+          src/exomem/note_cohesion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
           src/exomem/call_ledger.py
@@ -1124,7 +1125,7 @@ jobs:
           tests/test_observe_memory.py
           tests/test_memory_schema.py
           tests/test_relation_registry.py
-          tests/test_structure_promotion.py
+          tests/test_note_cohesion.py
           tests/test_traversal_profiles.py
           tests/test_call_ledger.py
           tests/test_call_spans.py
@@ -1146,6 +1147,7 @@ jobs:
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
           src/exomem/structure_promotion.py
+          src/exomem/note_cohesion.py
           src/exomem/traversal_profiles.py
           src/exomem/epistemic_graph.py
           src/exomem/source_taxonomy.py

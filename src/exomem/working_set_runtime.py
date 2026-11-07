@@ -119,7 +119,7 @@ def activation_released_corpus_tasks() -> bool:
     """Whether task discovery may prepare the caller's complete released corpus; `off` is the default.
 
     Discovery takes that path whenever the raw fast path is unavailable: for a restricted caller, and for every
-    caller on a vault with a file release policy, a bound writer or an enrolled collection store. It prepares the
+    caller on a vault with a file release policy or a bound writer. It prepares the
     whole corpus on each request, which does not yet meet the activation latency ceiling at scale, so such a
     request gets an unavailable task context unless the setting is `on`.
     """

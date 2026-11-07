@@ -43,7 +43,7 @@ Before task applicability selection, the system SHALL revalidate every carried m
 
 ### Requirement: Maps activation discovers across knowledge carriers
 
-Maps activation SHALL discover bounded relevant candidates from admitted notes, episode sources, supported intention references, methods and collection descriptions. Eligibility SHALL NOT depend on successful anchor resolution or membership in its neighborhood. Discovery SHALL reuse existing retrieval and graph authorities and preserve canonical identity, source version and origin. When discovery cannot use the raw fast path, because the caller is restricted or the vault has a file release policy, a bound writer or an enrolled collection store, it SHALL prepare the caller's released corpus only when the operator enables released-corpus discovery; by default it reports unavailable task context, because that preparation on each request does not yet meet the activation latency ceiling at scale.
+Maps activation SHALL discover bounded relevant candidates from admitted notes, episode sources, supported intention references, methods and collection descriptions. Eligibility SHALL NOT depend on successful anchor resolution or membership in its neighborhood. Discovery SHALL reuse existing retrieval and graph authorities and preserve canonical identity, source version and origin. An enrolled collection store SHALL NOT remove the raw fast path from an unrestricted caller; each page the store owns SHALL keep its own release decision. When discovery cannot use the raw fast path, because the caller is restricted or the vault has a file release policy or a bound writer, it SHALL prepare the caller's released corpus only when the operator enables released-corpus discovery; by default it reports unavailable task context, because that preparation on each request does not yet meet the activation latency ceiling at scale.
 
 #### Scenario: A site mention connects to a prior intention
 - **WHEN** a fresh session mentions a workshop and a pre-existing episode links it to an unresolved calibration appointment
@@ -83,9 +83,15 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 
 #### Scenario: Released-corpus discovery is off by default
 
-- **WHEN** a restricted caller, or any caller on a vault with an enrolled collection store, activates task context and the operator has not enabled released-corpus discovery
+- **WHEN** a restricted caller, or any caller on a vault with a file release policy, activates task context and the operator has not enabled released-corpus discovery
 - **THEN** task context reports `unavailable` with no candidates, held methods are reset, and the map, the turn slice and ordinary pulls are unchanged
-- **AND** an unrestricted caller on a vault without a file release policy, bound writer or enrolled collection store keeps discovery
+- **AND** an unrestricted caller on a vault without a file release policy or bound writer keeps discovery
+
+#### Scenario: The owner of an enrolled collection store keeps discovery
+
+- **WHEN** the owner activates task context on a vault with an enrolled collection store, no file release policy and no bound writer
+- **THEN** discovery uses the raw fast path and serves candidates without released-corpus discovery
+- **AND** a page the store owns joins the candidates only while its own release decision admits it, so a store outage withholds that page
 
 ### Requirement: Candidate context does not manufacture ongoing intent
 
