@@ -32,17 +32,20 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Iterable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from . import audit as audit_module
 from . import indexes, maintenance_jobs, originals, relation_review, semantic_index, semantic_writes
 from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root
 
 log = logging.getLogger(__name__)
+
+_Item = TypeVar("_Item")
+_Key = TypeVar("_Key")
 
 _LIFECYCLE_REPORT_LIMIT = 256
 
@@ -77,6 +80,9 @@ class ReconcileReport:
     semantic_isolation_changed: list[dict[str, str]] = field(default_factory=list)
     #: The unit-index parents a write left alone, because their bytes moved after the corpus read.
     semantic_unit_parents_moved: list[str] = field(default_factory=list)
+    #: The CLIP and frame orphans that a planned write's plan and its read inside the orphans hold do
+    #: not share, each as {kind, path, change}, with `change` as in `semantic_isolation_changed`.
+    orphans_changed: list[dict[str, str]] = field(default_factory=list)
     semantic_unit_indexes_status: str = "current"
     semantic_unit_index_drift: list[dict] = field(default_factory=list)
     semantic_unit_index_remaining: list[dict] = field(default_factory=list)
@@ -170,6 +176,7 @@ class ReconcileReport:
             # Only a write reads its inputs again inside its holds, so only a write can find that one moved.
             result["semantic_isolation_changed"] = self.semantic_isolation_changed
             result["semantic_unit_parents_moved"] = self.semantic_unit_parents_moved
+            result["orphans_changed"] = self.orphans_changed
         if self.plan_id is not None:
             result["plan_id"] = self.plan_id
         registered = self._graph_reconcile_registered
@@ -248,6 +255,46 @@ def finalize_graph_rebuild_handoff(
     return final
 
 
+@contextmanager
+def _run_lock(vault_root: Path, *, dry_run: bool) -> Iterator[None]:
+    """Hold this vault's reconcile-run lock for one write run, or refuse the run before it reads anything.
+
+    The whole-run boundary hold used to serialize reconciles; this lock keeps that guarantee without
+    blocking writers, because no ordinary writer takes it. A second write run waits for it as long as
+    a writer waits for a busy boundary (`EXOMEM_MUTATION_TIMEOUT`), then gets `MUTATION_BUSY` with
+    nothing written. It is a plain file lock, as one archive expansion per vault holds, and not a
+    mutation coordinator: a coordinator hold would make the run's foreground yields return at once.
+    A preview, and a call from outside the writer lease, take none, as `_phase_hold` does.
+    """
+    from filelock import FileLock, Timeout
+
+    from . import mutation_lock, private_state
+    from .cli_ops import OpError
+    from .writer_lease import LeaseConfig, active_mutation_request_id
+
+    if dry_run or active_mutation_request_id() is None:
+        yield
+        return
+    lock = FileLock(private_state.store(vault_root, "reconcile") / "run.lock")
+    try:
+        lock.acquire(timeout=LeaseConfig.from_env().mutation_timeout_seconds)
+    except Timeout:
+        raise OpError(
+            "MUTATION_BUSY",
+            "another reconcile is running for this vault",
+            "Retry after the running reconcile completes.",
+            details={
+                "status": "retryable",
+                "committed": False,
+                "retry_after_ms": mutation_lock.dynamic_retry_after_ms(None),
+            },
+        ) from None
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _phase_hold(vault_root: Path, operation: str, *, dry_run: bool) -> AbstractContextManager[Any]:
     """Hold the mutation boundary for one phase's writes: one short hold, re-read inside, per phase.
 
@@ -267,26 +314,66 @@ def _phase_hold(vault_root: Path, operation: str, *, dry_run: bool) -> AbstractC
     return maintenance_jobs.chunk_hold(vault_root, operation)
 
 
-def _moved_since_read(vault_root: Path, pages: Mapping[str, Any], paths: Iterable[str]) -> list[str]:
-    """The paths whose bytes are not the bytes the run's corpus read (`pages`).
+def _current_hash(vault_root: Path, rel: str) -> str | None:
+    """The content hash of a path's bytes now, as the corpus hashes a page, or None with no file there."""
+    try:
+        return content_hash((vault_root / rel).read_bytes().decode("utf-8"))
+    except FileNotFoundError:
+        return None
 
-    A path in `pages` was read with its `source_hash`; a path outside it was no page then, so it
-    moved once a file is there. The write that moved a path also indexed it, so a phase leaves it to
-    that write. A path that cannot be read now counts as moved.
+
+def _read_hashes(vault_root: Path, paths: Iterable[str]) -> dict[str, str]:
+    """The content hash of each path that is a readable file now, for a later `_moved_since_read`."""
+    hashes: dict[str, str] = {}
+    for rel in paths:
+        try:
+            current = _current_hash(vault_root, rel)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if current is not None:
+            hashes[rel] = current
+    return hashes
+
+
+def _corpus_hashes(pages: Mapping[str, Any], paths: Iterable[str]) -> dict[str, str]:
+    """The content hash that the run's corpus read for each path that was a corpus page then."""
+    return {rel: pages[rel].source_hash for rel in paths if rel in pages}
+
+
+def _moved_since_read(vault_root: Path, read: Mapping[str, str], paths: Iterable[str]) -> list[str]:
+    """The paths whose bytes are not the bytes the run read (`read` maps a path to their content hash).
+
+    A path that `read` lacks was absent, or could not be read, so it moved once a file is there. A
+    path that cannot be read now counts as moved. The write that moved a path also indexed it, so a
+    phase leaves it to that write.
     """
     moved: list[str] = []
     for rel in paths:
-        state = pages.get(rel)
         try:
-            current = content_hash((vault_root / rel).read_bytes().decode("utf-8"))
-        except FileNotFoundError:
-            current = None
+            current = _current_hash(vault_root, rel)
         except (OSError, UnicodeDecodeError):
             moved.append(rel)
             continue
-        if current != (state.source_hash if state is not None else None):
+        if current != read.get(rel):
             moved.append(rel)
     return moved
+
+
+def _against_plan(
+    planned: Iterable[_Key], fresh: Iterable[_Item], key: Callable[[_Item], _Key]
+) -> tuple[list[_Item], list[_Item], list[_Key]]:
+    """Split what a planned write read inside its hold by its plan.
+
+    Returns the items that both name, the items that only the fresh read holds, and the keys that
+    only the plan holds. A planned write applies the first and reports the other two.
+    """
+    planned_keys = list(dict.fromkeys(planned))
+    planned_set = set(planned_keys)
+    items = list(fresh)
+    fresh_keys = {key(item) for item in items}
+    shared = [item for item in items if key(item) in planned_set]
+    unplanned = [item for item in items if key(item) not in planned_set]
+    return shared, unplanned, [name for name in planned_keys if name not in fresh_keys]
 
 
 def _media_present(vault_root: Path, path: Path | str) -> bool:
@@ -406,12 +493,29 @@ def _shared_isolation(
     planned: audit_module.SemanticRecallIsolationCensus, fresh: audit_module.SemanticRecallIsolationCensus
 ) -> tuple[audit_module.SemanticRecallIsolationCensus, list[dict[str, str]]]:
     """The fresh census cut to the rows its plan names too, and each row that only one of the two holds."""
-    planned_keys = {_isolation_key(row) for row in planned.rows}
-    fresh_keys = {_isolation_key(row) for row in fresh.rows}
-    changed = [{**row.as_dict(), "change": "unplanned"} for row in fresh.rows if _isolation_key(row) not in planned_keys]
-    changed += [{**row.as_dict(), "change": "gone"} for row in planned.rows if _isolation_key(row) not in fresh_keys]
-    shared = tuple(row for row in fresh.rows if _isolation_key(row) in planned_keys)
-    return replace(fresh, rows=shared), changed
+    planned_rows = {_isolation_key(row): row for row in planned.rows}
+    shared, unplanned, gone = _against_plan(planned_rows, fresh.rows, _isolation_key)
+    changed = [{**row.as_dict(), "change": "unplanned"} for row in unplanned]
+    changed += [{**planned_rows[name].as_dict(), "change": "gone"} for name in gone]
+    return replace(fresh, rows=tuple(shared)), changed
+
+
+def _planned_orphans(
+    vault_root: Path, census: _Census, clip_orphans: list[str], frame_orphans: list[tuple[Path, Path]]
+) -> tuple[list[str], list[tuple[Path, Path]], list[dict[str, str]]]:
+    """The CLIP and frame orphans that a planned write's plan names too, and each that only one holds."""
+    clips, unplanned_clips, gone_clips = _against_plan(census.clip_orphans, clip_orphans, lambda clip: clip)
+    frames, unplanned_frames, gone_frames = _against_plan(
+        census.frame_orphans, frame_orphans, lambda frame: _rel(frame[0], vault_root)
+    )
+    changed = [{"kind": "clip", "path": clip, "change": "unplanned"} for clip in unplanned_clips]
+    changed += [{"kind": "clip", "path": clip, "change": "gone"} for clip in gone_clips]
+    changed += [
+        {"kind": "frames", "path": _rel(frame_dir, vault_root), "change": "unplanned"}
+        for frame_dir, _video in unplanned_frames
+    ]
+    changed += [{"kind": "frames", "path": rel, "change": "gone"} for rel in gone_frames]
+    return clips, frames, changed
 
 
 def _clip_orphans(vault_root: Path, missing_clip_orphans: set[str]) -> list[str]:
@@ -454,6 +558,9 @@ class _Census:
     posthoc_inputs: dict[str, Any]
     #: Each removal or quarantine as (what it names, its kind), for a preview job's receipt.
     planned: tuple[tuple[str, str], ...]
+    #: The CLIP keys and the vault-relative frame directories that the plan removes.
+    clip_orphans: tuple[str, ...]
+    frame_orphans: tuple[str, ...]
 
 
 def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
@@ -479,8 +586,10 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
     entries: list[list[str]] = [["suppressed", path] for path in suppressed_paths]
     entries += [["missing", path] for path in missing_paths]
     entries += [list(_isolation_key(row)) for row in isolation.corrupt_rows]
-    entries += [["clip", key] for key in _clip_orphans(vault_root, missing_clip_orphans)]
-    entries += [["frames", _rel(frame_dir, vault_root)] for frame_dir, _video in _dangling_frame_dirs(vault_root)]
+    clip_orphans = tuple(_clip_orphans(vault_root, missing_clip_orphans))
+    frame_orphans = tuple(_rel(frame_dir, vault_root) for frame_dir, _video in _dangling_frame_dirs(vault_root))
+    entries += [["clip", key] for key in clip_orphans]
+    entries += [["frames", rel] for rel in frame_orphans]
     from . import extraction_parts
 
     entries += [["part", rel] for rel in extraction_parts.sweep(vault_root, dry_run=True).removed]
@@ -493,6 +602,8 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
         posthoc_inputs={"corpus": corpus, "language_registry": language, "status_basis": status_basis},
         # Every entry reads [kind, what it names, ...].
         planned=tuple((entry[1], entry[0]) for entry in entries),
+        clip_orphans=clip_orphans,
+        frame_orphans=frame_orphans,
     )
 
 
@@ -511,8 +622,15 @@ def reconcile(
     read earlier has not moved: a page whose bytes moved belongs to the write that moved it. The
     read-only phases (the census, the posthoc evaluation, the unit audit and the drift report) and
     the lexical refresh, which serializes its publication itself, hold nothing. A stop lands between
-    holds: the phases before it keep their effect, and a repeat converges the rest.
+    holds: the phases before it keep their effect, and a repeat converges the rest. A write run holds
+    the vault's reconcile-run lock throughout (`_run_lock`), so two write runs never interleave.
     """
+    with _run_lock(vault_root, dry_run=dry_run):
+        return _reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id)
+
+
+def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id: str | None) -> ReconcileReport:
+    """One reconcile run, as `reconcile` describes it, under that run's reconcile-run lock."""
     report = ReconcileReport(dry_run=dry_run, graph_rebuild_requested=rebuild_graph)
     census: _Census | None = None
     if dry_run or plan_id is not None:
@@ -642,6 +760,7 @@ def reconcile(
         include_graph=include_unit_graph,
     )
     report.semantic_unit_index_drift = [item.as_dict() for item in unit_drift]
+    outside_corpus_hashes: dict[str, str] = {}
     if unit_drift:
         report.semantic_unit_indexes_status = "drifted" if dry_run else "repairing"
     if unit_drift and not dry_run:
@@ -662,11 +781,21 @@ def reconcile(
                 and item.sidecar != "cross_sidecar"
             }
         )
+        # A parent outside the corpus was no page that the corpus read. Its bytes are recorded now, at
+        # the audit, so the hold removes its rows only while it stays as the audit found it.
+        outside_corpus_hashes = _read_hashes(
+            vault_root, sorted({item.parent_path for item in unit_drift if item.parent_path not in semantic_states})
+        )
         with _phase_hold(vault_root, "reconcile units", dry_run=dry_run):
-            # The audit compared each parent with the bytes the corpus read. A parent whose bytes
-            # moved since then was indexed by the write that moved it; a repair from the old read
-            # would undo that write, so the run leaves it and reports it.
-            moved = set(_moved_since_read(vault_root, semantic_batch.corpus.pages, [*affected, *orphans]))
+            # A parent whose bytes moved since they were read was indexed by the write that moved it;
+            # a repair from the old read would undo that write, so the run leaves it and reports it.
+            moved = set(
+                _moved_since_read(
+                    vault_root,
+                    {**_corpus_hashes(semantic_batch.corpus.pages, affected), **outside_corpus_hashes},
+                    [*affected, *orphans],
+                )
+            )
             affected = [path for path in affected if path not in moved]
             orphans = [path for path in orphans if path not in moved]
             if orphans:
@@ -712,12 +841,9 @@ def reconcile(
             # The inspection classified each slot against its owner's bytes in the corpus read. A
             # slot whose owner moved since then is left for the next run to classify again. The
             # cleanup checks the rest itself: the owners' identities, the slots and the trash.
+            owners = sorted({path for item in eligible for path in item.live_owner_paths})
             moved = set(
-                _moved_since_read(
-                    vault_root,
-                    semantic_batch.corpus.pages,
-                    sorted({path for item in eligible for path in item.live_owner_paths}),
-                )
+                _moved_since_read(vault_root, _corpus_hashes(semantic_batch.corpus.pages, owners), owners)
             )
             raced = [item for item in eligible if moved.intersection(item.live_owner_paths)]
             cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch(
@@ -975,7 +1101,9 @@ def reconcile(
     clip_orphans = _clip_orphans(vault_root, missing_clip_orphans)
     frame_orphans = _dangling_frame_dirs(vault_root)
     swept = extraction_parts.sweep(vault_root, dry_run=True)
-    if not dry_run and (clip_orphans or frame_orphans or swept.removed or swept.missing):
+    # A planned write also takes the hold when every orphan that its plan names has gone, to report them.
+    planned_orphans = census is not None and bool(census.clip_orphans or census.frame_orphans)
+    if not dry_run and (clip_orphans or frame_orphans or swept.removed or swept.missing or planned_orphans):
         with _phase_hold(vault_root, "reconcile orphans", dry_run=dry_run):
             clip_orphans = [key for key in clip_orphans if not _media_present(vault_root, key)]
             frame_orphans = [
@@ -983,6 +1111,11 @@ def reconcile(
                 for frame_dir, video_path in frame_orphans
                 if not _media_present(vault_root, video_path)
             ]
+            if census is not None:
+                # A planned write removes only the orphans that its plan names too, and reports the rest.
+                clip_orphans, frame_orphans, report.orphans_changed = _planned_orphans(
+                    vault_root, census, clip_orphans, frame_orphans
+                )
             if clip_orphans:
                 embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
             for frame_dir, video_path in frame_orphans:
@@ -1022,12 +1155,11 @@ def reconcile(
         include_graph=include_unit_graph,
     )
     if not dry_run:
-        # A parent that moved since the corpus read is its own write's, not drift this run left.
+        # A parent that moved since the run read it is its own write's, not drift this run left.
+        parents = sorted({item.parent_path for item in remaining_unit_drift})
         moved_since = set(
             _moved_since_read(
-                vault_root,
-                semantic_batch.corpus.pages,
-                sorted({item.parent_path for item in remaining_unit_drift}),
+                vault_root, {**_corpus_hashes(semantic_batch.corpus.pages, parents), **outside_corpus_hashes}, parents
             )
         )
         remaining_unit_drift = tuple(
@@ -1130,4 +1262,5 @@ def _job_summary(report: ReconcileReport) -> dict[str, Any]:
         # As in `as_dict`: only a write reads its inputs again inside its holds.
         summary["semantic_isolation_changed"] = len(report.semantic_isolation_changed)
         summary["semantic_unit_parents_moved"] = len(report.semantic_unit_parents_moved)
+        summary["orphans_changed"] = len(report.orphans_changed)
     return summary

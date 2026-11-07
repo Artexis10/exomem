@@ -1065,6 +1065,57 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile(
     assert not frames.exists()
 
 
+def test_a_second_reconcile_is_refused_while_one_runs(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two reconciles never interleave their phases, though neither holds the boundary for its run.
+
+    The first run pauses in its lexical refresh, where it holds no boundary hold. A second
+    reconcile through the manager gets MUTATION_BUSY there, and the first run still completes.
+    """
+    import threading
+
+    from exomem import maintenance_jobs, writer_lease
+    from exomem.__main__ import main
+    from exomem.cli_ops import OpError
+    from exomem.commands import commands_for
+
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease"))
+    writer_lease.reset_managers_for_tests()
+    reconcile_command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    second_outcomes: list[object] = []
+
+    def second_reconcile() -> None:
+        try:
+            second_outcomes.append(
+                writer_lease.get_manager().invoke(reconcile_command, (vault,), {"response_detail": "legacy"})
+            )
+        except OpError as error:
+            second_outcomes.append(error.code)
+
+    real_checkpoint = maintenance_jobs.checkpoint
+    started: list[bool] = []
+
+    def start_a_second_reconcile(phase, *args, **kwargs):
+        if phase == "lexical" and not started:
+            started.append(True)
+            other = threading.Thread(target=second_reconcile)
+            other.start()
+            other.join(30.0)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", start_a_second_reconcile)
+    try:
+        code = main(["maintain", "--reconcile", "--json"])
+    finally:
+        writer_lease.reset_managers_for_tests()
+    capsys.readouterr()
+
+    assert second_outcomes == ["MUTATION_BUSY"]
+    assert code == 0
+
+
 def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
