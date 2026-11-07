@@ -9,11 +9,19 @@
 - [x] 2.3 Record the stage and its proof at `start`, and add `consume=false`. Verify: tests show a manifest-backed stage recorded and a hand-made `_Imports/<id>/` folder not recorded.
 - [x] 2.4 After a chunk commits, remove each applied artifact's staged copy through `held_fs.unlink` with an identity check, when the durable copy and the manifest entry both match. Report `consumed`. Verify these with tests:
   - artifacts lose their staged copies only after their Knowledge Base copies match;
-  - text items and opted-out runs keep theirs;
+  - opted-out runs keep theirs;
   - a file added to a stage after its manifest is never removed;
   - a failed removal leaves the item applied and not consumed.
 - [x] 2.5 Resolve a missing staged copy in a recorded stage through the import index before failing, in `apply`, `retry_failed`, the repeat-call re-verification and `probe_staleness`. Verify: tests show a stop after commit and before the run save recovering with no failure, and a second run over the same stage resolving consumed items as already applied.
-- [x] 2.6 Make `finish` remove empty stage folders and report the residual with counts, bytes and the discard route. Verify: a test shows unselected, ineligible, failed and text items in the residual.
+- [x] 2.6 Make `finish` remove empty stage folders and report the residual with counts, bytes and the discard route. Verify: a test shows unselected, ineligible and failed items in the residual.
+
+- [ ] 2.7 Make `finish` remove the staged copy of each filed text item after it checks the text in the Source page, and report the residual as `unfiled` plus a `summary` sentence. Offer the review, and a discard that needs the person's agreement, while any file remains. Verify with tests:
+  - `finish` removes filed text, reports no unfiled file and offers no review;
+  - a Source whose text changed, a staged copy edited after the plan, an item that owes its note and a failed item keep their copies;
+  - a `finish` that runs out of budget reports the copies it did not reach as `unchecked`, and offers no second `finish`;
+  - a page that later pages follow leaves their files alone, and a later link to the removed text still resolves;
+  - a `finish` that stops after a removal reads as consumed on repeat;
+  - a run with `consume=false` and a stage with no manifest keep their text.
 
 ## 3. Scale
 

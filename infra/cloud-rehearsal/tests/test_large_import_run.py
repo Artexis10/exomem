@@ -155,7 +155,7 @@ def _recorded(consumed, *, residual):
 
 
 def test_paging_follows_next_after_adds_up_consumed_and_keeps_the_last_page_residual():
-    first, last = _residual(2, {"outside_run": {"files": 1}, "text": {"files": 2}}), _residual(2, {"text": {"files": 2}})
+    first, last = _residual(2, {"outside_run": {"files": 1}, "ineligible": {"files": 2}}), _residual(2, {"ineligible": {"files": 2}})
     agent = Scripted({
         "start": [_started(next_after="cursor"), _started()],
         STATUS: [_stored(["a"], next_after="cursor"), _recorded(3, residual=first), _stored(["b"]), _recorded(4, residual=last)],
@@ -170,7 +170,7 @@ def test_paging_follows_next_after_adds_up_consumed_and_keeps_the_last_page_resi
     assert problems == {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
     assert folder.consumed == 7
     assert folder.report["residual_files_left"] == 2
-    assert folder.report["residual_by_reason_files"] == {"text": 2}
+    assert folder.report["residual_by_reason_files"] == {"ineligible": 2}
     starts = [fields for kind, fields in agent.asked if kind == "start"]
     assert "after" not in starts[0] and starts[1] == {"after": "cursor"}
 
@@ -222,7 +222,7 @@ def test_a_compact_start_reply_that_drops_the_next_page_is_a_problem_not_a_short
 
 
 def test_a_compact_finish_reply_that_drops_the_residual_is_a_problem():
-    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"]), _recorded(1, residual=_residual(2, {"text": {"files": 2}}))],
+    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"]), _recorded(1, residual=_residual(2, {"ineligible": {"files": 2}}))],
                       "select": [{}], "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied()],
                       "finish": [{"finish": {}}]})
 

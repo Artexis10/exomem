@@ -421,10 +421,14 @@ def backfill_media(
                     need_retime and got_timed
                 )
                 if need_ocr or upgrade_gained:
+                    from . import media_processing
+
                     preserve.update_sidecar_extraction(
                         vault_root, sidecar,
                         text=res.sidecar_text, engine=res.engine,
                         speakers=res.speakers, ocr=res.ocr,
+                        # A page stored with its original holds null hints; it records these.
+                        binary_hints=media_processing.read_timestamp_hints(f),
                     )
                     if need_ocr:
                         stats.extracted += 1

@@ -101,6 +101,12 @@ def _cap_low_confidence_text(text: str) -> str:
     return f"{kept}\n\n[... truncated: kept the first {_MAX_EXTRACT_BYTES // 1024} KB of the withheld words ...]"
 
 
+def _media_processing_module():
+    from . import media_processing
+
+    return media_processing
+
+
 def _parts_module():
     from . import extraction_parts
 
@@ -570,6 +576,7 @@ def preserve(
     adoption_seed: Mapping[str, object] | None = None,
     text_origin: str = "upload",
     raw_protection: bool = False,
+    media_pending: bool = False,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -579,6 +586,10 @@ def preserve(
     `text_origin` says who supplied `text`: `upload` for an uploader's own
     extraction, `client` for a transcription an AI client derived from the
     original, which the page then records against the original's exact bytes.
+
+    `media_pending` stores a media stub in the pending state `media_processing.reconcile_media`
+    would give it. A caller that reconciles the original straight after sets it, so that
+    reconcile only queues the job instead of committing the page a second time.
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
@@ -791,9 +802,8 @@ def preserve(
                 extracted_by = None
             # Artifact provenance is carried everywhere except a pending
             # media stub. Reconciliation owns those: it re-renders them with
-            # the same fields computed from the binary itself, and writing
-            # them here first would change when its convergence check
-            # decides a stub is already current.
+            # the same fields computed from the binary itself. `media_pending`
+            # hands it that result already rendered, by the same function.
             describes_artifact = not want_stub
             sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
             adoption_receipt = (
@@ -842,6 +852,14 @@ def preserve(
             if raw_protection:
                 sidecar_md = raw_guard.protect(
                     sidecar_md, artifact_path=rel_artifact, digest=artifact_hash
+                )
+            if want_stub and media_pending:
+                sidecar_md = _media_processing_module().render_pending_page(
+                    sidecar_md,
+                    relative_path=rel_artifact,
+                    original_filename=artifact_path.name,
+                    sha256=artifact_hash,
+                    size=artifact_size,
                 )
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
@@ -1038,6 +1056,7 @@ def preserve_stream(
     adoption_seed: Mapping[str, object] | None = None,
     text_origin: str = "upload",
     raw_protection: bool = False,
+    media_pending: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -1064,6 +1083,7 @@ def preserve_stream(
         adoption_seed=adoption_seed,
         text_origin=text_origin,
         raw_protection=raw_protection,
+        media_pending=media_pending,
     )
 
 
@@ -1721,6 +1741,7 @@ def update_sidecar_extraction(
     speaker_verification: str | None = None,
     attempts: int | None = None,
     ocr: OcrFacts | None = None,
+    binary_hints: tuple[int, int] | None = None,
     defer_index_fanout: bool = False,
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
@@ -1750,6 +1771,7 @@ def update_sidecar_extraction(
         speaker_verification=speaker_verification,
         attempts=attempts,
         ocr=ocr,
+        binary_hints=binary_hints,
     )
     result = commit_media_sidecar_writes(
         vault_root,
@@ -1838,6 +1860,7 @@ def render_sidecar_extraction(
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
     parts: Layout | None = None,
+    binary_hints: tuple[int, int] | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -1850,7 +1873,9 @@ def render_sidecar_extraction(
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
     `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
-    do not describe the new one.
+    do not describe the new one. `binary_hints` are the mtime and ctime of the original, as the
+    caller verified them; a page stored with its original still holds them as null
+    (`media_processing.render_pending_page`) and records them here.
     """
     newline = document_newline(before)
     before = with_newline(before, "\n")
@@ -1887,6 +1912,10 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if binary_hints is not None:
+        content = _media_processing_module().record_read_hints(
+            content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
+        )
     if prior_extractions:
         links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
         content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")

@@ -127,7 +127,7 @@ The fixture generator (`large_import_fixture.py`) is deterministic. It writes it
 - every filed file has a Source whose SHA-256 matches;
 - the residual equals the expected set, counted by reason;
 - no write fails for lack of space;
-- `consumed` equals the count of filed artifacts;
+- `consumed` equals the count of filed files, artifacts and text;
 - the volume claim and the cell row stay at the fixed size (design D7: a local-storage cell publishes no limits and never grows).
 
 The platform chart leaves `cloudGateway.transferTools` off, and so does the rehearsal (`platform.TRANSFER_TOOLS_ENABLED`). While it is off, the cell refuses `observe_transfer` and `transfer_memory` with `CLOUD_GATEWAY_REQUIRED`. The run reports that refusal and makes the discard through the Substrate route instead. With the setting on, the same refusal fails the run. The step summary prints `observe_transfer.served` and `discard_call.route` for each folder, so a pass shows when the transfer tools were not exercised.
