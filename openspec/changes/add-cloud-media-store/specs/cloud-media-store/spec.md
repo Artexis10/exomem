@@ -387,7 +387,7 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions. The bucket SHALL stay in the founder account.
 
-This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold a key that reads and writes it. A follow-on change for version destruction SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
+This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold a key that reads and writes it. the change `collect-released-media` SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
 
 No age or time cutoff SHALL decide destruction.
 
@@ -502,7 +502,7 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 
 ### Requirement: Deleting originals and cells removes their stored objects
 
-This change SHALL NOT destroy the version of an original that the owner deletes. The version stays in the media store until the follow-on change for version destruction ships, and the physical meter counts it.
+This change SHALL NOT destroy the version of an original that the owner deletes. The version stays in the media store until the change `collect-released-media` ships, and the physical meter counts it.
 
 When a cell row is set to `deleted`, cellctl SHALL retire its media content keys under `cloud-cell-key-custody`, independently of provider cleanup.
 Live-copy absence and retention evidence SHALL continue to govern the key-destruction claim.

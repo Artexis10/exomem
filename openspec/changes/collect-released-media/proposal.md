@@ -27,7 +27,9 @@ No server-side model is added. No clock decides a deletion.
 
 - `cloud-media-store`: not canonical yet. The edge operations, bucket retention and owner deletion requirements of `add-cloud-media-store` change in place, as listed below.
 
-### Modified elsewhere (follow-up edit in this delivery)
+### Modified elsewhere
+
+The proposing delivery already points `add-cloud-media-store` task 4.6, task 6.3 and its D9 owner-deletion text at this change. The implementation delivery makes the other edits below.
 
 - `add-cloud-media-store`:
   - design D6: the edge gains the `condemn` operation for a collector credential, and HEAD gains the `condemned` status;

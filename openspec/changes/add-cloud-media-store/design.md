@@ -282,7 +282,7 @@ The same provider holds backups and media. A second copy at another provider was
   - A separate *upload* step without the media key transfers the archive as today's export does.
 
   The archive's format and delivery stay those of the export contract. Export of more media than the staging volume can hold is an open question; until it is settled, no cell other than the canary may store more media than its export can stage (D11).
-- **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because this change destroys no version, and the follow-on destroys none that a retained snapshot references (D9). A restored reference reads its pinned version, so a restore needs no reactivation step.
+- **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because this change destroys no version, and `collect-released-media` removes none that a retained snapshot references. A restored reference reads its pinned version, so a restore needs no reactivation step.
 - **Restore from an export.** A vault restored from an export can carry references to versions destroyed since the export. So the cell confirms with a head request that a pinned version exists before it evicts an original or reuses the version. A reference to an absent version counts as no reference, and the original is offloaded again (D3).
 
 The existing upload service carries the selected lane. Source sessions use the canonical Source writer and its existing mutation replay protocol.
@@ -331,25 +331,16 @@ The operator confirmed the shape in D12 on 2026-10-30. It adds windows and filin
 
 ### D9. Deletion
 
-**Amendment, 2026-11-06: version destruction moves to a follow-on change.** Under the key custody of `contain-cloud-controller-compromise` D9, cellctl cannot read a manifest, because its backup key can only list. It cannot delete a manifest, because the backup bucket is locked in compliance mode. It holds no `deleteFiles` on the media bucket. So this change ships no reference manifest and no destruction of versions. A follow-on change for version destruction carries both, and the operator has chosen to build it next. Never destroying a version is safe and costs storage only, which the physical meter (D10) watches. The text below stays as the follow-on's starting design, except where a bullet says what this change does.
+**Amendment, 2026-11-06: version destruction moves to a follow-on change.** Under the key custody of `contain-cloud-controller-compromise` D9, cellctl cannot read a manifest, because its backup key can only list. It cannot delete a manifest, because the backup bucket is locked in compliance mode. It holds no `deleteFiles` on the media bucket. So this change ships no reference manifest and no destruction of versions. The change `collect-released-media` carries both, and the operator has chosen to build it next. Never destroying a version is safe and costs storage only, which the physical meter (D10) watches. Its design (D1 to D5) replaces the manifest and destruction text that this decision held before the amendment.
 
-Collection is new lifecycle logic. No existing sweep supplies it: the archive member pool's sweep removes only abandoned temporary files. Collection works by reachability, with no hide step:
-
-- **Reference manifests (follow-on).** Each backup computes a reference manifest from the clone it backs up. The manifest lists every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It is stored beside the snapshot in the cell's backup prefix, keyed by snapshot ID.
 - **Protection records.** A crash-consistent clone may omit the newest commits of a ledger that syncs lazily (WAL with `synchronous=NORMAL`). So the ordering is explicit:
   1. Before an offload uploads or reuses a version, it commits a protection record for the object name with a full sync. Any later capture therefore contains the record.
   2. The offload publishes the sidecar reference and syncs that write to disk.
   3. Only then does it retire the protection record.
 
   At every capture after step 1, the clone holds the record, the synced reference, or both. A reuse also checks that a live sidecar references the version at the moment its record commits.
-- **Destroy (follow-on).** This change destroys no version. A follow-on change for version destruction destroys versions only in the backup hold, after that hold's backup and prune succeed. Holds are exclusive per cell, so no restore and no other capture runs in between. It destroys a version only if all of these hold:
-  - the version appears in a listing of the cell's media prefix that cellctl completed before it took the newest retained snapshot's capture;
-  - no retained snapshot's manifest names that version or lists its object name under a protection record;
-  - every retained snapshot has a readable manifest. Otherwise nothing is destroyed for that cell.
-
-  cellctl then deletes the manifests of pruned snapshots.
-- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. Only versions in a listing that cellctl completed before the newest capture are candidates, so no clocks are compared. A restic restore brings back sidecars whose versions some retained manifest names.
-- **Owner deletion.** Until the follow-on ships, a version that the owner deleted stays in the store. Its storage counts in the physical meter, not against the owner's allowance. With the follow-on, it leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
+- **Destroy.** This change destroys no version. `collect-released-media` D5 defines when a released version may be removed, and its manifest carries the protection records above.
+- **Owner deletion.** Until `collect-released-media` ships, a version that the owner deleted stays in the store. Its storage counts in the physical meter, not against the owner's allowance. With it, the version is hidden at the first backup hold after the last retained backup that references it is pruned, and the provider deletes it after the grace period.
 - **Cell deletion (decision 2026-11-06).** cellctl revokes and proves the revocation. The operator's cleanup script deletes. cellctl holds no `deleteFiles` on the media bucket, so it deletes nothing there.
   - *Content keys.* Media content-key retirement follows `cloud-cell-key-custody` and does not wait for edge or provider cleanup. cellctl runs it before any provider work.
   - *Revocation.* A cell that the previously published active set lists, or that has a `media_store` record in its custody observation, stays `deleting` until the edge's exact-set evidence (D6) shows a set that omits the cell. A previously published set that cellctl cannot read counts as listing the cell, because unknown is not absent. The first wait records `revoke_requested_at` in that `media_store` record, because the next pass publishes a set without the cell and no longer shows the membership. The matching evidence adds `revoked_generation`, `set_sha256` and `observed_at`. The record needs no migration and survives a restart. A cell that a readable set never listed waits for nothing. Then the row becomes `deleted` and the existing cleanup alert fires. This wait only controls when the alert fires. It authorizes no deletion.
@@ -372,7 +363,7 @@ Each cell has a media allowance, separate from its volume size. It is a configur
 #### The physical meter (decision 2026-11-06)
 
 Once per backup hold, cellctl lists each cell's prefix with its list-only key (D7). It sums `contentLength` over the upload versions and counts unfinished large files. It raises an alert in three cases:
-- any hide entry appears. The edge cannot hide, so a hide means a key or a person outside the design. The follow-on for version destruction withdraws this alert if its design needs hides;
+- any hide entry appears. The edge cannot hide, so a hide means a key or a person outside the design. `collect-released-media` (D4) withdraws this alert, because its collection hides released names;
 - a prefix's bytes exceed the cell's allowance times the configured headroom factor;
 - a listing page fails. This is a failed reading, so the figure is unknown and never 0, and it does not change the owner's figure.
 
@@ -445,9 +436,9 @@ Under filing by rename (D12), each window is an ordinary import within the limit
 1. Ship core behind the store being disabled. Tasks 3.x prove the states and eviction against a filesystem-backed store.
 2. Ship the bucket, edge, keys and policies with the edge off.
 3. Enable one canary cell. Back-fill: upload and verify every bound original, then evict to target.
-4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5) and the follow-on change for version destruction has shipped. Until then, only the canary may store more media than its export can stage. Imports larger than the volume also stay on the canary until then (D12, choice 4).
+4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5) and the change `collect-released-media` has shipped. Until then, only the canary may store more media than its export can stage. Imports larger than the volume also stay on the canary until then (D12, choice 4).
 
-**Operator decision, 2026-11-06: "Build it next; test cell now".** The follow-on change for version destruction is built next. Only the canary cell uses the media store before it ships. The fleet switch (task 6.3) waits for the follow-on as well as for task 5.5.
+**Operator decision, 2026-11-06: "Build it next; test cell now".** The change `collect-released-media` is built next. Only the canary cell uses the media store before it ships. The fleet switch (task 6.3) waits for it as well as for task 5.5.
 
 Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change. Phase 7 does for any media-heavy cell. Either this change's rollout finishes first, or a media-light cell migrates first.
 
