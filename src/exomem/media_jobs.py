@@ -128,8 +128,9 @@ EXTRACTION_DISABLED_ACTION = (
     "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, restart the service"
 )
 RUNTIME_UNAVAILABLE_ACTION = "fix the media runtime configuration, restart the service"
-#: The one owner of which errors are such a block: a closed set the service itself writes. The SQL
-#: that selects the rows and the status that describes them both read it.
+#: The one owner of which errors are such a block: a closed set the service itself writes. The
+#: writer builds its block with `runtime_block`; the SQL that selects the rows and the status that
+#: describes them both read it.
 RUNTIME_BLOCK_ACTIONS = {
     EXTRACTION_DISABLED_CODE: EXTRACTION_DISABLED_ACTION,
     RUNTIME_UNAVAILABLE_CODE: RUNTIME_UNAVAILABLE_ACTION,
@@ -140,6 +141,8 @@ _RUNTIME_BLOCKED_SQL = (
     f"({','.join('?' * len(RUNTIME_BLOCK_ACTIONS))}) "
     "AND NOT EXISTS (SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id)"
 )
+#: One row from `runtime_blocked_jobs`, while nothing claimed or changed it since.
+_SAME_RUNTIME_BLOCK_SQL = f"id = ? AND claim_revision = ? AND {_RUNTIME_BLOCKED_SQL}"
 
 WAIT_ACTION = "wait for media processing"
 #: Both ways out of a multilingual request that the configured speech engine cannot run.
@@ -2478,6 +2481,18 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def current_runtime_block(self, job: MediaJob) -> MediaJob | None:
+        """A job from `runtime_blocked_jobs` as it is now, or None once it changed since."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                f"SELECT * FROM jobs WHERE {_SAME_RUNTIME_BLOCK_SQL}",
+                (job.id, job.claim_revision, *RUNTIME_BLOCK_ACTIONS),
+            ).fetchone()
+            return self._row_to_job(row) if row is not None else None
+        finally:
+            conn.close()
+
     def requeue_runtime_block(self, job: MediaJob) -> bool:
         """Return a job from `runtime_blocked_jobs` to pending, unless it changed since.
 
@@ -2489,7 +2504,7 @@ class MediaJobStore:
             with conn:
                 return conn.execute(
                     "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                    f"WHERE id = ? AND claim_revision = ? AND {_RUNTIME_BLOCKED_SQL}",
+                    f"WHERE {_SAME_RUNTIME_BLOCK_SQL}",
                     (time.time(), job.id, job.claim_revision, *RUNTIME_BLOCK_ACTIONS),
                 ).rowcount == 1
         finally:
@@ -3170,6 +3185,15 @@ def _hydration_too_large_action() -> str:
     if cloud_cell.cloud_mode_enabled():
         return "wait until the operator raises this deployment's hydration capacity, then retry"
     return "raise the hydration capacity (max_temporary_bytes in the media store policy) above the file's size, then retry"
+
+
+def runtime_block(code: str, detail: str) -> tuple[str, str]:
+    """The `last_error` and next action with which a start without a media runtime blocks work.
+
+    A code outside `RUNTIME_BLOCK_ACTIONS` raises KeyError here, at the write: the next start with a
+    runtime would never requeue a row blocked with it.
+    """
+    return f"{code}: {detail}", RUNTIME_BLOCK_ACTIONS[code]
 
 
 def _runtime_block_action(error: str | None) -> str | None:

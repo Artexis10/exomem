@@ -6,7 +6,11 @@ import hashlib
 import importlib
 import logging
 import os
+import sqlite3
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1612,17 +1616,58 @@ def _image_whose_clip_stage_the_pause_blocked(
     return binary, sidecar
 
 
+def _supervisor_starts_no_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real supervisor runs its passes and requeues the work, but starts no media child."""
+    from exomem import extract
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda _self: None)
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+
+def _wait_for(condition: Callable[[], bool], what: str) -> None:
+    deadline = time.monotonic() + 10
+    while not condition():
+        assert time.monotonic() < deadline, f"the supervisor did not {what}"
+        time.sleep(0.02)
+
+
+def _no_runtime_block_left(vault: Path) -> bool:
+    return not media_jobs.MediaJobStore(vault).runtime_blocked_jobs()
+
+
+def _recordings_a_paused_start_blocked(vault: Path) -> list[Path]:
+    """Three recordings queued while the pause flag is set, and the paused start that blocked them."""
+    from exomem import server_runtime
+
+    media_processing = _media_processing()
+    sidecars = [
+        media_processing.reconcile_media(vault, _drop_media(vault, f"paused-memo-{index}.m4a")).sidecar_path
+        for index in range(3)
+    ]
+    assert server_runtime._start_media_worker(vault) is None
+    return sidecars
+
+
+def _rows_and_pages(vault: Path, sidecars: list[Path]) -> list[tuple[str, object]]:
+    """Each recording's job state beside the processing state its page shows, in queue order."""
+    states = {job["sidecar_path"]: job["state"] for job in media_jobs.status(vault)["jobs"]}
+    return [
+        (states[sidecar.relative_to(vault).as_posix()], _frontmatter_and_body(sidecar)[0]["processing_state"])
+        for sidecar in sidecars
+    ]
+
+
 def test_a_start_with_media_extraction_requeues_the_clip_stage_a_paused_start_blocked(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import extract, server_runtime
+    from exomem import server_runtime
 
     media_processing = _media_processing()
     binary, sidecar = _photo_whose_clip_stage_waits(vault, monkeypatch)
     before = sidecar.read_bytes()
-    # The supervisor would start a media child for the requeued work; the test claims it itself.
-    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
-    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    # The test claims the requeued work itself.
+    _supervisor_starts_no_child(monkeypatch)
     worker = None
     try:
         # A start while the pause flag is set blocks the stage, and status says to clear the flag.
@@ -1636,6 +1681,7 @@ def test_a_start_with_media_extraction_requeues_the_clip_stage_a_paused_start_bl
         monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
         worker = server_runtime._start_media_worker(vault)
         assert worker is not None
+        _wait_for(lambda: _no_runtime_block_left(vault), "requeue the paused stage")
         [resumed] = media_jobs.status(vault)["jobs"]
         claimed = media_jobs.MediaJobStore(vault).claim_next()
     finally:
@@ -1652,14 +1698,12 @@ def test_a_start_with_media_extraction_requeues_the_clip_stage_a_paused_start_bl
 def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_as_pending(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import extract, server_runtime
+    from exomem import server_runtime
 
     media_processing = _media_processing()
     binary = _drop_media(vault, "paused-memo.m4a")
     sidecar = media_processing.reconcile_media(vault, binary).sidecar_path
-    # The supervisor would start a media child for the requeued work; the test claims it itself.
-    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
-    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    _supervisor_starts_no_child(monkeypatch)
     shown_when_claimable: list[object] = []
     requeue = media_jobs.MediaJobStore.requeue_runtime_block
 
@@ -1676,6 +1720,7 @@ def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_
         monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
         worker = server_runtime._start_media_worker(vault)
         assert worker is not None
+        _wait_for(lambda: _no_runtime_block_left(vault), "requeue the paused recording")
         [resumed] = media_jobs.status(vault)["jobs"]
     finally:
         if worker is not None:
@@ -1691,56 +1736,211 @@ def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_
     assert shown_when_claimable == ["pending"]
 
 
-class _ProcessStopped(BaseException):
-    """A stop that no `except Exception` of the start can absorb, as a killed process."""
-
-
-def test_a_start_stopped_after_presenting_one_row_leaves_every_page_agreeing_with_its_row(
+def test_a_start_with_media_extraction_returns_before_the_supervisor_shows_and_requeues_paused_work(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import extract, server_runtime
+    from exomem import server_runtime
 
-    media_processing = _media_processing()
-    sidecars = [
-        media_processing.reconcile_media(vault, _drop_media(vault, f"paused-memo-{index}.m4a")).sidecar_path
-        for index in range(3)
-    ]
-    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
-    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    start_returned = threading.Event()
     present = media_worker.MediaWorker.present_runtime_requeue
-    started: list[media_worker.MediaWorker] = []
-    presented: list[str] = []
+    presented_on: list[tuple[threading.Thread, bool]] = []
 
-    def present_one_then_stop(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
-        started[:] = [worker]
-        if presented:
-            raise _ProcessStopped
-        presented.append(job.sidecar_path.name)
+    def present_after_the_start_returns(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        # Each page costs a commit, so the start must not wait for one: the first page waits for the start.
+        presented_on.append((threading.current_thread(), start_returned.wait(timeout=5)))
         return present(worker, job)
 
-    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present_one_then_stop)
+    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present_after_the_start_returns)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
     try:
-        assert server_runtime._start_media_worker(vault) is None  # the pause blocks all three
-        monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
-        with pytest.raises(_ProcessStopped):
-            server_runtime._start_media_worker(vault)
+        worker = server_runtime._start_media_worker(vault)
+        start_returned.set()
+        assert worker is not None
+        _wait_for(lambda: _no_runtime_block_left(vault), "requeue the three paused recordings")
+        supervisor = worker._thread
     finally:
-        for worker in started:
+        if worker is not None:
             worker.stop()
-        media_processing.set_media_runtime_available(vault)
+        _media_processing().set_media_runtime_available(vault)
 
-    states = {job["sidecar_path"]: job["state"] for job in media_jobs.status(vault)["jobs"]}
-    pages = {path.relative_to(vault).as_posix(): _frontmatter_and_body(path)[0] for path in sidecars}
-    for path, state in states.items():
-        # The page that says pending belongs to a row that is pending, and no other.
-        assert (pages[path]["processing_state"] == "pending") == (state == media_jobs.PENDING), path
-        assert (pages[path]["processing_state"] == "blocked") == (state == media_jobs.BLOCKED), path
-    assert presented == [sidecars[0].name]
-    assert states == {
-        sidecars[0].relative_to(vault).as_posix(): media_jobs.PENDING,
-        sidecars[1].relative_to(vault).as_posix(): media_jobs.BLOCKED,
-        sidecars[2].relative_to(vault).as_posix(): media_jobs.BLOCKED,
-    }
+    assert presented_on == [(supervisor, True)] * 3
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
+
+
+class _ProcessStopped(BaseException):
+    """A stop that no `except Exception` of the worker can absorb, as a killed process."""
+
+
+def test_a_process_stopped_inside_the_requeue_of_one_row_leaves_only_that_page_ahead_until_the_next_start(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    requeue = media_jobs.MediaJobStore.requeue_runtime_block
+    stopped: list[type[BaseException]] = []
+
+    def stop_inside_the_second_requeue(store: media_jobs.MediaJobStore, job: media_jobs.MediaJob) -> bool:
+        if job.sidecar_path.name == sidecars[1].name:
+            raise _ProcessStopped
+        return requeue(store, job)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_block", stop_inside_the_second_requeue)
+    monkeypatch.setattr(threading, "excepthook", lambda args: stopped.append(args.exc_type))
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    workers: list[media_worker.MediaWorker] = []
+    try:
+        workers.append(server_runtime._start_media_worker(vault))
+        workers[0]._thread.join(timeout=10)
+        assert stopped == [_ProcessStopped]
+        interrupted = _rows_and_pages(vault, sidecars)
+
+        monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_block", requeue)
+        workers.append(server_runtime._start_media_worker(vault))
+        _wait_for(lambda: _no_runtime_block_left(vault), "heal the interrupted requeue")
+    finally:
+        for worker in workers:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    # A row and its page cannot change together, so the row in hand shows pending while still blocked.
+    # No other page is ahead of its row, and the next start with a runtime brings every row in step.
+    assert interrupted == [
+        (media_jobs.PENDING, "pending"),
+        (media_jobs.BLOCKED, "pending"),
+        (media_jobs.BLOCKED, "blocked"),
+    ]
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
+
+
+def test_a_worker_stopped_during_the_requeue_finishes_the_row_in_hand_and_leaves_the_rest_blocked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    present = media_worker.MediaWorker.present_runtime_requeue
+    in_second_row = threading.Event()
+
+    def present_the_second_row_once_stopped(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        if job.sidecar_path.name == sidecars[1].name:
+            in_second_row.set()
+            worker._stop_event.wait(timeout=5)
+        return present(worker, job)
+
+    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present_the_second_row_once_stopped)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    workers: list[media_worker.MediaWorker] = []
+    try:
+        workers.append(server_runtime._start_media_worker(vault))
+        assert in_second_row.wait(timeout=10)
+        workers[0].stop()  # the service stops while the supervisor shows the second page
+        assert not workers[0]._thread.is_alive()
+        stopped = _rows_and_pages(vault, sidecars)
+
+        monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present)
+        workers.append(server_runtime._start_media_worker(vault))
+        _wait_for(lambda: _no_runtime_block_left(vault), "requeue the row the stop left")
+    finally:
+        for worker in workers:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    assert stopped == [
+        (media_jobs.PENDING, "pending"),
+        (media_jobs.PENDING, "pending"),
+        (media_jobs.BLOCKED, "blocked"),
+    ]
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
+
+
+def test_a_ledger_error_on_one_paused_row_leaves_it_blocked_and_requeues_the_rows_after_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    reread = media_jobs.MediaJobStore.current_runtime_block
+
+    def ledger_locked_for_the_second_row(
+        store: media_jobs.MediaJobStore, job: media_jobs.MediaJob
+    ) -> media_jobs.MediaJob | None:
+        if job.sidecar_path.name == sidecars[1].name:
+            raise sqlite3.OperationalError("database is locked")
+        return reread(store, job)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "current_runtime_block", ledger_locked_for_the_second_row)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        _wait_for(lambda: _rows_and_pages(vault, sidecars)[2][0] == media_jobs.PENDING, "requeue the third row")
+        supervising = worker._thread.is_alive()
+    finally:
+        if worker is not None:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    # The failed row keeps its block and its blocked page for the next start; the supervisor carries on.
+    assert supervising
+    assert _rows_and_pages(vault, sidecars) == [
+        (media_jobs.PENDING, "pending"),
+        (media_jobs.BLOCKED, "blocked"),
+        (media_jobs.PENDING, "pending"),
+    ]
+
+
+def test_a_start_skips_a_paused_row_claimed_and_blocked_again_after_the_handover(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    store = media_jobs.MediaJobStore(vault)
+    present = media_worker.MediaWorker.present_runtime_requeue
+    reblocked: list[media_jobs.MediaJob] = []
+
+    def another_start_reblocks_the_second_row(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        if job.sidecar_path.name == sidecars[0].name:
+            # Another process returns the second row to the queue, claims it, and blocks it again.
+            [_first, second, _third] = store.runtime_blocked_jobs()
+            assert store.retry(binary_path=second.binary_path) == 1
+            claimed = store.claim_next()
+            assert claimed is not None and claimed.id == second.id
+            error, _action = media_jobs.runtime_block(media_jobs.RUNTIME_UNAVAILABLE_CODE, "startup failed")
+            assert store.mark(claimed, media_jobs.BLOCKED, error)
+            reblocked.append(claimed)
+        return present(worker, job)
+
+    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", another_start_reblocks_the_second_row)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        _wait_for(lambda: _rows_and_pages(vault, sidecars)[2][0] == media_jobs.PENDING, "requeue the third row")
+    finally:
+        if worker is not None:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    # The row is still runtime-blocked, but not the row the start handed over: neither its page nor its row moves.
+    [claimed] = reblocked
+    still_blocked = store.get(claimed.id)
+    assert still_blocked is not None and still_blocked.claim_revision == claimed.claim_revision
+    assert _rows_and_pages(vault, sidecars) == [
+        (media_jobs.PENDING, "pending"),
+        (media_jobs.BLOCKED, "blocked"),
+        (media_jobs.PENDING, "pending"),
+    ]
 
 
 def test_a_start_leaves_a_row_alone_that_changed_after_it_was_selected_for_requeue(vault: Path) -> None:
