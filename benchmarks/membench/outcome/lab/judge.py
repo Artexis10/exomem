@@ -10,6 +10,7 @@ the paired differences with a bootstrap interval over tasks, and cost.
 A matter with no deliverable scores 0 for that arm: a product failure is scored. A matter where any
 arm met a harness fault (``faults``) is struck from every arm, and more than ``STRIKE_LIMIT`` struck
 matters void the decision. Every arm's report lists its scheduled, valid, invalid and missing matters.
+A decision reads as incomplete, and decides nothing, while a judgement has failed or a matter is missing.
 
 ``membench outcome report lab`` drives this module.
 """
@@ -22,9 +23,9 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-from ..faults import STRIKE_LIMIT, books
-from ..judging import Judge, JudgeSpec, grade_item, judge_all, read_rows
-from ..stats import paired_interval, usage_totals
+from ..faults import STRIKE_LIMIT, books, incomplete_why
+from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
+from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from ..workspace import RUN_ROOT
 from .prepare import slug
 from .run import ARMS
@@ -220,21 +221,26 @@ def difference(by_task: dict[str, dict], a: str, b: str, measure: str) -> dict:
     }
 
 
-def decision(pairs: dict, struck: set[str]) -> dict:
-    """PREREGISTRATION §7: WP beats S when the lower bound of the per-matter WP-S difference is above 0."""
+def decision(pairs: dict, struck: set[str], failed: list[str], arms: dict[str, dict]) -> dict:
+    """PREREGISTRATION §7: WP does no harm when the lower bound of WP-S is above the accepted loss, and helps above 0."""
     if len(struck) > STRIKE_LIMIT:
         return {
             "status": "void",
             "why": f"{len(struck)} matters are struck by harness faults: {sorted(struck)}",
         }
-    verdict = pairs.get("WP-S", {}).get("pass_fraction", {}).get("verdict")
+    if why := incomplete_why(failed, arms):
+        return {"status": "incomplete", "why": why}
+    interval = pairs.get("WP-S", {}).get("pass_fraction", {}).get("ci95")
+    low = None if interval is None else interval[0]
     return {
         "status": "complete",
-        "wp_beats_s": {
+        "no_harm": {
+            "rule": f"lower bound of the per-matter WP-S pass fraction difference above {NOT_WORSE_BOUND}",
+            "result": None if low is None else low > NOT_WORSE_BOUND,
+        },
+        "helps": {
             "rule": "lower bound of the per-matter WP-S pass fraction difference above 0",
-            "result": None
-            if verdict is None or verdict.startswith("insufficient")
-            else verdict == "better",
+            "result": None if low is None else low > 0,
         },
     }
 
@@ -244,7 +250,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     by_item = {s["item"]: s for s in sessions if s["item"]}
     struck = struck_tasks(sessions)
     rows = read_rows(judge_run / "judge" / "verdicts.jsonl")
-    failed = [r["id"] for r in rows if r["verdict"] is None]
+    failed = failed_judgements(judge_run / "judge")
     # Per task and arm, the mean over runs of the pass fraction and of the all-pass flag.
     repeats: dict[str, dict[str, list[tuple[float, float]]]] = defaultdict(
         lambda: defaultdict(list)
@@ -288,7 +294,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
         logs = session_logs(mine)
         report["arms"][arm] = {
             # Matters of this arm: valid (scored), invalid (struck by any arm's harness fault) or missing.
-            "units": books(len(scheduled), set(judged), scheduled & struck),
+            "units": books(scheduled, set(judged), scheduled & struck),
             "tasks_judged": len(judged),
             "no_deliverable": sorted(s["task_id"] for s in mine if s["state"] == "no_deliverable"),
             "mean_pass_fraction": round(
@@ -305,7 +311,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
             measure: difference(by_task, a, b, measure) for measure in ("pass_fraction", "all_pass")
         }
     if heldout:
-        report["decision"] = decision(report["pairs"], struck)
+        report["decision"] = decision(report["pairs"], struck, failed, report["arms"])
     report["judge_noise"] = judge_noise(judge_run, rows)
     (judge_run / "score.json").write_text(json.dumps(report, indent=2))
     return report

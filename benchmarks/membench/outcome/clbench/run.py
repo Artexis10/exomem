@@ -320,9 +320,13 @@ class ClaudeSession:
                     str(d.get("tool_name", "?")) for d in event.get("permission_denials") or []
                 ]
                 if event.get("is_error"):
-                    # The CLI ended in an error instead of an answer; whether the model or the
-                    # service caused it, no answer was scored, so the unit is retried and may be voided.
-                    log.harness(f"result error: {event.get('subtype')}: {event.get('result')}")
+                    # A scored loss, not a harness fault (PREREGISTRATION section 7): the product ended in
+                    # an error, such as a spent turn or context budget. The result text is the error, not
+                    # an answer, so the reply is empty.
+                    log.faults.append(
+                        f"result error: {event.get('subtype')}: {event.get('result')}"
+                    )
+                    return ""
                 return event.get("result") or ""
 
     def close(self) -> None:
@@ -446,15 +450,12 @@ class ClaudeActor:
             return self.env
         return {**self.env, **hook_env(self.arm_dir, f"q{index:03d}")}
 
-    def _reset_work(self, memory: Path | None = None) -> None:
-        """An empty workspace. The folder arm's memory folder is copied in from ``memory``, or starts empty."""
+    def _reset_work(self) -> None:
+        """An empty workspace; the folder arm's memory folder starts empty."""
         shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True)
         if self.spec.persists == "folder":
-            if memory is None:
-                (self.work / "memory").mkdir()
-            else:
-                shutil.copytree(memory, self.work / "memory")
+            (self.work / "memory").mkdir()
 
     def argv(self) -> list[str]:
         argv = build_turn_argv(
@@ -495,15 +496,20 @@ class ClaudeActor:
         if self.spec.exomem:
             copy_state(self.arm_dir, checkpoint)
         elif self.spec.persists == "folder":
+            # The folder arm's whole workspace carries from question to question, not only memory/.
             shutil.rmtree(checkpoint, ignore_errors=True)
-            shutil.copytree(self.work / "memory", checkpoint / "memory")
+            shutil.copytree(self.work, checkpoint / "work")
 
     def _restore(self, index: int) -> None:
-        """Put the arm back to the checkpoint: its memory, an empty workspace and the question's hook home."""
+        """Put the arm back to the checkpoint: its memory and workspace, and a fresh hook home for the question."""
         checkpoint = self.arm_dir / "checkpoint"
         if self.spec.exomem:
             copy_state(checkpoint, self.arm_dir)
-        self._reset_work(checkpoint / "memory")
+        if self.spec.persists == "folder":
+            shutil.rmtree(self.work, ignore_errors=True)
+            shutil.copytree(checkpoint / "work", self.work)
+        else:
+            self._reset_work()
         if self.spec.plugin:
             hook_home = hook_env(self.arm_dir, f"q{index:03d}")["EXOMEM_HOOK_HOME"]
             shutil.rmtree(hook_home, ignore_errors=True)

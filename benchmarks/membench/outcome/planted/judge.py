@@ -21,10 +21,12 @@ import json
 import random
 from pathlib import Path
 
+# ``_table`` is private to the sequence-8 scorer, whose module is outside this suite's scope; it is the
+# one place that builds the (a, b, c, d) table that method 10 reads, so a copy here would drift from it.
 from membench.utility.organisation_replay.score import _table, newcombe_paired
 
-from ..faults import STRIKE_LIMIT, books
-from ..judging import Judge, JudgeSpec, grade_item, judge_all, read_rows
+from ..faults import STRIKE_LIMIT, books, incomplete_why
+from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from ..stats import MIN_UNITS, usage_totals
 
 SEED = 20261107
@@ -206,7 +208,9 @@ def shown(table: dict) -> dict:
     }
 
 
-def decision(tables: dict[str, dict] | None, struck: set[str]) -> dict:
+def decision(
+    tables: dict[str, dict] | None, struck: set[str], failed: list[str], arms: dict[str, dict]
+) -> dict:
     """PREREGISTRATION §7: governance protects when the upper bound of E-P for stale_trusted is below 0.
 
     The point estimate of ``correct`` E-P must also be at least 0, so that an arm cannot gain by not answering.
@@ -216,8 +220,10 @@ def decision(tables: dict[str, dict] | None, struck: set[str]) -> dict:
             "status": "void",
             "why": f"{len(struck)} cases are struck by harness faults: {sorted(struck)}",
         }
+    if why := incomplete_why(failed, arms):
+        return {"status": "incomplete", "why": why}
     if tables is None or tables["stale_trusted"]["n"] < MIN_UNITS:
-        return {"status": "incomplete: no paired E-P cases"}
+        return {"status": "incomplete", "why": ["no paired E-P cases"]}
     stale, correct = tables["stale_trusted"], tables["correct"]
     return {
         "status": "complete",
@@ -235,12 +241,10 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     struck = struck_cases(sessions)
     rows = read_rows(judge_run / "judge" / "verdicts.jsonl")
     by_case: dict[str, dict[str, dict]] = {}
-    failed = []
+    failed = failed_judgements(judge_run / "judge")
     for row in rows:
-        entry = by_item[row["id"]]
-        if row["verdict"] is None:
-            failed.append(row["id"])
-        else:
+        if row["verdict"] is not None:
+            entry = by_item[row["id"]]
             by_case.setdefault(entry["case_id"], {})[entry["arm"]] = row["verdict"]
     unanswered = {
         (e["case_id"], e["arm"])
@@ -268,7 +272,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
         valid = {c for c, arms in by_case.items() if arm in arms}
         report["arms"][arm] = {
             # Cases of this arm: valid (scored), invalid (struck by any arm's harness fault) or missing.
-            "units": books(len(scheduled), valid, scheduled & struck),
+            "units": books(scheduled, valid, scheduled & struck),
             "cases_judged": len(valid) - sum(1 for c in valid if (c, arm) in unanswered),
             "unanswered": sum(1 for c in valid if (c, arm) in unanswered),
             "spent": usage_totals(e["log"] for e in mine if "log" in e),
@@ -278,7 +282,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
         raw[f"{a}-{b}"] = pair_tables(by_case, a, b)
         report["pairs"][f"{a}-{b}"] = {m: shown(t) for m, t in raw[f"{a}-{b}"].items()}
     if heldout:
-        report["decision"] = decision(raw.get("E-P"), struck)
+        report["decision"] = decision(raw.get("E-P"), struck, failed, report["arms"])
     again = [r for r in read_rows(judge_run / "judge" / "rejudge.jsonl") if r["verdict"]]
     first = {r["id"]: r["verdict"] for r in rows if r["verdict"]}
     agree = [

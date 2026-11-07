@@ -1,10 +1,11 @@
 """Harness faults: what voids a unit of an outcome run, judged from a session's own evidence.
 
 A product failure is a scored loss: a wrong answer, a refusal, a timeout, a malformed reply, a
-missing deliverable. A harness fault is the harness failing to run the product at all, and only
-evidence of one voids a unit. The evidence is:
+missing deliverable, and an error result that the CLI returns (a spent turn or context budget
+included). A harness fault is the harness failing to run the product at all, and only evidence of
+one voids a unit. The evidence is:
 
-- the CLI exited before it answered, or answered with an error result;
+- the CLI exited before it answered;
 - the CLI never sent an ``init`` event, or its transcript is missing or empty;
 - an ``init`` event shows a model other than the one requested (a fallback), an API key as the
   credential source, or an Exomem server that is not ``connected``.
@@ -63,15 +64,40 @@ def with_retries(
     return result, retries
 
 
-def books(scheduled: int | None, valid: Collection[str], invalid: Collection[str]) -> dict:
+def books(
+    scheduled: Collection[str] | int | None, valid: Collection[str], invalid: Collection[str]
+) -> dict:
     """One arm's unit counts: every scheduled unit is valid, invalid (struck or voided) or missing.
 
-    ``scheduled`` is None when the run does not say how many units it planned; ``missing`` is then unknown.
+    ``scheduled`` is the set of unit names, or a bare count when the units have no names yet. It
+    is None when the run does not say how many units it planned; ``missing`` is then unknown. The
+    names of the missing units are listed when the scheduled units are named.
     """
+    names = None if scheduled is None or isinstance(scheduled, int) else set(scheduled)
+    count = len(names) if names is not None else scheduled
     return {
-        "scheduled": scheduled,
+        "scheduled": count,
         "valid": len(valid),
         "invalid": len(invalid),
-        "missing": None if scheduled is None else scheduled - len(valid) - len(invalid),
+        "missing": None if count is None else count - len(valid) - len(invalid),
         "invalid_units": sorted(invalid),
+        "missing_units": None if names is None else sorted(names - set(valid) - set(invalid)),
     }
+
+
+def incomplete_why(failed: Collection[str], arms: dict[str, dict]) -> list[str]:
+    """Why a decision cannot be read yet: a failed judgement or an arm's missing units. Empty when it can.
+
+    A decision decides nothing until a rerun completes the run, so an unknown count counts as incomplete too.
+    """
+    why = [f"the judgement of {item} failed" for item in sorted(failed)]
+    for arm, body in sorted(arms.items()):
+        units = body["units"]
+        if units["missing"] is None:
+            why.append(f"arm {arm}: the scheduled units are unknown")
+        elif units["missing"]:
+            named = units["missing_units"]
+            why.append(
+                f"arm {arm} is missing {named if named is not None else units['missing']} unit(s)"
+            )
+    return why

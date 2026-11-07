@@ -3,7 +3,8 @@
 Every number is recomputed from the run's ``outcomes.jsonl`` files. A question that an arm did
 not reach is missing, never a zero. A run (one ``run_index``, all arms) with a harness fault that
 survived the retries is void for every arm, because memory carries across its questions; voided
-runs leave every figure, and the report lists them. Pairs are formed question by question inside
+runs leave every figure, and the report lists them. A held-out decision reads as incomplete, and
+decides nothing, while a scheduled cell has not run to its end. Pairs are formed question by question inside
 each ``run_index``. The differences of one question are averaged over the runs before the
 interval, so a question counts once: the interval is a bootstrap over questions, and the report
 also gives each run's mean difference and the post-migration questions on their own.
@@ -18,13 +19,11 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-from ..faults import REPLACEMENT_RUN, books
-from ..stats import paired_interval, usage_totals
+from ..faults import REPLACEMENT_RUN, books, incomplete_why
+from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from ..workspace import pin
 
 BOOTSTRAP_SEED = 20261107
-#: The largest loss against a plain folder the owner accepts (PREREGISTRATION §7, sequence 9).
-NOT_WORSE_BOUND = -0.05
 #: Upstream's own list of the questions it asks after the schema migration.
 POST_MIGRATION_FILE = "data/database_exploration/questions_post_drift.json"
 
@@ -51,6 +50,44 @@ def load_arms(run_dir: Path) -> dict[str, Rows]:
             row = json.loads(line)
             arms[manifest["arm"]][(run_index, row["log"]["question_id"])] = row
     return dict(arms)
+
+
+def cell_states(run_dir: Path) -> dict[tuple[str, int | None], dict]:
+    """``(arm, run_index) -> state`` of every cell the run started: whether it was evaluated, and how far it got."""
+    cells = {}
+    for cell in sorted(run_dir.iterdir()):
+        if not (cell / "manifest.json").exists():
+            continue
+        manifest = json.loads((cell / "manifest.json").read_text())
+        outcomes = cell / "outcomes.jsonl"
+        cells[(manifest["arm"], manifest["task"]["run_index"])] = {
+            "evaluated": (cell / "evaluation.json").exists(),
+            "questions": len(outcomes.read_text().splitlines()) if outcomes.exists() else 0,
+            "instances": manifest["task"]["instances"],
+        }
+    return cells
+
+
+def unfinished_cells(
+    cells: dict, arms: list[str], counted: list[int | None], voided: set[int | None]
+) -> list[str]:
+    """The cells the decision needs that did not run to their end. A voided run needs none: it is void."""
+    unfinished = []
+    for run_index in (i for i in counted if i not in voided):
+        for arm in arms:
+            name = f"{arm} run {run_index}"
+            cell = cells.get((arm, run_index))
+            if cell is None:
+                unfinished.append(f"{name} was not started")
+            elif not cell["evaluated"]:
+                unfinished.append(
+                    f"{name} ended after {cell['questions']} of {cell['instances']} questions, with no evaluation.json"
+                )
+            elif cell["questions"] != cell["instances"]:
+                unfinished.append(
+                    f"{name} has {cell['questions']} of {cell['instances']} questions"
+                )
+    return unfinished
 
 
 def instances_of(run_dir: Path) -> int | None:
@@ -85,6 +122,9 @@ def runs_state(arms: dict[str, Rows], scheduled: list[int | None], *, heldout: b
         "played": played,
         "voided": {str(i): faults for i, faults in voided.items()},
         "valid": valid,
+        # The runs whose units the report counts: every scheduled run, voided ones included (their
+        # units are invalid), and the replacement once it is played.
+        "counted": sorted({*scheduled, *played}, key=lambda i: (i is None, i or 0)),
         "replacement": None,
         "decision_void": False,
         "void_reason": None,
@@ -95,6 +135,7 @@ def runs_state(arms: dict[str, Rows], scheduled: list[int | None], *, heldout: b
     base = [i for i in scheduled if i != REPLACEMENT_RUN]
     voided_base = [i for i in base if i in voided]
     state["valid"] = [i for i in base if i in played and i not in voided]
+    state["counted"] = list(base)
     if len(voided) >= 2:
         state["decision_void"] = True
         state["void_reason"] = f"{len(voided)} runs are voided by harness faults: {sorted(voided)}"
@@ -102,6 +143,7 @@ def runs_state(arms: dict[str, Rows], scheduled: list[int | None], *, heldout: b
         if REPLACEMENT_RUN in played:
             state["replacement"] = {"run_index": REPLACEMENT_RUN, "replaces": voided_base[0]}
             state["valid"] = [*state["valid"], REPLACEMENT_RUN]
+            state["counted"] = [*base, REPLACEMENT_RUN]
         else:
             state["incomplete"] = (
                 f"run {voided_base[0]} is voided; run_index {REPLACEMENT_RUN} replaces it once"
@@ -120,9 +162,28 @@ def reached(rows: Rows, runs: set[int | None]) -> Rows:
     return {key: row for key, row in rows.items() if row["outcome"] and key[0] in runs}
 
 
-def arm_summary(rows: Rows, runs: set[int | None], scheduled: int | None) -> dict:
+def unit(run_index: int | None, position: int) -> str:
+    """A unit is a question by its position in the run: a question not yet asked has no id to name."""
+    return f"r{run_index}:q{position:02d}"
+
+
+def arm_units(rows: Rows, runs: dict, voided: set[int | None], instances: int | None) -> dict:
+    """The arm's questions in the runs the report counts: valid, invalid (the run is void) or missing."""
+    if instances is None:
+        return books(None, set(), set())
+    positions = range(instances)
+    scheduled = {unit(r, i) for r in runs["counted"] for i in positions}
+    valid = {
+        unit(k[0], row["log"]["index"]) for k, row in reached(rows, set(runs["valid"])).items()
+    }
+    invalid = {unit(r, i) for r in runs["counted"] if r in voided for i in positions}
+    return books(scheduled, valid, invalid)
+
+
+def arm_summary(rows: Rows, runs: dict, voided: set[int | None], instances: int | None) -> dict:
     """One arm: its scored questions in valid runs, its units, and everything it spent."""
-    scored = reached(rows, runs)
+    valid_runs = set(runs["valid"])
+    scored = reached(rows, valid_runs)
     outcomes = [r["outcome"] for r in scored.values()]
     rewards = [o["reward"] for o in outcomes]
     logs = [r["log"] for r in rows.values()]
@@ -137,12 +198,8 @@ def arm_summary(rows: Rows, runs: set[int | None], scheduled: int | None) -> dic
         for turn in log.get("hook_chars", []):
             for event, chars in turn.items():
                 injected[event] = injected.get(event, 0) + chars
-    faulted = {f"r{k[0]}:{k[1]}" for k, r in rows.items() if r["log"].get("harness_faults")}
-    in_voided = {f"r{k[0]}:{k[1]}" for k in rows if k[0] not in runs}
-    valid = {f"r{k[0]}:{k[1]}" for k in rows} - faulted - in_voided
     return {
-        # Units: questions of this arm that are valid, invalid (harness fault, or in a voided run) or missing.
-        "units": books(scheduled, valid, faulted | in_voided),
+        "units": arm_units(rows, runs, voided, instances),
         "scored_questions": len(scored),
         "mean_reward": round(statistics.mean(rewards), 4) if rewards else None,
         "accuracy": round(sum(o["success"] for o in outcomes) / len(outcomes), 4)
@@ -222,12 +279,13 @@ def per_question(rows: Rows, runs: set[int | None]) -> dict[str, float]:
     return {q: round(statistics.mean(v), 4) for q, v in sorted(by_question.items())}
 
 
-def decision(pairs: dict, runs: dict) -> dict:
+def decision(pairs: dict, runs: dict, arms: dict[str, dict]) -> dict:
     """PREREGISTRATION §7: each rule reads the lower bound and every run's mean; None means unknown."""
     if runs["decision_void"]:
         return {"status": "void", "why": runs["void_reason"]}
-    if runs["incomplete"]:
-        return {"status": f"incomplete: {runs['incomplete']}"}
+    why = [*([runs["incomplete"]] if runs["incomplete"] else []), *runs["unfinished"]]
+    if why := [*why, *incomplete_why([], arms)]:
+        return {"status": "incomplete", "why": why}
 
     def read(pair: str):
         body = pairs.get(pair)
@@ -261,23 +319,36 @@ def build(
     *,
     scheduled: list[int | None] | None = None,
     heldout: bool = False,
+    arms: list[str] | None = None,
 ) -> dict:
-    """The run's report. ``scheduled`` lists the ``run_index`` values the run planned (None for a plain run)."""
-    arms = load_arms(run_dir)
+    """The run's report.
+
+    ``scheduled`` lists the ``run_index`` values the run planned (None for a plain run) and ``arms``
+    the arms it planned; each defaults to what the run directory holds.
+    """
+    rows_by_arm = load_arms(run_dir)
     scheduled = scheduled or [None]
-    runs = runs_state(arms, scheduled, heldout=heldout)
+    runs = runs_state(rows_by_arm, scheduled, heldout=heldout)
+    voided = set(voided_runs(rows_by_arm))
+    runs["unfinished"] = (
+        unfinished_cells(cell_states(run_dir), arms or sorted(rows_by_arm), runs["counted"], voided)
+        if heldout
+        else []
+    )
     valid = set(runs["valid"])
     instances = instances_of(run_dir)
-    planned = None if instances is None else instances * len(scheduled)
     post = post_migration_ids()
     cases: dict[str, dict[str, float]] = defaultdict(dict)
-    for arm, rows in arms.items():
+    for arm, rows in rows_by_arm.items():
         for question, reward in per_question(rows, valid).items():
             cases[question][arm] = reward
     pair_bodies = {
-        f"{a}-{b}": paired(arms[a], arms[b], valid, post)
+        f"{a}-{b}": paired(rows_by_arm[a], rows_by_arm[b], valid, post)
         for a, b in pairs
-        if a in arms and b in arms
+        if a in rows_by_arm and b in rows_by_arm
+    }
+    summaries = {
+        name: arm_summary(rows, runs, voided, instances) for name, rows in rows_by_arm.items()
     }
     report = {
         "suite": "clbench",
@@ -285,10 +356,10 @@ def build(
         "measure": "mean reward per question (upstream scoring), 0 to 1",
         "interval": "percentile bootstrap over questions, 10,000 resamples; each question's differences are averaged over runs first",
         "runs": runs,
-        "arms": {name: arm_summary(rows, valid, planned) for name, rows in arms.items()},
+        "arms": summaries,
         "pairs": pair_bodies,
         "cases": dict(sorted(cases.items(), key=lambda kv: (len(kv[0]), kv[0]))),
     }
     if heldout:
-        report["decision"] = decision(pair_bodies, runs)
+        report["decision"] = decision(pair_bodies, runs, summaries)
     return report

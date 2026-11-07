@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -169,15 +170,31 @@ def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort) -> None
 
     if split == "heldout" and REPLACEMENT_RUN in clbench_indexes(split, seeds):
         require_replacement(run_dir)
-    cells = clbench_cells(run_dir, split, arms, seeds, limit, model, effort)
+    from .clbench import report
+
+    def play(cell) -> None:
+        # A voided run index is void for every arm, so its remaining cells would spend quota on nothing.
+        if cell.run_index in report.voided_runs(report.load_arms(run_dir)):
+            print(f"{cell.dir.name}: skipped, run {cell.run_index} is voided", flush=True)
+            return
+        if cell.dir.exists():
+            # Started and never evaluated: upstream's question sequence cannot resume, so the cell
+            # replays from its first question. The old cell stays under ``unfinished/`` as evidence.
+            parked = run_dir / "unfinished"
+            parked.mkdir(exist_ok=True)
+            shutil.move(
+                cell.dir, parked / f"{cell.dir.name}-{len(list(parked.glob(cell.dir.name + '-*')))}"
+            )
+        run_cell(cell)
+
     todo = []
-    for cell in cells:
+    for cell in clbench_cells(run_dir, split, arms, seeds, limit, model, effort):
         if (cell.dir / "evaluation.json").exists():
             print(f"{cell.dir.name}: already evaluated", flush=True)
         else:
             todo.append(cell)
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for future in [pool.submit(run_cell, cell) for cell in todo]:
+        for future in [pool.submit(play, cell) for cell in todo]:
             future.result()
 
 
@@ -323,7 +340,7 @@ def report_suite(
         from .clbench import report
 
         built = report.build(
-            run_dir, wanted, scheduled=stored.get("seeds") if heldout else None, heldout=heldout
+            run_dir, wanted, scheduled=stored.get("seeds"), heldout=heldout, arms=have
         )
     else:
         if spec is None:
@@ -370,6 +387,8 @@ def summary(report: dict) -> list[str]:
     decision = report.get("decision")
     if decision:
         lines.append(f"decision: {decision['status']}")
+        why = decision.get("why") or []
+        lines += [f"  {reason}" for reason in ([why] if isinstance(why, str) else why)]
         lines += [
             f"{name}: {rule['result']}" for name, rule in decision.items() if isinstance(rule, dict)
         ]

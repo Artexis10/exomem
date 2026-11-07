@@ -204,6 +204,16 @@ def read_rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def failed_judgements(judge_dir: Path) -> list[str]:
+    """The judgements that still have no verdict: a retry's row follows its failed row, so only items never settled count."""
+    failed = set()
+    for name in ("verdicts", "rejudge"):
+        rows = read_rows(judge_dir / f"{name}.jsonl")
+        settled = {row["id"] for row in rows if row["verdict"]}
+        failed |= {f"{row['id']} ({name})" for row in rows if row["id"] not in settled}
+    return sorted(failed)
+
+
 def judge_all(
     judge_dir: Path,
     spec: JudgeSpec,
@@ -229,8 +239,9 @@ def judge_all(
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)
     work = [(i, "verdicts") for i in items] + [(i, "rejudge") for i in rejudge]
+    # Only a row with a verdict is done: a rerun retries every item whose judgement failed.
     done = {
-        name: {row["id"] for row in read_rows(judge_dir / f"{name}.jsonl")}
+        name: {row["id"] for row in read_rows(judge_dir / f"{name}.jsonl") if row["verdict"]}
         for name in ("verdicts", "rejudge")
     }
     lock = threading.Lock()

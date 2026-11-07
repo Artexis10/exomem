@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import stat
 from pathlib import Path
 
@@ -318,6 +319,9 @@ def clbench_cell(
         outcome = {"reward": reward, "success": reward > 0, "metadata": {"num_queries": 1}}
         rows.append(json.dumps({"outcome": outcome, "log": log.__dict__}))
     (cell / "outcomes.jsonl").write_text("\n".join(rows) + "\n")
+    # upstream's evaluation, or the marker a voided cell leaves instead (see run_cell)
+    evaluation = {"voided": {"question_id": faulty[0]}} if faulty else {"score": 0.5}
+    (cell / "evaluation.json").write_text(json.dumps(evaluation))
 
 
 def test_a_voided_clbench_run_leaves_the_figures_and_run_index_4_replaces_it_once(tmp_path):
@@ -339,6 +343,28 @@ def test_a_voided_clbench_run_leaves_the_figures_and_run_index_4_replaces_it_onc
     built = clbench_report.build(tmp_path, [("P", "N")], scheduled=[1, 2, 3, 4], heldout=True)
     assert built["runs"]["replacement"] == {"run_index": 4, "replaces": 2}
     assert built["runs"]["valid"] == [1, 3, 4] and built["decision"]["status"] == "complete"
+    assert built["arms"]["P"]["units"]["missing"] == 0
+
+    # A cell that ended before its evaluation leaves the decision undecided and says which cell.
+    (tmp_path / "P-r4" / "evaluation.json").unlink()
+    built = clbench_report.build(tmp_path, [("P", "N")], scheduled=[1, 2, 3, 4], heldout=True)
+    assert built["decision"]["status"] == "incomplete"
+    assert any("P run 4" in reason for reason in built["decision"]["why"])
+
+
+VERDICT = {
+    "value_used": "correct",
+    "stale_trusted": False,
+    "correct": True,
+    "flags_conflict": False,
+    "rationalises": False,
+    "reason": "",
+}
+
+
+def planted_cases(count: int) -> list[dict]:
+    key = {"correct": "14 days", "stale": "7 days"}
+    return [{"case_id": f"c{i}", "task": "Plan.", "key": key} for i in range(count)]
 
 
 def planted_answers(run: Path, case_ids: list[str], unanswered: dict[str, set[str]]) -> None:
@@ -355,11 +381,8 @@ def planted_answers(run: Path, case_ids: list[str], unanswered: dict[str, set[st
 
 def test_an_arm_that_answers_nothing_cannot_read_as_protected(tmp_path):
     """An unanswered case counts as a stale answer, so governance cannot win by leaving the agent silent."""
-    case_ids = [f"c{i}" for i in range(8)]
-    cases = [
-        {"case_id": c, "task": "Plan.", "key": {"correct": "14 days", "stale": "7 days"}}
-        for c in case_ids
-    ]
+    cases = planted_cases(8)
+    case_ids = [c["case_id"] for c in cases]
     planted_answers(tmp_path / "run", case_ids, unanswered={"E": set(case_ids)})
     judge_run = tmp_path / "run" / "judge-claude"
     planted_judge.items(cases, tmp_path / "run", judge_run, ["E", "P"])
@@ -368,16 +391,8 @@ def test_an_arm_that_answers_nothing_cannot_read_as_protected(tmp_path):
         for line in (judge_run / "judge" / "items.jsonl").read_text().splitlines()
     ]
     assert len(ids) == len(case_ids), "only the answered cases go to the judge"
-    verdict = {
-        "value_used": "correct",
-        "stale_trusted": False,
-        "correct": True,
-        "flags_conflict": False,
-        "rationalises": False,
-        "reason": "",
-    }
     (judge_run / "judge" / "verdicts.jsonl").write_text(
-        "".join(json.dumps({"id": i, "verdict": verdict}) + "\n" for i in ids)
+        "".join(json.dumps({"id": i, "verdict": VERDICT}) + "\n" for i in ids)
     )
     (judge_run / "judge" / "judge.json").write_text(
         json.dumps({"backend": "codex", "model": "gpt-6.1-sol"})
@@ -388,6 +403,38 @@ def test_an_arm_that_answers_nothing_cannot_read_as_protected(tmp_path):
     assert report["arms"]["E"]["unanswered"] == len(case_ids)
     assert report["pairs"]["E-P"]["stale_trusted"]["mean_difference"] == 1.0
     assert report["decision"]["governance_protects"]["result"] is False
+
+
+def verdict_cli(path: Path) -> str:
+    """A judge CLI that reads its prompt and writes ``VERDICT`` to the file named by ``-o``."""
+    path.write_text(
+        "#!/bin/sh\ncat > /dev/null\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+        f"echo '{json.dumps(VERDICT)}' > \"$out\"\n"
+    )
+    return str(path)
+
+
+def test_a_rerun_retries_a_failed_judgement_and_the_decision_waits_for_it(tmp_path):
+    """A failed judgement must not be treated as done, or the decision would rest on fewer items than it reports."""
+    cases = planted_cases(4)
+    run = tmp_path / "run"
+    planted_answers(run, [c["case_id"] for c in cases], unanswered={})
+    judge_run = run / "judge-codex"
+    planted_judge.items(cases, run, judge_run, ["E", "P"])
+    cli = tmp_path / "codex"
+    spec = JudgeSpec.of("codex", executable=stub_cli(cli, exit_code=1))
+
+    planted_judge.judge(judge_run, spec, 0.0, 1)
+    report = planted_judge.score(judge_run, [("E", "P")], heldout=True)
+    assert report["decision"]["status"] == "incomplete"
+    assert len(report["failed_judgements"]) == 8, "every item of both arms failed"
+
+    verdict_cli(cli)  # the same executable now answers
+    planted_judge.judge(judge_run, spec, 0.0, 1)
+    report = planted_judge.score(judge_run, [("E", "P")], heldout=True)
+    assert report["failed_judgements"] == []
+    assert report["decision"]["status"] == "complete"
 
 
 def write_arm(run: Path, arm: str, body: str, *, status: str = "active") -> None:
@@ -407,8 +454,7 @@ def test_arm_e_may_differ_from_arm_p_only_by_its_own_governance_lines(tmp_path):
     write_arm(tmp_path, "E", "- id: u1\n- verdict: refuted\n\nThe rule is 7 days.\n")
     planted_build.require_identical_text(tmp_path)
 
-    shutil_rmtree = __import__("shutil").rmtree
-    shutil_rmtree(tmp_path / "E")
+    shutil.rmtree(tmp_path / "E")
     write_arm(tmp_path, "E", "- id: u1\n- verdict: refuted\n\nThe rule is 14 days.\n")
     with pytest.raises(RuntimeError, match="differ beyond the builder's governance"):
         planted_build.require_identical_text(tmp_path)

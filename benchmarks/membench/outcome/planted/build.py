@@ -208,9 +208,11 @@ class Builder:
 
 
 async def build(cases: list[dict], distractors: list[dict], arm: str, out: Path) -> None:
-    """Build the arm's vault under ``out``, capture each case's packet, then freeze ``out/built``.
+    """Build the arm's vault under ``out``, freeze ``out/built``, then capture each case's packet.
 
-    ``out/built`` is the vault and state as built. Every answer starts from a fresh copy of it.
+    ``out/built`` is the vault and state as built, frozen before any recall. A read warms the
+    product's state, so no case may start from a copy taken after the packets. Every answer starts
+    from a fresh copy of ``built``.
     """
     fresh_vault(out)
     async with McpSession(
@@ -227,13 +229,17 @@ async def build(cases: list[dict], distractors: list[dict], arm: str, out: Path)
         pages = [await b.case(case, arm) for case in cases]
         (out / "pages.json").write_text(json.dumps(pages, indent=2))
         (out / "authored.json").write_text(json.dumps(b.authored, indent=2))
+    copy_state(out, out / "built")
+    async with McpSession(
+        python=Path(sys.executable), state=out / "exomem-state", env=child_env(out)
+    ) as session:
+        b = Builder(session, out / "calls.jsonl")
         packets = out / "packets"
         packets.mkdir(exist_ok=True)
         for case in cases:
             (packets / f"{case['case_id']}.json").write_text(
                 json.dumps(await b.packet(case), indent=2)
             )
-    copy_state(out, out / "built")
 
 
 # --------------------------------------------------------------------------

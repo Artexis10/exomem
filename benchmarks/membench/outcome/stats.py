@@ -14,6 +14,10 @@ from recall_parity.scoring import percentile_bootstrap_ci
 
 #: An interval over one unit is a point, not an interval.
 MIN_UNITS = 2
+#: The largest loss against the baseline the owner accepts (PREREGISTRATION section 7, sequence 9):
+#: Exomem as shipped is not worse than a plain folder (f35, P - F) or than plain file search (f36, WP - S)
+#: when the interval's lower bound is above it.
+NOT_WORSE_BOUND = -0.05
 
 
 def paired_interval(diffs: list[float], *, seed: int, unit: str, digits: int = 4) -> dict:

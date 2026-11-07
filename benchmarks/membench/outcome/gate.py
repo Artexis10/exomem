@@ -94,10 +94,11 @@ def heldout_gate(
 
 
 def evidence_of(report: dict, stored: dict) -> str:
-    """What a report is worth, from what the run recorded: ``instrument``, ``void`` or ``decision``.
+    """What a report is worth, from what the run recorded: ``instrument``, ``void``, ``incomplete`` or ``decision``.
 
     A decision report is a gated held-out run whose actor and judge are the frozen ones and whose
-    decision no harness fault voided. Anything else is instrument evidence, whatever the split says.
+    decision no harness fault voided and nothing leaves incomplete. Anything else is instrument
+    evidence, whatever the split says.
     """
     if stored["split"] != "heldout" or not stored.get("gate"):
         return "instrument"
@@ -108,11 +109,12 @@ def evidence_of(report: dict, stored: dict) -> str:
     judge = report.get("judge")
     if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
         return "instrument"
-    return "void" if report.get("decision", {}).get("status") == "void" else "decision"
+    status = report.get("decision", {}).get("status")
+    return status if status in ("void", "incomplete") else "decision"
 
 
 def stamp(report: dict, stored: dict) -> dict:
-    """Every report says what it is: an internal diagnostic, and instrument, void or decision evidence."""
+    """Every report says what it is: an internal diagnostic, and instrument, void, incomplete or decision evidence."""
     return {
         "label": LABEL,
         "evidence": evidence_of(report, stored),
