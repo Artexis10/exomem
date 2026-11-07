@@ -1661,13 +1661,13 @@ def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_
     monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     shown_when_claimable: list[object] = []
-    requeue = media_jobs.MediaJobStore.requeue_runtime_blocks
+    requeue = media_jobs.MediaJobStore.requeue_runtime_block
 
-    def record_the_page_then_requeue(store: media_jobs.MediaJobStore) -> int:
+    def record_the_page_then_requeue(store: media_jobs.MediaJobStore, job: media_jobs.MediaJob) -> bool:
         shown_when_claimable.append(_frontmatter_and_body(sidecar)[0]["processing_state"])
-        return requeue(store)
+        return requeue(store, job)
 
-    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_blocks", record_the_page_then_requeue)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_block", record_the_page_then_requeue)
     worker = None
     try:
         assert server_runtime._start_media_worker(vault) is None
@@ -1689,6 +1689,83 @@ def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_
     assert page["processing_next_action"] == media_jobs.WAIT_ACTION
     # It was shown before the row became claimable: a rewrite under a running child is a stale extraction.
     assert shown_when_claimable == ["pending"]
+
+
+class _ProcessStopped(BaseException):
+    """A stop that no `except Exception` of the start can absorb, as a killed process."""
+
+
+def test_a_start_stopped_after_presenting_one_row_leaves_every_page_agreeing_with_its_row(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import extract, server_runtime
+
+    media_processing = _media_processing()
+    sidecars = [
+        media_processing.reconcile_media(vault, _drop_media(vault, f"paused-memo-{index}.m4a")).sidecar_path
+        for index in range(3)
+    ]
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    present = media_worker.MediaWorker.present_runtime_requeue
+    started: list[media_worker.MediaWorker] = []
+    presented: list[str] = []
+
+    def present_one_then_stop(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        started[:] = [worker]
+        if presented:
+            raise _ProcessStopped
+        presented.append(job.sidecar_path.name)
+        return present(worker, job)
+
+    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present_one_then_stop)
+    try:
+        assert server_runtime._start_media_worker(vault) is None  # the pause blocks all three
+        monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+        with pytest.raises(_ProcessStopped):
+            server_runtime._start_media_worker(vault)
+    finally:
+        for worker in started:
+            worker.stop()
+        media_processing.set_media_runtime_available(vault)
+
+    states = {job["sidecar_path"]: job["state"] for job in media_jobs.status(vault)["jobs"]}
+    pages = {path.relative_to(vault).as_posix(): _frontmatter_and_body(path)[0] for path in sidecars}
+    for path, state in states.items():
+        # The page that says pending belongs to a row that is pending, and no other.
+        assert (pages[path]["processing_state"] == "pending") == (state == media_jobs.PENDING), path
+        assert (pages[path]["processing_state"] == "blocked") == (state == media_jobs.BLOCKED), path
+    assert presented == [sidecars[0].name]
+    assert states == {
+        sidecars[0].relative_to(vault).as_posix(): media_jobs.PENDING,
+        sidecars[1].relative_to(vault).as_posix(): media_jobs.BLOCKED,
+        sidecars[2].relative_to(vault).as_posix(): media_jobs.BLOCKED,
+    }
+
+
+def test_a_start_leaves_a_row_alone_that_changed_after_it_was_selected_for_requeue(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "paused-memo.m4a")
+    media_processing.reconcile_media(vault, binary)
+    media_processing.mark_processing_unavailable(
+        vault, reason="MediaRuntimeUnavailable: startup failed", next_action=media_jobs.RUNTIME_UNAVAILABLE_ACTION
+    )
+    store = media_jobs.MediaJobStore(vault)
+    [selected] = store.runtime_blocked_jobs()
+    try:
+        # A process with a runtime retries the row and a child claims it before this start requeues it.
+        media_processing.set_media_runtime_available(vault)
+        assert media_processing.retry_media(vault, binary).requeued == 1
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.id == selected.id
+
+        assert store.requeue_runtime_block(selected) is False
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    running = store.get(selected.id)
+    assert running is not None and running.state == media_jobs.RUNNING
+    assert running.claim_revision == claimed.claim_revision
 
 
 def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
@@ -1808,6 +1885,35 @@ def test_targeted_retry_of_a_completed_photo_keeps_the_clip_stage_its_failed_job
     owed = store.get_by_binary(binary)
     assert owed is not None and owed.state == media_jobs.PENDING and owed.last_error is None
     assert owed.do_clip and not owed.do_ocr
+
+
+def test_targeted_retry_of_a_completed_photo_reports_the_row_a_claim_took_before_the_drop(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "ambiguous-photo-claimed.jpg", data=b"\xff\xd8\xff")
+    reconciled, store = _mark_ambiguous_terminal_job(vault, binary)
+    sidecar = reconciled.sidecar_path
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: ocr:test"
+    ).replace("processing_state: pending", "processing_state: completed")
+    sidecar.write_text(completed + "\n## Extracted text\n\nA caption read from the photo.\n", encoding="utf-8")
+    drop = media_jobs.MediaJobStore.drop_completed_extraction
+
+    def drop_after_another_process_claimed_the_row(store: media_jobs.MediaJobStore, job: media_jobs.MediaJob) -> int:
+        assert store.retry(binary_path=binary, include_failed=True, allow_reconciliation_required=True) == 1
+        assert store.claim_next() is not None
+        return drop(store, job)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "drop_completed_extraction", drop_after_another_process_claimed_the_row)
+
+    retried = media_processing.retry_media(vault, binary)
+
+    # The drop left the claimed row as it was, so the retry did not requeue anything.
+    claimed = store.get_by_binary(binary)
+    assert claimed is not None and claimed.state == media_jobs.RUNNING
+    assert (retried.state, retried.requeued) == (media_jobs.RUNNING, 0)
 
 
 def test_targeted_retry_keeps_completed_transcript_without_provenance_unresolved(

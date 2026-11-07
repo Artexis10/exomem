@@ -1067,7 +1067,7 @@ class MediaWorker:
             )
 
     def present_runtime_requeue(self, job: _Job) -> bool:
-        """Show the media of a job that `requeue_runtime_blocks` is about to return as pending.
+        """Show the media of a job that `requeue_runtime_block` is about to return as pending.
 
         A completed transcript never showed the block (`mark_processing_unavailable` leaves it
         alone), so it stays as it is. Call this while the row is still blocked: a write after the

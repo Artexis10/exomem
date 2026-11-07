@@ -1170,12 +1170,13 @@ def _retry_ambiguous_batch_failure(
         if completed == "valid":
             # The transcript settles the extraction stage only: a CLIP or re-embed stage the failed
             # job still owes goes back to the queue, as it does for the retry of an unambiguous row.
-            store.drop_completed_extraction(durable)
+            dropped = store.drop_completed_extraction(durable)
             owed = store.get_by_binary(binary)
             if owed is None:
                 return ReconcileResult(durable.media_type, "completed", sidecar, None)
+            # The drop leaves a row claimed since as it was: answer from the row and the drop's count.
             return ReconcileResult(
-                durable.media_type, media_jobs.PENDING, sidecar, owed.id, requeued=1
+                durable.media_type, owed.state, sidecar, owed.id, requeued=dropped
             )
         if not _pending_sidecar_matches_current_provenance(
             original,
