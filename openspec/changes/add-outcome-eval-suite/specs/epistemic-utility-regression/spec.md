@@ -54,7 +54,7 @@ Every outcome report SHALL carry the label "internal diagnostic", because the ac
 
 ### Requirement: Outcome actors and judges are isolated
 
-Outcome actors SHALL run headless on the subscription, with project-only settings, a strict MCP configuration, an out-of-tree working directory, auto memory off and path-scoped file permissions. Their environment SHALL NOT reach the live personal vault, the live service state or the user's MCP configuration, and each arm's Exomem state SHALL live inside its arm directory. A judge SHALL see an opaque item id, the task, the key or criteria and the answer, and SHALL NOT see the arm, the vault or the recall packet. A decision judge SHALL come from another model family than the actor, and the judgement file SHALL record its model id.
+Outcome actors SHALL run headless on the subscription, with project-only settings, a strict MCP configuration, an out-of-tree working directory, auto memory off and path-scoped file permissions. Their environment SHALL NOT reach the live personal vault, the live service state or the user's MCP configuration, and each arm's Exomem state SHALL live inside its arm directory. A judge SHALL see an opaque item id, the task, the key or criteria and the answer, and SHALL NOT see the arm, the vault or the recall packet. A decision judge SHALL come from another model family than the actor, and the judgement file SHALL record its model id. A held-out report judged by another model, or a held-out run whose actor model or effort differs from the frozen one, SHALL NOT read as decision evidence.
 
 #### Scenario: The parent shell points at the live vault
 
@@ -64,7 +64,7 @@ Outcome actors SHALL run headless on the subscription, with project-only setting
 
 ### Requirement: Each release records an outcome panel
 
-After a release is installed, the panel command SHALL run the Exomem arms on a fixed panel against that release's interpreter and SHALL write per-case results to `docs/benchmarks/outcome/<version>.json` and `.md`. The panel SHALL compare each case, paired, against the previous version's stored results when they exist. The panel is evidence and SHALL NOT gate a release. The control arms SHALL run again only when the actor model or CLI version changes.
+After a release, the panel command SHALL run from a clean checkout of that release's tag, SHALL run the Exomem arms on a fixed panel drawn only from the development cases, and SHALL write per-case results to `docs/benchmarks/outcome/<version>.json` and `.md`. The panel SHALL compare each case, paired, against the previous version's stored results when they exist. The panel is evidence and SHALL NOT gate a release. The control arms SHALL run again only when the actor model or CLI version changes.
 
 #### Scenario: The model changed since the last panel
 
