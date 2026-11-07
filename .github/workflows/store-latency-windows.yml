@@ -1,9 +1,9 @@
 name: Store latency (native Windows)
 
-# The store's phase gate needs guarded append, full inspect, bulk and query
-# timings on native NTFS, and file-mode query timings at the same sizes to
-# compare against. Dispatch this lane by hand against a ref; it gates nothing
-# and uploads the diagnostic's JSON reports.
+# Diagnostic lane for the single-store spike branch: runs the file-canonical
+# path and the single-store prototype on a synthetic vault on native NTFS,
+# including hard-kill trials. Dispatch by hand against the spike ref; it gates
+# nothing and uploads the JSON reports.
 on:
   workflow_dispatch:
 
@@ -11,45 +11,28 @@ permissions:
   contents: read
 
 jobs:
-  store-latency:
-    name: store append and inspect latency (native NTFS)
+  single-store-spike:
+    name: single-store spike (native NTFS)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Measure store-mode latency at 1,000 and 10,000 rows
+      - name: Run the comparison on a 13,000-page synthetic vault
         env:
-          EXOMEM_DISABLE_CLIP: "1"
-          EXOMEM_DISABLE_EMBEDDINGS: "1"
-          EXOMEM_DISABLE_WARMUP: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
-          uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
-          --sizes 1000,10000 --appends 30 --storage store --phase-probes
-          --out store-latency-windows.json
-      # The file path refuses collections over 2,000 items; --lift-caps measures it past that.
-      - name: Measure file-mode latency at the same sizes
-        if: success() || failure()
-        timeout-minutes: 40
-        env:
-          EXOMEM_DISABLE_CLIP: "1"
-          EXOMEM_DISABLE_EMBEDDINGS: "1"
-          EXOMEM_DISABLE_WARMUP: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          uv run --frozen --python 3.13 python scripts/measure-records-append-latency.py
-          --sizes 1000,10000 --appends 10 --storage files --lift-caps
-          --out file-latency-windows.json
+          uv run --frozen --python 3.13 python scripts/spike_single_store/bench.py
+          "${{ runner.temp }}/spike" "${{ github.workspace }}/spike-out"
+          --shape scripts/spike_single_store/medium_vault_shape.json
+          --pages 13000 --ops 100 --kills-files 6 --kills-single 10
       - name: Upload the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: store-latency-windows
-          path: |
-            store-latency-windows.json
-            file-latency-windows.json
+          name: single-store-spike-ntfs
+          path: spike-out
           if-no-files-found: warn
