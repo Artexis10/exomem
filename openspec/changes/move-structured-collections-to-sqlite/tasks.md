@@ -449,7 +449,51 @@ These tasks do not gate P3.6. Existing bounded CSV/JSON query output remains the
   - Full runs are the scheduled and dispatched runs (`release_evidence.ci_scope`); measure the step's cost against the product E2E budget before enabling it there.
   Evidence, 2026-11-01: full CI runs now install the release that `EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION` pins (0.151.1, store schema 14) from its published wheel, after checking `EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256`, and pass it to the journey. The journey's compatible-application check now refuses only a failed migration probe, because every release since GA declares the migration; its store, marker and fence checks prove that SQLite authority survives. Dispatched full run `41312187918` at `7a197fe42`, whose journey check also required that the rollback would not migrate (always true in the journey, so it implied the current check): the product E2E job reported `compatible_rollback` passed; the S1 branch took 195.6 s against 185.1 s on main run `41069453400`, and the product E2E took 206.2 s against its 330 s wall-time budget.
 
+## C. SQLite-only collections (owner decision, 2026-11-07)
+
+The owner decided that every structured collection is SQLite-only: Records, Planning and declared types, active and archived, existing and new. After cutover, no collection keeps a per-item Markdown file as canonical storage, automatic projection, ordinary write target or read fallback. The manifest, bounded summary pages, history pages, held-candidate views and explicitly requested exports stay Markdown. This supersedes P2's per-item views for every collection (`design.md` §17). Ordinary knowledge stays Markdown-canonical; `make-vault-store-canonical` owns any later change to that.
+
+**Baseline, 2026-11-07, one production vault on 0.163.0, read through the public read tools.** The vault has 71 collections (60 Records, 11 Planning), and every manifest declares `markdown-items`.
+- 66 collections are in the store and 5 are still file-canonical.
+- 32 store collections are derived summary collections with no item files.
+- 39 collections hold 612 per-item files: 34 in store items mode and the 5 file-canonical ones.
+- 4 file-canonical collections are blocked with `SCHEMA_UNKNOWN_FIELD: exomem_id`, after an ID backfill stamped 59 of their items.
+- 1 file-canonical collection reads `history_incomplete`, because its 8,765,180-byte audit history exceeds the 8,000,000-byte live read cap.
+- 8 store collections report audit gaps that predate their import. The cutover carries those gaps forward unchanged.
+
+Collections created after GA stayed file-canonical: store creation admits only summary manifests, so every items-mode create still writes files.
+
+Order: C0 to C4 ship in one release. C5 runs on the production vault only at the operator's GO. P6 runs after C5 is verified, because a deletion must not ship before every supported vault has left the deleted paths.
+
+- [ ] C0.1 Red first: one inventory names every collection that the store and the manifest census find. For each it reports identity, type, layout, view mode, store or file authority, row count, item-view count, audit status, held count and the blocking reason. Discovery reads the store and the manifests and has no list of known collections. It extends `check_memory collections-store` and changes no write.
+- [ ] C1.1 Red first: a file-canonical collection whose history exceeds the live audit read cap reads its complete history through a bounded streaming read, and reports `history_incomplete` only for a real gap. The legacy importer uses the same read.
+- [ ] C1.2 The legacy importer and the cutover preflight set the reserved note identity (`exomem_id`) aside, like the reader fix in #2510. The preflight reports each stamped item, so the production repair in C5 removes the stamps before the first write.
+- [ ] C2.1 Red first: `create` for Records, Planning and declared types writes a store collection in summary mode with `storage.strategy: sqlite`. No step creates an `Items` directory or a file-canonical collection. The same applies to scaffolds, curation and package templates. A manifest that declares `markdown-items` stays readable as an unconverted collection.
+- [ ] C2.2 Summary mode serves every profile. Planning gets bounded summary pages per saved view, and its hierarchy and links use indexed store queries, not a load of every row. Per-item filename and presentation recipes stop applying.
+- [ ] C2.3 Red first: an in-place conversion from items mode to summary mode for a populated store collection.
+  - It refuses while publication, edit-back or a held view correction is outstanding.
+  - It refuses when the collection-level policy path would change the disclosure decision of any row for any standing audience, and names the scope.
+  - One store transaction writes the new manifest version (`sqlite`, summary), retires the item projection state and keeps each row's former view path as a retired alias.
+  - Afterwards it moves the collection's item files into a checksummed archive outside the active vault tree, verifies the archive, and only then removes the files.
+  - A re-run resumes from its receipt and changes nothing that is already done.
+- [ ] C2.4 Old item paths keep resolving. Page reads, directory listings, `read_memory` and wikilinks resolve a retired item path through its alias to the stored row, read-only, and nothing recreates the file.
+- [ ] C2.5 Readers report store provenance. `inspect`, `query` and receipts derive versions and the container token from the store generation. `expected_container_hash` keeps its public meaning as the collection guard.
+- [ ] C2.6 The watcher and edit-back stop treating item paths as views. A file that appears under a retired item path is held as `VIEW_UNBOUND` and is never applied silently.
+- [ ] C2.7 The first conversion records the state compatibility descriptor `collections-sqlite-only-v1`. A release that lacks it refuses the state and names the release to run, instead of rendering item views again.
+- [ ] C3.1 Red first: `exomem collections cutover` and its maintenance preview and apply, bound to a `plan_id`.
+  - Preflight takes and verifies a backup snapshot, runs the C0 inventory and lists blockers.
+  - It migrates each file-canonical collection through the existing migration.
+  - It converts every store collection (C2.3).
+  - It checks source against target for each collection: row count, key set, payload hashes and audit event count against the snapshot.
+  - It writes one receipt. The run is idempotent and resumable after a crash at any step.
+- [ ] C4.1 End-to-end proof on invented vaults: SQLite-only create, the full lifecycle (create, read, query, update, upsert, transition, archive, restore), mixed types, conversion of migrated Records and Planning, crash and resume of the cutover, multiple-writer exclusion, export and import round trip, backup and restore, older-release refusal, and negative tests that no ordinary operation writes an item file.
+- [ ] C4.2 Measure the MCP-boundary reads, queries and lists against the 100 ms p95 target with the existing latency harness, and report each workload and its numbers.
+- [ ] C5.1 **Production, at the operator's GO only.** Prepare the exact commands, their expected effect and the rollback: backup, stamp repair, cutover apply, verification, and restore from the backup and archive. Run nothing on the production vault before the GO.
+- [ ] C5.2 After the cutover, verify on the production vault that the inventory reports zero file-canonical collections and zero item files, that parity holds for every collection, and that reads, writes and the latency gate pass.
+
 ## P6. Legacy window close (two minor releases after GA, R7)
+
+P6 runs after C5.2. Besides `design.md` §13, it deletes the item-view projection, item edit-back, filename recipes and file-canonical creation.
 
 - [ ] P6.1 Confirm that no supported vault remains in file mode: every migrated vault is store-canonical, and the doctor probe reports any file-mode vault with the migration remediation.
 - [ ] P6.2 Delete every item in `design.md` §13: file mode and its adapters as canonical readers, the #1457 stat-generation cache for collections, and the hard-coded profiles and branches. Measure and report the deleted line count. `legacy.py` and the reverse exporter stay until the owner retires the exporter in a later change.
