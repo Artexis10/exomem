@@ -981,13 +981,13 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     unavailable_action: str | None = None
     if worker is None:
         if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
-            unavailable_reason = (
-                f"{media_jobs.EXTRACTION_DISABLED_CODE}: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.EXTRACTION_DISABLED_CODE, "EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
             )
-            unavailable_action = media_jobs.EXTRACTION_DISABLED_ACTION
         else:
-            unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: media worker construction failed"
-            unavailable_action = media_jobs.RUNTIME_UNAVAILABLE_ACTION
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.RUNTIME_UNAVAILABLE_CODE, "media worker construction failed"
+            )
     if worker is not None:
         try:
             worker.start()
@@ -998,8 +998,9 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 pass
             log.warning("media runtime unavailable; core service continuing: %s", exc)
             worker = None
-            unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: {type(exc).__name__}: {exc}"
-            unavailable_action = media_jobs.RUNTIME_UNAVAILABLE_ACTION
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.RUNTIME_UNAVAILABLE_CODE, f"{type(exc).__name__}: {exc}"
+            )
     if unavailable_reason is not None and unavailable_action is not None:
         media_processing.set_media_runtime_unavailable(
             vault_root,
@@ -1053,16 +1054,10 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         # This start has a runtime, so the work a start without one blocked is owed again. The
         # reconcile above skips that work: each artifact already has a job. A blocked row cannot
         # be claimed, so its sidecar is shown as pending first, before a child could extract it
-        # and find the sidecar rewritten under it. One row at a time: a stop leaves at most the
-        # page of the row in hand ahead of its row, and the next start with a runtime heals it.
-        if media_jobs.job_store_path(vault_root).exists():
-            store = media_jobs.MediaJobStore(vault_root, create=False)
-            requeued = 0
-            for blocked in store.runtime_blocked_jobs():
-                worker.present_runtime_requeue(blocked)
-                requeued += store.requeue_runtime_block(blocked)
-            if requeued:
-                log.info("media worker: requeued %d job(s) a start without a media runtime blocked", requeued)
+        # and find the sidecar rewritten under it. One row at a time, on the supervisor: a stop
+        # leaves at most the page of the row in hand ahead of its row, and the next start with a
+        # runtime heals it.
+        worker.requeue_runtime_blocks()
     except Exception as exc:  # noqa: BLE001 - media must never deny the core service
         log.warning("media worker startup requeue failed: %s", exc)
     try:
