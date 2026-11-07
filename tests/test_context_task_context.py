@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate, _without_response_id
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, call
+from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_context_catalogue import _built, _page, _source_schema, _write
 from test_context_views import _second_vault
 from test_governance_egress import _external, write_rule
@@ -502,3 +504,39 @@ def test_restricted_corpus_capacity_cannot_rank_a_prepared_prefix(vault: Path, m
     assert packet["abstained"] is False and "map" in packet
     assert packet["task_context"]["state"] in ("partial", "unavailable")
     assert packet["task_context"]["candidates"] == []
+
+
+def test_owner_keeps_task_discovery_on_an_enrolled_store_while_a_store_page_waits_for_its_own_decision(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The owner discovers tasks on an enrolled collection store, and a store outage withholds only the store's page."""
+    from exomem.collection_store import runtime
+    from exomem.governance import egress
+
+    root = service.root
+    monkeypatch.delenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", raising=False)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    ordinary = _page(root, "gauge-calibration", body="Bring the handheld gauge to the depot service desk for a calibration quote.\n")
+    # A collection the store owns, titled so that the same turn reaches it.
+    manifest = DAILY_PATH.replace("Daily", "Gauge")
+    text = DAILY_TEXT.replace(DAILY, "77777777-7777-4777-8777-777777777778").replace("title: Daily", "title: Gauge calibration quotes")
+    call(root, "record_memory", action="create", manifest_path=manifest, manifest_text=text, why="a store-owned page")
+    _built(root).close()
+    lexstore.ensure_fresh(root)
+    turn = "Where are the gauge calibration quotes from the depot service desk?"
+
+    def candidates() -> tuple[str, set[str]]:
+        task = _activate(root, turn=turn, max_chars=8000)["task_context"]
+        return task["state"], {item["source_ref"] for item in task["candidates"]}
+
+    state, served = candidates()
+    assert state != "unavailable"
+    assert ordinary in served and manifest in served
+
+    with monkeypatch.context() as outage:
+        outage.setattr(runtime, "_server", lambda _root: None)
+        egress.clear_decision_memo()
+        working_set_runtime.reset_caches_for_tests(packets_only=True)
+        state, during = candidates()
+    assert state != "unavailable"
+    assert ordinary in during and manifest not in during

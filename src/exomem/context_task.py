@@ -154,10 +154,14 @@ def _deadline_check() -> None:
 
 
 def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
-    """The raw fast path requires unrestricted content and no file release policy."""
+    """The raw fast path requires unrestricted content, an empty policy and no bound writer.
+
+    An enrolled collection store keeps the fast path: each page it owns is still decided on its own by the
+    walk filter and by `quick_page_visible`, so a store outage withholds that page and nothing else.
+    """
     policy, _active = egress.gate_state(root)
     who = principal.effective_principal().with_purpose(caller.purpose)
-    return (provider is None and egress._file_policy_empty(root, policy)
+    return (provider is None and egress.policy_empty_without_writer(root, policy)
             and egress.unrestricted_content_access(root, who))
 
 
