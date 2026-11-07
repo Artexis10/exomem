@@ -1741,6 +1741,7 @@ def update_sidecar_extraction(
     speaker_verification: str | None = None,
     attempts: int | None = None,
     ocr: OcrFacts | None = None,
+    binary_hints: tuple[int, int] | None = None,
     defer_index_fanout: bool = False,
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
@@ -1770,6 +1771,7 @@ def update_sidecar_extraction(
         speaker_verification=speaker_verification,
         attempts=attempts,
         ocr=ocr,
+        binary_hints=binary_hints,
     )
     result = commit_media_sidecar_writes(
         vault_root,
@@ -1858,6 +1860,7 @@ def render_sidecar_extraction(
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
     parts: Layout | None = None,
+    binary_hints: tuple[int, int] | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -1870,7 +1873,9 @@ def render_sidecar_extraction(
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
     `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
-    do not describe the new one.
+    do not describe the new one. `binary_hints` are the mtime and ctime of the original, as the
+    caller verified them; a page stored with its original still holds them as null
+    (`media_processing.render_pending_page`) and records them here.
     """
     newline = document_newline(before)
     before = with_newline(before, "\n")
@@ -1907,6 +1912,10 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if binary_hints is not None:
+        content = _media_processing_module().record_read_hints(
+            content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
+        )
     if prior_extractions:
         links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
         content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")

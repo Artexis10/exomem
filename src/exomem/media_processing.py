@@ -143,14 +143,23 @@ class ExtractionRequest:
 
 
 @dataclass(frozen=True)
-class _BinaryProvenance:
+class _PageFacts:
+    """What a pending page records about its original."""
+
     relative_path: str
     original_filename: str
     sha256: str
     size: int
-    # None only in the facts `render_pending_page` renders from: "not read yet".
+    # None is "not read yet". `_read_provenance` always sets both hints. `render_pending_page`
+    # and `_render_pending_sidecar` (for a page that still holds both as null) pass None.
     mtime_ns: int | None
     ctime_ns: int | None
+
+
+@dataclass(frozen=True)
+class _BinaryProvenance(_PageFacts):
+    """The facts read from the open original, with the identity that revalidates it."""
+
     device: int
     inode: int
 
@@ -1644,7 +1653,7 @@ def _render_pending_sidecar(
             adoption_receipt = candidate_receipt
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
 
-            def render(facts: _BinaryProvenance) -> str:
+            def render(facts: _PageFacts) -> str:
                 fields = _pending_fields(facts, frontmatter=frontmatter)
                 if frontmatter.get("processing_state") == media_jobs.BLOCKED:
                     fields = fields[1:]
@@ -1751,11 +1760,7 @@ def render_pending_page(
     place moves its ctime, so no timestamp read beforehand can be exact. Both hints are null,
     "not read yet" (`_hints_unread`), and reconciliation leaves them so.
     """
-    # device and inode serve `_verify_binary_identity` only, which this page never reaches.
-    facts = _BinaryProvenance(
-        relative_path, original_filename, sha256, size,
-        mtime_ns=None, ctime_ns=None, device=0, inode=0,
-    )
+    facts = _PageFacts(relative_path, original_filename, sha256, size, mtime_ns=None, ctime_ns=None)
     return _set_fields(stub, _pending_fields(facts))
 
 
@@ -1778,8 +1783,21 @@ def _hint_value(hint: int | None) -> int | str:
     return "null" if hint is None else hint
 
 
+def record_read_hints(page: str, *, mtime_ns: int, ctime_ns: int) -> str:
+    """`page` with the timestamp hints of its original, when the page holds them as unread.
+
+    A caller that completes a page stored by `render_pending_page` passes the hints it has
+    verified, so that no completed page keeps null hints and none is repaired later. A page
+    that records its hints is returned as it is.
+    """
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(page)
+    if raw_frontmatter is None or not _hints_unread(frontmatter):
+        return page
+    return _set_fields(page, (("binary_mtime_ns", mtime_ns), ("binary_ctime_ns", ctime_ns)))
+
+
 def _pending_fields(
-    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+    provenance: _PageFacts, *, frontmatter: dict[str, object] | None = None,
 ) -> tuple[tuple[str, object], ...]:
     return (
         ("processing_state", "pending"),
@@ -1870,7 +1888,7 @@ def _backfill_completed_provenance(
 
 
 def _provenance_values(
-    provenance: _BinaryProvenance, *, frontmatter: dict[str, object] | None = None,
+    provenance: _PageFacts, *, frontmatter: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Provenance as parsed frontmatter would carry it, for comparison."""
     return {

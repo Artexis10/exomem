@@ -1,6 +1,7 @@
 """media_worker — the async extraction pipeline (extract engines stubbed; no GPU)."""
 
 import hashlib
+import io
 import os
 import threading
 import time
@@ -69,6 +70,28 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
     return preserve.preserve_bytes(
         vault, scope="Rental", category="audio", filename=filename, data=b"FAKEBYTES"
     )
+
+
+def _preserve_media_pending(vault, filename):
+    """Preserve a media binary the way `preserve_artifacts` does: its page already pending."""
+    return preserve.preserve_stream(
+        vault, scope="Rental", category="audio", filename=filename,
+        stream=io.BytesIO(b"FAKEBYTES"), media_pending=True,
+    )
+
+
+def _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch: pytest.MonkeyPatch) -> int:
+    """How many sidecar commits a background reconcile of `binary` makes, as the file watcher does."""
+    commits: list[object] = []
+    real = preserve.commit_media_sidecar_writes
+
+    def counted(*args, **kwargs):
+        commits.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", counted)
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    return len(commits)
 
 
 def _reconciled_pending_media(vault, filename="rec.mp3"):
@@ -146,6 +169,61 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert "water damage" in body
     assert "extracted_by: faster-whisper:test" in body
     assert "extracted_by: pending" not in body
+
+
+def test_a_page_stored_pending_records_the_worker_verified_hints_when_completed(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No completed page keeps null hints, so the file watcher's reconcile has nothing to repair."""
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    stored = _preserve_media_pending(vault, "inline.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    assert _parsed_frontmatter(sidecar)["binary_mtime_ns"] is None
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="a recorded sentence", media_type="audio", engine="faster-whisper:test"
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    page, info = _parsed_frontmatter(sidecar), binary.stat()
+    assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
+
+
+def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_result(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored = _preserve_media_pending(vault, "parent.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "published by parent", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args, **_kwargs: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    page, info = _parsed_frontmatter(sidecar), binary.stat()
+    assert "published by parent" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
 
 
 def test_process_child_hands_extraction_to_parent_without_sidecar_write(

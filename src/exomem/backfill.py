@@ -394,6 +394,9 @@ def backfill_media(
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
             try:
+                # Taken before the extraction: a page stored with its original holds null hints,
+                # and the extraction records these once it has read the bytes they describe.
+                info = f.stat()
                 res = extract.extract_text(f, media_type=media_type, vault_root=vault_root)
                 if not _is_automatic_media_candidate(vault_root, f):
                     _purge_suppressed_clip(clip_store, vault_root, f)
@@ -425,6 +428,7 @@ def backfill_media(
                         vault_root, sidecar,
                         text=res.sidecar_text, engine=res.engine,
                         speakers=res.speakers, ocr=res.ocr,
+                        binary_hints=(info.st_mtime_ns, info.st_ctime_ns),
                     )
                     if need_ocr:
                         stats.extracted += 1

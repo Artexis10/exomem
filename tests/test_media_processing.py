@@ -1728,44 +1728,19 @@ def test_a_page_stored_pending_follows_the_bytes_that_replace_its_original(vault
     assert frontmatter["binary_mtime_ns"] == _handle_stat(binary).st_mtime_ns
 
 
-def test_a_completed_page_stored_pending_gets_its_real_hints_at_the_next_explicit_reconcile(
-    vault: Path,
-) -> None:
-    media_processing = _media_processing()
-    stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
-    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
-    completed = sidecar.read_text(encoding="utf-8").replace(
-        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
-    ).replace("processing_state: pending", "processing_state: completed")
-    sidecar.write_text(f"{completed}\n## Extracted text\n\n[0:00] Kept transcript.\n", encoding="utf-8")
-
-    result = media_processing.reconcile_media(vault, binary)
-
-    frontmatter, body = _frontmatter_and_body(sidecar)
-    handle = _handle_stat(binary)
-    assert result.state == "completed"
-    assert (frontmatter["binary_mtime_ns"], frontmatter["binary_ctime_ns"]) == (
-        handle.st_mtime_ns,
-        handle.st_ctime_ns,
-    )
-    assert body.count("[0:00] Kept transcript.") == 1
-
-
 @pytest.mark.parametrize(
     ("mtime_line", "ctime_line", "awaits"),
     [
         ("binary_mtime_ns: null\n", "binary_ctime_ns: null\n", False),
-        ("binary_mtime_ns: 1700000000000000000\n", "binary_ctime_ns: 1700000000000000001\n", False),
         ("binary_mtime_ns: null\n", "binary_ctime_ns: 1700000000000000001\n", True),
-        ("binary_mtime_ns: -1\n", "binary_ctime_ns: 1700000000000000001\n", True),
         ("binary_mtime_ns: null\n", "", True),
     ],
-    ids=["both-null", "both-recorded", "one-null", "negative", "one-missing"],
+    ids=["both-null", "one-null", "one-missing"],
 )
-def test_only_two_null_or_two_recorded_hints_make_a_page_pending_shaped(
+def test_two_null_hints_make_a_pending_shaped_page_and_one_null_or_missing_hint_does_not(
     vault: Path, mtime_line: str, ctime_line: str, awaits: bool
 ) -> None:
-    """A page missing a hint, or holding a negative one, is still a stub to render."""
+    """A page with one hint missing, or only one null, is still a stub to render."""
     media_processing = _media_processing()
     stored = _store_with_pending_page(vault, b"\x00\x00\x00\x18ftypM4A born pending")
     text = (vault / stored.sidecar_path).read_text(encoding="utf-8").replace(
