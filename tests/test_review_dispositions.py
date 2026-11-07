@@ -821,17 +821,47 @@ def test_the_effect_block_counts_what_each_family_surfaced_and_what_became_of_it
     effect = commands.op_review_memory(vault, mode="dispositions")["effect"]
 
     assert effect["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
-    assert set(effect["sources"]) == {"surfaced", "dismissed", "snoozed", "cleared", "open"}
+    assert set(effect["sources"]) == {"surfaced", "dismissed", "snoozed", "cleared", "acted", "open"}
     assert effect["families"][FAMILY] == {
         "surfaced": 3,
         "dismissed": 1,
         "snoozed": 0,
         "cleared": 1,
+        "acted": "unknown",
         "open": 1,
     }
     assert effect["families"]["relation_debt"]["cleared"] == "unknown"
     assert effect["families"]["relation_debt"]["open"] == "unknown"
     assert effect["unattributed"]["surfaced"] == 1
+
+
+
+def test_the_effect_window_is_chosen_by_the_caller_within_one_to_ninety_days(vault: Path) -> None:
+    """The window was fixed at a week, so an owner could not read a month of what a
+    family did. A value outside the range must be refused by a message that names the
+    range, never clamped into a window the owner did not ask for."""
+    import datetime as dt
+
+    from exomem.command_surface import resolve_invocation
+    from exomem.writer_lease import invoke_command
+
+    def effect(**kwargs) -> dict:
+        return commands.op_review_memory(vault, mode="dispositions", **kwargs)["effect"]
+
+    command, flat = resolve_invocation(
+        "read_review", {"operation": {"kind": "dispositions", "window_days": 30}}, commands.PRODUCT_COMMANDS
+    )
+    month = invoke_command(command, vault, **flat)["effect"]["window"]
+    through = dt.date.fromisoformat(month["through"])
+    assert month["days"] == 30 and dt.date.fromisoformat(month["since"]) == through - dt.timedelta(days=29)
+    assert effect()["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
+    assert effect(window_days=1)["window"]["since"] == effect(window_days=1)["window"]["through"]
+    for bad in (0, 91, -1, True):
+        with pytest.raises(ValueError, match=r"INVALID_WINDOW_DAYS: .*from 1 to 90"):
+            effect(window_days=bad)
+    with pytest.raises(ValueError, match="INVALID_REVIEW_ARGUMENTS: window_days is only supported"):
+        commands.op_review_memory(vault, mode="upkeep", window_days=7)
+    assert effect()["sources"]["surfaced"].startswith("a lower bound")
 
 
 def test_a_due_state_delivery_is_charged_to_its_family(vault: Path) -> None:
@@ -940,6 +970,7 @@ def test_an_unreadable_dreamer_sidecar_leaves_every_upkeep_family_unknown(
             "dismissed": 0,
             "snoozed": 0,
             "cleared": "unknown",
+            "acted": "unknown",
             "open": "unknown",
             "unknown_reason": state,
         }
@@ -980,9 +1011,9 @@ def test_the_dismissal_and_effect_counts_are_served_to_the_owner_only(vault: Pat
 
     refusal = {"available": False, "reason": "audience_restricted"}
     assert restricted["effect"] == refusal
-    assert [row["manual_dismissals"] for row in restricted["dispositions"]] == [refusal]
+    assert {row["family"]: row["manual_dismissals"] for row in restricted["dispositions"]}[FAMILY] == refusal
     assert owner["effect"]["window"]["days"] == review_state.EFFECT_WINDOW_DAYS
-    assert [row["manual_dismissals"] for row in owner["dispositions"]] == [0]
+    assert {row["family"]: row["manual_dismissals"] for row in owner["dispositions"]}[FAMILY] == 0
 
 
 def test_the_dispositions_view_counts_dismissals_without_an_audit(

@@ -1,0 +1,12 @@
+{
+  "reference": "While drafting a thank-you message for the book swap volunteers, the person mentioned in passing that Ilse Marrow would love a hand-bound notebook for her birthday, which is in March. That is a lasting fact about Ilse and fits her page, which exists partly to help choose gifts; it belongs on Ilse Marrow's person page, with her existing details kept. The thank-you message draft is not durable and needs no page. Joss Penhallow's page and the Saturday Book Swap page do not change.",
+  "must_change": [
+    "Entities/People/Ilse Marrow.md"
+  ],
+  "must_not_change": [
+    "Entities/People/Joss Penhallow.md",
+    "Entities/Organizations/Saturday Book Swap.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

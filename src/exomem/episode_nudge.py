@@ -42,7 +42,8 @@ LEDGER_CAP = 512
 EPISODE_RULE = (
     "This conversation has run several turns without a recap. At its next "
     "decision or stopping point, record one with episode_memory: what was worked "
-    "on, decided and left open. Skip it if nothing durable happened."
+    "on, decided and left open. Compile or explicitly dismiss every Decided item "
+    "before citing it from updated compiled notes. Skip it if nothing durable happened."
 )
 
 #: Monotonic and injectable, as in `capture_sweep`: the cooldown is an elapsed

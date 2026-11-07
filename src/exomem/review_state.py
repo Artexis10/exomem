@@ -90,9 +90,16 @@ VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen", "competing"})
 VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
 #: The three dispositions a registered signal family can be in. `normal` is the
 #: absence of a record, not a stored value, so setting it clears (mirroring
-#: `reopen`).
+#: `reopen`), except for a family in `DEFAULT_DISPOSITIONS`, whose `normal` is stored.
 DISPOSITIONS: tuple[str, ...] = ("normal", "quiet", "off")
 DISPOSITION_ACTIONS = frozenset(DISPOSITIONS)
+#: The family of conversation recaps with a Decided line that no live page cites. Named here, with
+#: its shipped disposition, because `due_state` and `audit` both import this module and it imports neither.
+EPISODE_BACKLOG = "uncompiled_episode"
+#: The families that ship with a disposition other than `normal`, until the owner decides.
+#: `EPISODE_BACKLOG` ships `off`: its threshold (a Decided line no live page cites) is
+#: the product's, and no owner has yet said that it is worth a daily nag.
+DEFAULT_DISPOSITIONS: dict[str, str] = {EPISODE_BACKLOG: "off"}
 #: The closed triage-reason vocabulary. It rides the existing free-text `why` as
 #: a leading colon-terminated token, so no tool input parameter moves for it.
 #: `unspecified` is the fallback and is never an error for an item decision; a
@@ -306,6 +313,7 @@ STORE_ERROR_CODES: frozenset[str] = frozenset(
         "INVALID_REVIEW_REFERENCE",
         "INVALID_SNOOZE_DATE",
         "INVALID_SURFACE",
+        "INVALID_WINDOW_DAYS",
         "REVIEW_STATE_INVALID",
     }
 )
@@ -794,6 +802,9 @@ class ReviewStateStore:
                     "origin": origin if origin in ORIGINS else MANUAL,
                 }
                 stored["cleared"] = record is not None
+                if family in DEFAULT_DISPOSITIONS:
+                    # The owner's `normal` must outlive the shipped default it overrides.
+                    dispositions[family] = {key: value for key, value in stored.items() if key != "cleared"}
                 # An explicit normal decision begins a new adaptation epoch
                 # without erasing the durable review history.
                 payload["adaptation_resets"][family] = timestamp
@@ -1039,11 +1050,17 @@ def _parse_stamp(value: Any) -> dt.datetime | None:
 
 
 def disposition_map(payload: dict[str, Any] | None) -> dict[str, str]:
-    """``family -> quiet|off`` for every family with a non-default disposition."""
+    """``family -> quiet|off`` for every family with a non-default disposition.
+
+    A family in `DEFAULT_DISPOSITIONS` reads as its default until a record of its own,
+    which may be `normal`, says otherwise.
+    """
     stored = (payload or {}).get("dispositions") or {}
     if not isinstance(stored, dict):
-        return {}
-    out: dict[str, str] = {}
+        stored = {}
+    out: dict[str, str] = {
+        family: value for family, value in DEFAULT_DISPOSITIONS.items() if family not in stored
+    }
     for family, record in stored.items():
         if not isinstance(record, dict):
             continue
@@ -1111,25 +1128,39 @@ def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
     return len(events)
 
 
-#: The effect window. One week spans a working cycle and shows a change within
-#: days; the dispositions contract fixes it, so the response states it.
+#: The default effect window. One week spans a working cycle and shows a change
+#: within days; the response states the window it used.
 EFFECT_WINDOW_DAYS = 7
+#: The window a caller may ask for: a day shows a change, a quarter bounds the read.
+EFFECT_WINDOW_MIN_DAYS = 1
+EFFECT_WINDOW_MAX_DAYS = 90
 
 UNKNOWN = "unknown"
 
 
-def effect_window() -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
+def effect_window(
+    days: int = EFFECT_WINDOW_DAYS,
+) -> tuple[dt.datetime, dt.datetime, dict[str, Any]]:
     """The effect window: whole UTC days, today included, as `(since, until, stated)`.
 
     Events count from `since` 00:00Z through `until`, the time of the read. The
     block states only the dates, so its bytes change when a count does or at a
     UTC midnight; a window stated to the second changed them every second.
     """
+    if (
+        isinstance(days, bool)
+        or not isinstance(days, int)
+        or not EFFECT_WINDOW_MIN_DAYS <= days <= EFFECT_WINDOW_MAX_DAYS
+    ):
+        raise ValueError(
+            f"INVALID_WINDOW_DAYS: window_days must be a whole number of days from "
+            f"{EFFECT_WINDOW_MIN_DAYS} to {EFFECT_WINDOW_MAX_DAYS}, got {days!r}"
+        )
     until = dt.datetime.now(dt.UTC)
-    first_day = until.date() - dt.timedelta(days=EFFECT_WINDOW_DAYS - 1)
+    first_day = until.date() - dt.timedelta(days=days - 1)
     since = dt.datetime.combine(first_day, dt.time(), dt.UTC)
     return since, until, {
-        "days": EFFECT_WINDOW_DAYS,
+        "days": days,
         "since": first_day.isoformat(),
         "through": until.date().isoformat(),
     }
@@ -1154,8 +1185,10 @@ def effect_counts(
     - `dismissed`, `snoozed`: items with a manual decision of that action and
       family updated in the window.
     - `cleared`: surfaced in the window, no decision on the item, and the item
-      id is no longer in the family's current set. It is not "acted": deleting
-      or withholding a page clears an item too.
+      id is no longer in the family's current set.
+      Deleting or withholding a page clears an item without acting on it.
+    - `acted`: `unknown`: these records prove current state, not a subsequent
+      action. A citation already present before surfacing can be discovered later.
     - `open`: surfaced in the window, no decision, still in the current set.
 
     `current` holds the item ids of each family whose current set can be read
@@ -1188,6 +1221,7 @@ def effect_counts(
                     "dismissed": 0,
                     "snoozed": 0,
                     "cleared": UNKNOWN,
+                    "acted": UNKNOWN,
                     "open": UNKNOWN,
                     "unknown_reason": unknown[family],
                 },
@@ -1200,6 +1234,7 @@ def effect_counts(
                 "dismissed": 0,
                 "snoozed": 0,
                 "cleared": 0 if known else UNKNOWN,
+                "acted": UNKNOWN,
                 "open": 0 if known else UNKNOWN,
             },
         )
@@ -1239,7 +1274,10 @@ def effect_counts(
         counts["surfaced"] += 1
         if family not in current or item_id in decided:
             continue
-        counts["open" if item_id in current[family] else "cleared"] += 1
+        if item_id in current[family]:
+            counts["open"] += 1
+        else:
+            counts["cleared"] += 1
 
     # Two of this store's own `VALID_ACTIONS`, a closed set it defines, named as
     # the effect contract's columns.

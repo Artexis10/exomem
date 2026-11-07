@@ -1,0 +1,12 @@
+{
+  "id": "c04-nothing-durable",
+  "title": "A one-off question with no durable outcome",
+  "suite": "session-close",
+  "seed": "c01",
+  "engagement": "balanced",
+  "turns": [
+    "Quick one: I'm meeting Tavi Brennock tomorrow at 16:30 Lisbon time. What time is that in Tokyo?",
+    "Thanks. Can you also tell me how many minutes are in 3.5 hours?",
+    "That's all for today, thanks."
+  ]
+}

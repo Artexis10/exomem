@@ -1,0 +1,7 @@
+{
+  "id": "c06-policy-light",
+  "title": "The c01 session with engagement at light",
+  "suite": "session-close",
+  "engagement": "light",
+  "session_of": "c01-person"
+}
