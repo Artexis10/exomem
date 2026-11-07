@@ -92,7 +92,9 @@ def items(judge_run: Path, run_ids: list[str], arms: list[str]) -> None:
                     continue
                 result = json.loads(result_file.read_text())
                 entry["faults"] = result["faults"]
-                if result["harness_faults"]:
+                # A run recorded before fault classification has no such field; its faults
+                # stay listed under "faults" and nothing is struck for it.
+                if result.get("harness_faults"):
                     entry |= {"state": "harness_fault", "harness_faults": result["harness_faults"]}
                     rows.append({"entry": entry})
                 elif result["deliverable"] is None:
