@@ -559,7 +559,7 @@ def _materialize(captured, envelopes, check):
     text = captured.manifest_bytes.decode("utf-8")
     frontmatter, _, _ = vault.parse_frontmatter(text, strict=True)
     metadata = governance.manifest_metadata(text)
-    audit_property = records.profile_for(manifest.semantic_profile).manifest_audit_property
+    audit_property = types.profile(declared).manifest_audit_property
     reader_version = frontmatter.get(audit_property, {}).get("version", 1)
     collection = (declared.name, declared.version, manifest.path, manifest.storage.source,
                   manifest.storage.strategy, captured.audit_proof.reachable_count + 1,

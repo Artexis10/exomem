@@ -10,9 +10,12 @@ Rules a declaration cannot state declaratively are product-owned, versioned
 *named validators* in a closed registry (``planning.hierarchy.v1``). A
 declaration opts into one by name and never supplies code.
 
-This module loads and resolves types. Authoring declared types through
-``schema_memory`` is a later phase; :func:`parse_declaration` enforces only
-the closed shape that package data must already satisfy.
+This module loads and resolves types. A collection's behaviour comes from
+its stored type through :func:`profile` and :func:`facade`: a built-in keeps
+its frozen release contract, and a declared type derives generic names from
+its declaration. Authoring declared types through ``schema_memory`` is a
+later phase; :func:`parse_declaration` enforces only the closed shape that
+package data must already satisfy.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from .. import structured_collections as collections
+from ..collection_profiles import PROFILES, CollectionProfile
 from ..query_engine.indexes import IndexDeclarationError, IndexSpec, normalize_indexes
 
 if TYPE_CHECKING:
@@ -265,9 +269,65 @@ def builtin_types() -> Mapping[str, CollectionType]:
     return MappingProxyType(loaded)
 
 
+@functools.lru_cache(maxsize=64)
+def _parsed_declaration(declaration_json: str) -> CollectionType:
+    # Keyed by the stored canonical text, so a cached parse is that exact declaration's.
+    return parse_declaration(json.loads(declaration_json), builtin=False)
+
+
+def _declared_type(conn: sqlite3.Connection, name: str, version: int | None) -> CollectionType | None:
+    """One registered declared type at ``version``, or at its current version when None."""
+    row = conn.execute(
+        "SELECT v.version, v.declaration_json FROM collection_types t JOIN collection_type_versions v "
+        "ON v.name = t.name AND v.version = COALESCE(?, t.current_version) "
+        "WHERE t.name = ? AND t.builtin = 0",
+        (version, name),
+    ).fetchone()
+    if row is None:
+        return None
+    declared = _parsed_declaration(row[1])
+    if (declared.name, declared.version) != (name, row[0]):
+        raise CollectionTypeError(
+            "INVALID_DECLARATION", "stored declaration names another type", name
+        )
+    return declared
+
+
+def stored_type(conn: sqlite3.Connection, name: str, version: int) -> CollectionType:
+    """The type a stored collection names (``collections.type_name/type_version``).
+
+    A built-in resolves to this release's declaration, whose stored bytes
+    :func:`register_builtins` pins; any other version of it refuses.
+    """
+    builtin = builtin_types().get(name)
+    if builtin is not None:
+        if builtin.version != version:
+            raise CollectionTypeError(
+                "COLLECTION_TYPE_VERSION_MISMATCH", "collection type differs from release"
+            )
+        return builtin
+    declared = _declared_type(conn, name, version)
+    if declared is None:
+        raise CollectionTypeError(
+            "UNKNOWN_COLLECTION_TYPE", "collection type is not registered", "type_name"
+        )
+    return declared
+
+
+def registered_type(name: str) -> CollectionType | None:
+    """A built-in by name, else the current version of a type the bound store registered."""
+    declared = builtin_types().get(name)
+    if declared is not None:
+        return declared
+    from .preview import bound_registry
+
+    conn = bound_registry()
+    return None if conn is None else _declared_type(conn, name, None)
+
+
 def type_for_profile(semantic_profile: str) -> CollectionType:
-    """Resolve a manifest's ``semantic_profile`` alias to its built-in type."""
-    declared = builtin_types().get(semantic_profile)
+    """Resolve a manifest's ``semantic_profile`` alias to its registered type."""
+    declared = registered_type(semantic_profile)
     if declared is None:
         raise CollectionTypeError(
             "UNKNOWN_COLLECTION_TYPE", "collection type is not registered", "semantic_profile"
@@ -278,6 +338,65 @@ def type_for_profile(semantic_profile: str) -> CollectionType:
 def type_for_manifest(manifest: collections.CollectionManifest) -> CollectionType:
     """The type a parsed collection manifest belongs to."""
     return type_for_profile(manifest.semantic_profile)
+
+
+#: A declared type's item id on every surface: its views, its query rows and its receipts.
+_DECLARED_ITEM_KEY = "item_key"
+
+
+@dataclass(frozen=True, slots=True)
+class Facade:
+    """The names one tool's receipts give a type's items (design §14.7)."""
+
+    receipt_property: str
+    receipt_marker: str
+    item_key_property: str
+    #: The receipt name of each leaf operation the tool renames; any other keeps its own.
+    verbs: Mapping[str, str]
+
+
+#: Each built-in's receipt item key and operation renames; its receipt property and marker are its wire block's.
+_BUILTIN_RECEIPTS: Mapping[str, tuple[str, Mapping[str, str]]] = MappingProxyType({  # nosemgrep: ep-word-dict -- the two built-in facades are schema-fixed tools (design §14.7), not vocabulary.
+    "records": ("item_key", MappingProxyType({})),
+    "planning": ("plan_id", MappingProxyType({"append": "add"})),
+})
+_DECLARED_FACADE = Facade(
+    "_collection_receipt", "exomem.collection-mutation", _DECLARED_ITEM_KEY, MappingProxyType({})
+)
+
+
+def profile(declared: CollectionType) -> CollectionProfile:
+    """The product profile a type resolves to.
+
+    A built-in keeps its frozen release contract. A declared type derives its
+    profile from its declaration with generic names, so it never borrows a
+    built-in's names.
+    """
+    if declared.builtin:
+        return PROFILES[declared.name]
+    return CollectionProfile(
+        name=declared.name,
+        placement_layer=declared.placement,
+        item_id_property=_DECLARED_ITEM_KEY,
+        item_type=declared.item_type,
+        reference_namespace=declared.item_type,
+        manifest_audit_property="collection_audit",
+        item_audit_marker="exomem-collection-audit",
+        activity_prefix="Collections audit-v1 ",
+        tool="record_memory",
+    )
+
+
+@functools.cache
+def _builtin_facade(name: str) -> Facade:
+    wire = builtin_types()[name].wire
+    item_key, verbs = _BUILTIN_RECEIPTS[name]
+    return Facade(wire["receipt_property"], wire["receipt_marker"], item_key, verbs)
+
+
+def facade(declared: CollectionType) -> Facade:
+    """The receipt names of a type: a built-in's from its wire block and facade map, else generic."""
+    return _builtin_facade(declared.name) if declared.builtin else _DECLARED_FACADE
 
 
 def register_builtins(conn: sqlite3.Connection, *, txn_id: int) -> None:

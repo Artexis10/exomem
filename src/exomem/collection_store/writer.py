@@ -361,11 +361,11 @@ class CollectionWriter:
         )
         if manifest.collection_id != row["collection_id"] or manifest.manifest_version.hash != epoch[6]:
             governance.OperationAuthorization.refuse()
-        declared = types.type_for_manifest(manifest)
-        if (declared.name, declared.version) != (row["type_name"], row["type_version"]):
+        if manifest.semantic_profile != row["type_name"]:
             raise types.CollectionTypeError(
                 "COLLECTION_TYPE_VERSION_MISMATCH", "collection type differs from release"
             )
+        declared = types.stored_type(self.connection, row["type_name"], row["type_version"])
         cache._remember(cache.contracts, key, (manifest, declared), 64)
         return replace(manifest, audit_head=row["audit_head"], item_key_scheme=row["item_key_scheme"]), declared
 
@@ -1348,7 +1348,7 @@ class CollectionWriter:
             raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep is incomplete")
         result = {"moved": False}
         with self._mutation(reconcile=True):
-            row, manifest, _ = self._collection(cid)
+            row, manifest, declared = self._collection(cid)
             outside = facts.get("old_path") is not None
             if (row["generation"] != observed[0] or not _renders_rows(manifest)
                     or (not outside and not path.startswith(manifest.storage.source + "/"))):
@@ -1462,7 +1462,7 @@ class CollectionWriter:
                     affected_paths=[projection["path"], path], payload_hash=None,
                     outcome="committed", audit_correlation=txn["transition_id"])
                 self._history_reselection(cid)
-                self.handle.release_cache.touch(cid, f"exomem://{types.type_for_manifest(manifest).item_type}/{cid}/{item['item_key']}")
+                self.handle.release_cache.touch(cid, f"exomem://{declared.item_type}/{cid}/{item['item_key']}")
                 self._precommit(manifest)
                 self._insert_txn(txn, receipt)
                 result = {"moved": True, "old_path": projection["path"],
@@ -3593,7 +3593,7 @@ class CollectionWriter:
         """
         records._validate_why(why)
         with self._mutation():
-            row, manifest, _ = self._collection(collection)
+            row, manifest, declared = self._collection(collection)
             cid = manifest.collection_id
             requests = {filenames.request_id(plan_id, key, step): (key, step)
                         for (key,) in self.connection.execute("SELECT item_key FROM items WHERE collection_id=?", (cid,))
@@ -3630,7 +3630,7 @@ class CollectionWriter:
             self._execute("UPDATE items SET view_path=? WHERE collection_id=? AND item_key=?",
                           [(target, cid, key) for key, (_, target) in moves.items()], many=True)
             receipts = []
-            item_type = types.type_for_manifest(manifest).item_type
+            item_type = declared.item_type
             for key in sorted(moves.keys() | plan.bodies.keys()):
                 before = items[key]
                 version = self._version(before)

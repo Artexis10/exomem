@@ -51,5 +51,18 @@ PROFILES: Mapping[str, CollectionProfile] = MappingProxyType(
 
 
 def profile_for(name: str) -> CollectionProfile:
-    """Return the registered immutable contract for one explicit profile."""
-    return PROFILES[name]
+    """Return the immutable contract of one registered collection type.
+
+    A built-in returns its frozen entry. A declared type resolves through the
+    type registry of the store bound to this call context; an unknown name, or
+    a declared name with no bound store, raises ``KeyError``.
+    """
+    profile = PROFILES.get(name)
+    if profile is not None:
+        return profile
+    from .collection_store import types
+
+    declared = types.registered_type(name)
+    if declared is None:
+        raise KeyError(name)
+    return types.profile(declared)

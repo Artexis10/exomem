@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage, types
+from . import chain, tokens, typed_storage
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -294,7 +294,7 @@ def agent_history(writer, manifest):
     from . import governance
 
     row = writer._collection_row(manifest)
-    manifest = writer._collection_manifest(row)[0]
+    manifest, declared = writer._collection_manifest(row)
     assessment = audit(writer, row)
     events, complete = [], assessment["status"] != "history_incomplete"
     control_release = {}
@@ -345,7 +345,7 @@ def agent_history(writer, manifest):
                                                      (manifest.collection_id, key)).fetchone()
                 if current is None:
                     # Only unrestricted readers can release an imported event with no current row metadata.
-                    identity = f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}"
+                    identity = f"exomem://{declared.item_type}/{manifest.collection_id}/{key}"
                     permitted = (egress.unrestricted_content_access(writer.root, writer._operation.who)
                                  and governance.content_available(
                                      legacy_event["canonical_path"], identity,

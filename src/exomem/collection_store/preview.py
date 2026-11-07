@@ -20,6 +20,8 @@ from .. import structured_collections as collections
 from .connection import CollectionStoreError, WriterConnection
 
 if TYPE_CHECKING:
+    import sqlite3
+
     from .writer import CollectionWriter
 
 # (vault root, writer, served by a production session): only a production session's
@@ -78,6 +80,15 @@ def _bound_to(binding: tuple[Path, CollectionWriter, bool], vault_root: Path) ->
 def bound_writer(vault_root: Path) -> CollectionWriter | None:
     binding = _BOUND.get()
     return binding[1] if binding is not None and _bound_to(binding, vault_root) else None
+
+
+def bound_registry() -> sqlite3.Connection | None:
+    """The type registry of the store this call context serves, or None outside one.
+
+    A call context binds at most one store, so a type name resolves without a vault root.
+    """
+    binding = _BOUND.get()
+    return None if binding is None else binding[1].connection
 
 
 def production_bound(vault_root: Path) -> bool:

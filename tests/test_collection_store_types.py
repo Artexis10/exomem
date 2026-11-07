@@ -10,6 +10,7 @@ All data is invented.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +21,8 @@ from record_fixtures import LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT
 
 from exomem import collection_profiles, mutation_terminal, planning, plan_memory
 from exomem import structured_collections as collections
-from exomem.collection_store import types
+from exomem.collection_store import connection, types
+from exomem.collection_store.preview import preview_store
 
 PLANNING_COLLECTION_PATH = "Knowledge Base/Planning/Work/_collection.md"
 PLANNING_COLLECTION_ID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
@@ -177,6 +179,43 @@ def test_an_unknown_profile_never_becomes_records() -> None:
     with pytest.raises(types.CollectionTypeError) as refused:
         types.type_for_profile("dataset")
     assert refused.value.code == "UNKNOWN_COLLECTION_TYPE"
+
+
+def test_a_registered_declared_type_resolves_to_its_own_generic_profile(tmp_path: Path) -> None:
+    """A declared type neither raises KeyError nor borrows a built-in's names."""
+    declaration = {
+        "name": "recipes",
+        "version": 1,
+        "title": "Recipes",
+        "item_type": "recipe",
+        "kind": "procedural",
+        "placement": "Recipes",
+        "fields": {"title": {"type": "string", "required": True}},
+        "default_audience": "owner",
+    }
+    root = tmp_path / "vault"
+    root.mkdir()
+    with connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as handle:
+        with handle.transaction() as conn:
+            types.register_builtins(conn, txn_id=1)
+            conn.execute("INSERT INTO collection_types VALUES ('recipes', 1, 0)")
+            conn.execute(
+                "INSERT INTO collection_type_versions VALUES ('recipes', 1, ?, 'fixture', 'additive', 1)",
+                (json.dumps(declaration, sort_keys=True, separators=(",", ":")),),
+            )
+        with preview_store(root, handle):
+            profile = collection_profiles.profile_for("recipes")
+        receipts = types.facade(types.stored_type(handle.connection, "recipes", 1))
+    assert (profile.placement_layer, profile.item_type, profile.item_id_property) == (
+        "Recipes",
+        "recipe",
+        "item_key",
+    )
+    assert (receipts.receipt_property, receipts.item_key_property, dict(receipts.verbs)) == (
+        "_collection_receipt",
+        "item_key",
+        {},
+    )
 
 
 def test_named_validators_are_a_closed_registry() -> None:

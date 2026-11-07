@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 from . import record_formats, record_governance, state_paths, vault, writer_lease
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .collection_store import types as collection_types
 
 log = logging.getLogger(__name__)
 
@@ -3067,11 +3068,9 @@ def _lifecycle_result(
     checkpoint_snapshot_hash: str | None,
     affected_paths: tuple[str, ...],
 ) -> dict[str, Any]:
-    profile = profile_for(manifest.semantic_profile)
+    facade = collection_types.facade(collection_types.type_for_manifest(manifest))
     return {
-        "_record_receipt" if profile.name == "records" else "_plan_receipt": (
-            _RECEIPT_MARKER if profile.name == "records" else "exomem.planning-mutation"
-        ),
+        facade.receipt_property: facade.receipt_marker,
         "receipt_version": _LIFECYCLE_RECEIPT_VERSION,
         "operation": operation,
         "collection_id": manifest.collection_id,
@@ -5697,17 +5696,13 @@ def _result(
     outcome: str,
     audit_correlation: str | None,
 ) -> dict[str, Any]:
-    profile = profile_for(manifest.semantic_profile)
-    if profile.name == "planning":
-        operation = {"append": "add"}.get(operation, operation)
+    facade = collection_types.facade(collection_types.type_for_manifest(manifest))
     return {
-        "_record_receipt" if profile.name == "records" else "_plan_receipt": (
-            _RECEIPT_MARKER if profile.name == "records" else "exomem.planning-mutation"
-        ),
+        facade.receipt_property: facade.receipt_marker,
         "receipt_version": _RECEIPT_VERSION,
-        "operation": operation,
+        "operation": facade.verbs.get(operation, operation),
         "collection_id": manifest.collection_id,
-        "item_key" if profile.name == "records" else "plan_id": key,
+        facade.item_key_property: key,
         "before_item_hash": before_item_hash,
         "after_item_hash": after_item_hash,
         "before_container_hash": before_container_hash,
