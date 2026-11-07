@@ -1,7 +1,7 @@
 """The frozen assertion registry.
 
 The assertion and family names below mirror PREREGISTRATION.md through the
-sequence-eight organisation autonomy amendment. Unknown names fail at
+sequence-nine outcome evaluation amendment. Unknown names fail at
 fixture load; assertions cannot be added after seeing a result.
 
 Registration is not release. Each family's amendment receipt controls its
@@ -158,6 +158,9 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f32", "utility_action_episode"),
     ("f33", "referent_capture_replay"),
     ("f34", "organisation_autonomy_replay"),
+    ("f35", "clbench_outcome_over_sessions"),
+    ("f36", "multidoc_synthesis_outcome"),
+    ("f37", "planted_governance_ablation"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -206,6 +209,9 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f32": 6,
         "f33": 7,
         "f34": 8,
+        "f35": 9,
+        "f36": 9,
+        "f37": 9,
     }
 )
 
