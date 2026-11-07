@@ -25,11 +25,11 @@ import json
 import os
 import stat
 import time
-import urllib.request
 from pathlib import Path
 
 import pytest
 from benchmark_capabilities import has_no_follow_open, has_posix_file_modes
+from hook_requests import answer_requests
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -55,15 +55,6 @@ PROMPT = (
     "left, and did we decide anything about the winter schedule?"
 )
 SESSION = "session-under-test"
-
-
-def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
-    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
-    monkeypatch.setattr(
-        urllib.request.OpenerDirector,
-        "open",
-        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
-    )
 
 
 def _load_hook_module():
@@ -971,7 +962,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
         seen["body"] = json.loads(request.data.decode("utf-8"))
         return _Response()
 
-    _answer_requests(monkeypatch, _urlopen)
+    answer_requests(monkeypatch, _urlopen)
 
     packet = hook._fetch_packet_via_rest(PROMPT, _lane("sekret"), "TOKEN-0", 1.0)
 
@@ -1096,7 +1087,7 @@ def test_no_continuity_key_is_sent_when_there_is_no_token(
         def __exit__(self, *exc):
             return False
 
-    _answer_requests(
+    answer_requests(
         monkeypatch,
         lambda request, timeout=0.0: (
             seen.update(body=json.loads(request.data.decode("utf-8"))) or _Response()
@@ -2362,7 +2353,7 @@ def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
         return _Response()
 
     monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
-    _answer_requests(monkeypatch, fake_urlopen)
+    answer_requests(monkeypatch, fake_urlopen)
     packet = hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, hook.attribution(SESSION))
 
     assert packet == {"abstained": True}

@@ -46,7 +46,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def open_request(request: urllib.request.Request, timeout: float):
+def _open_request(request: urllib.request.Request, timeout: float):
     """Open `request` with no proxy and no redirect, so the credential reaches only its own URL."""
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open(
         request, timeout=timeout
@@ -88,7 +88,7 @@ class Lane:
         An HTTP error status returns with an empty body; a transport failure raises.
         """
         try:
-            with open_request(self.request(url, body), timeout=timeout) as response:
+            with _open_request(self.request(url, body), timeout=timeout) as response:
                 return response.getcode(), response.read()
         except urllib.error.HTTPError as error:
             return error.code, b""

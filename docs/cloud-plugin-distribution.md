@@ -190,7 +190,7 @@ The continuation hook reads local structural state and uses a restricted environ
 The Cloud-shipped scripts no longer contain the self-hosted credential transport.
 `exomem_local_credentials.py` owns every read of a local credential and every authenticated REST request.
 It also opens the connection: a hook calls `Lane.post` and imports no network module.
-The producer excludes that module from the archive, so the Cloud hooks hold no code that reads a credential or sends data.
+The producer excludes that module from the archive. The Cloud hook scripts therefore read no credential, import no network module and open no connection themselves.
 The retrieve and capture hooks load it through the continuation script's optional sibling loader.
 Where the module is absent, those hooks behave as when no credential is configured.
 Do not prune Python functions during packaging or create a second Cloud hook implementation to change a scanner result.

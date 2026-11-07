@@ -728,7 +728,7 @@ def _gather_with_lane(rest_call, cli_call):
 
     Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`). The
     CLI rung's `subprocess.run(timeout=)` is a wall-clock bound already; the
-    REST rung's `urlopen(timeout=)` is only a per-socket-operation timeout, so a
+    REST rung's opener timeout (`Lane.post`) is only a per-socket-operation timeout, so a
     server that dribbles a byte every few seconds would never trip it (measured
     52 s against an 8 s budget). The REST rung therefore runs on a daemon thread
     joined against the remaining budget: past the deadline the rung counts as

@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from hook_requests import answer_requests
 from test_retrieve_nudge_working_set import (
     PROMPT,
     SESSION,
@@ -47,15 +48,6 @@ SENTINELS = (
     "ANOTHER-RESULT-SENTINEL",
     "never-taken-from-results",
 )
-
-
-def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
-    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
-    monkeypatch.setattr(
-        urllib.request.OpenerDirector,
-        "open",
-        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -284,7 +276,7 @@ def test_main_sends_the_conversation_in_working_set_mode(
 
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    _answer_requests(monkeypatch, _urlopen)
+    answer_requests(monkeypatch, _urlopen)
     event = {**_event(CURRENT), "transcript_path": str(CLAUDE), "cwd": str(tmp_path)}
     output = _run_main(monkeypatch, capsys, event, tmp_path / "home")
     assert _context(output)
@@ -301,7 +293,7 @@ def test_no_transcript_path_sends_no_conversation(
     bodies: list[dict] = []
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    _answer_requests(
+    answer_requests(
         monkeypatch,
         lambda request, timeout=0.0: (
             bodies.append(json.loads(request.data.decode("utf-8")))
@@ -333,7 +325,7 @@ def test_an_older_service_gets_one_retry_without_the_conversation(monkeypatch: p
         return _Response({"success": True, "data": _packet()})
 
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    _answer_requests(monkeypatch, _urlopen)
+    answer_requests(monkeypatch, _urlopen)
     conversation = hook._conversation_from_transcript(str(CLAUDE), CURRENT)
     packet = hook._fetch_packet_via_rest(
         CURRENT, _lane("sekret"), "", 4.0, {"client": "claude-code", "session": SESSION}, conversation=conversation
@@ -394,7 +386,7 @@ def test_the_conversation_never_lands_in_hook_state(
     home = tmp_path / "home"
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    _answer_requests(
+    answer_requests(
         monkeypatch,
         lambda request, timeout=0.0: _Response({"success": True, "data": _packet()}),
     )
