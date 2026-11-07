@@ -31,8 +31,8 @@
   - Evidence: `_run_lock` takes the run lock without blocking. `tests/test_reconcile.py::test_a_second_reconcile_is_refused_while_one_runs` passes.
 - [x] 2.11 Rebase the lexical lineage after the rebaseline hold, under design D1.
   - Evidence: `lexstore.rebase_current_catalog_lineage` runs after the hold, as warm-up and the watcher seed call it.
-- [x] 2.12 Prove that the units repair leaves a corpus page edited after the unit audit, under design D2.
-  - Evidence: `tests/test_semantic_unit_reconcile.py::test_the_unit_repair_leaves_a_page_edited_after_the_unit_audit_with_the_rows_its_edit_indexed` passes. On `main`, it fails on the missing `semantic_unit_parents_moved`. With the units check disabled, the run refreshes both pages instead of one.
+- [x] 2.12 Check that the units repair leaves a corpus page edited after the unit audit, under design D2.
+  - Evidence: `semantic_index.current_parent_index_state` already discards a supplied parent state whose hash differs from the committed bytes, so a stale repair cannot write old units over an edit, on `main` or here. A test for the units skip passed with the skip removed and caught only report fields, so the change keeps no such test. The orphan case, where a skip is the only protection, is covered by `test_a_page_written_after_the_corpus_read_keeps_the_unit_rows_its_write_indexed`.
 
 ## 3. Verify
 
