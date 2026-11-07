@@ -1082,7 +1082,6 @@ def test_a_second_reconcile_is_refused_while_one_runs(
     from exomem.cli_ops import OpError
     from exomem.commands import commands_for
 
-    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease"))
     writer_lease.reset_managers_for_tests()
     reconcile_command = next(command for command in commands_for("mcp") if command.name == "reconcile")

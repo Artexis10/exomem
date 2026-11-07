@@ -260,9 +260,11 @@ def _run_lock(vault_root: Path, *, dry_run: bool) -> Iterator[None]:
     """Hold this vault's reconcile-run lock for one write run, or refuse the run before it reads anything.
 
     The whole-run boundary hold used to serialize reconciles; this lock keeps that guarantee without
-    blocking writers, because no ordinary writer takes it. A second write run waits for it as long as
-    a writer waits for a busy boundary (`EXOMEM_MUTATION_TIMEOUT`), then gets `MUTATION_BUSY` with
-    nothing written. It is a plain file lock, as one archive expansion per vault holds, and not a
+    blocking writers, because no ordinary writer takes it. A second write run refuses at once with
+    `MUTATION_BUSY` and nothing written; its caller's own retry decides whether to ask again. It does
+    not wait, because the running reconcile may be a job parked at a `_phase_hold` yield, and a
+    foreground request that waited here, outside `foreground_priority.awaiting_bulk()`, would wait on
+    a parked bulk pass. It is a plain file lock, as one archive expansion per vault holds, and not a
     mutation coordinator: a coordinator hold would make the run's foreground yields return at once.
     A preview, and a call from outside the writer lease, take none, as `_phase_hold` does.
     """
@@ -270,14 +272,14 @@ def _run_lock(vault_root: Path, *, dry_run: bool) -> Iterator[None]:
 
     from . import mutation_lock, private_state
     from .cli_ops import OpError
-    from .writer_lease import LeaseConfig, active_mutation_request_id
+    from .writer_lease import active_mutation_request_id
 
     if dry_run or active_mutation_request_id() is None:
         yield
         return
     lock = FileLock(private_state.store(vault_root, "reconcile") / "run.lock")
     try:
-        lock.acquire(timeout=LeaseConfig.from_env().mutation_timeout_seconds)
+        lock.acquire(blocking=False)
     except Timeout:
         raise OpError(
             "MUTATION_BUSY",
@@ -795,8 +797,9 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             if digest not in indexed_for[rel]
         }
         with _phase_hold(vault_root, "reconcile units", dry_run=dry_run):
-            # A parent whose bytes moved since they were read was indexed by the write that moved it;
-            # a repair from the old read would undo that write, so the run leaves it and reports it.
+            # A parent whose bytes moved since they were read was indexed by the write that moved it, so
+            # the run leaves it and reports it. Removing an orphan's rows would undo that write. Refreshing
+            # a corpus page would repeat it, since each sidecar re-parses a planned state whose bytes moved.
             moved = set(
                 _moved_since_read(
                     vault_root,
@@ -1227,8 +1230,11 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
 
         with _phase_hold(vault_root, "reconcile rebaseline", dry_run=dry_run):
             freshness.rebaseline(vault_root)
-            lexstore.rebase_current_catalog_lineage(vault_root)
             vault_module.clear_inbound_index()
+        # Outside the hold, as warm-up calls it: it serializes on the lexical publication barrier, where
+        # every catalog write commits, and stamps only a stored state equal to the live one, so it needs no
+        # boundary, and its wait for that barrier (up to 30 s) no longer blocks writers.
+        lexstore.rebase_current_catalog_lineage(vault_root)
 
     # Receipt evidence is intentionally repaired only here, after ordinary
     # derived-state reconciliation has established any critical-event target.
