@@ -3,6 +3,7 @@
 #     uv run python scripts/generate_harness_modules.py --write
 # Pinned against the derivation by tests/test_ci_reliability_contract.py.
 tests/test_benchmark_capabilities.py
+tests/test_capture_carrier.py
 tests/test_capture_sweep_journey.py
 tests/test_cjk_readiness.py
 tests/test_context_activation_audit.py
