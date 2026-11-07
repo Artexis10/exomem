@@ -6,8 +6,9 @@ retrieve and capture hooks load it only on those transports, and a missing copy
 reads as "no credential configured".
 
 This module owns every read of a credential from the user's machine and every
-request that carries one. A hook receives a `Lane`, an opaque route that builds
-the authenticated request for a URL and body, and never holds the secret itself.
+request that carries one. A hook receives a `Lane`, an opaque route that sends
+the authenticated request for a URL and body, and never holds the secret or
+opens a connection itself.
 
 Sources, in the order a lane resolves them:
 
@@ -31,12 +32,25 @@ from __future__ import annotations
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
 # The loopback spellings fixed by the network standards, not a vocabulary a user extends.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def open_request(request: urllib.request.Request, timeout: float):
+    """Open `request` with no proxy and no redirect, so the credential reaches only its own URL."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open(
+        request, timeout=timeout
+    )
 
 
 class Lane:
@@ -67,6 +81,17 @@ class Lane:
                 "Authorization": f"Bearer {self._token}",
             },
         )
+
+    def post(self, url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
+        """Send the authenticated JSON POST and return its status and body.
+
+        An HTTP error status returns with an empty body; a transport failure raises.
+        """
+        try:
+            with open_request(self.request(url, body), timeout=timeout) as response:
+                return response.getcode(), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, b""
 
 
 def service_env_path() -> Path | None:

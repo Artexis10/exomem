@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +28,15 @@ from exomem._hooks import exomem_retrieve_nudge as retrieve_hook
 
 SESSION = "session-episode-under-test"
 SUBSTANTIVE = "We compared the two lamps and settled the finish. " + "x" * 400
+
+
+def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
+    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector,
+        "open",
+        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
+    )
 
 
 def _lane(key: str = "key"):
@@ -509,7 +519,7 @@ def test_a_revision_recorded_through_the_rest_door_suppresses_the_next_ask(
         calls.append(json.loads(request.data.decode("utf-8")))
         return _RestResponse(_inspect_payload(1))
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
 
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     results = _stops(monkeypatch, capsys, tmp_path, k)
@@ -541,7 +551,7 @@ def test_an_unconfigured_door_falls_back_to_todays_behavior(
     def fail_urlopen(request, timeout):
         raise AssertionError("no key resolved; the hook must not call out")
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+    _answer_requests(monkeypatch, fail_urlopen)
 
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     results = _stops(monkeypatch, capsys, tmp_path, k)
@@ -571,7 +581,7 @@ def test_a_door_error_falls_back_to_todays_behavior(
     def flaky_urlopen(request, timeout):
         return make_response()
 
-    monkeypatch.setattr(hook, "_open_no_redirect", flaky_urlopen)
+    _answer_requests(monkeypatch, flaky_urlopen)
 
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     results = _stops(monkeypatch, capsys, tmp_path, k)
@@ -592,7 +602,7 @@ def test_the_door_check_stays_within_its_bounded_timeout(
         time.sleep(2.0)
         return _RestResponse(_inspect_payload(0))
 
-    monkeypatch.setattr(hook, "_open_no_redirect", slow_urlopen)
+    _answer_requests(monkeypatch, slow_urlopen)
 
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     _stops(monkeypatch, capsys, tmp_path, k - 1)
@@ -616,7 +626,7 @@ def test_a_transcript_record_still_counts_without_consulting_the_door(
     def fail_urlopen(request, timeout):
         raise AssertionError("a transcript-observed record needs no door check")
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+    _answer_requests(monkeypatch, fail_urlopen)
 
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     _stops(monkeypatch, capsys, tmp_path, k - 1)
@@ -668,7 +678,7 @@ def _counting_door(monkeypatch: pytest.MonkeyPatch) -> dict:
     def fake_urlopen(request, timeout):
         return _RestResponse(_inspect_payload(count["n"]))
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     return count
 
 
@@ -753,7 +763,7 @@ def test_the_retrieve_hook_sends_client_and_session_on_both_rungs(
         return _Response(json.dumps({"success": True, "data": {"abstained": True}}).encode())
 
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     attribution = retrieve_hook.attribution("rollout-9")
     retrieve_hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, attribution)
 
@@ -810,7 +820,7 @@ def test_an_older_service_that_refuses_attribution_still_serves_the_packet(
         return _Response()
 
     monkeypatch.setattr(retrieve_hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(retrieve_hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     packet = retrieve_hook._fetch_packet_via_rest(
         "continue", _lane(), "", 1.0, retrieve_hook.attribution("s")
     )
@@ -880,7 +890,7 @@ def _ledger_door(monkeypatch: pytest.MonkeyPatch, **payload: object) -> dict:
             return _RestResponse(_candidates_payload(**ledger["payload"]))
         return _RestResponse(_inspect_payload(0))
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     return ledger
 
 
@@ -951,7 +961,7 @@ def test_a_session_without_candidates_never_consults_the_ledger(
     def fail_urlopen(request, timeout):
         raise AssertionError("no candidate was ever prepared in this session")
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fail_urlopen)
+    _answer_requests(monkeypatch, fail_urlopen)
     for index in range(3):
         assert _stop(monkeypatch, capsys, _noted(tmp_path, saved=bool(index % 2), name=f"{index}.jsonl")) is None
 
@@ -1047,7 +1057,7 @@ def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
         )
         return _RestResponse(response.content, response.status_code)
 
-    monkeypatch.setattr(hook, "_open_no_redirect", via_app)
+    _answer_requests(monkeypatch, via_app)
 
     def episode(**kwargs: object) -> dict:
         return commands.op_episode_memory(

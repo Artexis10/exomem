@@ -4,7 +4,7 @@ The hook is a standalone, stdlib-only script — not a package member — so it 
 loaded via `importlib.util.spec_from_file_location` (matching how
 `tests/test_install_hook.py` resolves `RETRIEVE_SCRIPT` for its subprocess
 tests) to get an in-process module whose seam functions
-(`_fetch_via_rest` / `_fetch_via_cli` / `_open_no_redirect` /
+(`_fetch_via_rest` / `_fetch_via_cli` / `Lane.post` /
 `subprocess.run` / `shutil.which`) can be monkeypatched — the same seam
 precedent as `doctor_module._probe_get` in `tests/test_doctor_probe.py`. No
 real network request or subprocess is ever spawned by this suite; the one
@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,15 @@ import pytest
 import exomem
 
 RETRIEVE_SCRIPT = Path(exomem.__file__).parent / "_hooks" / "exomem_retrieve_nudge.py"
+
+
+def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
+    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector,
+        "open",
+        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
+    )
 
 
 def _load_hook_module():
@@ -84,7 +94,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 class _FakeResponse:
-    """Minimal stand-in for the context-managed object `_open_no_redirect`
+    """Minimal stand-in for the context-managed object the no-redirect opener
     returns: `.getcode()` + `.read()`, usable in a `with ... as resp:` block."""
 
     def __init__(self, status: int, body: bytes) -> None:
@@ -312,7 +322,7 @@ def test_fetch_via_rest_success_returns_hits(monkeypatch: pytest.MonkeyPatch) ->
         captured["timeout"] = timeout
         return _FakeResponse(200, _envelope_bytes(hits))
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     result = hook_mod._fetch_via_rest("what did I conclude about X?", _lane("secret-key"))
 
     assert result == hits
@@ -335,7 +345,7 @@ def test_fetch_via_rest_respects_exomem_host(monkeypatch: pytest.MonkeyPatch) ->
         captured["url"] = req.full_url
         return _FakeResponse(200, _envelope_bytes([]))
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["url"] == "http://10.0.0.5:8765/api/search_memory"
 
@@ -359,7 +369,7 @@ def test_fetch_via_rest_uses_valid_port_override(monkeypatch: pytest.MonkeyPatch
         captured["url"] = req.full_url
         return _FakeResponse(200, _envelope_bytes([]))
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["url"] == "http://127.0.0.1:9123/api/search_memory"
 
@@ -372,7 +382,7 @@ def test_fetch_via_rest_rejects_invalid_port_without_request(monkeypatch: pytest
         calls.append(req)
         raise AssertionError("request attempted")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
     assert calls == []
 
@@ -381,7 +391,7 @@ def test_fetch_via_rest_success_false_returns_none(monkeypatch: pytest.MonkeyPat
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(200, json.dumps({"success": False, "error": {}}).encode())
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
@@ -389,7 +399,7 @@ def test_fetch_via_rest_non_200_returns_none(monkeypatch: pytest.MonkeyPatch) ->
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(500, b"internal error")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
@@ -397,7 +407,7 @@ def test_fetch_via_rest_malformed_json_returns_none(monkeypatch: pytest.MonkeyPa
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(200, b"{not json")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
@@ -405,7 +415,7 @@ def test_fetch_via_rest_connection_error_returns_none_never_raises(monkeypatch: 
     def fake_urlopen(req, timeout=None):
         raise ConnectionRefusedError("connection refused")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
@@ -413,7 +423,7 @@ def test_fetch_via_rest_timeout_returns_none_never_raises(monkeypatch: pytest.Mo
     def fake_urlopen(req, timeout=None):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     assert hook_mod._fetch_via_rest("prompt", _lane()) is None
 
 
@@ -577,7 +587,7 @@ def test_parse_hits_rejects_dict_without_hits() -> None:
 def test_fetch_via_rest_reads_marked_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
     body = json.dumps({"success": True, "data": {"hits": hits, "degraded": []}}).encode("utf-8")
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", lambda req, timeout=None: _FakeResponse(200, body))
+    _answer_requests(monkeypatch, lambda req, timeout=None: _FakeResponse(200, body))
     assert hook_mod._fetch_via_rest("prompt", _lane()) == hits
 
 
@@ -589,7 +599,7 @@ def test_fetch_via_rest_passes_the_rest_timeout_budget(monkeypatch: pytest.Monke
         captured["timeout"] = timeout
         return _FakeResponse(200, _envelope_bytes([]))
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     hook_mod._fetch_via_rest("prompt", _lane())
     assert captured["timeout"] == hook_mod.REST_TIMEOUT_SECONDS
     assert hook_mod.REST_TIMEOUT_SECONDS > 2.0
@@ -900,7 +910,7 @@ def test_log_records_lane_and_hit_count_without_the_key(
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret-key-value")
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
+    _answer_requests(monkeypatch, lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
 
     _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-log-lane"}, home)
 
@@ -971,7 +981,7 @@ def test_default_off_no_network_or_subprocess_attempted(
         cli_calls.append(cmd)
         raise AssertionError("subprocess.run must not be called when EXOMEM_RETRIEVE_INJECT is unset")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
     monkeypatch.setattr(hook_mod.subprocess, "run", _boom_run)
 
     out = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-off"}, home)
@@ -1005,7 +1015,7 @@ def test_control_prompt_skips_before_reminder_or_transport(
         cli_calls.append(cmd)
         raise AssertionError("subprocess.run must not be called for control-only prompts")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
     monkeypatch.setattr(hook_mod.subprocess, "run", _boom_run)
 
     out = _call_main(
@@ -1028,7 +1038,7 @@ def test_inject_rest_configured_and_reachable_appends_stubs(
 
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
+    _answer_requests(monkeypatch, lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
     cli_calls = []
 
     def _boom_run(cmd, **kwargs):
@@ -1056,7 +1066,7 @@ def test_legacy_kb_retrieve_inject_env_still_activates_inject(
 
     monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")  # legacy name only — NOT EXOMEM_RETRIEVE_INJECT
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
+    _answer_requests(monkeypatch, lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
 
     out = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-legacy-inject"}, home)
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -1076,7 +1086,7 @@ def test_inject_rest_unreachable_cli_not_opted_in_is_nudge_only(
     def _boom_url(req, timeout=None):
         raise ConnectionRefusedError("connection refused")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
 
     out = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-rest-down"}, home)
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
@@ -1140,7 +1150,7 @@ def test_min_chars_gate_short_circuits_before_any_transport(
         rest_calls.append(req)
         raise AssertionError("urlopen must not be called for a trivial prompt")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
 
     out = _call_main(monkeypatch, capsys, {"prompt": "yes go", "session_id": "e2e-short"}, home)
     assert out.strip() == ""
@@ -1161,7 +1171,7 @@ def test_cooldown_gate_short_circuits_second_transport_attempt(
         call_count["n"] += 1
         return _FakeResponse(200, _envelope_bytes([]))
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
 
     event = {"prompt": PROMPT, "session_id": "e2e-cooldown"}
     first = _call_main(monkeypatch, capsys, event, home)
@@ -1213,7 +1223,7 @@ def test_exomem_retrieve_inject_zero_is_disabled_end_to_end(
         rest_calls.append(req)
         raise AssertionError("urlopen must not be called when EXOMEM_RETRIEVE_INJECT=0 (falsy)")
 
-    monkeypatch.setattr(hook_mod, "_open_no_redirect", _boom_url)
+    _answer_requests(monkeypatch, _boom_url)
 
     out = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-falsy"}, home)
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]

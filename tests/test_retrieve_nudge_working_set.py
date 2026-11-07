@@ -25,6 +25,7 @@ import json
 import os
 import stat
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,15 @@ PROMPT = (
     "left, and did we decide anything about the winter schedule?"
 )
 SESSION = "session-under-test"
+
+
+def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
+    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector,
+        "open",
+        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
+    )
 
 
 def _load_hook_module():
@@ -961,7 +971,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
         seen["body"] = json.loads(request.data.decode("utf-8"))
         return _Response()
 
-    monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
+    _answer_requests(monkeypatch, _urlopen)
 
     packet = hook._fetch_packet_via_rest(PROMPT, _lane("sekret"), "TOKEN-0", 1.0)
 
@@ -1086,9 +1096,8 @@ def test_no_continuity_key_is_sent_when_there_is_no_token(
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(
-        hook,
-        "_open_no_redirect",
+    _answer_requests(
+        monkeypatch,
         lambda request, timeout=0.0: (
             seen.update(body=json.loads(request.data.decode("utf-8"))) or _Response()
         ),
@@ -2353,7 +2362,7 @@ def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
         return _Response()
 
     monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    _answer_requests(monkeypatch, fake_urlopen)
     packet = hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, hook.attribution(SESSION))
 
     assert packet == {"abstained": True}

@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -25,6 +26,15 @@ import exomem
 RETRIEVE_SCRIPT = Path(exomem.__file__).parent / "_hooks" / "exomem_retrieve_nudge.py"
 LOCAL_TOKEN = "exo_s1.synthetic-local-client-token"
 HITS = [{"path": "Notes/local.md", "type": "note", "updated": "2026-09-01"}]
+
+
+def _answer_requests(monkeypatch: pytest.MonkeyPatch, fake) -> None:  # noqa: ANN001
+    """Answer every request the credential module's opener sends with `fake(request, timeout=...)`."""
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector,
+        "open",
+        lambda _opener, request, data=None, timeout=None: fake(request, timeout=timeout),
+    )
 
 
 def _load_hook_module():
@@ -86,7 +96,7 @@ def _record_requests(monkeypatch: pytest.MonkeyPatch, answer) -> list[tuple[str,
         seen.append((request.full_url, authorization))
         return answer(request)
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_open)
+    _answer_requests(monkeypatch, fake_open)
     return seen
 
 
