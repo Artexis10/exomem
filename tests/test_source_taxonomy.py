@@ -30,6 +30,7 @@ import yaml
 
 from exomem import add as add_module
 from exomem import commands, mutation_terminal
+from exomem import init as init_module
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
 
@@ -759,6 +760,27 @@ def test_nested_sources_count_under_their_kind(
 def test_registration_is_idempotent(vault: Path) -> None:
     assert st.register(vault, kind="field-notebook")
     assert st.register(vault, kind="field-notebook") == ()
+
+
+def test_every_domain_registered_on_a_fresh_vault_lands_under_the_real_heading(
+    tmp_path: Path,
+) -> None:
+    """The scaffold's commented example must not swallow the second domain.
+
+    The scaffolded file mentions `domains:` in its header comment before the real
+    key, so the second registration used to land inside that comment and leave a
+    file whose `domains` held only the first entry.
+    """
+    vault = tmp_path / "fresh"
+    init_module.init_vault(vault)
+
+    for key in ("a-hiking-club", "tide-tables", "harbour-works"):
+        assert st.register(vault, domain=key)
+
+    registry = yaml.safe_load(st.registry_path(vault).read_text(encoding="utf-8"))
+    assert set(registry["domains"]) == {"a-hiking-club", "tide-tables", "harbour-works"}
+    assert registry["source_kinds"] == {}
+    assert set(st.load_taxonomy(vault).domains) >= set(registry["domains"])
 
 
 def test_a_registry_override_changes_where_future_captures_land(

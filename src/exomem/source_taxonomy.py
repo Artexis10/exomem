@@ -984,12 +984,25 @@ def _append_introductions(
     return text
 
 
+def _top_level_line_at(text: str, line: str) -> int:
+    """Index of `line` starting at column 0, or -1.
+
+    Anchored to the start of a line so the commented example in the file header
+    (`#   domains:`) never matches the real section key.
+    """
+    if text.startswith(line):
+        return 0
+    index = text.find(f"\n{line}")
+    return -1 if index == -1 else index + 1
+
+
 def _insert_in_section(text: str, section: str, entry: str) -> str:
     empty_heading = f"{section}: {{}}\n"
-    if empty_heading in text:
-        return text.replace(empty_heading, f"{section}:\n{entry}", 1)
+    index = _top_level_line_at(text, empty_heading)
+    if index != -1:
+        return f"{text[:index]}{section}:\n{entry}{text[index + len(empty_heading):]}"
     heading = f"{section}:\n"
-    index = text.find(heading)
+    index = _top_level_line_at(text, heading)
     if index == -1:
         return f"{text}{heading}{entry}"
     insert_at = index + len(heading)
