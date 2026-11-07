@@ -33,14 +33,15 @@ class Blocker:
     reason: str
 
 
-def blocked_fields(blockers: tuple[Blocker, ...], total: int) -> dict:
-    """The status fields that name the notes behind an unknown census, or none when no note explains it.
+def blocked_fields(blockers: tuple[Blocker, ...]) -> dict:
+    """The status field that names the notes behind an unknown census, or none when no note explains it.
 
     The notes stay out of every message: each is its own entry with a path, which egress filters one by one.
+    No count goes with them, because a count would tell a caller about notes that egress withholds from it.
     """
     if not blockers:
         return {}
-    return {"blocked_by": [{"path": item.path, "reason": item.reason} for item in blockers], "blocked_total": total}
+    return {"blocked_by": [{"path": item.path, "reason": item.reason} for item in blockers]}
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +49,8 @@ class ReferenceUsage:
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] | None
     observed_at: str
     live_paths: dict[tuple[str, str, str], str] = field(default_factory=dict)
-    # Why the census is unknown, when notes explain it: the first few by path, and how many there were in all.
+    # Why the census is unknown, when notes explain it: the first few by path.
     blockers: tuple[Blocker, ...] = ()
-    blockers_total: int = 0
 
     @property
     def used_bytes(self) -> int | None:
@@ -246,11 +246,8 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
     versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] = {}
     live_paths: dict[tuple[str, str, str], str] = {}
     blockers: list[Blocker] = []
-    blocked = 0
 
     def blocked_by(path: str, error: Exception) -> None:
-        nonlocal blocked
-        blocked += 1
         blockers.append(Blocker(path, str(error)[:REASON_MAX_CHARS] or type(error).__name__))
         blockers.sort(key=lambda item: item.path)
         del blockers[BLOCKERS_SHOWN:]
@@ -273,6 +270,6 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                     live_paths.setdefault(key, binary.path)
     except UNREADABLE:  # The walk itself failed, so any note named so far is not the whole reason: name none.
         return ReferenceUsage(None, datetime.now(UTC).isoformat())
-    if blocked:  # Notes that failed one by one: the census is unknown, and says which notes and why.
-        return ReferenceUsage(None, datetime.now(UTC).isoformat(), {}, tuple(blockers), blocked)
+    if blockers:  # Notes that failed one by one: the census is unknown, and says which notes and why.
+        return ReferenceUsage(None, datetime.now(UTC).isoformat(), {}, tuple(blockers))
     return ReferenceUsage(versions, datetime.now(UTC).isoformat(), live_paths)

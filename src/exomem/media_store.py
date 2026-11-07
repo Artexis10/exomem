@@ -618,11 +618,10 @@ def _record_census(ledger: MediaJobStore, usage: media_allowance.ReferenceUsage)
     """
     with suppress(*_LEDGER_UNREADABLE), closing(ledger._connect()) as conn, conn:
         conn.execute(
-            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at, blockers, blockers_total) "
-            "VALUES (1, ?, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, "
-            "observed_at=excluded.observed_at, blockers=excluded.blockers, blockers_total=excluded.blockers_total",
-            (usage.used_bytes, usage.observed_at,
-             json.dumps([[item.path, item.reason] for item in usage.blockers]), usage.blockers_total),
+            "INSERT INTO media_owner_census(singleton, used_bytes, observed_at, blockers) "
+            "VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET used_bytes=excluded.used_bytes, "
+            "observed_at=excluded.observed_at, blockers=excluded.blockers",
+            (usage.used_bytes, usage.observed_at, json.dumps([[item.path, item.reason] for item in usage.blockers])),
         )
 
 
@@ -633,7 +632,6 @@ class RecordedCensus:
     used_bytes: int | None
     observed_at: str
     blockers: tuple[media_allowance.Blocker, ...] = ()
-    blockers_total: int = 0
 
     def older_than(self, seconds: float) -> bool:
         """Whether the census is older than `seconds`; a time that cannot be read counts as older."""
@@ -650,7 +648,7 @@ def take_census(vault: Path) -> RecordedCensus:
     usage = media_allowance.reference_usage(vault)
     with suppress(*_LEDGER_UNREADABLE):  # The reading is still returned; only the record is lost.
         _record_census(MediaJobStore(vault), usage)
-    return RecordedCensus(usage.used_bytes, usage.observed_at, usage.blockers, usage.blockers_total)
+    return RecordedCensus(usage.used_bytes, usage.observed_at, usage.blockers)
 
 
 def recorded_census(vault: Path) -> RecordedCensus | None:
@@ -671,12 +669,11 @@ def recorded_census(vault: Path) -> RecordedCensus | None:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     if row is None:
         return None
-    # A ledger from before the blockers were recorded has no such columns: an unknown census names no note.
+    # A ledger from before the blockers were recorded has no such column: an unknown census names no note.
     named = json.loads(row["blockers"] or "[]") if "blockers" in columns else []
     return RecordedCensus(
         None if row["used_bytes"] is None else int(row["used_bytes"]), str(row["observed_at"]),
-        tuple(media_allowance.Blocker(path, reason) for path, reason in named),
-        int(row["blockers_total"]) if "blockers_total" in columns else 0)
+        tuple(media_allowance.Blocker(path, reason) for path, reason in named))
 
 
 def _offload_admission(
@@ -897,7 +894,7 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
             entry = {"path": row["binary_rel"], "original_state": snapshot.state,
                      "code": code, "ciphertext_size": row["ciphertext_size"]}
             if code in media_allowance.ALLOWANCE_REFUSAL_CODES and usage is not None:
-                entry.update(media_allowance.blocked_fields(usage.blockers, usage.blockers_total))
+                entry.update(media_allowance.blocked_fields(usage.blockers))
             result.append(entry)
     return result, coverage
 

@@ -3562,7 +3562,6 @@ def test_an_unknown_allowance_names_the_unreadable_notes_in_the_status_and_in_th
 
     assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN" and refusal["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
     for named in (allowance, refusal):
-        assert named["blocked_total"] == 7
         assert [item["path"] for item in named["blocked_by"]] == damaged[:5]  # Bounded, in path order.
         assert all(item["reason"] for item in named["blocked_by"])
     assert "used_bytes" not in allowance
@@ -3576,7 +3575,7 @@ def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, 
     monkeypatch.setattr(media_allowance, "_binding", lambda *args: (_ for _ in ()).throw(OSError("disk")))
     census = media_store.take_census(vault)
 
-    assert census.used_bytes is None and census.blockers == () and census.blockers_total == 0
+    assert census.used_bytes is None and census.blockers == ()
 
 
 def test_a_restricted_caller_learns_no_path_of_a_restricted_note_that_stops_the_census(vault: Path, selected_store):

@@ -267,7 +267,7 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     if counted.used_bytes is None:
         return {"allowance_bytes": allowance, "observed_at": counted.observed_at,
                 "unknown": "the stored versions could not be counted",
-                **media_allowance.blocked_fields(counted.blockers, counted.blockers_total)}
+                **media_allowance.blocked_fields(counted.blockers)}
     return {"allowance_bytes": allowance, "used_bytes": counted.used_bytes,
             "remaining_bytes": max(0, allowance - counted.used_bytes), "observed_at": counted.observed_at}
 

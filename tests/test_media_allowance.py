@@ -160,7 +160,7 @@ def test_invalid_header_makes_the_whole_allowance_unknown_and_is_named(custody, 
     usage = media_allowance.reference_usage(vault)
     assert usage.used_bytes is None
     assert [blocker.path for blocker in usage.blockers] == ["Knowledge Base/Evidence/invalid.md", "Knowledge Base/Evidence/later.md"]
-    assert usage.blockers_total == 2 and all(blocker.reason for blocker in usage.blockers)
+    assert all(blocker.reason for blocker in usage.blockers)
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
 
 
