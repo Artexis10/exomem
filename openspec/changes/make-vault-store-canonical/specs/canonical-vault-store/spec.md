@@ -53,7 +53,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **THEN** status reports the number of queued files and the age of the oldest one
 
 ### Requirement: Outside edits return through a base-revision check
-In store mode, a vault file whose hash differs from the projection manifest SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
+In store mode, a file the store owns whose hash differs from the projection manifest, or a new file under the managed Knowledge Base, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
 
 #### Scenario: A clean outside edit imports
 - **WHEN** a person edits a projected page in Obsidian and no Exomem write to that page is pending
@@ -100,7 +100,7 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. It SHALL export the audit trail and the canonicity records, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail and the canonicity records, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
@@ -118,7 +118,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** no file-mode rebuild applies the held bytes
 
 ### Requirement: Knowledge writes share the store's availability
-In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.
+In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.
 
 #### Scenario: An unavailable store refuses knowledge writes
 - **WHEN** the store reports that it cannot accept writes
@@ -129,10 +129,15 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
 - **THEN** the replica holds the collection tables and no page, lexical or graph table
 
-### Requirement: File-mode freshness requirements bind file mode only
-The requirements that keep derived sidecars in step with Markdown on disk SHALL bind file mode only: External File Edits Still Reindex Live, Graph Sidecar Incremental Freshness, Graph Freshness Cannot Hide External Edits, the self-healing and reconcile scenarios of Lexical Index Synchronization and Graph Drift Is Auditable And Reconciled, and the hot-cache keying by file modification time. In store mode, a change on disk SHALL follow the outside-edit requirement of this capability instead, and caches SHALL key on store revision.
+### Requirement: Freshness requirements follow store ownership
+For files the store owns, the requirements that keep derived sidecars in step with Markdown on disk SHALL NOT apply in store mode; a change on disk to such a file SHALL follow the outside-edit requirement of this capability, and caches SHALL key on store revision. For vault content outside the store, those requirements SHALL keep applying in store mode as they do in file mode.
 
-#### Scenario: An outside edit in store mode does not rewrite derived rows directly
+#### Scenario: An outside edit to a store-owned page goes through the base-revision check
 - **WHEN** a projected page changes on disk in store mode
 - **THEN** Exomem handles it as an outside edit through the base-revision check
 - **AND** no sidecar reindex or graph correction runs against the on-disk bytes outside that check
+
+#### Scenario: Vault content outside the store stays fresh
+- **WHEN** a note outside the managed Knowledge Base changes on disk in a store-mode vault
+- **THEN** its vault-scope lexical rows refresh as they do in file mode
+- **AND** the note is not imported into the store

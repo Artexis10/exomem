@@ -4,7 +4,7 @@
 - [ ] 1.2 Extend `collection_store/migration.py` with an offline page migration that loads exact bytes and current derived rows.
 - [ ] 1.3 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
 - [ ] 1.4 Add rollback with its preconditions (drain projection, refuse on unexported held items, export audit and canonicity records) and a drill that rebuilds file mode from the projection and compares search and graph answers.
-- [ ] 1.5 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; amend the knowledge-stays-out and knowledge-writes-continue clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, and the Markdown-authority and replay requirements in `add-graph-traversal-queries`, to file mode.
+- [ ] 1.5 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; build the replica from a staging database filled in one read transaction; refuse store-mode activation while multi-host writer-lease coordination is configured; amend to file mode the knowledge-stays-out, knowledge-writes-continue and whole-file replica clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`.
 
 ## 2. Write path
 
@@ -15,7 +15,7 @@
 
 ## 3. Readers
 
-- [ ] 3.1 Point every reader of page bytes or derived rows at the store in store mode: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision) and governance frontmatter reads.
+- [ ] 3.1 Point every reader of page bytes or derived rows at the store in store mode: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision), governance frontmatter reads and the registry overlay loaders.
 - [ ] 3.2 Remove freshness witnesses, mtime checks and sync-on-first-use repair from the store-mode read path.
 
 ## 4. Projection and outside edits
