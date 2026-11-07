@@ -59,7 +59,9 @@ audit. The phases that must hold it take about 90 s of the 2,899 s warm hold.
 The grouping is:
 
 - No hold: the planning census, the posthoc evaluation, the units audit, the
-  lifecycle inspection, the lexical refresh, the drift audit and the projections.
+  lifecycle inspection, the lexical refresh, the drift audit, the lexical
+  lineage rebase and the projections. The lineage rebase serializes on the
+  lexical publication barrier, as warm-up and the watcher seed call it.
 - One short hold each: the activation manifest, the purge, the units repair,
   the lifecycle cleanup, the indexes, the embeddings refresh, the graph phase,
   the orphans repair, the reference rebuild, the derived receipts, the
@@ -92,9 +94,29 @@ read before the hold has not moved:
 - The indexes are counted inside their hold. The embeddings refresh and the
   orphans repair check each found file again inside their hold.
 
+Three kinds of plan entry are not split against the plan. The extraction parts,
+the lifecycle slots and the graph-quarantine members apply the fresh read inside
+their hold, even for a planned write. This is safe for each:
+
+- Parts: the sweep reads every part again inside the orphans hold. It removes
+  only a part beyond the count that its Source page lists now. An extraction
+  write that shortens a page retires the same surplus parts itself, so the
+  sweep agrees with that write.
+- Lifecycle slots: the cleanup takes a fresh identity census inside its hold
+  and re-checks each slot's owners. The run also compares the owners' bytes with
+  the corpus read. A slot whose owners changed is reported as a race and left.
+- Graph-quarantine members: the isolation reads its members again under the
+  graph coordinator, and only while the graph lineage is still unavailable. It
+  moves them aside, with a manifest, into a reset directory that
+  `graph_quarantine_id` names. It removes that directory only after a rebuilt
+  graph is current, so the members stay recoverable until then.
+
 Run-long values that a later phase reads go stale once the boundary is released
 between phases. `semantic_states` is used only for parents whose bytes did not
-move, so it still describes them. `suppressed_paths` and `missing_paths` come
+move, so it still describes them. Each sidecar also re-parses a supplied state
+whose hash differs from the committed bytes
+(`semantic_index.current_parent_index_state`), so a stale state cannot write old
+units over an edit. `suppressed_paths` and `missing_paths` come
 from the census read inside the purge hold. `missing_clip_orphans` is checked
 again against the disk inside the orphans hold. The unit inclusion sets only
 scope what the units audit compares, and `initial_graph_drift` only decides
@@ -124,9 +146,11 @@ never inside a hold's write.
 
 The whole-run hold also kept two reconciles from interleaving their phases. A
 write run now holds a vault-scoped run lock for its whole run, and no ordinary
-writer takes that lock. A second write run waits for it as long as a writer
-waits for a busy boundary (`EXOMEM_MUTATION_TIMEOUT`). It then gets
-`MUTATION_BUSY` with `committed: false` before it reads or writes anything. A
+writer takes that lock. A second write run refuses at once with
+`MUTATION_BUSY` and `committed: false`, before it reads or writes anything. It
+does not wait, because the running reconcile can be a job parked at a phase
+hold's foreground yield. A foreground request that waited for the lock would
+wait on a parked bulk pass, outside `foreground_priority.awaiting_bulk()`. A
 preview takes no run lock.
 
 The lock is a file lock in the vault's private state, as the one archive
@@ -151,3 +175,11 @@ return at once.
   units repair, the embeddings refresh and the orphans repair, which can rebuild
   extraction parts. → The profile puts each well under the old hold. Chunking
   them is follow-up work.
+- The parts sweep walks the whole knowledge base inside the orphans hold. A
+  planned write applies the sweep's fresh read, not the parts that its plan
+  names. → A sweep scoped to the planned parts is follow-up work.
+- A caller that absorbs contention, such as the CLI or a keyed request,
+  retries the run lock's refusal until its wait budget ends (40 s by default).
+  In the service, that retry slows a running reconcile job to its progress
+  floor meanwhile. → A `maintain_memory` reconcile write from a request
+  surface runs only as a job, and a job thread is not a foreground request.
