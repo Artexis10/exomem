@@ -278,7 +278,7 @@ def staged_files(vault_root: Path, import_id: str) -> list[tuple[str, int]]:
 
 
 def residual_member(path: str, size: int, code: str) -> dict:
-    """One member that adoption did not file: its path relative to the stage, its bytes and why it stayed."""
+    """One member that adoption did not file or `finish` did not verify: its path relative to the stage, its bytes and why it stayed."""
     return {"path": path, "bytes": size, "code": code}
 
 

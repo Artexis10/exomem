@@ -346,15 +346,17 @@ def test_a_plain_discard_after_a_walk_still_lists_the_walked_members(vault: Path
 
 def test_a_plain_discard_after_a_walk_writes_no_empty_record_over_the_walk(vault: Path) -> None:
     """Catches an empty record for a window that a walk listed: the receipt's record outranks the walk's and says all filed."""
-    import_id = _job_stage(vault, {"plan.md": b"# Plan\n\nInvented plan.\n"})
-    _file_all_but(vault, import_id)
+    import_id = _job_stage(vault, {"filed.pdf": PDF})
+    run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}", consume=False)
+    consume._apply(vault, run_id, plan_id)
+    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
     _walk_then_make_the_receipt_readable_again(vault, import_id)
 
     cloud_import_job.discard(vault, import_id)
 
     assert import_stage.RESIDUAL_KEY not in _receipt(vault, import_id)
     assert import_stage.read_residual(vault, import_id) == [
-        {"path": "Field Notes/plan.md", "bytes": len(b"# Plan\n\nInvented plan.\n"), "code": "receipt_unreadable"}]
+        {"path": "Field Notes/filed.pdf", "bytes": len(PDF), "code": "receipt_unreadable"}]
 
 
 def _walk_a_stage_with_a_file_the_manifest_does_not_list(vault: Path) -> str:
