@@ -15,25 +15,17 @@ only difference, and the recall packet each arm serves for the case's task is
 what the answering agent sees.
 
 The builder reads cases authored by a separate lane. It never writes or edits
-a key.
-
-Usage (``PYTHONPATH=benchmarks:src``)::
-
-    python -m membench.outcome.planted.build --cases <dev.jsonl> --distractors <distractors.jsonl> \\
-        --arm E --out /var/tmp/exomem-outcome-evals/runs/<run>/E
+a key. ``membench outcome run planted`` drives it.
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
 import json
-import sys
 from pathlib import Path
 
 from collection_ingest.mcp_session import McpSession
 
-from ..isolation import child_env, fresh_vault
+from ..isolation import child_env, fresh_vault, product_python_of
 
 # The governance arm E authors per kind: (verdict, relation). None means supersession.
 GOVERNANCE = {
@@ -189,11 +181,18 @@ class Builder:
         )
 
 
-async def build(cases: list[dict], distractors: list[dict], arm: str, out: Path) -> None:
-    fresh_vault(out)
-    env = child_env(out)
+async def build(
+    cases: list[dict],
+    distractors: list[dict],
+    arm: str,
+    out: Path,
+    product_python: Path | None = None,
+) -> None:
+    """Build the arm's vault under ``out`` with the product interpreter, then capture each case's packet."""
+    fresh_vault(out, product_python)
+    env = child_env(out, product_python)
     async with McpSession(
-        python=Path(sys.executable), state=out / "exomem-state", env=env
+        python=Path(product_python_of(product_python)), state=out / "exomem-state", env=env
     ) as session:
         b = Builder(session, out / "calls.jsonl")
         for i, d in enumerate(distractors):
@@ -211,21 +210,3 @@ async def build(cases: list[dict], distractors: list[dict], arm: str, out: Path)
             (packets / f"{case['case_id']}.json").write_text(
                 json.dumps(await b.packet(case), indent=2)
             )
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--cases", type=Path, required=True)
-    parser.add_argument("--distractors", type=Path, required=True)
-    parser.add_argument("--arm", choices=("E", "P"), required=True)
-    parser.add_argument("--out", type=Path, required=True)
-    args = parser.parse_args(argv)
-    if args.out.exists():
-        raise SystemExit(f"{args.out} exists; choose a new --out")
-    args.out.mkdir(parents=True)
-    load = lambda p: [json.loads(line) for line in p.read_text().splitlines() if line.strip()]  # noqa: E731
-    asyncio.run(build(load(args.cases), load(args.distractors), args.arm, args.out))
-
-
-if __name__ == "__main__":
-    main()

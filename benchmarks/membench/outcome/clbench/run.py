@@ -12,15 +12,18 @@ arm:
   memory instruction.
 - ``E``: Exomem over MCP on a fresh disposable vault. The workspace resets per
   question, so Exomem is the only thing that persists.
+- ``EH``: ``E`` plus the shipped Exomem Claude hook at its default activation
+  packet; each turn records the characters the hook injected.
 
 Every arm has the same built-in file tools, scoped to its workspace. The
 ``oracle`` and ``wrong`` actors play no model: they prove the grader before any
 model run (R0).
 
-Usage (from the repository root, with ``PYTHONPATH=benchmarks:src``)::
+``membench outcome run clbench`` drives this module. Its own command line only
+proves the grader (``oracle`` and ``wrong`` actors, from the repository root with
+``PYTHONPATH=benchmarks:src``)::
 
     python -m membench.outcome.clbench.run --run-id r0-oracle --actor oracle
-    python -m membench.outcome.clbench.run --run-id r1-dev --actor claude --arm F
 """
 
 from __future__ import annotations
@@ -37,17 +40,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
+    PLUGIN_DIR,
+    AgentEnvelope,
     Arm,
     build_turn_argv,
     discover_agent_envelope,
-    environment_floor,
     refuse_unsafe_out_dir,
 )
 
-from ..isolation import REPO_ROOT, mcp_server
+from membench.utility.switch_eval.session import hook_push
 
-RUN_ROOT = Path(os.environ.get("OUTCOME_EVAL_ROOT", "/var/tmp/exomem-outcome-evals"))
-UPSTREAM = RUN_ROOT / "upstream" / "clbench"
+from .. import record
+from ..isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT, claude_env, hook_env, mcp_server
+from ..workspace import RUN_ROOT, pin, require_pinned_checkout
+
+UPSTREAM = pin("clbench").checkout()
 ENV_SERVER = Path(__file__).with_name("env_server.py")
 
 #: Upstream's Claude system gives each CLI invocation 300 s; the task's own 60 s
@@ -69,6 +76,7 @@ FILE_TOOLS = "Read,Write,Edit,Glob,Grep"
 class ArmSpec:
     arm_id: str
     persists: str  # "none" | "folder" | "exomem"
+    hook: bool = False  # the shipped Claude plugin's hooks run beside the memory
 
     @property
     def exomem(self) -> bool:
@@ -79,6 +87,7 @@ ARMS = {
     "N": ArmSpec("N", "none"),
     "F": ArmSpec("F", "folder"),
     "E": ArmSpec("E", "exomem"),
+    "EH": ArmSpec("EH", "exomem", hook=True),
 }
 
 
@@ -134,6 +143,24 @@ class QuestionLog:
     notional_cost_usd: float = 0.0
     faults: list[str] = field(default_factory=list)
     init: dict | None = None
+    #: One entry per user turn sent: hook event name -> characters that hook injected.
+    hook_chars: list[dict[str, int]] = field(default_factory=list)
+
+
+def injected_chars(event: dict) -> int:
+    """Characters one ``hook_response`` event added to the session's context."""
+    text = hook_push(event)
+    if not text:
+        # A Stop hook injects through its block ``reason``, not through ``additionalContext``.
+        for raw in (event.get("stdout"), event.get("output")):
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else None
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("reason"), str):
+                text = payload["reason"]
+                break
+    return len(text)
 
 
 class KeyActor:
@@ -185,6 +212,8 @@ class ClaudeSession:
         self._proc.stdin.write(json.dumps(message) + "\n")
         self._proc.stdin.flush()
         deadline = time.monotonic() + timeout
+        injected: dict[str, int] = {}
+        log.hook_chars.append(injected)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -213,6 +242,9 @@ class ClaudeSession:
                         "cwd",
                     )
                 }
+            elif kind == "system" and event.get("subtype") == "hook_response":
+                name = str(event.get("hook_event"))
+                injected[name] = injected.get(name, 0) + injected_chars(event)
             elif kind == "assistant":
                 for block in event.get("message", {}).get("content", []):
                     if block.get("type") == "tool_use":
@@ -244,21 +276,30 @@ class ClaudeActor:
     """The model under test, behind one memory arm."""
 
     def __init__(
-        self, spec: ArmSpec, arm_dir: Path, model: str, effort: str, memory_instruction: str
+        self,
+        spec: ArmSpec,
+        arm_dir: Path,
+        model: str,
+        effort: str,
+        memory_instruction: str,
+        *,
+        product_python: Path | None = None,
+        envelope: AgentEnvelope | None = None,
     ) -> None:
         self.spec = spec
         self.arm_dir = arm_dir
         self.work = arm_dir / "work"
         self.model = model
         self.effort = effort
-        self.envelope = discover_agent_envelope()
+        self.product_python = product_python
+        self.envelope = envelope or discover_agent_envelope()
         self.memory_instruction = (
             EXOMEM_MEMORY_INSTRUCTION
             if spec.exomem
             else memory_instruction.format(memory_dir=str(self.work / "memory"))
         )
         self.mcp_config = arm_dir / "mcp.json"
-        servers = {"exomem": mcp_server(arm_dir)} if spec.exomem else {}
+        servers = {"exomem": mcp_server(arm_dir, product_python)} if spec.exomem else {}
         self.mcp_config.write_text(json.dumps({"mcpServers": servers}, indent=2))
         # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's memory.
         allowed = ["Read(./**)", "Write(./**)", "Edit(./**)"]
@@ -269,14 +310,14 @@ class ClaudeActor:
             prominence="instruction",
             tools=FILE_TOOLS,
             allowed_tools=",".join(allowed),
-            uses_plugin=False,
+            uses_plugin=spec.hook,
             uses_custom_instructions=False,
             configure_ref="membench.outcome.clbench",
         )
-        floor, self.removed_env = environment_floor(os.environ)
-        self.env = {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
-        # Claude Code's own auto memory would be a second, unmeasured store in every arm.
-        self.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        self.env, self.removed_env = claude_env()
+        if spec.hook:
+            # The hooks are child processes of the CLI: their state and every Exomem path stay in the arm.
+            self.env.update(hook_env(arm_dir))
         self._reset_work()
 
     def _reset_work(self) -> None:
@@ -297,7 +338,7 @@ class ClaudeActor:
             max_turns=None,
             first=True,
             append_system_prompt_file=None,
-            plugin_dir=None,
+            plugin_dir=PLUGIN_DIR if self.spec.hook else None,
         )
         protected = [UPSTREAM, self.arm_dir / "vault", self.arm_dir / "exomem-state"]
         argv += [
@@ -376,10 +417,31 @@ class ClaudeActor:
 # --------------------------------------------------------------------------
 
 
-def run(args: argparse.Namespace) -> Path:
-    run_dir = refuse_unsafe_out_dir(RUN_ROOT / "runs" / args.run_id)
-    arm_id = args.arm if args.actor == "claude" else args.actor
-    arm_dir = run_dir / arm_id
+@dataclass(frozen=True)
+class CellSpec:
+    """One arm played once over one question sequence."""
+
+    run_dir: Path
+    arm: str  # an ARMS key, or "oracle" / "wrong" for the grader proofs
+    variant: str | None = None
+    schedule: str | None = None
+    seed: int | None = None
+    run_index: int | None = None
+    limit: int | None = None
+    model: str = ACTOR_MODEL
+    effort: str = ACTOR_EFFORT
+    product_python: Path | None = None
+
+    @property
+    def dir(self) -> Path:
+        suffix = "" if self.run_index is None else f"-r{self.run_index}"
+        return self.run_dir / f"{self.arm}{suffix}"
+
+
+def run_cell(cell: CellSpec) -> Path:
+    require_pinned_checkout("clbench")
+    refuse_unsafe_out_dir(cell.run_dir)
+    arm_dir = cell.dir
     if arm_dir.exists():
         raise SystemExit(f"{arm_dir} exists; choose a new --run-id")
     arm_dir.mkdir(parents=True)
@@ -388,57 +450,75 @@ def run(args: argparse.Namespace) -> Path:
         opened = env.call(
             "open",
             task="database_exploration",
-            variant=args.variant,
-            schedule=args.schedule,
-            seed=args.seed,
-            run_index=args.run_index,
-            num_instances=args.limit,
+            variant=cell.variant,
+            schedule=cell.schedule,
+            seed=cell.seed,
+            run_index=cell.run_index,
+            num_instances=cell.limit,
         )
-        if args.actor == "claude":
+        if cell.arm in ARMS:
             actor = ClaudeActor(
-                ARMS[args.arm], arm_dir, args.model, args.effort, opened["file_memory_instruction"]
+                ARMS[cell.arm],
+                arm_dir,
+                cell.model,
+                cell.effort,
+                opened["file_memory_instruction"],
+                product_python=cell.product_python,
             )
         else:
-            actor = KeyActor(wrong=args.actor == "wrong")
+            actor = KeyActor(wrong=cell.arm == "wrong")
         manifest = {
-            "run_id": args.run_id,
-            "arm": arm_id,
+            "run_id": cell.run_dir.name,
+            "arm": cell.arm,
             "task": {
                 "name": "database_exploration",
-                "variant": args.variant,
-                "schedule": args.schedule,
-                "seed": args.seed,
-                "run_index": args.run_index,
+                "variant": cell.variant,
+                "schedule": cell.schedule,
+                "seed": cell.seed,
+                "run_index": cell.run_index,
                 "instances": opened["instances"],
             },
-            "upstream_commit": subprocess.run(
-                ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], capture_output=True, text=True
-            ).stdout.strip(),
+            "upstream_commit": pin("clbench").commit,
             "product_revision": subprocess.run(
                 ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
             ).stdout.strip(),
         }
         if isinstance(actor, ClaudeActor):
             manifest["actor"] = {
-                "cli": actor.envelope.version,
-                "model_requested": args.model,
-                "effort": args.effort,
+                **record.actor_record(
+                    cli=actor.envelope.version,
+                    model=cell.model,
+                    effort=cell.effort,
+                    mcp_config=actor.mcp_config,
+                    root=arm_dir,
+                    product_python=cell.product_python,
+                ),
                 "argv": actor.argv(),
                 "env_removed": list(actor.removed_env),
                 "memory_instruction": actor.memory_instruction,
                 "retrieval": "lexical" if actor.spec.exomem else None,
+                "hook": {
+                    "plugin_dir": str(PLUGIN_DIR),
+                    "activation": "shipped default: no EXOMEM_RETRIEVE_INJECT override",
+                    "hook_home": str(arm_dir / "hook-home"),
+                }
+                if actor.spec.hook
+                else None,
             }
         (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
         turn, pending, index = opened["turn"], None, 0
+        first_init: dict | None = None
         outcomes = (arm_dir / "outcomes.jsonl").open("a")
         while True:
             log = QuestionLog(question_id=str(turn["instance_id"]), index=index)
             result = actor.play_question(env, turn, log, pending)
+            first_init = first_init or log.init
             outcomes.write(json.dumps({"outcome": result["outcome"], "log": log.__dict__}) + "\n")
             outcomes.flush()
             print(
-                f"q{index:03d} {log.question_id} reward={result['outcome'] and result['outcome']['reward']} "
+                f"{arm_dir.name} q{index:03d} {log.question_id} "
+                f"reward={result['outcome'] and result['outcome']['reward']} "
                 f"turns={log.turns} s={log.seconds} faults={len(log.faults)}",
                 flush=True,
             )
@@ -452,33 +532,41 @@ def run(args: argparse.Namespace) -> Path:
             )
             turn, index = result["turn"], index + 1
         outcomes.close()
+        if isinstance(actor, ClaudeActor):
+            manifest["actor"]["observed"] = record.observed(first_init)
+            (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         evaluation = env.call("evaluate")["result"]
         (arm_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2))
-        print(f"score={evaluation.get('score')}", flush=True)
+        print(f"{arm_dir.name} score={evaluation.get('score')}", flush=True)
     finally:
         env.close()
     return arm_dir
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Prove the grader: the oracle must score 1 on every question, the wrong actor 0."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--actor", choices=("claude", "oracle", "wrong"), default="claude")
-    parser.add_argument("--arm", choices=sorted(ARMS), default="F")
+    parser.add_argument("--actor", choices=("oracle", "wrong"), required=True)
     parser.add_argument("--variant", default=None)
     parser.add_argument("--schedule", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--run-index", type=int, default=None)
-    parser.add_argument(
-        "--limit", type=int, default=None, help="Run only the first N instances (smoke runs)."
-    )
-    parser.add_argument("--model", default="claude-sonnet-5-5")
-    parser.add_argument("--effort", default="high")
+    parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args(argv)
     if args.variant is None and args.schedule is None and args.limit is None:
-        # A variant fixes its question count, so a --limit smoke runs the task's plain defaults.
         args.variant = "multi_group"
-    run(args)
+    run_cell(
+        CellSpec(
+            run_dir=RUN_ROOT / "runs" / args.run_id,
+            arm=args.actor,
+            variant=args.variant,
+            schedule=args.schedule,
+            seed=args.seed,
+            run_index=args.run_index,
+            limit=args.limit,
+        )
+    )
 
 
 if __name__ == "__main__":

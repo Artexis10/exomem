@@ -15,18 +15,12 @@ use besides the converted documents:
   ablation of one product component, not a product configuration.
 
 The task prompt is the same in every arm. ``judge`` scores the deliverables.
-
-Usage (from ``/var/tmp`` with ``PYTHONPATH=benchmarks:src``)::
-
-    python -m membench.outcome.lab.run --run-id r1-dev --prepared prep-dev --arms S
-    python -m membench.outcome.lab.run --run-id r2-dev --prepared prep-dev --jobs 3
+``membench outcome run lab`` drives this module.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import shutil
 import subprocess
 import time
@@ -38,16 +32,15 @@ from epistemic.journeys.f27_replay import (
     Arm,
     build_turn_argv,
     discover_agent_envelope,
-    environment_floor,
     refuse_unsafe_out_dir,
 )
 
+from .. import record
 from ..clbench.run import ClaudeSession, QuestionLog
-from ..isolation import REPO_ROOT, mcp_server, server_pins
-from .prepare import CASES, RUN_ROOT, UPSTREAM, slug
+from ..isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT, claude_env, mcp_server, server_pins
+from ..workspace import RUN_ROOT, require_pinned_checkout
+from .prepare import CASES, UPSTREAM, slug
 
-MODEL = "claude-sonnet-5-5"
-EFFORT = "high"
 SESSION_TIMEOUT_SECONDS = 1800.0
 SERVER_EXIT_SECONDS = 60.0
 
@@ -85,16 +78,22 @@ COMPILE_PROMPT = (
 class Lab:
     """What every session of one run shares: the CLI, its environment, the paths to protect."""
 
-    def __init__(self, run_dir: Path, task_slugs: list[str], model: str, effort: str) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        task_slugs: list[str],
+        model: str,
+        effort: str,
+        product_python: Path | None = None,
+    ) -> None:
         self.run_dir = run_dir
         self.task_slugs = task_slugs
         self.model = model
         self.effort = effort
+        self.product_python = product_python
         self.envelope = discover_agent_envelope()
-        floor, self.removed_env = environment_floor(os.environ)
-        self.env = {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
-        # Claude Code's own auto memory would be a second, unmeasured store in every arm.
-        self.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        self.env, self.removed_env = claude_env()
+        self.product = record.product_record(run_dir, product_python)
 
     def protected(self, task_slug: str, arm: str) -> list[Path]:
         """Paths a session must not read: the rubric, every other run, and every other arm's files."""
@@ -257,7 +256,7 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
         mcp_config.write_text(json.dumps({"mcpServers": {}}, indent=2))
         allowed = list(FILE_ALLOWS)
     else:
-        server = mcp_server(arm_dir)
+        server = mcp_server(arm_dir, lab.product_python)
         if arm == "WG":
             server["env"]["EXOMEM_DISABLE_GRAPH_INDEX"] = "1"
         mcp_config = arm_dir / "mcp.json"
@@ -301,7 +300,7 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
         (arm_dir / "deliverable.md").write_text(text, encoding="utf-8")
     for session in sessions.values():
         faults += session["log"]["faults"]
-    return write_result(lab, case, arm, sessions, text, files, faults)
+    return write_result(lab, case, arm, sessions, text, files, faults, mcp_config)
 
 
 def write_result(
@@ -312,13 +311,21 @@ def write_result(
     text: str | None,
     files: list[str],
     faults: list[str],
+    mcp_config: Path | None = None,
 ) -> dict:
+    first_init = next((s["log"]["init"] for s in sessions.values() if s["log"]["init"]), None)
     result = {
         "run_id": lab.run_dir.name,
         "task_id": case["task_id"],
         "arm": arm,
         "model_requested": lab.model,
         "effort": lab.effort,
+        "actor": {
+            "cli": lab.envelope.version,
+            "product": lab.product,
+            "mcp_config_sha256": record.sha256_of(mcp_config) if mcp_config else None,
+            "observed": record.observed(first_init),
+        },
         "deliverable": None if text is None else {"file": "deliverable.md", "chars": len(text)},
         "output_files": files,
         "sessions": sessions,
@@ -356,31 +363,43 @@ def git(*args: str) -> str:
     ).stdout.strip()
 
 
-def run(args: argparse.Namespace) -> Path:
-    run_dir = refuse_unsafe_out_dir(RUN_ROOT / "runs" / args.run_id)
-    if run_dir.exists():
-        raise SystemExit(f"{run_dir} exists; choose a new --run-id")
-    prepared = RUN_ROOT / "runs" / args.prepared
-    prepared_manifest = json.loads((prepared / "manifest.json").read_text())
-    task_ids = args.tasks.split(",") if args.tasks else prepared_manifest["tasks"]
+def run_lab(
+    run_dir: Path,
+    *,
+    prepared: str,
+    tasks: list[str] | None = None,
+    arms: list[str],
+    jobs: int = 1,
+    model: str = ACTOR_MODEL,
+    effort: str = ACTOR_EFFORT,
+    product_python: Path | None = None,
+) -> Path:
+    """Play ``arms`` over the tasks of a converted tree (``prepared`` is its run id)."""
+    require_pinned_checkout("lab")
+    refuse_unsafe_out_dir(run_dir)
+    if (run_dir / "manifest.json").exists():
+        raise SystemExit(f"{run_dir} was already run; choose a new --run-id")
+    prepared_dir = RUN_ROOT / "runs" / prepared
+    prepared_manifest = json.loads((prepared_dir / "manifest.json").read_text())
+    task_ids = tasks or prepared_manifest["tasks"]
     unknown = set(task_ids) - set(prepared_manifest["tasks"])
     if unknown:
-        raise SystemExit(f"not in {args.prepared}: {sorted(unknown)}")
-    arms = args.arms.split(",")
+        raise SystemExit(f"not in {prepared}: {sorted(unknown)}")
     if not set(arms) <= set(ARMS) or ("WG" in arms and "W" not in arms):
         raise SystemExit(f"--arms takes {ARMS}; WG needs W, whose vault it copies")
     arms = [a for a in ARMS if a in arms]
-    run_dir.mkdir(parents=True)
-    lab = Lab(run_dir, [slug(t) for t in task_ids], args.model, args.effort)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lab = Lab(run_dir, [slug(t) for t in task_ids], model, effort, product_python)
     manifest = {
-        "run_id": args.run_id,
-        "prepared": args.prepared,
+        "run_id": run_dir.name,
+        "prepared": prepared,
         "upstream_commit": prepared_manifest["upstream_commit"],
         "product_revision": git("rev-parse", "HEAD"),
         "product_dirty": bool(git("status", "--porcelain")),
+        "product": lab.product,
         "cli": lab.envelope.version,
-        "model_requested": args.model,
-        "effort": args.effort,
+        "model_requested": model,
+        "effort": effort,
         "session_timeout_seconds": SESSION_TIMEOUT_SECONDS,
         "env_removed": list(lab.removed_env),
         "tasks": task_ids,
@@ -397,23 +416,7 @@ def run(args: argparse.Namespace) -> Path:
         "wg_ablation": "EXOMEM_DISABLE_GRAPH_INDEX=1",
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        for future in [pool.submit(run_task, lab, prepared, t, arms) for t in task_ids]:
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for future in [pool.submit(run_task, lab, prepared_dir, t, arms) for t in task_ids]:
             future.result()
     return run_dir
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--prepared", required=True, help="run id of a `prepare convert` tree")
-    parser.add_argument("--tasks", help="comma-separated task ids; default: all prepared tasks")
-    parser.add_argument("--arms", default=",".join(ARMS))
-    parser.add_argument("--jobs", type=int, default=1, help="tasks played in parallel")
-    parser.add_argument("--model", default=MODEL)
-    parser.add_argument("--effort", default=EFFORT)
-    print(run(parser.parse_args(argv)))
-
-
-if __name__ == "__main__":
-    main()

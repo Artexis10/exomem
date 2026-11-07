@@ -3,36 +3,25 @@
 ``items`` pools every arm's answers, shuffles them under opaque ids and writes
 the arm key to a separate file. ``judge`` gives one fresh judge process per
 item the task, the case key and the answer: never the arm, the vault or the
-recall packet. The judge returns a structured verdict through ``--json-schema``.
-``score`` joins verdicts to the arm key and reports the paired difference per
-case with a bootstrap interval.
-
-Usage (``PYTHONPATH=benchmarks:src``)::
-
-    python -m membench.outcome.planted.judge items --cases <dev.jsonl> --run <run-dir> --arms E,P
-    python -m membench.outcome.planted.judge judge --run <run-dir>
-    python -m membench.outcome.planted.judge score --run <run-dir> --pair E-P
+recall packet. The judge returns a structured verdict. ``score`` joins verdicts
+to the arm key and reports the paired difference per case with a bootstrap
+interval. ``membench outcome report planted`` drives this module.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import random
 import statistics
-import subprocess
 from pathlib import Path
 
-from epistemic.journeys.f27_replay import (
-    discover_agent_envelope,
-    environment_floor,
-    refuse_unsafe_out_dir,
-)
 from recall_parity.scoring import percentile_bootstrap_ci
 
+from ..judging import Judge, JudgeSpec, grade_item, judge_all
+
 SEED = 20261107
-JUDGE_MODEL = "claude-opus-5-5"
+JUDGE_TIMEOUT_SECONDS = 600
+MEASURES = ("stale_trusted", "correct", "flags_conflict", "rationalises")
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -46,7 +35,7 @@ VERDICT_SCHEMA = {
         "reason",
     ],
     "properties": {
-        "value_used": {"enum": ["correct", "stale", "both", "neither"]},
+        "value_used": {"type": "string", "enum": ["correct", "stale", "both", "neither"]},
         "stale_trusted": {"type": "boolean"},
         "correct": {"type": "boolean"},
         "flags_conflict": {"type": "boolean"},
@@ -70,121 +59,78 @@ Return:
 Judge only what the answer says about the key's fact. Ignore style and everything else in the task."""
 
 
-def items(cases: list[dict], run: Path, arms: list[str]) -> None:
+def items(cases: list[dict], run: Path, judge_run: Path, arms: list[str]) -> None:
+    """Pool every arm's answers under ``judge_run``. Pooling twice from unchanged answers is a no-op."""
     pool = []
     for case in cases:
         for arm in arms:
-            record = json.loads((run / arm / "answers" / f"{case['case_id']}.json").read_text())
+            answered = json.loads((run / arm / "answers" / f"{case['case_id']}.json").read_text())
             pool.append(
                 {
                     "case_id": case["case_id"],
                     "arm": arm,
                     "task": case["task"],
                     "key": case["key"],
-                    "answer": record["answer"],
+                    "answer": answered["answer"],
                 }
             )
     random.Random(SEED).shuffle(pool)
-    judge_dir = run / "judge"
-    judge_dir.mkdir(exist_ok=True)
-    key = {}
-    with (judge_dir / "items.jsonl").open("w") as fh:
-        for i, item in enumerate(pool):
-            item_id = f"it-{i:04d}"
-            key[item_id] = {"case_id": item["case_id"], "arm": item["arm"]}
-            fh.write(
-                json.dumps(
-                    {
-                        "id": item_id,
-                        "task": item["task"],
-                        "key": item["key"],
-                        "answer": item["answer"],
-                    }
-                )
-                + "\n"
+    key, lines = {}, []
+    for i, item in enumerate(pool):
+        item_id = f"it-{i:04d}"
+        key[item_id] = {"case_id": item["case_id"], "arm": item["arm"]}
+        shown = {"id": item_id, "task": item["task"], "key": item["key"], "answer": item["answer"]}
+        lines.append(json.dumps(shown) + "\n")
+    items_file = judge_run / "judge" / "items.jsonl"
+    if items_file.exists():
+        if items_file.read_text() != "".join(lines):
+            raise SystemExit(
+                f"{items_file} was pooled from different answers; move {judge_run} aside to judge again"
             )
+        return
+    (judge_run / "judge").mkdir(parents=True)
+    (judge_run / "unblinding").mkdir()
+    items_file.write_text("".join(lines))
     # The arm key lives apart from the items; judge processes never receive it.
-    (run / "unblinding").mkdir(exist_ok=True)
-    (run / "unblinding" / "arm-key.json").write_text(json.dumps(key, indent=2))
-    print(f"{len(pool)} items")
+    (judge_run / "unblinding" / "arm-key.json").write_text(json.dumps(key, indent=2))
+    print(f"{len(pool)} items", flush=True)
 
 
-def judge(run: Path, rejudge_fraction: float) -> None:
-    judge_dir = run / "judge"
-    cwd = refuse_unsafe_out_dir(judge_dir / "cwd")
-    cwd.mkdir(exist_ok=True)
-    empty_mcp = judge_dir / "no-mcp.json"
-    empty_mcp.write_text('{"mcpServers": {}}')
-    floor, _ = environment_floor(os.environ)
-    env = {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
-    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    exe = str(discover_agent_envelope().executable)
-    pending = [json.loads(line) for line in (judge_dir / "items.jsonl").read_text().splitlines()]
-    rejudge = random.Random(SEED + 1).sample(
-        pending, max(1, round(len(pending) * rejudge_fraction))
+def build_prompt(item: dict) -> str:
+    """Exactly what a judge reads for one item: the rubric, the task, the case key, the answer."""
+    return (
+        f"{RUBRIC}\n\nTASK:\n{item['task']}\n\nKEY:\n{json.dumps(item['key'], indent=1)}\n\n"
+        f"ANSWER:\n{item['answer'] or '(no answer)'}"
     )
-    for item, out_name in [(i, "verdicts.jsonl") for i in pending] + [
-        (i, "rejudge.jsonl") for i in rejudge
-    ]:
-        out = judge_dir / out_name
-        done = (
-            {json.loads(line)["id"] for line in out.read_text().splitlines()}
-            if out.exists()
-            else set()
-        )
-        if item["id"] in done:
-            continue
-        prompt = (
-            f"{RUBRIC}\n\nTASK:\n{item['task']}\n\nKEY:\n{json.dumps(item['key'], indent=1)}\n\n"
-            f"ANSWER:\n{item['answer'] or '(no answer)'}"
-        )
-        proc = subprocess.run(  # noqa: S603 - fixed argv
-            [
-                exe,
-                "-p",
-                prompt,
-                "--model",
-                JUDGE_MODEL,
-                "--output-format",
-                "json",
-                "--json-schema",
-                json.dumps(VERDICT_SCHEMA),
-                "--tools",
-                "",
-                "--strict-mcp-config",
-                "--mcp-config",
-                str(empty_mcp),
-                "--setting-sources",
-                "project",
-                "--no-session-persistence",
-            ],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        result = json.loads(proc.stdout) if proc.stdout.strip() else {}
-        verdict = result.get("structured_output")
-        with out.open("a") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "id": item["id"],
-                        "verdict": verdict,
-                        "error": None if verdict else proc.stdout[-400:] + proc.stderr[-400:],
-                    }
-                )
-                + "\n"
-            )
-        print(item["id"], out_name, "ok" if verdict else "FAILED", flush=True)
 
 
-def score(run: Path, pair: tuple[str, str]) -> dict:
-    key = json.loads((run / "unblinding" / "arm-key.json").read_text())
-    rows = [
-        json.loads(line) for line in (run / "judge" / "verdicts.jsonl").read_text().splitlines()
-    ]
+def judge(judge_run: Path, spec: JudgeSpec, rejudge_fraction: float, jobs: int) -> None:
+    judge_dir = judge_run / "judge"
+    items_in = [json.loads(line) for line in (judge_dir / "items.jsonl").read_text().splitlines()]
+
+    def grade(item: dict, judge: Judge) -> dict:
+        return grade_item(
+            judge,
+            item["id"],
+            build_prompt(item),
+            VERDICT_SCHEMA,
+            out_dir=judge_dir,
+            timeout=JUDGE_TIMEOUT_SECONDS,
+            problem=lambda verdict: None,
+        )
+
+    judge_all(
+        judge_dir, spec, items_in, grade, rejudge_fraction=rejudge_fraction, jobs=jobs, seed=SEED
+    )
+
+
+def read_rows(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def score(judge_run: Path, pairs: list[tuple[str, str]]) -> dict:
+    key = json.loads((judge_run / "unblinding" / "arm-key.json").read_text())
+    rows = read_rows(judge_run / "judge" / "verdicts.jsonl")
     by_case: dict[str, dict[str, dict]] = {}
     failed = []
     for row in rows:
@@ -193,56 +139,47 @@ def score(run: Path, pair: tuple[str, str]) -> dict:
             failed.append(row["id"])
             continue
         by_case.setdefault(k["case_id"], {})[k["arm"]] = row["verdict"]
-    a, b = pair
-    report = {"pair": f"{a}-{b}", "judge": JUDGE_MODEL, "failed_judgements": failed, "measures": {}}
-    for measure in ("stale_trusted", "correct", "flags_conflict", "rationalises"):
-        cases = sorted(c for c, arms in by_case.items() if a in arms and b in arms)
-        diffs = [int(by_case[c][a][measure]) - int(by_case[c][b][measure]) for c in cases]
-        low, high = percentile_bootstrap_ci(diffs, seed=SEED)
-        report["measures"][measure] = {
-            "cases": len(cases),
-            f"rate_{a}": round(statistics.mean(int(by_case[c][a][measure]) for c in cases), 3),
-            f"rate_{b}": round(statistics.mean(int(by_case[c][b][measure]) for c in cases), 3),
-            "mean_difference": round(statistics.mean(diffs), 3),
-            "ci95": [round(low, 3), round(high, 3)],
-            "verdict": "no change" if low <= 0 <= high else "differs",
-        }
-    rejudge = run / "judge" / "rejudge.jsonl"
-    if rejudge.exists():
-        first = {r["id"]: r["verdict"] for r in rows}
-        again = [json.loads(line) for line in rejudge.read_text().splitlines()]
-        agree = [
-            first[r["id"]]["stale_trusted"] == r["verdict"]["stale_trusted"]
-            for r in again
-            if r["verdict"] and first.get(r["id"])
-        ]
-        report["judge_self_agreement_stale_trusted"] = f"{sum(agree)}/{len(agree)}"
-    (run / "score.json").write_text(json.dumps(report, indent=2))
+    report: dict = {
+        "judge": json.loads((judge_run / "judge" / "judge.json").read_text()),
+        "judge_model_reported": sorted(
+            {m for r in rows for m in r.get("judge_model_reported") or []}
+        ),
+        "failed_judgements": failed,
+        "arms": {
+            arm: {"cases_judged": sum(arm in v for v in by_case.values())}
+            for arm in sorted({k["arm"] for k in key.values()})
+        },
+        "pairs": {},
+        "cases": dict(sorted(by_case.items())),
+    }
+    for a, b in pairs:
+        measures = {}
+        for measure in MEASURES:
+            cases = sorted(c for c, arms in by_case.items() if a in arms and b in arms)
+            diffs = [int(by_case[c][a][measure]) - int(by_case[c][b][measure]) for c in cases]
+            if len(diffs) < 2:
+                measures[measure] = {
+                    "cases": len(cases),
+                    "verdict": "unknown: too few paired cases",
+                }
+                continue
+            low, high = percentile_bootstrap_ci(diffs, seed=SEED)
+            measures[measure] = {
+                "cases": len(cases),
+                f"rate_{a}": round(statistics.mean(int(by_case[c][a][measure]) for c in cases), 3),
+                f"rate_{b}": round(statistics.mean(int(by_case[c][b][measure]) for c in cases), 3),
+                "mean_difference": round(statistics.mean(diffs), 3),
+                "ci95": [round(low, 3), round(high, 3)],
+                "verdict": "no change" if low <= 0 <= high else "differs",
+            }
+        report["pairs"][f"{a}-{b}"] = measures
+    again = [r for r in read_rows(judge_run / "judge" / "rejudge.jsonl") if r["verdict"]]
+    first = {r["id"]: r["verdict"] for r in rows if r["verdict"]}
+    agree = [
+        first[r["id"]]["stale_trusted"] == r["verdict"]["stale_trusted"]
+        for r in again
+        if r["id"] in first
+    ]
+    report["judge_self_agreement_stale_trusted"] = f"{sum(agree)}/{len(agree)}" if agree else None
+    (judge_run / "score.json").write_text(json.dumps(report, indent=2))
     return report
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    p_items = sub.add_parser("items")
-    p_items.add_argument("--cases", type=Path, required=True)
-    p_items.add_argument("--run", type=Path, required=True)
-    p_items.add_argument("--arms", default="E,P")
-    p_judge = sub.add_parser("judge")
-    p_judge.add_argument("--run", type=Path, required=True)
-    p_judge.add_argument("--rejudge-fraction", type=float, default=0.2)
-    p_score = sub.add_parser("score")
-    p_score.add_argument("--run", type=Path, required=True)
-    p_score.add_argument("--pair", default="E-P")
-    args = parser.parse_args(argv)
-    if args.cmd == "items":
-        cases = [json.loads(line) for line in args.cases.read_text().splitlines() if line.strip()]
-        items(cases, args.run, args.arms.split(","))
-    elif args.cmd == "judge":
-        judge(args.run, args.rejudge_fraction)
-    else:
-        print(json.dumps(score(args.run, tuple(args.pair.split("-", 1))), indent=2))
-
-
-if __name__ == "__main__":
-    main()

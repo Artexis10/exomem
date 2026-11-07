@@ -11,11 +11,11 @@ Markdown text with LAB's own ``parse_doc.py``, and copies the task and rubric
 into a prepared tree that ``run`` and ``judge`` read, so neither touches the
 LAB checkout.
 
-Usage (from ``/var/tmp`` with ``PYTHONPATH=benchmarks:src``)::
+``membench outcome fetch`` runs ``setup``; ``membench outcome run lab`` runs ``convert`` when
+a split has no converted tree yet. The fixed draw is made once, from ``/var/tmp`` with
+``PYTHONPATH=benchmarks:src``::
 
-    python -m membench.outcome.lab.prepare setup
     python -m membench.outcome.lab.prepare sample
-    python -m membench.outcome.lab.prepare convert --run-id prep-dev --cases dev
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import argparse
 import hashlib
 import inspect
 import json
-import os
 import random
 import shutil
 import subprocess
@@ -33,9 +32,10 @@ import time
 from collections import Counter
 from pathlib import Path
 
-RUN_ROOT = Path(os.environ.get("OUTCOME_EVAL_ROOT", "/var/tmp/exomem-outcome-evals"))
-UPSTREAM = RUN_ROOT / "upstream" / "harvey-labs"
-UPSTREAM_COMMIT = "ba363f57c900166b616062c8153560d0508d9175"
+from ..workspace import RUN_ROOT, pin, require_pinned_checkout
+
+UPSTREAM = pin("lab").checkout()
+UPSTREAM_COMMIT = pin("lab").commit
 TASKS = UPSTREAM / "tasks"
 PARSE_DOC = UPSTREAM / "lab_core" / "sandbox" / "parsers" / "parse_doc.py"
 LAB_PYTHON = UPSTREAM / ".venv" / "bin" / "python"
@@ -167,23 +167,17 @@ share no area.
 # --------------------------------------------------------------------------
 
 
-def setup() -> None:
+def setup(root: Path = RUN_ROOT) -> None:
     """LAB's venv from its own lock file, and the pandoc release its sandbox image pins."""
-    head = subprocess.run(  # noqa: S603 - fixed argv
-        ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if head != UPSTREAM_COMMIT:
-        raise SystemExit(f"{UPSTREAM} is at {head}, not the pinned {UPSTREAM_COMMIT}")
+    checkout = require_pinned_checkout("lab", root)
     subprocess.run(  # noqa: S603 - fixed argv
-        ["uv", "sync", "--frozen", "--no-dev", "--project", str(UPSTREAM)], check=True
+        ["uv", "sync", "--frozen", "--no-dev", "--project", str(checkout)], check=True
     )
-    if not (PANDOC_PREFIX / "bin" / "pandoc").exists():
+    pandoc_prefix = root / "tools" / "pandoc"
+    if not (pandoc_prefix / "bin" / "pandoc").exists():
         # LAB's installer checks the download against the release's published SHA-256.
-        installer = UPSTREAM / "lab_core" / "sandbox" / "install_pandoc.sh"
-        subprocess.run(["sh", str(installer), str(PANDOC_PREFIX)], check=True)  # noqa: S603
+        installer = checkout / "lab_core" / "sandbox" / "install_pandoc.sh"
+        subprocess.run(["sh", str(installer), str(pandoc_prefix)], check=True)  # noqa: S603
 
 
 # --------------------------------------------------------------------------
@@ -298,6 +292,23 @@ def convert(run_id: str, task_ids: list[str]) -> Path:
             f"{len(manifest['faults'])} documents failed to convert; see {prepared}/manifest.json"
         )
     return prepared
+
+
+def ensure_prepared(split: str) -> str:
+    """The run id of a split's converted tree, converting its documents first when there is none."""
+    run_id = f"prepared-lab-{split}"
+    tasks = task_ids_from(split, None)
+    manifest = RUN_ROOT / "runs" / run_id / "manifest.json"
+    if not manifest.exists():
+        convert(run_id, tasks)
+        return run_id
+    have = json.loads(manifest.read_text())
+    if have["upstream_commit"] != UPSTREAM_COMMIT or have["tasks"] != tasks:
+        raise SystemExit(
+            f"{manifest.parent} was converted from other inputs than the pinned commit and "
+            f"cases/lab/{split}.json; move it aside and run again"
+        )
+    return run_id
 
 
 def task_ids_from(cases: str | None, tasks: str | None) -> list[str]:

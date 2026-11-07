@@ -1,47 +1,32 @@
 """Judge LAB deliverables blind against the task's own criteria, then score the arms.
 
 ``items`` pools the deliverables of one or more runs, shuffles them under opaque
-ids and writes the arm key apart. ``judge`` gives one fresh Opus process per
+ids and writes the arm key apart. ``judge`` gives one fresh judge process per
 item the task instructions, the full criteria list and the deliverable, never the
 arm, and requires a structured verdict that covers every criterion. ``score``
 joins the verdicts to the arm key and reports each arm's pass fraction per task,
 the paired differences with a bootstrap interval over tasks, and cost.
 
-Usage (from ``/var/tmp`` with ``PYTHONPATH=benchmarks:src``)::
-
-    python -m membench.outcome.lab.judge items --run-id j1 --runs r1-dev,r2-dev
-    python -m membench.outcome.lab.judge judge --run-id j1 --jobs 4
-    python -m membench.outcome.lab.judge score --run-id j1
+``membench outcome report lab`` drives this module.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import math
-import os
 import random
 import statistics
-import subprocess
-import threading
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from epistemic.journeys.f27_replay import (
-    discover_agent_envelope,
-    environment_floor,
-    refuse_unsafe_out_dir,
-)
 from recall_parity.scoring import percentile_bootstrap_ci
 
-from .prepare import RUN_ROOT, slug
+from ..judging import Judge, JudgeSpec, grade_item, judge_all
+from ..workspace import RUN_ROOT
+from .prepare import slug
 from .run import ARMS
 
 SEED = 20261108
-JUDGE_MODEL = "claude-opus-5-5"
 JUDGE_TIMEOUT_SECONDS = 1200
-JUDGE_ATTEMPTS = 3
 MIN_PAIRED_TASKS = 2
 
 VERDICT_SCHEMA = {
@@ -81,10 +66,8 @@ def run_path(name: str) -> Path:
 # --------------------------------------------------------------------------
 
 
-def items(judge_id: str, run_ids: list[str], arms: list[str]) -> None:
-    judge_run = run_path(judge_id)
-    if judge_run.exists():
-        raise SystemExit(f"{judge_run} exists; choose a new --run-id")
+def items(judge_run: Path, run_ids: list[str], arms: list[str]) -> None:
+    """Pool the deliverables under ``judge_run``. Pooling twice from an unchanged run is a no-op."""
     pool, sessions = [], []
     for run_id in run_ids:
         manifest = json.loads((run_path(run_id) / "manifest.json").read_text())
@@ -92,7 +75,7 @@ def items(judge_id: str, run_ids: list[str], arms: list[str]) -> None:
             case = json.loads(
                 (run_path(manifest["prepared"]) / "tasks" / slug(task_id) / "case.json").read_text()
             )
-            for arm in arms:
+            for arm in (a for a in arms if a in manifest["arms"]):
                 arm_dir = run_path(run_id) / slug(task_id) / arm
                 result_file = arm_dir / "result.json"
                 if not result_file.exists():
@@ -113,18 +96,26 @@ def items(judge_id: str, run_ids: list[str], arms: list[str]) -> None:
                     }
                 )
     random.Random(SEED).shuffle(pool)
+    lines = []
+    for i, row in enumerate(pool):
+        row["entry"]["item"] = f"it-{i:04d}"
+        sessions.append(row["entry"])
+        item = {key: row[key] for key in ("instructions", "criteria", "deliverable")}
+        lines.append(json.dumps({"id": row["entry"]["item"], **item}) + "\n")
+    items_file = judge_run / "judge" / "items.jsonl"
+    if items_file.exists():
+        if items_file.read_text() != "".join(lines):
+            raise SystemExit(
+                f"{items_file} was pooled from a different run state; move {judge_run} aside to judge again"
+            )
+        return
     (judge_run / "judge").mkdir(parents=True)
     (judge_run / "unblinding").mkdir()
-    with (judge_run / "judge" / "items.jsonl").open("w") as fh:
-        for i, row in enumerate(pool):
-            row["entry"]["item"] = f"it-{i:04d}"
-            sessions.append(row["entry"])
-            item = {key: row[key] for key in ("instructions", "criteria", "deliverable")}
-            fh.write(json.dumps({"id": row["entry"]["item"], **item}) + "\n")
+    items_file.write_text("".join(lines))
     # The arm key lives apart from the items; judge processes never receive it.
     (judge_run / "unblinding" / "sessions.json").write_text(json.dumps(sessions, indent=2))
     missing = [s for s in sessions if s["item"] is None]
-    print(f"{len(pool)} items, {len(missing)} sessions without a deliverable")
+    print(f"{len(pool)} items, {len(missing)} sessions without a deliverable", flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -144,89 +135,33 @@ def coverage_error(item: dict, verdict: dict | None) -> str | None:
     return None
 
 
-def judge_item(item: dict, exe: str, env: dict[str, str], cwd: Path, empty_mcp: Path) -> dict:
-    prompt = (
+def build_prompt(item: dict) -> str:
+    """Exactly what a judge reads for one item: the rubric, the task, the criteria, the work product."""
+    return (
         f"{RUBRIC}\n\nTASK INSTRUCTIONS:\n{item['instructions']}\n\n"
         f"CRITERIA:\n{json.dumps(item['criteria'], indent=1)}\n\n"
         f"WORK PRODUCT:\n{item['deliverable']}"
     )
-    cost, errors, verdict = 0.0, [], None
-    for _ in range(JUDGE_ATTEMPTS):
-        try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv
-                [
-                    exe,
-                    "-p",
-                    prompt,
-                    "--model",
-                    JUDGE_MODEL,
-                    "--output-format",
-                    "json",
-                    "--json-schema",
-                    json.dumps(VERDICT_SCHEMA),
-                    "--tools",
-                    "",
-                    "--strict-mcp-config",
-                    "--mcp-config",
-                    str(empty_mcp),
-                    "--setting-sources",
-                    "project",
-                    "--no-session-persistence",
-                ],
-                cwd=cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=JUDGE_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            errors.append(f"timeout after {JUDGE_TIMEOUT_SECONDS} s")
-            continue
-        try:
-            result = json.loads(proc.stdout) if proc.stdout.strip() else {}
-        except json.JSONDecodeError:
-            result = {}
-        cost += float(result.get("total_cost_usd") or 0.0)
-        verdict = result.get("structured_output")
-        error = coverage_error(item, verdict)
-        if error is None:
-            return {"id": item["id"], "verdict": verdict, "judge_cost_usd": cost, "errors": errors}
-        errors.append(f"{error}: {proc.stdout[-200:]} {proc.stderr[-200:]}")
-    return {"id": item["id"], "verdict": None, "judge_cost_usd": cost, "errors": errors}
 
 
-def judge(judge_id: str, rejudge_fraction: float, jobs: int) -> None:
-    judge_dir = run_path(judge_id) / "judge"
-    cwd = refuse_unsafe_out_dir(judge_dir / "cwd")
-    cwd.mkdir(exist_ok=True)
-    empty_mcp = judge_dir / "no-mcp.json"
-    empty_mcp.write_text('{"mcpServers": {}}')
-    floor, _ = environment_floor(os.environ)
-    env = {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
-    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    exe = str(discover_agent_envelope().executable)
-    pending = [json.loads(line) for line in (judge_dir / "items.jsonl").read_text().splitlines()]
-    rejudge = random.Random(SEED + 1).sample(pending, math.ceil(len(pending) * rejudge_fraction))
-    jobs_list = [(i, "verdicts.jsonl") for i in pending] + [(i, "rejudge.jsonl") for i in rejudge]
-    done = {
-        name: {json.loads(line)["id"] for line in (judge_dir / name).read_text().splitlines()}
-        if (judge_dir / name).exists()
-        else set()
-        for name in ("verdicts.jsonl", "rejudge.jsonl")
-    }
-    lock = threading.Lock()
+def judge(judge_run: Path, spec: JudgeSpec, rejudge_fraction: float, jobs: int) -> None:
+    judge_dir = judge_run / "judge"
+    items_in = [json.loads(line) for line in (judge_dir / "items.jsonl").read_text().splitlines()]
 
-    def work(job: tuple[dict, str]) -> None:
-        item, name = job
-        if item["id"] in done[name]:
-            return
-        row = judge_item(item, exe, env, cwd, empty_mcp)
-        with lock, (judge_dir / name).open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
-        print(item["id"], name, "ok" if row["verdict"] else "FAILED", flush=True)
+    def grade(item: dict, judge: Judge) -> dict:
+        return grade_item(
+            judge,
+            item["id"],
+            build_prompt(item),
+            VERDICT_SCHEMA,
+            out_dir=judge_dir,
+            timeout=JUDGE_TIMEOUT_SECONDS,
+            problem=lambda verdict: coverage_error(item, verdict),
+        )
 
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        list(pool.map(work, jobs_list))
+    judge_all(
+        judge_dir, spec, items_in, grade, rejudge_fraction=rejudge_fraction, jobs=jobs, seed=SEED
+    )
 
 
 # --------------------------------------------------------------------------
@@ -291,8 +226,7 @@ def difference(by_task: dict[str, dict], a: str, b: str, measure: str) -> dict:
     }
 
 
-def score(judge_id: str, pairs: list[tuple[str, str]]) -> dict:
-    judge_run = run_path(judge_id)
+def score(judge_run: Path, pairs: list[tuple[str, str]]) -> dict:
     sessions = json.loads((judge_run / "unblinding" / "sessions.json").read_text())
     by_item = {s["item"]: s for s in sessions if s["item"]}
     rows = read_rows(judge_run / "judge" / "verdicts.jsonl")
@@ -319,11 +253,14 @@ def score(judge_id: str, pairs: list[tuple[str, str]]) -> dict:
     }
     arms_seen = sorted({s["arm"] for s in sessions}, key=ARMS.index)
     report: dict = {
-        "judge": JUDGE_MODEL,
+        "judge": json.loads((judge_run / "judge" / "judge.json").read_text()),
+        "judge_model_reported": sorted(
+            {m for r in rows for m in r.get("judge_model_reported") or []}
+        ),
         "failed_judgements": failed,
         "arms": {},
         "pairs": {},
-        "tasks": by_task,
+        "cases": by_task,
     }
     for arm in arms_seen:
         mine = [s for s in sessions if s["arm"] == arm]
@@ -387,31 +324,3 @@ def judge_noise(judge_run: Path, rows: list[dict]) -> dict | None:
         "criteria_agreement": f"{same}/{total}",
         "mean_abs_pass_fraction_gap": round(statistics.mean(gaps), 4),
     }
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    p_items = sub.add_parser("items", help="pool deliverables under opaque ids")
-    p_items.add_argument("--run-id", required=True, help="the new judging run")
-    p_items.add_argument("--runs", required=True, help="comma-separated `run` ids to pool")
-    p_items.add_argument("--arms", default=",".join(ARMS))
-    p_judge = sub.add_parser("judge", help="judge every item; resumes a stopped judging run")
-    p_judge.add_argument("--run-id", required=True)
-    p_judge.add_argument("--rejudge-fraction", type=float, default=0.2)
-    p_judge.add_argument("--jobs", type=int, default=1)
-    p_score = sub.add_parser("score", help="per-task pass fractions, paired differences, cost")
-    p_score.add_argument("--run-id", required=True)
-    p_score.add_argument("--pairs", default="W-S,WG-W")
-    args = parser.parse_args(argv)
-    if args.cmd == "items":
-        items(args.run_id, args.runs.split(","), args.arms.split(","))
-    elif args.cmd == "judge":
-        judge(args.run_id, args.rejudge_fraction, args.jobs)
-    else:
-        pairs = [tuple(p.split("-", 1)) for p in args.pairs.split(",")]
-        print(json.dumps(score(args.run_id, pairs), indent=2))
-
-
-if __name__ == "__main__":
-    main()
