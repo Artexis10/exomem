@@ -1186,9 +1186,11 @@ def test_disabled_media_runtime_persists_actionable_blocked_state(
     assert job["state"] == "blocked"
     assert job["retryable"] is True
     assert "enable media extraction" in job["next_action"]
+    assert job["next_action"].endswith("restart the service")
     frontmatter = (binary.with_name(binary.name + ".md")).read_text(encoding="utf-8")
     assert "processing_state: blocked" in frontmatter
     assert "EXOMEM_DISABLE_MEDIA_EXTRACTION" in frontmatter
+    assert "then retry" not in frontmatter
 
 
 def test_failed_media_runtime_start_persists_actionable_blocked_state(
@@ -1217,7 +1219,7 @@ def test_failed_media_runtime_start_persists_actionable_blocked_state(
     assert job["state"] == "blocked"
     assert job["retryable"] is True
     assert job["error"].startswith("MediaRuntimeUnavailable: OSError:")
-    assert "restart the service" in job["next_action"]
+    assert job["next_action"].endswith("restart the service")
 
 
 def test_later_drop_is_immediately_blocked_after_runtime_start_failure(

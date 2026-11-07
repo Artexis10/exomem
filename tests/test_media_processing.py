@@ -1607,7 +1607,7 @@ def _image_whose_clip_stage_the_pause_blocked(
     _media_processing().mark_processing_unavailable(
         vault,
         reason="MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set",
-        next_action="enable media extraction, restart the service, then retry",
+        next_action=media_jobs.EXTRACTION_DISABLED_ACTION,
     )
     return binary, sidecar
 
@@ -1630,7 +1630,8 @@ def test_a_start_with_media_extraction_requeues_the_clip_stage_a_paused_start_bl
         [paused] = media_jobs.status(vault)["jobs"]
         assert paused["state"] == media_jobs.BLOCKED
         assert "EXOMEM_DISABLE_MEDIA_EXTRACTION" in paused["next_action"]
-        assert "restart the service" in paused["next_action"]
+        # The next start requeues the work, so a retry after the restart would do nothing.
+        assert paused["next_action"].endswith("restart the service")
 
         monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
         worker = server_runtime._start_media_worker(vault)
@@ -1648,6 +1649,48 @@ def test_a_start_with_media_extraction_requeues_the_clip_stage_a_paused_start_bl
     assert sidecar.read_bytes() == before
 
 
+def test_a_start_with_media_extraction_shows_a_recording_a_paused_start_blocked_as_pending(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import extract, server_runtime
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "paused-memo.m4a")
+    sidecar = media_processing.reconcile_media(vault, binary).sidecar_path
+    # The supervisor would start a media child for the requeued work; the test claims it itself.
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    shown_when_claimable: list[object] = []
+    requeue = media_jobs.MediaJobStore.requeue_runtime_blocks
+
+    def record_the_page_then_requeue(store: media_jobs.MediaJobStore) -> int:
+        shown_when_claimable.append(_frontmatter_and_body(sidecar)[0]["processing_state"])
+        return requeue(store)
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_blocks", record_the_page_then_requeue)
+    worker = None
+    try:
+        assert server_runtime._start_media_worker(vault) is None
+        assert _frontmatter_and_body(sidecar)[0]["processing_state"] == "blocked"
+
+        monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        [resumed] = media_jobs.status(vault)["jobs"]
+    finally:
+        if worker is not None:
+            worker.stop()
+        media_processing.set_media_runtime_available(vault)
+
+    # The page stops telling the user to restart a service that has restarted.
+    page, _body = _frontmatter_and_body(sidecar)
+    assert resumed["state"] == media_jobs.PENDING
+    assert (page["processing_state"], page["processing_error"]) == ("pending", None)
+    assert page["processing_next_action"] == media_jobs.WAIT_ACTION
+    # It was shown before the row became claimable: a rewrite under a running child is a stale extraction.
+    assert shown_when_claimable == ["pending"]
+
+
 def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1659,7 +1702,7 @@ def test_path_retry_requeues_the_clip_stage_an_extraction_pause_blocked(
         assert media_processing.retry_media(vault, binary).requeued == 0
         [paused] = media_jobs.status(vault)["jobs"]
         assert paused["state"] == media_jobs.BLOCKED
-        assert "restart the service" in paused["next_action"]
+        assert paused["next_action"].endswith("restart the service")
 
         # A process that holds no pause, such as the CLI, retries the completed photo's stage.
         media_processing.set_media_runtime_available(vault)

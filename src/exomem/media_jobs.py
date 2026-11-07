@@ -122,6 +122,17 @@ OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget
 #: next start with a runtime requeues the work (`MediaJobStore.requeue_runtime_blocks`).
 EXTRACTION_DISABLED_CODE = "MediaExtractionDisabled"
 RUNTIME_UNAVAILABLE_CODE = "MediaRuntimeUnavailable"
+#: The rows such a start blocked, matched by the part of `last_error` before its first colon.
+_RUNTIME_BLOCKED_SQL = (
+    "state = 'blocked' AND substr(last_error, 1, instr(last_error, ':') - 1) IN (?, ?) "
+    "AND NOT EXISTS (SELECT 1 FROM media_job_results WHERE media_job_results.job_id = jobs.id)"
+)
+#: What the status and the blocked sidecars tell a person to do. The text ends at the restart: the
+#: next start requeues the work, so a retry or a second reprocess request afterwards does nothing.
+EXTRACTION_DISABLED_ACTION = (
+    "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, restart the service"
+)
+RUNTIME_UNAVAILABLE_ACTION = "fix the media runtime configuration, restart the service"
 WAIT_ACTION = "wait for media processing"
 #: Both ways out of a multilingual request that the configured speech engine cannot run.
 MULTILINGUAL_UNSUPPORTED_ACTION = (
@@ -2447,6 +2458,18 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def runtime_blocked_jobs(self) -> list[MediaJob]:
+        """The rows `requeue_runtime_blocks` would return to pending."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE {_RUNTIME_BLOCKED_SQL} ORDER BY id",
+                (EXTRACTION_DISABLED_CODE, RUNTIME_UNAVAILABLE_CODE),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
     def requeue_runtime_blocks(self) -> int:
         """Return to pending the work that a service start without a media runtime blocked.
 
@@ -2459,11 +2482,7 @@ class MediaJobStore:
                 return int(
                     conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                        "WHERE state = 'blocked' "
-                        # The error code is the part of `last_error` before its first colon.
-                        "AND substr(last_error, 1, instr(last_error, ':') - 1) IN (?, ?) "
-                        "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                        "WHERE media_job_results.job_id = jobs.id)",
+                        f"WHERE {_RUNTIME_BLOCKED_SQL}",
                         (time.time(), EXTRACTION_DISABLED_CODE, RUNTIME_UNAVAILABLE_CODE),
                     ).rowcount
                 )
@@ -3160,13 +3179,13 @@ def _status_job(row: Any) -> dict[str, Any]:
     }
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
+    restart_requeues = False
     if state == BLOCKED and error and error.startswith(f"{EXTRACTION_DISABLED_CODE}:"):
-        actions[BLOCKED] = (
-            "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
-            "restart the service, then retry"
-        )
+        actions[BLOCKED] = EXTRACTION_DISABLED_ACTION
+        restart_requeues = True
     if state == BLOCKED and error and error.startswith(f"{RUNTIME_UNAVAILABLE_CODE}:"):
-        actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
+        actions[BLOCKED] = RUNTIME_UNAVAILABLE_ACTION
+        restart_requeues = True
     if state == BLOCKED and error and error.startswith("AMBIGUOUS_SIDECAR_BOUNDARY:"):
         actions[BLOCKED] = "review the sidecar's preserved-notes boundary, then retry"
     if state == BLOCKED and (
@@ -3206,7 +3225,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         and not _returns_by_itself(state, reason)
     )
     reprocess_failed = reprocess_stopped and state == FAILED
-    if reprocess_stopped and state == BLOCKED:
+    # The start that requeues a paused reprocess keeps its request, so the restart is the whole remedy.
+    if reprocess_stopped and state == BLOCKED and not restart_requeues:
         actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
     multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
     unsupported_language = multilingual_unsupported or (
