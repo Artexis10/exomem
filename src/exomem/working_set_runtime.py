@@ -500,7 +500,8 @@ def with_capture_policy(token: str | None, digest: str) -> str:
     """`token` with the digest of the capture policy its holder was last handed.
 
     The caller echoes the token on every call, on any transport, so the digest travels with the
-    conversation and the server keeps no state for it. The signed thread fields are untouched. A
+    conversation and the server keeps no state for it. The digest is unsigned on purpose: a forged
+    digest only withholds advice from its own holder and grants no authority. The signed thread fields are untouched. A
     token this server did not write, or one the digest would push past `CONTINUITY_MAX_CHARS`,
     comes back unchanged, and its holder is then owed the policy again.
     """
