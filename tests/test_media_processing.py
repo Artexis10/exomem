@@ -1868,14 +1868,14 @@ def test_a_ledger_error_on_one_paused_row_leaves_it_blocked_and_requeues_the_row
     _supervisor_starts_no_child(monkeypatch)
     reread = media_jobs.MediaJobStore.current_runtime_block
 
-    def ledger_locked_for_the_second_row(
+    def ledger_unreadable_for_the_second_row(
         store: media_jobs.MediaJobStore, job: media_jobs.MediaJob
     ) -> media_jobs.MediaJob | None:
         if job.sidecar_path.name == sidecars[1].name:
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite3.DatabaseError("database disk image is malformed")
         return reread(store, job)
 
-    monkeypatch.setattr(media_jobs.MediaJobStore, "current_runtime_block", ledger_locked_for_the_second_row)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "current_runtime_block", ledger_unreadable_for_the_second_row)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
     worker = None
     try:
@@ -1895,6 +1895,119 @@ def test_a_ledger_error_on_one_paused_row_leaves_it_blocked_and_requeues_the_row
         (media_jobs.BLOCKED, "blocked"),
         (media_jobs.PENDING, "pending"),
     ]
+
+
+def test_a_job_ledger_held_past_its_busy_timeout_delays_the_paused_rows_until_it_is_released(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    present = media_worker.MediaWorker.present_runtime_requeue
+    requeue = media_jobs.MediaJobStore.requeue_runtime_block
+    # Another writer of the ledger, as a second process or a long migration would be.
+    holder = sqlite3.connect(media_jobs.job_store_path(vault), isolation_level=None, check_same_thread=False)
+    held = threading.Event()
+    refused = threading.Event()
+
+    def present_once_another_writer_holds_the_ledger(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        if not held.is_set():
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+        return present(worker, job)
+
+    def requeue_and_note_a_refusal(store: media_jobs.MediaJobStore, job: media_jobs.MediaJob) -> bool:
+        try:
+            return requeue(store, job)
+        except sqlite3.OperationalError:
+            refused.set()
+            raise
+
+    monkeypatch.setattr(media_worker.MediaWorker, "present_runtime_requeue", present_once_another_writer_holds_the_ledger)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_block", requeue_and_note_a_refusal)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        # The first requeue write waits out the ledger's busy timeout, and the ledger stays held past it.
+        assert refused.wait(timeout=15)
+        holder.rollback()
+        _wait_for(
+            lambda: _no_runtime_block_left(vault) or not worker._thread.is_alive(),
+            "requeue the paused rows once the ledger was released",
+        )
+        supervising = worker._thread.is_alive()
+    finally:
+        if holder.in_transaction:
+            holder.rollback()
+        holder.close()
+        if worker is not None:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    assert supervising
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
+
+
+def test_a_start_writes_no_page_for_a_paused_row_that_a_retry_returned_and_a_child_claimed_after_the_reread(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+    from exomem.writer_lease import get_manager
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "paused-memo.m4a")
+    sidecar = media_processing.reconcile_media(vault, binary).sidecar_path
+    _supervisor_starts_no_child(monkeypatch)
+    assert server_runtime._start_media_worker(vault) is None
+    store = media_jobs.MediaJobStore(vault)
+    boundary = get_manager()._mutation_coordinator_for(vault)
+    reread = media_jobs.MediaJobStore.current_runtime_block
+    tools: list[threading.Thread] = []
+    claimed: list[tuple[media_jobs.MediaJob | None, bytes]] = []
+
+    def retry_then_claim() -> None:
+        # The retry tool returns the row under the mutation boundary; a child claims it without one.
+        with get_manager().mutation_guard(vault, operation="process_media_retry_commit", holder_kind="command"):
+            store.retry(binary_path=binary, include_failed=True)
+        claimed.append((store.claim_next(), sidecar.read_bytes()))
+
+    def a_retry_and_a_claim_after_the_reread(
+        store_: media_jobs.MediaJobStore, job: media_jobs.MediaJob
+    ) -> media_jobs.MediaJob | None:
+        current = reread(store_, job)
+        tools.append(threading.Thread(target=retry_then_claim))
+        tools[0].start()
+        # The retry runs now, unless it waits for a boundary that this re-read holds.
+        _wait_for(
+            lambda: bool(claimed) or (boundary.current_thread_holds_boundary() and boundary.waiter_count() > 0),
+            "let the retry run or wait for the boundary",
+        )
+        return current
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "current_runtime_block", a_retry_and_a_claim_after_the_reread)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        _wait_for(lambda: bool(claimed), "let the retry and the claim run")
+        worker.stop()  # the supervisor finishes the row in hand first
+        tools[0].join(timeout=10)
+    finally:
+        if worker is not None:
+            worker.stop()
+        media_processing.set_media_runtime_available(vault)
+
+    [(running, page_at_claim)] = claimed
+    assert running is not None
+    current = store.get(running.id)
+    assert current is not None and current.state == media_jobs.RUNNING
+    # Nothing wrote the page after the claim: a write under a running child makes its extraction stale.
+    assert sidecar.read_bytes() == page_at_claim
+    assert _frontmatter_and_body(sidecar)[0]["processing_state"] == "pending"
 
 
 def test_a_start_skips_a_paused_row_claimed_and_blocked_again_after_the_handover(
