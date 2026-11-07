@@ -7,10 +7,12 @@ with what bootstrap serves for the same caller.
 
 from __future__ import annotations
 
-import pytest
+import asyncio
 
-from exomem import capture_carrier, commands, envelope, prominence, writer_lease
-from exomem import due_state as due_state_module
+import pytest
+from test_connector_boundary import configured_boundary as configured_boundary
+
+from exomem import capture_carrier, commands, envelope, prominence, working_set_runtime, writer_lease
 from exomem.governance.principal import RequestPrincipal, request_scope
 
 TURN = "what do we know about the tidal ledger?"
@@ -22,9 +24,7 @@ def served(vault, tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "machine.json"))
     for key in ("EXOMEM_PROMINENCE", "EXOMEM_SURFACE", "EXOMEM_HOSTED_CELL"):
         monkeypatch.delenv(key, raising=False)
-    due_state_module.reset_emission_state()
     yield vault
-    due_state_module.reset_emission_state()
 
 
 def _invoke(name: str, vault, **kwargs):
@@ -105,31 +105,109 @@ def test_a_full_map_still_delivers_the_block_inside_limit_chars(served) -> None:
 def test_a_request_too_small_for_the_block_is_not_starved_and_is_owed_it_later(served) -> None:
     with request_scope(CALLER):
         small = _activate(served, max_chars=800)
-        later = _activate(served)
+        later = _activate(served, continuity=small["continuity"])
 
     assert "capture_policy" not in small
     assert "capture_policy" in later
 
 
-def test_an_attached_block_is_counted_in_the_packet_budget(served) -> None:
+def test_an_attached_block_is_counted_in_the_packet_budget() -> None:
     block = {"disposition": "silent", "say": "x" * 100}
     packet = {"budget": {"limit_chars": 4000, "used_chars": 1000}}
 
-    capture_carrier.for_packet(served, packet, capture_carrier.Owed(block, "d"), session="s")
+    capture_carrier.for_packet(packet, capture_carrier.Policy(block, "d", False, capture_carrier.size(block)))
 
     assert packet["capture_policy"] == block
     assert packet["budget"]["used_chars"] == 1000 + capture_carrier.size(block)
 
 
-def test_a_block_that_would_overflow_the_packet_is_left_off_and_uncounted(served) -> None:
+def test_a_block_that_would_overflow_the_packet_is_left_off_and_uncounted() -> None:
+    block = {"disposition": "silent", "say": "x" * 100}
     packet = {"budget": {"limit_chars": 1000, "used_chars": 990}}
 
-    capture_carrier.for_packet(
-        served, packet, capture_carrier.Owed({"disposition": "silent", "say": "x" * 100}, "d"), session="s"
-    )
+    capture_carrier.for_packet(packet, capture_carrier.Policy(block, "d", False, capture_carrier.size(block)))
 
     assert "capture_policy" not in packet
     assert packet["budget"]["used_chars"] == 990
+
+
+def test_stamping_a_token_keeps_what_the_token_already_says() -> None:
+    """The digest joins the signed thread and refs; it does not replace or invalidate them."""
+    token = working_set_runtime.encode_continuity(
+        identity="index-a", roles_hash="r", conventions_hash="c", generation=3, refs=["a.md"], roles=["anchor"],
+        minted_ns=10, thread="thread-a", thread_ns=5, salt="salt",
+    )
+
+    stamped = working_set_runtime.with_capture_policy(token, "digest-a")
+
+    assert working_set_runtime.decode_continuity(stamped) == {
+        **working_set_runtime.decode_continuity(token),
+        "capture_policy": "digest-a",
+    }
+    assert working_set_runtime.decode_continuity(token).get("mac")
+
+
+def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
+    configured_boundary, served, monkeypatch
+) -> None:
+    """Over the shipped transport every request is a fresh session, so only the echoed token can say what was sent."""
+    from starlette.testclient import TestClient
+    from test_connector_boundary import ISSUER
+
+    from exomem import server, server_auth, state_migration
+    from exomem.auth_sessions import SessionIdentity
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    for name, value in {
+        "GITHUB_CLIENT_ID": "fixture-client",
+        "GITHUB_CLIENT_SECRET": "fixture-secret",
+        "EXOMEM_GITHUB_USERNAME": "fixture-owner",
+        "EXOMEM_JWT_SIGNING_KEY": "temporary-boundary-signing-root",
+        "EXOMEM_UPLOAD_TOKEN": "temporary-boundary-transfer-secret",
+        "EXOMEM_VAULT_PATH": str(served),
+    }.items():
+        monkeypatch.setenv(name, value)
+    authority = server_auth.build_session_authority(base_url=ISSUER)
+    bearer, _record = asyncio.run(
+        authority.issue(
+            client_id="full", scopes=["exomem:read", "exomem:write"],
+            identity=SessionIdentity(github_user_id=4242, github_login="fixture-owner"),
+        )
+    )
+    state_migration.arm_connector_boundary_offline(
+        served, authority=state_migration.assert_offline_migration_authority(source="capture carrier test")
+    )
+
+    def call(client, name: str, arguments: dict) -> dict:
+        reply = client.post(
+            "/mcp",
+            headers={
+                "Authorization": f"Bearer {bearer}", "Accept": "application/json",
+                "mcp-protocol-version": "2025-06-18", "mcp-method": "tools/call", "mcp-name": name,
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": name, "arguments": arguments,
+                "_meta": {"io.modelcontextprotocol/protocolVersion": "2025-06-18",
+                          "io.modelcontextprotocol/clientCapabilities": {},
+                          "io.modelcontextprotocol/clientInfo": {"name": "fixture", "version": "1"}},
+            }},
+        )
+        result = reply.json()["result"]
+        assert not result.get("isError"), reply.text[:500]
+        return result["structuredContent"]
+
+    with TestClient(server.build_server(require_auth=True).http_app(stateless_http=True, json_response=True)) as client:
+        token, delivered = None, []
+        for _ in range(4):
+            packet = call(client, "recall_context", {"turn": TURN, **({"continuity": token} if token else {})})
+            token = packet["continuity"]
+            delivered.append("capture_policy" in packet)
+        before = call(client, "configure_memory", {})
+        call(client, "configure_memory", {"action": "set", "prominence": "light", "expected_revision": before["revision"]})
+        changed = call(client, "recall_context", {"turn": TURN, "continuity": token})
+
+    assert delivered == [True, False, False, False]
+    assert changed["capture_policy"]["disposition"] == "off"
 
 
 def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> None:

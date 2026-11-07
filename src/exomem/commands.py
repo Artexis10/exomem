@@ -6895,11 +6895,8 @@ def op_activate_context(
                             )
                         # Owed before the body runs, so its characters come out of the map's budget
                         # and a full map cannot starve it.
-                        capture_policy = capture_carrier_module.owed(
-                            vault_root,
-                            continuity=continuity,
-                            session=session,
-                            room=requested_chars - read_next_action.MAX_CHARS,
+                        capture_policy = capture_carrier_module.current(
+                            continuity, room=requested_chars - read_next_action.MAX_CHARS
                         )
                         packet = _op_activate_context_body(
                             vault_root,
@@ -6916,14 +6913,14 @@ def op_activate_context(
                             observation_timings=observation_timings,
                             trigger=trigger,
                             intent_resolution=intent_resolution,
-                            reserved_chars=capture_carrier_module.size(capture_policy.block) if capture_policy else 0,
+                            reserved_chars=capture_policy.reserve if capture_policy else 0,
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
                             packet["budget"]["limit_chars"] = requested_chars
                         read_next_action.attach(packet)
                         # Outside the packet cache, like `continuity`: the live disposition is read per request.
-                        capture_carrier_module.for_packet(vault_root, packet, capture_policy, session=session)
+                        capture_carrier_module.for_packet(packet, capture_policy)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -6941,6 +6938,8 @@ def op_activate_context(
                         # digest change and counted inside the packet's own `limit_chars`.
                         vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
+                    # Last among the paths that set the token: the token names the policy its holder holds.
+                    capture_carrier_module.stamp(packet, capture_policy)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
                         packet["trigger"] = trigger

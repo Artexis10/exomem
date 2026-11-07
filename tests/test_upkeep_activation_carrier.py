@@ -517,11 +517,9 @@ def test_failed_worker_status_block_on_session_start_only(
 def test_activation_with_upkeep_never_touches_the_due_state_ledger(
     tmp_path: Path, clock: _Clock, serving: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import capture_carrier, due_state
+    from exomem import due_state
 
     vault = _ready(tmp_path)
-    # The live capture policy is acknowledged on this ledger by design; this test is about upkeep.
-    monkeypatch.setattr(capture_carrier, "owed", lambda *_a, **_k: None)
     touched: list[str] = []
     for name in dir(due_state):
         if "emission" in name.lower() or name.startswith("mark_emitted"):

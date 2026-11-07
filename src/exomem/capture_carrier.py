@@ -10,10 +10,12 @@ The block is computed per request, outside the packet cache, from the calls boot
 the two cannot disagree. It reads neither the turn nor the vault: a deterministic carrier, never
 a judgement about what the turn means.
 
-Delivery is recorded on the due-state emission ledger, keyed by session, audience and vault. The
-block is owed when the request carries no continuity token (a new session, or a client that
-dropped it on compaction) or when the ledger holds a different digest (the policy changed).
-Nothing is recorded until a response carries the block.
+Delivery rides the continuity token. The token the response returns names the digest of the policy
+its holder was handed, and every client echoes it, so the carrier keeps no state: it works over a
+stateless transport and survives a restart. The block is owed when the request carries no token (a
+new session, or a client that dropped it on compaction), when the token names no digest (minted
+before this carrier), or when the digest differs (the policy changed). A token is stamped only when
+its holder holds the current policy, so a block that did not fit is owed again.
 """
 
 from __future__ import annotations
@@ -22,28 +24,25 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-from . import due_state
 
 log = logging.getLogger(__name__)
 
-#: The ledger scope that keeps this carrier's digest apart from the due-state digests.
-SCOPE = "capture_policy"
 #: The key a packet carries the block under.
 PACKET_KEY = "capture_policy"
-#: A request whose room is too small to spare this share for the block is not owed it, so a small
-#: `max_chars` is never starved; the block goes out on the next request that can hold it.
-_MAX_SHARE = 2
 
 
 @dataclass(frozen=True)
-class Owed:
-    """A block that is owed to the caller and not yet handed over."""
+class Policy:
+    """The policy this request is under, and what the caller is owed of it."""
 
     block: dict[str, str]
     digest: str
+    #: The request's token already names this digest: nothing is owed.
+    held: bool
+    #: Characters set aside for the block in the map's budget; 0 when nothing is owed, or when the
+    #: map would be left under the smallest budget a request may ask for.
+    reserve: int
 
 
 def size(block: dict[str, str]) -> int:
@@ -67,46 +66,53 @@ def _digest(served: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(served, sort_keys=True).encode()).hexdigest()[:24]
 
 
-def owed(
-    vault_root: Path, *, continuity: str | None, session: str | None, room: int
-) -> Owed | None:
-    """What this request is owed, or None. Never raises: the policy is advice to a read.
+def current(continuity: str | None, *, room: int) -> Policy | None:
+    """The policy this request is under, or None. Never raises: the policy is advice to a read.
 
-    `room` is the characters the packet can spend on it; a block that would take more than its
-    share is left for a larger request.
+    `room` is the characters the packet can spend on map and block together.
     """
     try:
+        from . import working_set, working_set_runtime
+
         served = block()
-        if size(served) * _MAX_SHARE > room:
-            return None
         digest = _digest(served)
-        held = due_state.acknowledged(SCOPE, vault_root=Path(vault_root), session=session)
-        if str(continuity or "").strip() and held == digest:
-            return None
-        return Owed(served, digest)
+        held = (working_set_runtime.decode_continuity(continuity) or {}).get("capture_policy") == digest
+        fits = room - size(served) >= working_set.MIN_BUDGET_CHARS
+        return Policy(served, digest, held, 0 if held or not fits else size(served))
     except Exception:  # noqa: BLE001 - optional guidance never breaks an activation
         log.debug("capture policy unavailable (non-fatal)", exc_info=True)
         return None
 
 
-def for_packet(
-    vault_root: Path, packet: dict[str, Any], pending: Owed | None, *, session: str | None = None
-) -> None:
+def for_packet(packet: dict[str, Any], policy: Policy | None) -> None:
     """Attach the owed block to an activation packet, counted inside its `limit_chars`. Never raises."""
-    if pending is None:
+    if policy is None or not policy.reserve:
         return
     try:
         budget = packet.get("budget") or {}
-        cost = size(pending.block)
-        if int(budget.get("used_chars") or 0) + cost > int(budget.get("limit_chars") or 0):
+        if int(budget.get("used_chars") or 0) + policy.reserve > int(budget.get("limit_chars") or 0):
             return
         from . import context_views
 
-        packet[PACKET_KEY] = pending.block
-        context_views.count_attached(packet, cost)
-        # The ledger holds the digest the caller was last handed. It is recorded whether or not
-        # it changed, because a request without a continuity token is owed the block again.
-        due_state.claim(SCOPE, pending.digest, vault_root=Path(vault_root), session=session)
+        packet[PACKET_KEY] = policy.block
+        context_views.count_attached(packet, policy.reserve)
     except Exception:  # noqa: BLE001 - optional guidance never breaks an activation
         log.debug("capture policy unavailable (non-fatal)", exc_info=True)
         packet.pop(PACKET_KEY, None)
+
+
+def stamp(packet: dict[str, Any], policy: Policy | None) -> None:
+    """Name the policy digest in the token the packet returns, when its holder now holds the policy.
+
+    A caller that was owed the block and did not get it is left unstamped, so the next request
+    owes it again. Runs last, after every path that sets the token. Never raises.
+    """
+    token = packet.get("continuity")
+    if policy is None or not (policy.held or PACKET_KEY in packet) or not isinstance(token, str) or not token:
+        return
+    try:
+        from . import working_set_runtime
+
+        packet["continuity"] = working_set_runtime.with_capture_policy(token, policy.digest)
+    except Exception:  # noqa: BLE001 - optional guidance never breaks an activation
+        log.debug("capture policy unavailable (non-fatal)", exc_info=True)
