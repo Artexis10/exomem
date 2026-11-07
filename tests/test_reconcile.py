@@ -996,6 +996,127 @@ def test_reconcile_via_maintain_memory_heals_out_of_band_count_drift(vault: Path
     ), res2
 
 
+def test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`exomem maintain --reconcile` holds the boundary per phase, not for its whole run.
+
+    The run pauses in its lexical refresh, which holds no boundary: the indexes phase before it
+    has committed and the orphans phase after it has not run. A foreground write through the
+    manager commits there. Under a whole-run hold it meets MUTATION_BUSY instead.
+    """
+    import threading
+
+    from exomem import maintenance_jobs, writer_lease
+    from exomem.__main__ import main
+
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1.0")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease"))
+    writer_lease.reset_managers_for_tests()
+    top = vault / "Knowledge Base" / "index.md"
+    top.write_text(
+        top.read_text(encoding="utf-8").replace("- Notes (insight): 4", "- Notes (insight): 9"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    frames = vault / "Knowledge Base" / "Evidence" / "gone.mp4.frames"
+    frames.mkdir(parents=True)
+    written = vault / "Knowledge Base" / "Records" / "written-during-reconcile.md"
+
+    def leaf(vault_root: Path) -> dict[str, str]:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(written, "# Written during a reconcile\n")],
+            vault_root=vault_root,
+            post_commit_fanout=False,
+        )
+        return {"status": "committed"}
+
+    ordinary_write = SimpleNamespace(name="canonical_mutation", read_only=False, leaf=leaf)
+    outcomes: list[object] = []
+    seen_at_the_write: list[tuple[bool, bool]] = []
+
+    def write() -> None:
+        try:
+            outcomes.append(writer_lease.get_manager().invoke(ordinary_write, (vault,), {}))
+        except Exception as error:  # noqa: BLE001 - the outcome is what the test reads
+            outcomes.append(error)
+
+    real_checkpoint = maintenance_jobs.checkpoint
+
+    def write_during_the_lexical_refresh(phase, *args, **kwargs):
+        if phase == "lexical" and not seen_at_the_write:
+            seen_at_the_write.append(("- Notes (insight): 4" in top.read_text(encoding="utf-8"), frames.is_dir()))
+            writer = threading.Thread(target=write)
+            writer.start()
+            writer.join(30.0)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", write_during_the_lexical_refresh)
+    try:
+        code = main(["maintain", "--reconcile", "--json"])
+    finally:
+        writer_lease.reset_managers_for_tests()
+    capsys.readouterr()
+
+    # The write ran and returned while the run waited at the pause, between its two holds.
+    assert len(outcomes) == 1 and isinstance(outcomes[0], dict), outcomes
+    assert outcomes[0]["status"] == "committed"
+    assert seen_at_the_write == [(True, True)]
+    assert written.is_file()
+    assert code == 0
+    assert not frames.exists()
+
+
+def test_a_second_reconcile_is_refused_while_one_runs(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two reconciles never interleave their phases, though neither holds the boundary for its run.
+
+    The first run pauses in its lexical refresh, where it holds no boundary hold. A second
+    reconcile through the manager gets MUTATION_BUSY there, and the first run still completes.
+    """
+    import threading
+
+    from exomem import maintenance_jobs, writer_lease
+    from exomem.__main__ import main
+    from exomem.cli_ops import OpError
+    from exomem.commands import commands_for
+
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease"))
+    writer_lease.reset_managers_for_tests()
+    reconcile_command = next(command for command in commands_for("mcp") if command.name == "reconcile")
+    second_outcomes: list[object] = []
+
+    def second_reconcile() -> None:
+        try:
+            second_outcomes.append(
+                writer_lease.get_manager().invoke(reconcile_command, (vault,), {"response_detail": "legacy"})
+            )
+        except OpError as error:
+            second_outcomes.append(error.code)
+
+    real_checkpoint = maintenance_jobs.checkpoint
+    started: list[bool] = []
+
+    def start_a_second_reconcile(phase, *args, **kwargs):
+        if phase == "lexical" and not started:
+            started.append(True)
+            other = threading.Thread(target=second_reconcile)
+            other.start()
+            other.join(30.0)
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", start_a_second_reconcile)
+    try:
+        code = main(["maintain", "--reconcile", "--json"])
+    finally:
+        writer_lease.reset_managers_for_tests()
+    capsys.readouterr()
+
+    assert second_outcomes == ["MUTATION_BUSY"]
+    assert code == 0
+
+
 def test_reconcile_rebuild_graph_forwards_the_opt_in_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

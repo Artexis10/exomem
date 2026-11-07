@@ -238,7 +238,7 @@ _DECLARED_UNBOUNDED_JOINS = {
     # Unbounded by design: `reconcile`'s terminal exists to prove the graph is
     # readable, so it must not return before the rebuild lands. Both the
     # reconcile pass itself and the handoff it finalizes make that same claim.
-    "reconcile.py::reconcile": "reconcile opt-in; its terminal asserts graph currency",
+    "reconcile.py::_reconcile": "reconcile opt-in; its terminal asserts graph currency",
     "reconcile.py::finalize_graph_rebuild_handoff": (
         "reconcile handoff; its terminal asserts graph currency"
     ),
