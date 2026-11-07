@@ -2360,10 +2360,14 @@ def project_terminal(
         and str(leaf["run_id"]).startswith("adr-")
     ):
         # An Adoption Studio call: the caller carries on with the run id, the plan id
-        # and the continuation cursor, so these must survive the compact view.
+        # and the continuation cursor, so these must survive the compact view. A `file`
+        # reply is built small for this view: its state, summary, stop, person list and
+        # final result are what the agent reads, so they pass as built.
         compact.update(
-            {key: leaf[key] for key in ("run_id", "run_ref", "phase", "continuation", "progress")
-             if key in leaf}
+            {key: leaf[key] for key in (
+                "run_id", "run_ref", "phase", "continuation", "progress",
+                "filing", "summary", "stop", "person", "filed",
+            ) if key in leaf}
         )
         plan = leaf.get("plan")
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):

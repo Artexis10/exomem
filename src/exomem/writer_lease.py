@@ -506,7 +506,7 @@ def _fast_ack_enabled(command: str | None = None, action: str | None = None) -> 
         return flag == "1"
     # Fixed command/action protocol: bulk apply uses existing durable custody by
     # default; an explicit flag still provides the synchronous rollback.
-    return command == "adoption_studio" and action == "apply"
+    return command == "adoption_studio" and action in ("apply", "file")
 
 
 def fast_durable_ack_active() -> bool:
@@ -6901,7 +6901,7 @@ class LeaseManager:
                     resume_canonically_committed=resume_graph_sync,
                     commit_evidence=exact_commit_evidence,
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
-                    reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") == "apply",
+                    reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
                 )
 
             from .command_surface import OPEN_WORLD_OPS

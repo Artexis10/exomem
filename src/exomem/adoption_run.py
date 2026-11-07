@@ -287,18 +287,28 @@ class AdoptionRunStore:
     def list_runs(self) -> list[dict]:
         return self.listing()["runs"]
 
-    def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
-        """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
+    def _readable_runs(self) -> Iterable[dict]:
+        """Every run that loads, in run id order."""
         try:
             names = sorted(folder.name for folder in self.base.iterdir())
         except OSError:
-            return {}
-        grouped: dict[str, list[dict]] = {}
+            return
         for name in names:
             try:
-                run = self.load(name)
+                yield self.load(name)
             except AdoptionRunError:
                 continue
+
+    def runs_at(self, source_root: str) -> tuple[dict, ...]:
+        """Every readable run that scanned `source_root`, whatever its page or phase."""
+        return tuple(
+            run for run in self._readable_runs() if isinstance(run, dict) and run.get("source_root") == source_root
+        )
+
+    def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
+        """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
+        grouped: dict[str, list[dict]] = {}
+        for run in self._readable_runs():
             recorded = run.get("stage") if isinstance(run, dict) else None
             if isinstance(recorded, dict) and isinstance(recorded.get("stage"), str):
                 grouped.setdefault(recorded["stage"], []).append(run)
@@ -970,8 +980,10 @@ def _next_actions(run: dict) -> list[dict]:
     return actions
 
 
-def _residual_actions(residual: dict | None) -> list[dict]:
+def _residual_actions(residual: dict | None, where: str = "finish.residual") -> list[dict]:
     """Review the files that stay staged with the person, and discard them only after the person agrees; neither while later pages follow.
+
+    `where` names the reply field that holds the residual, so that the review text points at the field the reader has.
 
     A page that later pages follow leaves the review and the discard to the last page, because the folder
     still holds files that those pages file. A file that stays is never discarded without the person: a staged
@@ -985,7 +997,7 @@ def _residual_actions(residual: dict | None) -> list[dict]:
     return [
         {"action": "review-residual", "status": "available",
          "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
-                        "finish.residual.by_reason says why. Review them with the person before anything is discarded."},
+                        f"{where}.by_reason says why. Review them with the person before anything is discarded."},
         {"action": "discard", "status": "available",
          "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
     ]
@@ -1196,18 +1208,23 @@ def _vault_relative(root: Path, raw: str) -> str | None:
     return relative.as_posix() if relative.parts else None
 
 
+def _cursor_holder(root: Path, cursor: str, kind: str) -> tuple[dict, str, dict]:
+    """The run that issued a `<run id>:<token>` cursor of `kind`, the token and its entry; a cursor no run issued is refused."""
+    run_id, _, token = cursor.partition(":")
+    if not run_id or Path(run_id).name != run_id:
+        raise AdoptionRunError("RUN_NOT_FOUND", "not a run id")
+    run = AdoptionRunStore(root).load(run_id)
+    return run, token, _cursor_entry(run, kind, token)
+
+
 def _page_cursor(root: Path, after: str) -> tuple[dict, str, dict]:
     """The run that issued the `after` cursor, the cursor's token and its entry.
 
     The cursor is `<run id>:<token>`. The token is one the run object holds, so a guessed or altered
     cursor finds nothing and is refused, the same way a continuation cursor is.
     """
-    run_id, _, token = after.partition(":")
     try:
-        if not run_id or Path(run_id).name != run_id:
-            raise AdoptionRunError("RUN_NOT_FOUND", "not a run id")
-        source = AdoptionRunStore(root).load(run_id)
-        return source, token, _cursor_entry(source, "after", token)
+        return _cursor_holder(root, after, "after")
     except AdoptionRunError as exc:
         raise AdoptionRunError(
             "INVALID_CONTINUATION",
@@ -2081,7 +2098,7 @@ def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | 
     return {
         "code": "INSUFFICIENT_SPACE", "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
         "next": "Stop. The continuation stops at this chunk again until the vault's volume has this chunk's bytes "
-                "plus the reserve free. Free space and tell the person, then call apply again: it resumes at this chunk.",
+                "plus the reserve free. Free space and tell the person, then repeat the call with its continuation: it resumes at this chunk.",
     }
 
 
@@ -3565,3 +3582,301 @@ def _write_run_manifest(
     )
     batch_atomic_write(writes, vault_root=root)
     return rel
+
+
+# --------------------------------------------------------------------------- #
+# file: the whole lifecycle behind one repeatable call
+# --------------------------------------------------------------------------- #
+# These run phases are this module's closed protocol (`PHASES`), not vault vocabulary.
+_APPLY_PHASES = ("planned", "applying")  # nosemgrep: ep-word-set -- the run phases that `apply` accepts for work.
+_FINISH_PHASES = ("applied", "partial")  # nosemgrep: ep-word-set -- the run phases that `finish` accepts.
+_FINISHED_PHASES = ("done", "cancelled")  # nosemgrep: ep-word-set -- the run phases that end a page.
+
+
+def _filing_open(run: dict) -> bool:
+    """Whether `file` still has work on this run: its page is unfinished, or later pages follow it."""
+    return run["phase"] not in _FINISHED_PHASES or _open_cursor(run, "after") is not None
+
+
+def _chain_end(store: AdoptionRunStore, run: dict) -> dict:
+    """The newest page of the paged scan that `run` belongs to: follow each used `after` cursor to the page it opened."""
+    seen = {run["run_id"]}
+    while True:
+        opened = next(
+            (
+                entry["reply"]["run_id"] for entry in (run.get("cursors") or {}).values()
+                if entry.get("kind") == "after" and entry.get("state") == "used"
+                and isinstance(entry.get("reply"), dict) and entry["reply"].get("run_id")
+            ),
+            None,
+        )
+        if opened is None or opened in seen:
+            return run
+        try:
+            run = store.load(opened)
+        except AdoptionRunError:
+            return run
+        seen.add(opened)
+
+
+def _filing_page(root: Path, store: AdoptionRunStore, path: str, collection: str | None, continuation: str | None) -> dict | None:
+    """The newest page that `file` carries on, or None when the call starts a new scan.
+
+    A continuation names the run that issued it. A path alone resumes the newest run of that path that is
+    unfinished, so a retried first call never makes a second run.
+    """
+    source_root = _clean(path)
+    if source_root and (len(PurePosixPath(source_root).parts) < 2 or PurePosixPath(source_root).parts[0] != IMPORT_STAGE_DIR):
+        raise AdoptionRunError(
+            "IMPORT_REQUEST_INVALID", f"file takes a staged folder, {IMPORT_STAGE_DIR}/<id>; use start for any other folder"
+        )
+    if continuation:
+        try:
+            issuer, _token, _entry = _cursor_holder(root, continuation, "file")
+        except AdoptionRunError as exc:
+            raise AdoptionRunError(
+                "INVALID_CONTINUATION",
+                "no file call issued that continuation; call file with the path and no continuation",
+            ) from exc
+        label = issuer["collection"]["label"]
+        if source_root not in ("", issuer["source_root"]) or (
+            (collection or "").strip() and adoption_plan.nfc(collection.strip()) != label
+        ):
+            raise AdoptionRunError(
+                "INVALID_CONTINUATION",
+                f"that continuation belongs to the import of {issuer['source_root']!r} as collection {label!r}; "
+                "pass the same path and collection, or neither",
+            )
+        return _chain_end(store, issuer)
+    if not source_root:
+        raise AdoptionRunError("IMPORT_REQUEST_INVALID", f"file takes the path of the staged folder, {IMPORT_STAGE_DIR}/<id>")
+    unfinished = [run for run in store.runs_at(source_root) if _filing_open(run)]
+    newest = max(unfinished, key=lambda run: str(run.get("created") or ""), default=None)
+    return None if newest is None else _chain_end(store, newest)
+
+
+def _next_filing_step(run: dict) -> str:
+    """The step that moves this page on, from its saved phase alone; `done` and `failed` end the call."""
+    phase = run["phase"]
+    if phase == "selecting":
+        return "plan" if run.get("plan_draft") or (run.get("selection") or {}).get("paths") else "select"
+    if phase in _APPLY_PHASES:
+        return "apply"
+    if phase in _FINISH_PHASES:
+        return "finish"
+    if phase == "failed":
+        return "failed"
+    return "start" if _open_cursor(run, "after") else "done"
+
+
+def _held_apply(store: AdoptionRunStore, run: dict, identity_digest: str) -> tuple[str, dict] | None:
+    """The page that holds this mutation identity's apply invocation, and the invocation; None when the attempt never reached apply.
+
+    `apply` saves the invocation before it publishes anything, so an identity without one published nothing.
+    """
+    for page in (run, *_earlier_pages(store, run)):
+        invocation = (page.get("apply_invocations") or {}).get(identity_digest)
+        if isinstance(invocation, dict):
+            return page["run_id"], invocation
+    return None
+
+
+def _file_step(
+    root: Path, store: AdoptionRunStore, run: dict | None, step: str, *,
+    path: str, collection: str | None, today: dt.date | None,
+) -> dict:
+    """Run one lifecycle step through its own function and return the page it leaves."""
+    if step == "start":
+        if run is None:
+            # Read here, not as a default argument, so a test or an operator can change the page size.
+            opened = start(
+                root, path=_clean(path), collection=collection, max_candidates=MAX_CANDIDATES_DEFAULT, today=today
+            )
+        else:
+            opened = start(root, after=f"{run['run_id']}:{_open_cursor(run, 'after')}", today=today)
+        return store.load(opened["run_id"])
+    run_id = run["run_id"]
+    if step == "select":
+        select(root, run_id=run_id, include=[run["source_root"]])
+        page = store.load(run_id)
+        if not page["selection"]["paths"]:
+            # Nothing on this page can import, so no plan can exist; closing it lets the scan move to the next page.
+            cancel(root, run_id=run_id, why="nothing on this page is eligible to file")
+            page = store.load(run_id)
+        return page
+    if step == "plan":
+        plan(root, run_id=run_id, continuation=_open_cursor(run, "plan") if run.get("plan_draft") else None, today=today)
+    elif step == "apply":
+        apply(
+            root, run_id=run_id, plan_id=run["plan"]["plan_id"],
+            continuation=_open_cursor(run, "apply") if run["phase"] == "applying" else None, today=today,
+        )
+    else:
+        finish(root, run_id=run_id, today=today)
+    return store.load(run_id)
+
+
+def file(
+    root: Path,
+    *,
+    path: str = "",
+    collection: str | None = None,
+    continuation: str | None = None,
+    today: dt.date | None = None,
+) -> dict:
+    """File a staged folder with as many lifecycle steps as one call affords, and say what comes next.
+
+    Every step is the module function of that name, chosen from the saved phase of the newest page, so a call
+    carries on from wherever the run stands, however it got there. A call ends after `apply` or `finish`,
+    when `plan` needs another call, when the next step is `start` of another page and the call has run a
+    step, or when the budget cannot cover the delivery reserve. The reply's `continuation` is fresh each
+    time: a call that repeats an earlier one's arguments gets that call's stored answer and does no work.
+
+    A call that retries an interrupted attempt of its own mutation identity repeats that attempt's `apply`
+    exactly, or runs no `apply` when the attempt never reached one. Another identity that meets an
+    interrupted chunk is refused by `apply`, and the reply stops with its code. An error before any run
+    exists is a bad argument and raises. An error after one stops the reply with that error's code, so the
+    work already committed is still reported.
+    """
+    from .writer_lease import active_mutation_recovery_identity
+
+    root = Path(root)
+    store = AdoptionRunStore(root)
+    run = _filing_page(root, store, path, collection, continuation)
+    identity = active_mutation_recovery_identity()
+    reconciling = identity is not None and identity[2]
+    budget = _call_budget()
+    steps = 0
+    try:
+        held = _held_apply(store, run, identity[0]) if reconciling and run is not None else None
+        if held is not None:
+            page_id, invocation = held
+            apply(
+                root, run_id=page_id, plan_id=invocation.get("plan_id"),
+                continuation=invocation.get("continuation"), today=today,
+            )
+            return _filing_reply(root, store, _chain_end(store, store.load(page_id)))
+        while True:
+            step = "start" if run is None else _next_filing_step(run)
+            if step == "done" or step == "failed":
+                break
+            if steps and (step == "start" or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)):
+                break
+            if step == "apply" and reconciling:
+                # Only the identity's own held apply may run under reconciliation; this attempt published nothing.
+                break
+            run = _file_step(root, store, run, step, path=path, collection=collection, today=today)
+            steps += 1
+            if step == "apply" or step == "finish" or (step == "plan" and run["phase"] == "selecting"):
+                break
+    except AdoptionRunError as exc:
+        if run is None:
+            if exc.code == "KB_NOT_INITIALIZED":
+                # `file` has no such argument, so `start`'s own advice would send the agent to one it cannot pass.
+                raise AdoptionRunError(
+                    exc.code,
+                    f"{kb_dirname()}/ is required; run adoption_studio start on this path with initialize_kb=true, "
+                    "then repeat the file call: it carries on that run",
+                ) from exc
+            raise
+        return _filing_reply(root, store, run, stop={"code": exc.code, "reason": exc.reason})
+    return _filing_reply(root, store, run)
+
+
+def _filing_state(run: dict) -> tuple[str, dict | None]:
+    """`done`, `stopped` with why, or `working`, from the newest page alone."""
+    step = _next_filing_step(run)
+    if step == "done":
+        return "done", None
+    stop = run.get("apply_stop")
+    if stop:
+        free = stop["free_bytes"]
+        return "stopped", {
+            "code": stop["code"],
+            "reason": f"The next chunk needs {stop['chunk_bytes']} bytes and a reserve of {stop['reserve_bytes']} bytes; "
+                      f"{free} bytes are free.",
+        }
+    if step == "failed":
+        codes = Counter(
+            outcome.get("code") for outcome in (run.get("outcomes") or {}).values() if outcome.get("status") == "failed"
+        )
+        code = codes.most_common(1)[0][0] if codes else "INVALID_PHASE"
+        return "stopped", {"code": code, "reason": f"No file on run {run['run_id']} could be filed."}
+    return "working", None
+
+
+def _page_remaining(run: dict) -> int:
+    """Files of this page that have neither been filed nor failed."""
+    if run["phase"] in _FINISHED_PHASES:
+        return 0
+    if run.get("plan"):
+        return _progress(run)["remaining"]
+    selected = (run.get("selection") or {}).get("paths")
+    return len(selected) if selected else sum(1 for row in run.get("inventory") or [] if row.get("eligible"))
+
+
+def _files(count: int) -> str:
+    return f"{count} file" if count == 1 else f"{count} files"
+
+
+def _filing_summary(filing: str, filed: int, failed: int, remaining: int) -> str:
+    """One sentence built from the three counts and nothing else: it claims no more than the outcomes record."""
+    counts = f"{_files(filed)} filed, {failed} failed, {remaining} left"
+    if filing == "done":
+        return f"Filing is done: {counts}."
+    return f"Filing is {filing}: {counts}."
+
+
+def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict | None = None) -> dict:
+    """The compact reply of a `file` call: where the import stands, what comes next and what only the person can do."""
+    run = store.load(run["run_id"])
+    filing, derived = _filing_state(run)
+    if stop is not None:
+        filing, derived = "stopped", stop
+    pages = (run, *_earlier_pages(store, run))
+    outcomes = [outcome for page in pages for outcome in (page.get("outcomes") or {}).values()]
+    filed = sum(1 for outcome in outcomes if outcome.get("status") in _APPLIED_STATUSES)
+    failed = sum(1 for outcome in outcomes if outcome.get("status") == "failed")
+    remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
+    person: list[dict] = []
+    if stop is None and filing == "stopped" and run.get("apply_stop"):
+        person.append({"need": "free_space", "text": run["apply_stop"]["next"]})
+    if stop is not None and stop["code"] == "IMPORT_RECOVERY_UNRESOLVED":
+        person.append({"need": "report_to_operator", "text": stop["reason"]})
+    reply: dict = {
+        "run_id": run["run_id"],
+        "filing": filing,
+        "progress": {
+            "filed": filed, "failed": failed, "remaining": remaining,
+            "pages_done": sum(1 for page in pages if page["phase"] in _FINISHED_PHASES),
+        },
+        "summary": _filing_summary(filing, filed, failed, remaining),
+    }
+    if derived is not None:
+        reply["stop"] = derived
+    if filing == "done":
+        finished = next((page for page in pages if page.get("finish")), None)
+        residual = (
+            run["finish"]["residual"] if run.get("finish")
+            # The last page finished nothing (it held no file to import), so the residual is read now.
+            else adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
+        )
+        done: dict = {}
+        if finished is not None:
+            finish = _presented_finish(finished)
+            done = {"coverage_run": finished["run_id"], **{
+                key: finish[key] for key in ("coverage", "first_question", "route", "indexing") if key in finish
+            }}
+        if residual is not None:
+            done["residual"] = residual
+        reply["filed"] = done
+        for action in _residual_actions(residual, where="filed.residual"):
+            person.append({"need": action["action"].replace("-", "_"), "text": action["description"]})
+    reply["person"] = person
+    if filing == "working" or (filing == "stopped" and run.get("apply_stop") and stop is None):
+        with _LOCK:
+            latest = store.load(run["run_id"])
+            token = _issue_cursor(latest, "file")
+            store.save(latest)
+        reply["continuation"] = f"{run['run_id']}:{token}"
+    return reply

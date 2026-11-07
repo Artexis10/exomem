@@ -552,8 +552,8 @@ _TOOL_HELP = {
     "record_episode": ("write", "Record episode", "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
-    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),
-    "import_memory": ("write", "Import memory", "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Carry continuations through plan and apply; finish records coverage."),
+    "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then file the path it prints with import_memory file. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),
+    "import_memory": ("write", "Import memory", "Import selected originals and optional draft notes without changing original files. Staged folder: repeat file with its continuation until filing is not working. Other kinds are the step path: select folder rules with adopt_as, note_type, project and domain; carry continuations through plan and apply; finish records coverage."),
 }
 
 
@@ -591,6 +591,7 @@ _REMAINING = {
         _row("compile-selected", "import_memory", (*_ADOPTION_SCAN_FIELDS, "selected_paths"), ("selected_paths",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "adoption_studio": ("action", (
+        _row("file", "import_memory", ("path", "collection", "continuation"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes", "view", "offset", "limit", "revision")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
