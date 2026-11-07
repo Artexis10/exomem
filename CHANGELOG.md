@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.163.1](https://github.com/Artexis10/exomem/compare/v0.163.0...v0.163.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **activation:** carry the relation, adoption and delivery capture routes ([#2503](https://github.com/Artexis10/exomem/issues/2503)) ([5748764](https://github.com/Artexis10/exomem/commit/57487646911ceb5db94e98c07fbdd3726d4d9cb9))
+* **cellctl:** refuse an empty volume passphrase for a per-cell key class ([#2490](https://github.com/Artexis10/exomem/issues/2490)) ([ddbba31](https://github.com/Artexis10/exomem/commit/ddbba3126125dcee6496dcfe6aeeb94b1beafa67))
+* **media:** keep the media supervisor alive while the job ledger is held ([#2502](https://github.com/Artexis10/exomem/issues/2502)) ([d03c38f](https://github.com/Artexis10/exomem/commit/d03c38f5269f6ac211a67d4415fc2cea8c7fcb61))
+* **plugins:** keep network sending out of the Cloud hook scripts ([#2513](https://github.com/Artexis10/exomem/issues/2513)) ([c1e300a](https://github.com/Artexis10/exomem/commit/c1e300a936a72994c02bdb4df991cb8edd770abe))
+
 ## [0.163.0](https://github.com/Artexis10/exomem/compare/v0.162.0...v0.163.0) (2026-11-07)
 
 
