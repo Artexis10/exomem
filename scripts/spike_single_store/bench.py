@@ -46,8 +46,14 @@ def main() -> None:
     ap.add_argument("--ops", type=int, default=100)
     ap.add_argument("--kills-files", type=int, default=6)
     ap.add_argument("--kills-single", type=int, default=10)
+    ap.add_argument("--reuse-base", action="store_true",
+                    help="the run root already holds a warm base (vault copy plus sidecars)")
+    ap.add_argument("--stream", type=Path, help="an existing op stream instead of a new one")
     args = ap.parse_args()
     root, out = args.work_root.resolve(), args.out_dir.resolve()
+    # Children run with the run root as working directory.
+    args.shape = args.shape.resolve() if args.shape else None
+    args.stream = args.stream.resolve() if args.stream else None
     out.mkdir(parents=True, exist_ok=True)
     paths = spike_env.layout(root)
     log = (out / "bench-steps.jsonl").open("a", encoding="utf-8")
@@ -58,10 +64,16 @@ def main() -> None:
             paths[key].mkdir(parents=True, exist_ok=True)
         step(log, "synth_vault", "synth_vault", str(args.shape), str(paths["vault"]),
              "--pages", str(args.pages), run_root=root)
-    step(log, "build_base", "build_base", str(root), run_root=root)
-    spike_env.snapshot(root)
-    step(log, "make_stream", "make_stream", str(paths["vault"]), str(out / "stream.jsonl"),
-         str(args.ops), run_root=root)
+    if not args.reuse_base:
+        step(log, "build_base", "build_base", str(root), run_root=root)
+        spike_env.snapshot(root)
+    else:
+        spike_env.restore(root)
+    if args.stream:
+        shutil.copyfile(args.stream, out / "stream.jsonl")
+    else:
+        step(log, "make_stream", "make_stream", str(paths["vault"]), str(out / "stream.jsonl"),
+             str(args.ops), run_root=root)
     spike_env.restore(root)
     step(log, "arm_files", "arm_files", "run", str(root), str(out / "stream.jsonl"),
          str(out / "arm-a"), "--rate-per-min", "0", run_root=root)
