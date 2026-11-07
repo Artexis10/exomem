@@ -14,10 +14,12 @@ import hashlib
 import io
 import json
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from hook_requests import answer_requests
 from test_retrieve_nudge_working_set import (
     PROMPT,
     SESSION,
@@ -274,7 +276,7 @@ def test_main_sends_the_conversation_in_working_set_mode(
 
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
+    answer_requests(monkeypatch, _urlopen)
     event = {**_event(CURRENT), "transcript_path": str(CLAUDE), "cwd": str(tmp_path)}
     output = _run_main(monkeypatch, capsys, event, tmp_path / "home")
     assert _context(output)
@@ -291,9 +293,8 @@ def test_no_transcript_path_sends_no_conversation(
     bodies: list[dict] = []
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    monkeypatch.setattr(
-        hook,
-        "_open_no_redirect",
+    answer_requests(
+        monkeypatch,
         lambda request, timeout=0.0: (
             bodies.append(json.loads(request.data.decode("utf-8")))
             or _Response({"success": True, "data": _packet()})
@@ -324,7 +325,7 @@ def test_an_older_service_gets_one_retry_without_the_conversation(monkeypatch: p
         return _Response({"success": True, "data": _packet()})
 
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
+    answer_requests(monkeypatch, _urlopen)
     conversation = hook._conversation_from_transcript(str(CLAUDE), CURRENT)
     packet = hook._fetch_packet_via_rest(
         CURRENT, _lane("sekret"), "", 4.0, {"client": "claude-code", "session": SESSION}, conversation=conversation
@@ -385,9 +386,8 @@ def test_the_conversation_never_lands_in_hook_state(
     home = tmp_path / "home"
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
     monkeypatch.setenv("EXOMEM_REST_PORT", "8123")
-    monkeypatch.setattr(
-        hook,
-        "_open_no_redirect",
+    answer_requests(
+        monkeypatch,
         lambda request, timeout=0.0: _Response({"success": True, "data": _packet()}),
     )
     phrase = "Bram Quillfeather owns the rota"

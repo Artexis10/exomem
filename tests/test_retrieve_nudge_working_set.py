@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 from benchmark_capabilities import has_no_follow_open, has_posix_file_modes
+from hook_requests import answer_requests
 
 import exomem
 from exomem._hooks import exomem_continuation_checkpoint as checkpoint
@@ -961,7 +962,7 @@ def test_the_working_set_rung_posts_to_the_activation_route(
         seen["body"] = json.loads(request.data.decode("utf-8"))
         return _Response()
 
-    monkeypatch.setattr(hook, "_open_no_redirect", _urlopen)
+    answer_requests(monkeypatch, _urlopen)
 
     packet = hook._fetch_packet_via_rest(PROMPT, _lane("sekret"), "TOKEN-0", 1.0)
 
@@ -1086,9 +1087,8 @@ def test_no_continuity_key_is_sent_when_there_is_no_token(
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(
-        hook,
-        "_open_no_redirect",
+    answer_requests(
+        monkeypatch,
         lambda request, timeout=0.0: (
             seen.update(body=json.loads(request.data.decode("utf-8"))) or _Response()
         ),
@@ -2353,7 +2353,7 @@ def test_a_service_that_predates_the_workspace_key_still_gets_the_session(
         return _Response()
 
     monkeypatch.setattr(hook, "_rest_port", lambda: 1234)
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_urlopen)
+    answer_requests(monkeypatch, fake_urlopen)
     packet = hook._fetch_packet_via_rest("continue", _lane(), "", 1.0, hook.attribution(SESSION))
 
     assert packet == {"abstained": True}

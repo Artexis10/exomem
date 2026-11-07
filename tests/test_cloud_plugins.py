@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -186,12 +187,21 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
         b"EXOMEM_REST_API_KEY",
         b"Authorization",
     )
+    # The standard library's network clients; the directory pairs a credential read with a send.
+    network_modules = {"urllib", "http", "socket", "ssl"}
     with zipfile.ZipFile(tmp_path / "built/claude-hooks.zip") as archive:
         assert "hooks/exomem_local_credentials.py" not in archive.namelist()
         for name in archive.namelist():
             if name.startswith("hooks/") and name.endswith(".py"):
                 for identifier in credential_identifiers:
                     assert identifier not in archive.read(name), (name, identifier)
+                imported = set()
+                for node in ast.walk(ast.parse(archive.read(name))):
+                    if isinstance(node, ast.Import):
+                        imported.update(alias.name.split(".")[0] for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        imported.add(node.module.split(".")[0])
+                assert not imported & network_modules, (name, imported & network_modules)
         archive.extractall(package)
     env = {
         name: value
