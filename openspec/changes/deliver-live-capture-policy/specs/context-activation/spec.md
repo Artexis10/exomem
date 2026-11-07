@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Activation carries the live capture policy
-When the request carries no continuity token, or its token names no capture-policy digest or a digest that differs from the current one, `activate_context` SHALL attach one `capture_policy` block. The block SHALL state the effective `proactive_capture` disposition in plain words and, unless that disposition is `off`, the durable-capture classes with their routing and quiet negatives. The server SHALL build the block from the constants that bootstrap serves, attach it outside the packet cache, reserve its characters inside `limit_chars`, and compute it independently of the turn's content and free of vault content. The server SHALL name the current digest in the continuity token that the response returns when the caller then holds the current policy, because the response carries the block or the request's token already named the digest, and SHALL keep no delivery state of its own. A token that is not valid or a digest field that is absent SHALL read as no digest. The block SHALL NOT exceed 800 bytes.
+When the request carries no continuity token, or its token names no capture-policy digest or a digest that differs from the current one, `activate_context` SHALL attach one `capture_policy` block. The block SHALL state the effective `proactive_capture` disposition in plain words and, unless that disposition is `off`, the durable-capture classes with their routing and quiet negatives. The server SHALL build the block from the constants that bootstrap serves, attach it outside the packet cache, reserve its characters inside `limit_chars` from the map's room and not from the turn slice's share, and compute it independently of the turn's content and free of vault content. The server SHALL name the current digest in the continuity token that the response returns when the caller then holds the current policy, because the response carries the block or the request's token already named the digest, and SHALL keep no delivery state of its own. A token that is not valid or a digest field that is absent SHALL read as no digest. The block SHALL NOT exceed 800 bytes.
 
 #### Scenario: The block agrees with the bootstrap envelope
 - **WHEN** the effective disposition is `off`, `advisory` or `silent`, set by prominence, by an envelope override or by the unreadable-preference floor
@@ -23,6 +23,11 @@ When the request carries no continuity token, or its token names no capture-poli
 #### Scenario: A full map still delivers the block
 - **WHEN** the map fills the character budget and the block is owed
 - **THEN** the packet carries the block and `used_chars` does not exceed `limit_chars`
+
+#### Scenario: The block does not shrink the turn slice
+- **WHEN** a request is owed the block and the turn reaches more leads than fit the slice's share of a budget that has no block
+- **THEN** the packet serves the same leads as the same request that holds the policy
+- **AND** the map's index is the part that holds fewer items
 
 #### Scenario: A request too small for the block leaves it owed
 - **WHEN** a request's budget would leave the map under the smallest budget that a request may ask for

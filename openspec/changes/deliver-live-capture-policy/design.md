@@ -16,7 +16,7 @@ Deliver the disposition in the activation packet, computed by the server per req
 - `envelope.PROACTIVE_CAPTURE_MEANING` holds one plain sentence for each value of the closed `proactive_capture` range.
 - `capture_carrier` computes the block and its digest, decides whether the block is owed, and stamps the digest into the continuity token that the response returns. It never reads the turn.
 - The caller echoes the token on every call, on any transport, so the token carries the delivery state. The shipped HTTP transport is stateless and gives each request a fresh session, so a per-session ledger would send the block on every call. An old token has no digest field, so its holder is owed the block.
-- `op_activate_context` reserves the block's characters in the map budget when the block is owed and the map keeps at least the smallest budget a request may ask for, and attaches it outside the packet cache. A smaller request leaves the block owed, and the token is not stamped.
+- `op_activate_context` reserves the block's characters in the packet budget when the block is owed and the map keeps at least the smallest budget a request may ask for. It attaches the block outside the packet cache. The turn slice keeps its share of the budget as if the block were not owed, so the block costs the map's index and never the leads the turn reached. A smaller request leaves the block owed, and the token is not stamped.
 - A packet that carries no token, such as the abstention under `EXOMEM_DISABLE_WORKING_SET`, has nothing to stamp and so carries the block on every request.
 - The hook prints the block as served. The server owns de-duplication, so the hook keeps no state file.
 
