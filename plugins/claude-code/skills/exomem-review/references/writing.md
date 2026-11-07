@@ -21,8 +21,7 @@ Resolve entity candidates against the active entity registry and selected knowle
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
   editing frontmatter around the registry rule.
-  A single incidental mention, unresolved identity, or transient participant
-  stays in source/note context.
+  Apply the entity eligibility rule in [engagement](engagement.md).
 
 ### Names in another script
 
@@ -128,19 +127,28 @@ state and citations. If the next operation explicitly needs current graph edges,
 honor its freshness refusal; optional graph lag does not invalidate a successful
 ordinary lookup.
 
-**When a write says the page has outgrown its scope.** A compiled write may return
-`structure_suggestion` — the runtime's observation that recurring durable material
-on that page now sits outside what the page says it is about. It is advice, not an
-instruction, and nothing has been moved.
+**When a write asks whether the page answers one question.** A compiled write may
+return `structure_suggestion` of kind `note_cohesion`. It means the page has grown to
+a size step (the response gives `units` and `step_units`). It does not say the page
+is overloaded: the runtime counts size, and you judge meaning. You hold the page, so
+answer its one question now: does this page answer more than one independent
+question? Name them.
 
-Normally surface a `strong` one, in the user's own words: name the threads that have
-grown up, say it looks like its own project or note now, and offer to organise it.
-Never recite the reason codes or say "scope divergence" — that is internal
-vocabulary. Prefer routing into an existing suitable destination over inventing a
-new one, so search before proposing. Ask before restructuring anything unless the
-user has already delegated curation. Do not raise the same recommendation twice in
-one conversation. On a `moderate` one, use judgement: if mentioning it would be
-bureaucracy rather than help, stay quiet.
+- **One question.** Keep the page whole however long it is. Dismiss the item with
+  `triage_memory(ref=<ref>, action="dismiss", expected_fingerprint=<fingerprint>,
+  why="intentional: <the one question>")`. The page stays quiet until it reaches its
+  next size step.
+- **Several questions, each with its own material.** Propose a split through the
+  curation lane, `repair_memory` operation `curation-propose`. Preview the plan and
+  ask the user for exact confirmation before applying it. After a split, a remainder
+  or a new child that still reaches a size step gets its own item. Answer those in
+  the same pass.
+- **A hub by design.** Add a breadth tag (`hub` or `snapshot`) with a governed edit.
+  The page is then never asked.
+
+Answer once and carry on with the task. Do not recite the field names to the user,
+and do not split a coherent note to make the question go away. A page that drops
+below the first step is not asked either.
 
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
@@ -485,6 +493,8 @@ Read-only recall and review follow the live retrieval policy.
 When new evidence changes a durable conclusion, inspect each affected claim and its sources.
 Distinguish what someone attested from what the evidence establishes.
 Use the suitable existing home; a correction does not need another page by default.
+Reconcile each affected current proposition and its explanation with the revised scope.
+A later exception does not complete a correction while other current wording still overstates it.
 
 1. Read the affected units and parent hashes; the exact propositions are visible.
 2. Judge each proposition against the evidence; its support and uncertainty are explicit.

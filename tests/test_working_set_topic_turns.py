@@ -25,7 +25,14 @@ import pytest
 from test_governance_egress import SCOPE_ID, _external, _gov_dir, _reset_caches, write_rule
 from test_working_set_carry import seed_ordinary_notes
 
-from exomem import commands, lexstore, working_set_heat, working_set_index, working_set_runtime
+from exomem import (
+    capture_carrier,
+    commands,
+    lexstore,
+    working_set_heat,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem.governance.principal import request_scope
 
 # This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
@@ -221,7 +228,10 @@ def test_a_topic_turn_in_ordinary_words_lists_the_page_its_title_names(
         for anchor in packet["anchors"]
     ] == [(CLEANING, "retrieval_named", ["lexical_overlap", "retrieval"], ["cycling"])]
     assert packet["units"] == [] and packet["pointers"] == [] and packet["current_state"] == []
-    assert packet["budget"]["used_chars"] == len(packet["next_action"]["say"])
+    # The first call is owed the capture-policy block, which the packet counts inside its budget.
+    policy = packet.get("capture_policy")
+    policy_block = capture_carrier.size(policy) if policy is not None else 0
+    assert packet["budget"]["used_chars"] == len(packet["next_action"]["say"]) + policy_block
     assert CLEANING not in working_set_runtime.decode_continuity(packet["continuity"])["refs"]
 
     picked = _activate(workshop_vault, turn, anchor=CLEANING)

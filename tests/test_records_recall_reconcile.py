@@ -1346,6 +1346,50 @@ def test_reconcile_routes_safe_missing_rows_through_generic_cleanup(
         assert conn.execute("SELECT rel_path FROM semantic_upserts").fetchall() == []
 
 
+def test_a_record_restored_after_the_plan_is_reported_and_keeps_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planned purge applies only what the plan and the read inside its hold share.
+
+    The plan names the record as missing, so it would remove every row it owns. A write restores
+    the record between the plan and the purge; a purge from the plan's read would wipe the rows
+    of a live record.
+    """
+    from exomem import claims, maintenance_jobs
+
+    raw, rel = _raw_record(tmp_path)
+    _seed_suppressed_sidecars(tmp_path, rel)
+    content = raw.read_bytes()
+    raw.unlink()
+    monkeypatch.setattr("exomem.governance.receipts.reconcile", lambda *_args, **_kwargs: {})
+    preview = reconcile_module.reconcile(tmp_path, dry_run=True)
+    assert preview.semantic_missing_drift == [rel]
+    real_checkpoint = maintenance_jobs.checkpoint
+    claims_after_the_purge: list[list[tuple[str]]] = []
+
+    def restore_before_the_purge(phase, *args, **kwargs):
+        if phase == "purging":
+            raw.write_bytes(content)
+        if phase == "units":
+            # The purge has ended. The units phase after it removes the rows of a raw record outside
+            # the corpus, as it did before the per-phase holds, so the purge's effect is read here.
+            with _sqlite(claims.sidecar_path(tmp_path)) as conn:
+                claims_after_the_purge.append(conn.execute("SELECT file_path FROM claims").fetchall())
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", restore_before_the_purge)
+    report = reconcile_module.reconcile(tmp_path, plan_id=preview.plan_id).as_dict()
+
+    assert report["semantic_missing_purged"] == []
+    assert report["semantic_suppressed_purged"] == []
+    assert claims_after_the_purge == [[(rel,)]]
+    assert {(item["path"], item["change"]) for item in report["semantic_isolation_changed"]} == {
+        (rel, "gone"),
+        (rel, "unplanned"),
+    }
+    assert set(report["semantic_suppressed_incomplete"].values()) == {"changed_since_plan"}
+
+
 def test_reconcile_resumes_census_past_admitted_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

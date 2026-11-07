@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 PASS, FAIL, UNKNOWN = "pass", "fail", "unknown"
+#: A check the run gave no occasion for. It is neither a pass nor a gap, so the verdict leaves it out.
+NOT_APPLICABLE = "not_applicable"
 
 #: The scripted server's name, as the agent sees it in `mcp__<server>__<tool>`.
 SERVER = "exomem"
@@ -263,7 +265,7 @@ def verdict(run_error: str | None, deterministic: list[Outcome], judged: list[Ou
     Otherwise a proven failure wins, any gap is unknown, and pass needs every check to pass."""
     if run_error is not None:
         return UNKNOWN
-    outcomes = [*deterministic, *judged]
+    outcomes = [o for o in [*deterministic, *judged] if o.verdict != NOT_APPLICABLE]
     if any(o.verdict == FAIL for o in outcomes):
         return FAIL
     return PASS if outcomes and all(o.verdict == PASS for o in outcomes) else UNKNOWN

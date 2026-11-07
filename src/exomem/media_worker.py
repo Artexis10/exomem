@@ -14,6 +14,7 @@ are returned to the host. Inline mode preserves a deterministic test/debug path.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import hashlib
 import inspect
@@ -22,6 +23,7 @@ import os
 import queue
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -237,6 +239,14 @@ def _job_store_signature(store: MediaJobStore) -> tuple[object, ...] | None:
         return None
 
 
+def _ledger_busy(error: BaseException) -> bool:
+    """Whether `error` says only that another connection holds the job ledger now, so a later pass can outlast it."""
+    # The lexical store's SQLite triage, reused rather than copied; imported only once an error needs it.
+    from . import lexstore
+
+    return isinstance(error, sqlite3.Error) and lexstore.classify_sqlite_error(error) == "transient"
+
+
 def _writer_authority_available() -> bool:
     """Derived from :func:`_probe_writer_authority`, never a second probe.
 
@@ -437,12 +447,18 @@ class MediaWorker:
         self._gpu_preflight: cuda_containment.Preflight | None = None
         #: The supervisor killed the running child itself, so its signal exit is not a crash.
         self._child_stopped = False
+        #: A stop of the dead child that the ledger has not recorded yet: its kind, cell and settings.
+        self._unrecorded_stop: tuple[str, media_brakes.CellMemory, media_brakes.Settings] | None = None
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
         self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
         self._child_started_at = 0.0
         self._engine_waits: list[_Job] = []
+        #: The rows `requeue_runtime_blocks` handed over, taken one per step, and how many of them
+        #: have returned to the queue so far. A deque: the start thread appends while the supervisor pops.
+        self._runtime_requeues: collections.deque[_Job] = collections.deque()
+        self._runtime_requeued = 0
         # The last pressure reading was high; the supervisor then reads it every pass
         # so the memory-blocked retry backs off only while pressure lasts.
         self._pressure_high = False
@@ -1066,28 +1082,114 @@ class MediaWorker:
                 dropped,
             )
 
+    def present_runtime_requeue(self, job: _Job) -> bool:
+        """Show the media of a job that `requeue_runtime_block` is about to return as pending.
+
+        Call this holding `_presentation_guard`, once a read under it found the row still blocked: a
+        write after the claim would make the child's extraction stale. A completed transcript never
+        showed the block (`mark_processing_unavailable` leaves it alone), so it stays as it is.
+        """
+        try:
+            return self._holds_completed_transcript(job) or self._show_pending(job)
+        except Exception:  # noqa: BLE001 - a sidecar that cannot be shown must not strand the requeue
+            log.warning("media worker: pending presentation failed for %s", job.sidecar_path.name, exc_info=True)
+            return False
+
+    def requeue_runtime_blocks(self) -> None:
+        """Return the work that a start without a media runtime blocked to the queue, one row at a time.
+
+        Call it once this start has recorded its runtime as available and run its startup reconcile.
+        The supervisor takes one row per pass, so the start does not wait one page commit per row and
+        a stop leaves at most the row in hand. Inline mode has no supervisor and takes every row here;
+        a held ledger ends that sweep, and the rows left wait for the next start with a runtime.
+        """
+        store = self._store
+        if store is None:
+            if not media_jobs.job_store_path(self._vault_root).exists():
+                return
+            store = MediaJobStore(self._vault_root, create=False)
+        self._runtime_requeues.extend(store.runtime_blocked_jobs())
+        if self._execution_mode == "process":
+            self._wake.set()
+            return
+        while self._requeue_next_runtime_block(store):
+            pass
+
+    def _requeue_next_runtime_block(self, store: MediaJobStore) -> bool:
+        """Requeue the next row that `requeue_runtime_blocks` handed over. True while rows remain."""
+        try:
+            job = self._runtime_requeues.popleft()
+        except IndexError:
+            return False
+        self._runtime_requeued += self._requeue_runtime_block(store, job)
+        if self._runtime_requeues:
+            return True
+        if self._runtime_requeued:
+            log.info("media worker: requeued %d job(s) a start without a media runtime blocked", self._runtime_requeued)
+        self._runtime_requeued = 0
+        return False
+
+    def _requeue_runtime_block(self, store: MediaJobStore, job: _Job) -> bool:
+        """Show a handed-over row's media as pending while the row is still blocked, then requeue it.
+
+        The row is read again under the guard of the page write. A retry needs that guard to return the
+        row to pending, and a child claims only a pending row, so a row that changed since the handover
+        keeps its page, and no page is written for a row that runs. Without the guard, the page keeps
+        its blocked text and the row returns anyway; the requeue checks the row itself.
+
+        A ledger that another connection holds puts the row back first in line, and its error reaches
+        the caller, so the supervisor tries the row again after one poll. Any other error leaves the row
+        blocked for the next start with a runtime, and the rows after it still run. Before the page is
+        shown, the page still says blocked; after it, that one page is ahead of its row, as a stop at
+        that point leaves it.
+        """
+        try:
+            try:
+                with self._presentation_guard():
+                    current = store.current_runtime_block(job)
+                    if current is None:
+                        return False
+                    self.present_runtime_requeue(current)
+            except (OSError, OpError):
+                # No page was written: the guard was refused, or the read failed before the page.
+                log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
+            return store.requeue_runtime_block(job)
+        except Exception as error:  # noqa: BLE001 - one row's ledger error must not strand the rows after it
+            if _ledger_busy(error):
+                self._runtime_requeues.appendleft(job)
+                raise
+            log.warning("media worker: requeue of %s deferred to the next start", job.sidecar_path.name, exc_info=True)
+            return False
+
+    def _presentation_guard(self) -> contextlib.AbstractContextManager[Any]:
+        """The guard of every pending-page write."""
+        return get_manager().mutation_guard(
+            self._vault_root,
+            operation="background_media_pending_presentation",
+            holder_kind="background",
+        )
+
     def _present_pending(self, job: _Job) -> bool:
         """Show a blocked job's media as pending. True once no sidecar shows the block."""
         try:
-            with get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_pending_presentation",
-                holder_kind="background",
-            ):
-                if not job.sidecar_path.exists() or not self._is_recall_admitted_media_sidecar(
-                    job.sidecar_path
-                ):
-                    return True
-                return preserve.update_sidecar_processing_pending(
-                    self._vault_root,
-                    job.sidecar_path,
-                    attempts=max(1, job.attempts),
-                    next_action=media_jobs.WAIT_ACTION,
-                )
+            with self._presentation_guard():
+                return self._show_pending(job)
         except (OSError, UnicodeError, OpError, preserve.PreserveError):
-            # Kept blocked; the next supervisor start presents it again.
+            # The page keeps its blocked text. The engine caller then keeps the job blocked, so the next
+            # start shows it again.
             log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
             return False
+
+    def _show_pending(self, job: _Job) -> bool:
+        """`_present_pending` for a caller that holds `_presentation_guard`."""
+        if not job.sidecar_path.exists() or not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            return True
+        return preserve.update_sidecar_processing_pending(
+            self._vault_root,
+            job.sidecar_path,
+            attempts=max(1, job.attempts),
+            next_action=media_jobs.WAIT_ACTION,
+        )
 
     def _context_for(self, cell: media_brakes.CellMemory, config: media_brakes.Settings):
         def context(job: _Job) -> str:
@@ -1160,12 +1262,25 @@ class MediaWorker:
                 f", brakes unavailable: {cell.problem}" if cell.problem else "",
             )
         self._child_stopped = True
+        self._unrecorded_stop = (kind, cell, config)
         with contextlib.suppress(OSError):
             os.killpg(child.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             child.wait(timeout=5)
         if child.returncode is not None:
             _reap_group(child.pid)
+        self._record_stop()
+
+    def _record_stop(self) -> None:
+        """Record the stop that `_stop_child` made for each job its child ran, once.
+
+        A held ledger leaves the stop unrecorded, and the child's exit records it before the exit
+        returns the job. A recorded stop takes the job out of running, so a second pass counts it once.
+        """
+        assert self._store is not None
+        if self._unrecorded_stop is None:
+            return
+        kind, cell, config = self._unrecorded_stop
         if kind == media_brakes.TIMEOUT:
             exceeded = media_brakes.timeout_context(config)
             for job in self._store.running_jobs():
@@ -1182,17 +1297,18 @@ class MediaWorker:
                         config.stop_limit,
                     )
                     self.publish_over_budget(job, exceeded)
-            return
-        context = self._context_for(cell, config)
-        for job in self._store.running_jobs():
-            self._store.record_memory_stop(
-                job,
-                kind=kind,
-                stop_limit=config.stop_limit,
-                context=context(job),
-                progress=self._speech_progress(job),
-            )
-        self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
+        else:
+            context = self._context_for(cell, config)
+            for job in self._store.running_jobs():
+                self._store.record_memory_stop(
+                    job,
+                    kind=kind,
+                    stop_limit=config.stop_limit,
+                    context=context(job),
+                    progress=self._speech_progress(job),
+                )
+            self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
+        self._unrecorded_stop = None
 
     def _commit_sidecar_extraction(
         self,
@@ -1316,6 +1432,8 @@ class MediaWorker:
         parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
         text where it was.
         """
+        from . import media_processing
+
         fields = dict(
             engine=engine,
             speakers=speakers,
@@ -1323,6 +1441,8 @@ class MediaWorker:
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
+            # Both callers have just revalidated the original; a page stored with it records these.
+            binary_hints=media_processing.read_timestamp_hints(job.binary_path),
         )
         if not reprocessing:
             plan, write = preserve.sidecar_extraction_writes(
@@ -1367,8 +1487,9 @@ class MediaWorker:
 
     def _reprocesses_completed(self, job: _Job) -> bool:
         """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""
-        if not (job.reprocess and job.do_ocr):
-            return False
+        return job.reprocess and job.do_ocr and self._holds_completed_transcript(job)
+
+    def _holds_completed_transcript(self, job: _Job) -> bool:
         from . import media_processing
 
         try:
@@ -1824,6 +1945,8 @@ class MediaWorker:
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+        #: When a pass first found the job ledger held, while it stays held; `None` while it is free.
+        ledger_held_since: float | None = None
         brakes = media_brakes.enabled()
         #: A GPU wait is recorded that no idle pass has re-checked yet; a restart can keep one for waiting jobs.
         gpu_wait_recorded = bool(
@@ -1839,219 +1962,255 @@ class MediaWorker:
                 except Exception:  # noqa: BLE001 - convergence retries at the next start
                     log.warning("media worker: engine convergence deferred", exc_info=True)
             while not self._stop_event.is_set():
-                if _clock() >= eviction_at:
-                    # A pass may wait on the store, so it runs beside this watchdog, one pass at a time.
-                    if eviction is None or not eviction.is_alive():
-                        eviction = threading.Thread(target=_evict, args=(self._vault_root,),
-                                                    name="exomem-media-eviction", daemon=True)
-                        eviction.start()
-                    eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
-                child = self._child
-                running = child is not None and child.poll() is None
-                if brakes and (running or self._pressure_high):
-                    cell = media_brakes.read_cell()
-                    config = media_brakes.settings(cell=cell)
-                    self._note_pressure(media_brakes.pressure_exceeded(cell, config))
-                if brakes and running:
-                    assert child is not None
-                    if self._pressure_high:
-                        self._stop_child(child, media_brakes.PRESSURE)
-                    elif _clock() - self._child_started_at >= config.job_timeout_seconds:
-                        # A hang or a file too long for the timeout must not hold the
-                        # queue: after the stop limit it is over budget.
-                        self._stop_child(child, media_brakes.TIMEOUT)
-                if brakes and _clock() >= self._memory_recovery_at:
-                    pressure = True
-                    try:
-                        recovered, pressure = self._recover_memory_verdicts()
-                        if recovered:
-                            idle_signature = None
-                    except Exception:  # noqa: BLE001 - recovery retries on the next tick
-                        log.warning("media worker: memory recovery deferred", exc_info=True)
-                    self._pressure_high = pressure
-                    self._memory_recovery_interval = (
-                        min(self._memory_recovery_interval * 2, _MEMORY_RECOVERY_MAX_SECONDS)
-                        if pressure
-                        else _MEMORY_RECOVERY_SECONDS
-                    )
-                    self._memory_recovery_at = _clock() + self._memory_recovery_interval
-                # Retry polling without replaying child-exit bookkeeping.
+                requeuing = False
                 try:
-                    if child is not None:
-                        signature = _job_store_signature(self._store)
-                        settled = (
-                            idle_signature is not None
-                            and signature is not None
-                            and signature == idle_signature
-                            and _clock() < forced_recheck_at
-                        )
-                        if not settled:
-                            if self._store.has_parent_work():
-                                # A retained result may make no write; retry next pass.
+                    if _clock() >= eviction_at:
+                        # A pass may wait on the store, so it runs beside this watchdog, one pass at a time.
+                        if eviction is None or not eviction.is_alive():
+                            eviction = threading.Thread(target=_evict, args=(self._vault_root,),
+                                                        name="exomem-media-eviction", daemon=True)
+                            eviction.start()
+                        eviction_at = _clock() + _EVICTION_INTERVAL_SECONDS
+                    child = self._child
+                    running = child is not None and child.poll() is None
+                    if brakes and (running or self._pressure_high):
+                        cell = media_brakes.read_cell()
+                        config = media_brakes.settings(cell=cell)
+                        self._note_pressure(media_brakes.pressure_exceeded(cell, config))
+                    if brakes and running:
+                        assert child is not None
+                        if self._pressure_high:
+                            self._stop_child(child, media_brakes.PRESSURE)
+                        elif _clock() - self._child_started_at >= config.job_timeout_seconds:
+                            # A hang or a file too long for the timeout must not hold the
+                            # queue: after the stop limit it is over budget.
+                            self._stop_child(child, media_brakes.TIMEOUT)
+                    if brakes and _clock() >= self._memory_recovery_at:
+                        pressure = True
+                        try:
+                            recovered, pressure = self._recover_memory_verdicts()
+                            if recovered:
                                 idle_signature = None
-                                self._drain_parent_results()
-                            else:
-                                # Capture after close; the check can change the WAL.
-                                idle_signature = _job_store_signature(self._store)
-                                # Sidecar-only edits and folded writes need a fixed backstop.
-                                forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
-                except OpError as exc:
-                    if exc.code not in _TRANSIENT_OPERATION_CODES:
-                        raise
-                    idle_signature = None
-                    log.info("media worker: parent poll deferred after %s", exc.code)
-                if child is not None and child.poll() is not None:
-                    returncode = child.returncode
-                    child_pid = child.pid
-                    self._child = None
-                    self._release_slot()
-                    idle_signature = None
-                    gpu_hold = False
-                    crashed = returncode is not None and returncode < 0 and not self._child_stopped
-                    crashes_before, crashes = crashes, crashes + 1 if crashed else 0
-                    owns_runtime = self._store.worker_pid() == child_pid
-                    recovered = self._store.recover_interrupted() if owns_runtime else 0
-                    if owns_runtime:
-                        self._store.clear_worker(child_pid)
-                    if crashed:
-                        # After the recovery, so the record names the job that the next child claims.
-                        self._record_status(
-                            MediaJobStore.record_child_crash, crashes, cuda_containment.signal_name(-returncode)
+                        except Exception:  # noqa: BLE001 - recovery retries on the next tick
+                            log.warning("media worker: memory recovery deferred", exc_info=True)
+                        self._pressure_high = pressure
+                        self._memory_recovery_interval = (
+                            min(self._memory_recovery_interval * 2, _MEMORY_RECOVERY_MAX_SECONDS)
+                            if pressure
+                            else _MEMORY_RECOVERY_SECONDS
                         )
-                    elif crashes_before:
-                        self._record_status(MediaJobStore.clear_child_crashes)
-                    if returncode == _MEMORY_RECYCLE_EXIT_CODE:
-                        delay = 0.5
-                    elif returncode == _MEMORY_WAIT_EXIT_CODE:
-                        delay = _MEMORY_WAIT_SECONDS
-                        log.info("media child found no memory room; retrying after %.1fs", delay)
-                    elif returncode == _SLOT_TOO_SMALL_EXIT_CODE:
-                        delay = 0.5  # the slot is already released; the next ask is sized again
-                        log.info("media child found its node slot too small; asking again")
-                    elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
-                        delay = self._authority_backoff
-                        self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
-                        log.info(
-                            "media child found no writer authority; retrying after %.1fs",
-                            delay,
-                        )
-                    elif returncode == _GPU_BUSY_EXIT_CODE:
-                        delay = _GPU_BUSY_RECHECK_SECONDS
-                        gpu_hold = gpu_wait_recorded = True
-                        hold_signature = _job_store_signature(self._store)  # the child ran everything it could
-                        log.info("media child found the GPU busy; retrying after %.1fs", delay)
-                    elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
-                        delay = (
-                            _LOCK_UNAVAILABLE_RECHECK_SECONDS
-                            if returncode == _LOCK_UNAVAILABLE_EXIT_CODE
-                            else _TRANSIENT_RECHECK_SECONDS
-                        )
-                        log.info(
-                            "media child deferred work; retrying after %.1fs",
-                            delay,
-                        )
-                    elif crashed:
-                        delay = min(2.0 * 2 ** (crashes - 1), _CHILD_CRASH_BACKOFF_MAX_SECONDS)
-                        log.error(
-                            "media child died with signal %d (%d in a row); recovered %d job(s); retrying after %.0fs",
-                            -returncode,
-                            crashes,
-                            recovered,
-                            delay,
-                        )
-                    elif returncode:
-                        delay = 2.0
-                        log.warning(
-                            "media child exited %s; recovered %d job(s)",
-                            returncode,
-                            recovered,
-                        )
-                    else:
-                        delay = 0.5
-                        if brakes:
-                            self._reset_memory_recovery()  # the child's job completed
-                    if returncode != _AUTHORITY_UNAVAILABLE_EXIT_CODE:
-                        self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
-                    relaunch_after = max(_clock() + delay, self._memory_hold_until)
-                    recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                try:
-                    if gpu_hold:
-                        # Every path that queues work writes the store, so a changed signature is the cue to look.
-                        # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
-                        # more on the way, so one probe is the whole cost.
-                        signature = _job_store_signature(self._store)
-                        if signature is None or signature != hold_signature:
-                            if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
-                                relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
-                                gpu_hold = False
-                            else:
-                                hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
-                    if self._child is None and _clock() >= relaunch_after:
-                        now = _clock()
-                        signature = _job_store_signature(self._store)
-                        if (
-                            idle_signature is not None
-                            and signature is not None
-                            and signature != idle_signature
-                        ):
-                            # Someone wrote the store since the last idle answer.
-                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                        settled = (
-                            idle_signature is not None
-                            and signature is not None
-                            and signature == idle_signature
-                            and now < forced_recheck_at
-                        )
-                        parent_work = not settled and self._store.has_parent_work()
-                        if parent_work:
-                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                            self._drain_parent_results()
-                        elif not settled and self._store.needs_worker():
-                            idle_signature = None
-                            recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                            refusal = _probe_writer_authority()
-                            if brakes and not self._room_for_next_job():
-                                # No child starts into pressure or without room for its
-                                # job: it would only be stopped or exit unrun.
-                                relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
-                            elif refusal is not None:
-                                relaunch_after = _clock() + _authority_recheck_seconds(
-                                    refusal
-                                )
-                            elif brakes and self._slot is not None and not self._ask_slot():
-                                # No node slot yet, or no answer: wait as a memory-blocked job waits.
-                                relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
-                            else:
-                                try:
-                                    self._child_stopped = False
-                                    self._child = self._launch_child()
-                                    self._child_started_at = _clock()
-                                except OSError:
-                                    self._release_slot()
-                                    log.exception("media worker: could not start child")
-                                    relaunch_after = _clock() + 5.0
-                        elif not settled:
-                            # Nothing to do.  Record the signature AFTER the check,
-                            # not the one read before it: `needs_worker()` opens the
-                            # store, and that open writes to the WAL, so a
-                            # before-signature would never match again and the skip
-                            # would never engage.
-                            if gpu_wait_recorded:
-                                # No work is pending, so no speech job waits for a GPU: end the record of that wait.
-                                self._record_status(MediaJobStore.clear_gpu_wait)
-                                gpu_wait_recorded = False
-                            idle_signature = _job_store_signature(self._store)
-                            forced_recheck_at = _clock() + recheck_interval
-                            recheck_interval = min(
-                                recheck_interval * 2, _SUPERVISE_FORCED_RECHECK_MAX_SECONDS
+                        self._memory_recovery_at = _clock() + self._memory_recovery_interval
+                    # Retry polling without replaying child-exit bookkeeping.
+                    try:
+                        if child is not None:
+                            signature = _job_store_signature(self._store)
+                            settled = (
+                                idle_signature is not None
+                                and signature is not None
+                                and signature == idle_signature
+                                and _clock() < forced_recheck_at
                             )
-                except OpError as exc:
-                    if exc.code not in _TRANSIENT_OPERATION_CODES:
+                            if not settled:
+                                if self._store.has_parent_work():
+                                    # A retained result may make no write; retry next pass.
+                                    idle_signature = None
+                                    self._drain_parent_results()
+                                else:
+                                    # Capture after close; the check can change the WAL.
+                                    idle_signature = _job_store_signature(self._store)
+                                    # Sidecar-only edits and folded writes need a fixed backstop.
+                                    forced_recheck_at = _clock() + _SUPERVISE_FORCED_RECHECK_SECONDS
+                    except OpError as exc:
+                        if exc.code not in _TRANSIENT_OPERATION_CODES:
+                            raise
+                        idle_signature = None
+                        log.info("media worker: parent poll deferred after %s", exc.code)
+                    if child is not None and child.poll() is not None:
+                        returncode = child.returncode
+                        child_pid = child.pid
+                        self._release_slot()  # idempotent, so a held ledger below does not hold the node slot
+                        # The ledger next: when it is held, the child stays in place and the next pass
+                        # replays this exit whole. Each of these writes holds when it runs twice. A stop
+                        # is recorded first, so the recovery below does not return its job uncounted.
+                        self._record_stop()
+                        owns_runtime = self._store.worker_pid() == child_pid
+                        recovered = self._store.recover_interrupted() if owns_runtime else 0
+                        if owns_runtime:
+                            self._store.clear_worker(child_pid)
+                        self._child = None
+                        idle_signature = None
+                        gpu_hold = False
+                        crashed = returncode is not None and returncode < 0 and not self._child_stopped
+                        crashes_before, crashes = crashes, crashes + 1 if crashed else 0
+                        if crashed:
+                            # After the recovery, so the record names the job that the next child claims.
+                            self._record_status(
+                                MediaJobStore.record_child_crash, crashes, cuda_containment.signal_name(-returncode)
+                            )
+                        elif crashes_before:
+                            self._record_status(MediaJobStore.clear_child_crashes)
+                        if returncode == _MEMORY_RECYCLE_EXIT_CODE:
+                            delay = 0.5
+                        elif returncode == _MEMORY_WAIT_EXIT_CODE:
+                            delay = _MEMORY_WAIT_SECONDS
+                            log.info("media child found no memory room; retrying after %.1fs", delay)
+                        elif returncode == _SLOT_TOO_SMALL_EXIT_CODE:
+                            delay = 0.5  # the slot is already released; the next ask is sized again
+                            log.info("media child found its node slot too small; asking again")
+                        elif returncode == _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                            delay = self._authority_backoff
+                            self._authority_backoff = min(delay * 2, _AUTHORITY_BACKOFF_MAX_SECONDS)
+                            log.info(
+                                "media child found no writer authority; retrying after %.1fs",
+                                delay,
+                            )
+                        elif returncode == _GPU_BUSY_EXIT_CODE:
+                            delay = _GPU_BUSY_RECHECK_SECONDS
+                            gpu_hold = gpu_wait_recorded = True
+                            hold_signature = _job_store_signature(self._store)  # the child ran everything it could
+                            log.info("media child found the GPU busy; retrying after %.1fs", delay)
+                        elif returncode in {_TRANSIENT_EXIT_CODE, _LOCK_UNAVAILABLE_EXIT_CODE}:
+                            delay = (
+                                _LOCK_UNAVAILABLE_RECHECK_SECONDS
+                                if returncode == _LOCK_UNAVAILABLE_EXIT_CODE
+                                else _TRANSIENT_RECHECK_SECONDS
+                            )
+                            log.info(
+                                "media child deferred work; retrying after %.1fs",
+                                delay,
+                            )
+                        elif crashed:
+                            delay = min(2.0 * 2 ** (crashes - 1), _CHILD_CRASH_BACKOFF_MAX_SECONDS)
+                            log.error(
+                                "media child died with signal %d (%d in a row); recovered %d job(s); retrying after %.0fs",
+                                -returncode,
+                                crashes,
+                                recovered,
+                                delay,
+                            )
+                        elif returncode:
+                            delay = 2.0
+                            log.warning(
+                                "media child exited %s; recovered %d job(s)",
+                                returncode,
+                                recovered,
+                            )
+                        else:
+                            delay = 0.5
+                            if brakes:
+                                self._reset_memory_recovery()  # the child's job completed
+                        if returncode != _AUTHORITY_UNAVAILABLE_EXIT_CODE:
+                            self._authority_backoff = _FOLLOWER_RECHECK_SECONDS
+                        relaunch_after = max(_clock() + delay, self._memory_hold_until)
+                        recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                    try:
+                        if gpu_hold:
+                            # Every path that queues work writes the store, so a changed signature is the cue to look.
+                            # Work that needs no GPU ends the wait early: the child that takes it asks the GPU once
+                            # more on the way, so one probe is the whole cost.
+                            signature = _job_store_signature(self._store)
+                            if signature is None or signature != hold_signature:
+                                if self._store.next_pending(skip_media_types=media_engines.SPEECH_KINDS) is not None:
+                                    relaunch_after = min(relaunch_after, max(_clock(), self._memory_hold_until))
+                                    gpu_hold = False
+                                else:
+                                    hold_signature = _job_store_signature(self._store)  # after the read: it can write the WAL
+                        if self._child is None and _clock() >= relaunch_after:
+                            now = _clock()
+                            signature = _job_store_signature(self._store)
+                            if (
+                                idle_signature is not None
+                                and signature is not None
+                                and signature != idle_signature
+                            ):
+                                # Someone wrote the store since the last idle answer.
+                                recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                            settled = (
+                                idle_signature is not None
+                                and signature is not None
+                                and signature == idle_signature
+                                and now < forced_recheck_at
+                            )
+                            parent_work = not settled and self._store.has_parent_work()
+                            if parent_work:
+                                recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                                self._drain_parent_results()
+                            elif not settled and self._store.needs_worker():
+                                idle_signature = None
+                                recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+                                refusal = _probe_writer_authority()
+                                if brakes and not self._room_for_next_job():
+                                    # No child starts into pressure or without room for its
+                                    # job: it would only be stopped or exit unrun.
+                                    relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
+                                elif refusal is not None:
+                                    relaunch_after = _clock() + _authority_recheck_seconds(
+                                        refusal
+                                    )
+                                elif brakes and self._slot is not None and not self._ask_slot():
+                                    # No node slot yet, or no answer: wait as a memory-blocked job waits.
+                                    relaunch_after = _clock() + _MEMORY_WAIT_SECONDS
+                                else:
+                                    try:
+                                        self._child_stopped = False
+                                        self._child = self._launch_child()
+                                        self._child_started_at = _clock()
+                                    except OSError:
+                                        self._release_slot()
+                                        log.exception("media worker: could not start child")
+                                        relaunch_after = _clock() + 5.0
+                            elif not settled:
+                                # Nothing to do.  Record the signature AFTER the check,
+                                # not the one read before it: `needs_worker()` opens the
+                                # store, and that open writes to the WAL, so a
+                                # before-signature would never match again and the skip
+                                # would never engage.
+                                if gpu_wait_recorded:
+                                    # No work is pending, so no speech job waits for a GPU: end the record of that wait.
+                                    self._record_status(MediaJobStore.clear_gpu_wait)
+                                    gpu_wait_recorded = False
+                                idle_signature = _job_store_signature(self._store)
+                                forced_recheck_at = _clock() + recheck_interval
+                                recheck_interval = min(
+                                    recheck_interval * 2, _SUPERVISE_FORCED_RECHECK_MAX_SECONDS
+                                )
+                    except OpError as exc:
+                        if exc.code not in _TRANSIENT_OPERATION_CODES:
+                            raise
+                        idle_signature = None
+                        relaunch_after = max(relaunch_after, _clock() + _authority_recheck_seconds(exc.code))
+                        log.info("media worker: dispatch deferred after %s", exc.code)
+                    # One handed-over row per pass, after the child watch above. The next pass starts at once
+                    # while rows remain, and a stop ends the sweep after the row in hand.
+                    requeuing = not self._stop_event.is_set() and self._requeue_next_runtime_block(self._store)
+                except sqlite3.Error as exc:
+                    if not _ledger_busy(exc):
                         raise
+                    # Another connection holds the job ledger past its busy timeout. The pass ends here and the
+                    # next one starts after one poll. Nothing recorded an answer, so it asks the store again.
                     idle_signature = None
-                    relaunch_after = max(relaunch_after, _clock() + _authority_recheck_seconds(exc.code))
-                    log.info("media worker: dispatch deferred after %s", exc.code)
-                if self._wake.wait(_SUPERVISE_POLL_SECONDS):
+                    # The first held pass warns, the passes after it log at debug, and the first free pass
+                    # warns again, so a long hold writes two warnings.
+                    first = ledger_held_since is None
+                    if first:
+                        ledger_held_since = _clock()
+                    log.log(
+                        logging.WARNING if first else logging.DEBUG,
+                        "media worker: the job ledger is held; supervisor pass retried after %.1fs "
+                        "(child running: %s, handed-over rows waiting: %d)",
+                        _SUPERVISE_POLL_SECONDS,
+                        self._child is not None and self._child.poll() is None,
+                        len(self._runtime_requeues),
+                        exc_info=first,
+                    )
+                else:
+                    if ledger_held_since is not None:
+                        log.warning(
+                            "media worker: the job ledger is free again; supervisor passes resumed after %.1fs",
+                            _clock() - ledger_held_since,
+                        )
+                        ledger_held_since = None
+                if self._wake.wait(0 if requeuing else _SUPERVISE_POLL_SECONDS):
                     # Cleared only once it has fired, so a wake that lands
                     # after a timed-out wait is still seen on the next one. A
                     # second enqueue between the wait and the clear wrote the

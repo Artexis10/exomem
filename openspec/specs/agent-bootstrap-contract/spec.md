@@ -314,26 +314,6 @@ Bootstrap SHALL expose the six finite Planning actions, the four Planning kinds,
 - **WHEN** an agent has the generic Exomem skill or bootstrap contract
 - **THEN** ordinary Planning capture, triage, and query are fully routable without installing a separate skill that only repeats `plan_memory` arguments
 
-### Requirement: The agent contract teaches structural-promotion presentation
-
-Bootstrap and the canonical write loop SHALL teach agents that a compiled write may return one advisory `structure_suggestion`, and SHALL state how to act on it.
-
-The guidance SHALL direct agents to normally surface a `strong` suggestion, to describe it in the user's own domain language rather than in Exomem's internal terms, to ask before reorganising unless the user has explicitly delegated curation, to prefer an existing suitable destination over creating a new one, to avoid repeating the same recommendation within one interaction, and to exercise judgement on a `moderate` suggestion where mentioning it would be bureaucracy rather than help.
-
-The guidance SHALL state that the suggestion is advisory and that the runtime never reorganises knowledge on its own.
-
-#### Scenario: Bootstrap names the signal and the expected behaviour
-
-- **WHEN** a generic client reads the bootstrap post-write guidance
-- **THEN** it learns that a durable write may return a structural suggestion and where to find it
-- **AND** it learns to surface a strong suggestion, to ask before restructuring, and to prefer an existing destination
-
-#### Scenario: Guidance is presentational, not executable
-
-- **WHEN** bootstrap describes structural suggestions
-- **THEN** reading bootstrap creates, moves, or reorganises nothing
-- **AND** no new tool or parameter is required to receive the suggestion
-
 ### Requirement: Post-write guidance names only fields the response carries
 
 The write-loop guidance SHALL describe the fields a successful mutation actually returns at its default response detail, and SHALL identify the response detail required for any field it names that is not returned by default.
@@ -1107,3 +1087,77 @@ The compact core's due-state summary SHALL report the per-category visible and o
 
 - **WHEN** a compact bootstrap runs on a vault with outstanding `unprocessed_source` items as its largest visible category
 - **THEN** the due-state summary carries the per-category counts and a `next` route naming `unprocessed_source`
+
+### Requirement: The agent contract teaches the note-cohesion question
+
+Bootstrap and the canonical write loop SHALL teach agents that a compiled write may return one `structure_suggestion` with `kind` `note_cohesion`, and SHALL state how to answer it.
+
+The guidance SHALL direct the agent to read the whole page and name the independent questions it answers. It SHALL keep a page that answers one question whole, however long, by dismissing the item through `triage_memory` with an `intentional:` reason. It SHALL propose a split only when several questions each have their own material, and only through the curation lane with the user's exact plan confirmation. It SHALL add a breadth tag through a governed edit when the page is a hub by design. The guidance SHALL state that the question asserts nothing about the page and that the runtime never reorganises knowledge on its own.
+
+#### Scenario: Bootstrap names the question and the three answers
+
+- **WHEN** a generic client reads the bootstrap post-write guidance
+- **THEN** it learns that a compiled write may carry a note-cohesion question and where to find it
+- **AND** it learns to keep a coherent page whole by dismissal, to split only through the curation lane, and to mark a hub with a breadth tag
+
+#### Scenario: Guidance is presentational, not executable
+
+- **WHEN** bootstrap describes the note-cohesion question
+- **THEN** reading bootstrap creates, moves, or reorganises nothing
+- **AND** no new tool or parameter is required to receive or answer the question
+
+### Requirement: A session closes by recording the recap and citing it
+
+At a decision or stopping point, the shipped skill, engagement reference, Stop-hook episode ask and `episode_due` advisory SHALL tell the agent to record one recap, then compile or explicitly dismiss every Decided item before citing it. The agent SHALL update each item's canonical page with the ordinary writers (`edit_note`, `change_observations`, `supersede_note`). Only after the whole pass is complete SHALL the agent cite the recap from updated compiled notes. Entity, plan and record pages take no citation. The guidance SHALL explain that one compiled note's citation holds every line in that recap revision, so citation linkage is not semantic coverage. The Stop-hook episode ask SHALL stay one short line within its established byte ceilings and SHALL make capture conditional on live policy. At `off`, or when the user asked only for a recap, a recap request alone SHALL NOT authorize page edits. The `episode_memory` tool description SHALL state the completion-before-citation condition and SHALL point to the `compile` block. The existing rules SHALL hold: record only when the user asks or the live `proactive_capture` disposition permits it, record nothing when nothing durable happened, and treat a hook reminder as no permission. No text SHALL ask the agent to record the same recap a second time, and none SHALL ask the agent to link a decided item to a page.
+
+#### Scenario: The close step reaches a client with no hook
+
+- **WHEN** a tool-only client reads the `episode_memory` tool description
+- **THEN** the description tells the agent to finish or dismiss every Decided item before citing the recap from updated compiled notes
+- **AND** it points to the `compile` block of the response
+
+#### Scenario: The Stop hook asks for the citation only under live policy
+
+- **WHEN** the Stop hook fires its episode ask
+- **THEN** the ask puts the citation step after the condition that live policy permits capture
+- **AND** it ends with "Otherwise do nothing."
+
+### Requirement: The record response reports which decided items no live page cites
+
+The `record` response SHALL carry a `compile` block when the recap holds at least one Decided item. The block SHALL carry `cite`, the ref of the recap just recorded, `decided`, the count of Decided items, and `open`, the count of the live revision's Decided lines that no cited revision of the episode holds. A revision SHALL count as cited when a live compiled page that the caller can see names it in `sources:`. The block SHALL lead with one `outcome` sentence that an agent can repeat as is. The `outcome` SHALL state the coverage result only, SHALL say that the count is by citation, and SHALL NOT order a write. When live policy permits proactive capture, a separate `next_step` SHALL ask the agent to compile or explicitly dismiss every Decided item before citing the recap from updated compiled notes. When live policy does not permit it, the block SHALL carry no `next_step` and its `outcome` SHALL be unchanged. No text of the block SHALL ask the agent to record the recap again.
+
+The record SHALL NOT walk the vault to count. It SHALL read the episode's own revisions and the pages that cite them through the writers' resolver snapshot taken without the disk fallback. It SHALL probe the snapshot before it reads any revision. When that snapshot is cold, or the count fails, the block SHALL report `open` as `unchecked` for every recap with Decided items, whatever the recap's `ingested_into` holds, SHALL say in the `outcome` that the citation was not checked, and SHALL NOT report 0. When the live revision's Decided count differs from the count just recorded, the block SHALL report `open` as `unchecked`. An unchecked count SHALL NOT refuse the recap. A citing page that the caller cannot see SHALL read as absent, so that the block equals the block of a vault without that page. A recap with no Decided item SHALL carry no `compile` block.
+
+#### Scenario: The block names the recap to cite and the open count falls once a page cites it
+
+- **WHEN** a recap with two Decided items is recorded, a live compiled page cites it, and the episode records again with the same two Decided items
+- **THEN** the first block carries `cite` equal to the recap ref, `decided: 2` and `open: 2`
+- **AND** the second block carries `open: 0` and no `next_step`
+
+#### Scenario: A cold resolver snapshot reports the count as unchecked
+
+- **WHEN** a recap's earlier revision is cited and the writers' resolver snapshot is cold
+- **THEN** the recap is still recorded and no resolver is built from the vault
+- **AND** the block reports `open: "unchecked"` and its `outcome` says that the citation was not checked
+
+#### Scenario: A cold snapshot hides whether a withheld page cites the recap
+
+- **WHEN** the writers' resolver snapshot is cold, and one recap is cited by a page withheld from the caller while another recap has no citing page
+- **THEN** both blocks are equal apart from the recap ref, and both report `open: "unchecked"`
+
+#### Scenario: The next step appears only when live policy permits capture
+
+- **WHEN** live policy permits proactive capture
+- **THEN** the block carries a `next_step` that conditions a page update on the agent's judgement
+- **WHEN** live policy does not permit proactive capture
+- **THEN** the same block carries no `next_step`, and its `outcome` is unchanged
+
+#### Scenario: A recap with no Decided item gives no block
+
+- **WHEN** a recap has no Decided item
+- **THEN** the `record` response has no `compile` key
+
+#### Scenario: A withheld citing page reads as no citation
+
+- **WHEN** the only live page that cites a recap is withheld from the caller
+- **THEN** the caller's open count equals the count of a vault where that page does not exist

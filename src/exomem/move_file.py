@@ -1081,6 +1081,10 @@ def _move_file_local(
                             removals=tuple(catalog_removals),
                             graph_replacement_provider=graph_replacement_provider,
                             now=int(time.time()),
+                            # The part pages follow the page only after the catalog is ready.
+                            part_folders=(
+                                {new_rel: paired_parts[0]} if paired_parts is not None else {}
+                            ),
                         )
                     )
                 except catalog_publication.CatalogPublicationError as error:

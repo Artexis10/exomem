@@ -1,15 +1,18 @@
 """media_worker — the async extraction pipeline (extract engines stubbed; no GPU)."""
 
 import hashlib
+import io
 import os
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
+from test_media_processing import _handle_stat
 
 from exomem import (
     asr_runtime,
@@ -69,6 +72,28 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
     return preserve.preserve_bytes(
         vault, scope="Rental", category="audio", filename=filename, data=b"FAKEBYTES"
     )
+
+
+def _preserve_media_pending(vault, filename):
+    """Preserve a media binary the way `preserve_artifacts` does: its page already pending."""
+    return preserve.preserve_stream(
+        vault, scope="Rental", category="audio", filename=filename,
+        stream=io.BytesIO(b"FAKEBYTES"), media_pending=True,
+    )
+
+
+def _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch: pytest.MonkeyPatch) -> int:
+    """How many sidecar commits a background reconcile of `binary` makes, as the file watcher does."""
+    commits: list[object] = []
+    real = preserve.commit_media_sidecar_writes
+
+    def counted(*args, **kwargs):
+        commits.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", counted)
+    media_processing.reconcile_media(vault, binary, explicit=False)
+    return len(commits)
 
 
 def _reconciled_pending_media(vault, filename="rec.mp3"):
@@ -146,6 +171,98 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert "water damage" in body
     assert "extracted_by: faster-whisper:test" in body
     assert "extracted_by: pending" not in body
+
+
+def test_a_page_stored_pending_records_the_worker_verified_hints_when_completed(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No completed page keeps null hints, so the file watcher's reconcile has nothing to repair."""
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    stored = _preserve_media_pending(vault, "inline.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    assert _parsed_frontmatter(sidecar)["binary_mtime_ns"] is None
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="a recorded sentence", media_type="audio", engine="faster-whisper:test"
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
+    assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
+
+
+def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_result(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stored = _preserve_media_pending(vault, "parent.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio"))
+    claimed = store.claim_next()
+    assert claimed is not None
+    identity = media_worker._binary_identity(binary)
+    assert identity is not None
+    assert store.record_result(
+        claimed,
+        kind="extraction",
+        sidecar_before_hash=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        binary_identity=media_worker._result_binary_identity(identity),
+        payload={"text": "published by parent", "engine": "test"},
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args, **_kwargs: True)
+
+    worker._publish_parent_result(store.pending_results()[0])
+
+    page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
+    assert "published by parent" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
+
+
+def test_a_page_stored_pending_records_the_open_handle_hints_when_path_stat_disagrees(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows `Path.stat` reports another ctime than the open handle, which reconcile compares."""
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    stored = _preserve_media_pending(vault, "windows-like.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    resolved = binary.resolve(strict=True)
+    original_stat = Path.stat
+
+    def windows_like_path_stat(self: Path, *args, **kwargs):
+        result = original_stat(self, *args, **kwargs)
+        if self != resolved:
+            return result
+        fields = {name: getattr(result, name) for name in dir(result) if name.startswith("st_")}
+        fields["st_ctime_ns"] -= 1_000_000_000
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(Path, "stat", windows_like_path_stat)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="a recorded sentence", media_type="audio", engine="faster-whisper:test"
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    page, handle = _parsed_frontmatter(sidecar), _handle_stat(binary)
+    assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (handle.st_mtime_ns, handle.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
 
 
 def test_process_child_hands_extraction_to_parent_without_sidecar_write(
@@ -5643,6 +5760,79 @@ def test_a_job_that_always_outruns_the_watchdog_ends_over_budget_and_the_queue_m
     # The tenant sees the memory over-budget outcome: no retry the ledger would refuse.
     shown = _parsed_frontmatter(sidecars["long-scan.mp3"])
     assert (shown["processing_state"], shown["processing_retryable"]) == (media_jobs.BLOCKED, False)
+
+
+def test_a_watchdog_stop_that_meets_a_held_job_ledger_counts_once_the_ledger_is_free(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+    import subprocess
+    import sys
+
+    from exomem import media_brakes
+
+    # With a stop limit of one, the first stop that counts puts the file over budget. A stop the
+    # exit returned uncounted would run the file, and stop it, a second time.
+    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
+    monkeypatch.setenv(media_brakes.STOP_LIMIT_ENV, "1")
+    monkeypatch.setenv("EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    monkeypatch.setattr(media_worker, "_SUPERVISE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(media_worker, "_MEMORY_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(media_worker, "_MEMORY_RECOVERY_SECONDS", 1.0)
+    result = _preserve_media_stub(vault, filename="long-scan.mp3")
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"
+        )
+    )
+    children: list[subprocess.Popen] = []
+
+    def launch_child(self):
+        assert self._store.claim_next() is not None
+        children.append(
+            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        )
+        self._store.set_worker(children[-1].pid, 1.0)
+        return children[-1]
+
+    # Another writer of the ledger, as a second process or a long migration would be.
+    holder = sqlite3.connect(media_jobs.job_store_path(vault), isolation_level=None, check_same_thread=False)
+    held = threading.Event()
+    refused = threading.Event()
+    running_jobs = media_jobs.MediaJobStore.running_jobs
+
+    def running_jobs_once_another_writer_holds_the_ledger(store: media_jobs.MediaJobStore):
+        # The stop's record asks for the jobs its child ran; the child is dead by then.
+        if not held.is_set():
+            holder.execute("BEGIN IMMEDIATE")
+            held.set()
+        try:
+            return running_jobs(store)
+        except sqlite3.OperationalError:
+            refused.set()
+            raise
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", launch_child)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "running_jobs", running_jobs_once_another_writer_holds_the_ledger)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    try:
+        assert refused.wait(timeout=15)
+        holder.rollback()
+        settled = _wait_until(lambda: media_jobs.status(vault)["over_budget_count"] == 1, seconds=15.0)
+        supervising = worker._thread.is_alive()
+    finally:
+        if holder.in_transaction:
+            holder.rollback()
+        holder.close()
+        worker.stop()
+        for child in children:
+            child.kill()
+
+    assert settled, f"children {len(children)}; jobs {media_jobs.status(vault)['jobs']}"
+    assert supervising
+    assert len(children) == 1
 
 
 def test_no_child_starts_when_the_next_job_does_not_fit(vault, monkeypatch: pytest.MonkeyPatch) -> None:

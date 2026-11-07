@@ -202,9 +202,9 @@ unaffected by any family decision.
 
 #### Scenario: A taught mapping quiets a real family and the envelope stands
 
-- **WHEN** a hookless session, following the served contract, quiets the
-  registered structural family (for example `scope_divergence_semantic`) with a
-  reason, a new session starts, and the dispositions view is read
+- **WHEN** a hookless session, following the served contract, quiets a
+  registered review family (for example `note_cohesion`) with a reason, a new
+  session starts, and the dispositions view is read
 - **THEN** that family is `quiet` with the recorded reason and origin, other
   families are untouched, every envelope class disposition is unchanged, and a
   reset restores `normal`

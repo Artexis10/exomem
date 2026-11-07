@@ -39,6 +39,11 @@ schema from eligibility alone: concise observations and narrow additive facts ob
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
 confirmed `restructure_execution`.
 
+For a resolved Entity, add the facet as one compact unit line under `## Observations`
+with `edit_note` and `{"kind": "edit_section", "heading": "Observations", "create_missing": true,
+"new_string": "<unit line>", "expected_hash": "<content_hash>"}`; `prepare_note/change_observations`
+does not write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
+
 ## Planning
 
 `read_plans` and `change_plans` are the public tools for human-owned intended future
@@ -216,17 +221,15 @@ fingerprint in their warning text. Triage binds to that exact fingerprint (dismi
 requires a reason); a stale fingerprint simply lets the advisory re-emit when the
 counterpart changes or the written page changes the detected signal class.
 
-A compiled-note write may additionally return `structure_suggestion`, an
-advisory signal that recurring durable material on the written page now sits
-outside its own declared scope. It carries `kind`, a `strength` of either
-`strong` or `moderate`, a deterministically ordered `reasons` list, the count of
-durable units in the group, and at most six `cluster_terms`. Every
-value is derived from the page named in the same response; it never reports a
-path, title, or count belonging to another page. It is advisory only: it is
-absent when nothing is detected, it never changes `status`, `mutated`,
-`warnings_count`, mutation identity, or replay, and detection failure omits the
-field rather than affecting the write. The runtime never creates, moves,
-renames, or deletes anything as a result.
+A compiled-note write may additionally return `structure_suggestion` with `kind`
+`note_cohesion` while the written page has reached a size step and that step is
+unanswered. It carries `units`, `step_units`, `next_step_units`, the review item's
+`ref` and `fingerprint`, and one `question`. Every value is derived from the page
+named in the same response; it never reports a path, title, or count belonging to
+another page. It is advisory only: it is absent when no step is open, it never
+changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and a
+failure to compute it omits the field rather than affecting the write. The runtime
+never creates, moves, renames, or deletes anything as a result.
 
 `response_detail="full"` adds the existing leaf result under
 `diagnostics`. `response_detail="legacy"` returns that old raw leaf result and
@@ -1009,7 +1012,7 @@ New episode-bound plans require a reader that understands their invocation marke
 Older strict readers refuse those plans before applying them; legacy unmarked plans keep their identities.
 
 ### Result shapes
-- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped}`.
+- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped, compile?}`. `compile` is `{outcome, cite, decided, open}`: the recap's ref, its Decided item count, and how many lines no cited recap holds (`unchecked` when not checked). Compile or explicitly dismiss every Decided item before citing the recap from updated compiled notes. A citation holds every line in that revision; it does not prove semantic coverage. The conditional `next_step` appears only when live policy permits capture; the block is absent when the recap decides nothing.
 - inspect: `{episode, revisions: [{revision, recovery}], latest_source_ref, coverage_current}`.
 - candidates/prepare/disposition: `{episode, input_revision, candidates: [{candidate_key, route, disposition, pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete, execution, coverage: {attempted, pending, covered_through_input_revision, next}}`.
 - resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.

@@ -17,8 +17,10 @@ on:
 
 # Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
-# The release App owns tag creation. Its protected environment and tag ruleset
-# remain operator activation steps; source alone establishes no live protection.
+# The release App owns tag creation. The two jobs that mint its token run in the
+# `release` environment. Restricting that environment to `main`, holding the App
+# key there and a `v*` tag ruleset are operator settings; source alone
+# establishes no live protection.
 permissions:
   contents: write
   issues: write
@@ -42,6 +44,7 @@ jobs:
   release-please:
     if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
+    environment: release
     env:
       HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
     outputs:
@@ -79,6 +82,7 @@ jobs:
     needs: release-please
     if: ${{ github.event_name == 'push' && needs.release-please.outputs.release_branch != '' }}
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     env:
@@ -208,7 +212,7 @@ jobs:
           fi
           git fetch --quiet --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
           source_commit=$(git rev-parse "refs/tags/$tag^{commit}")
-          # This guards mistakes; the operator-held tag ruleset and App key custody prevent hostile refs.
+          # This guards mistakes only; the operator's tag ruleset and App key custody, where configured, address hostile refs.
           git fetch --quiet --no-tags origin main
           if ! git merge-base --is-ancestor "$source_commit" FETCH_HEAD; then
             echo "::error::Release source must be contained in main"

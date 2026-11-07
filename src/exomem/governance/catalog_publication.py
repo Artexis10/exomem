@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 from .. import find_corpus, find_types, recall_space, reserved_paths, vault
 from . import (
@@ -32,6 +34,8 @@ from . import (
     store,
 )
 from .policy import Policy
+
+logger = logging.getLogger(__name__)
 
 
 class CatalogPublicationError(RuntimeError):
@@ -468,14 +472,25 @@ def _recover_catalog_acknowledgement(
     return recovered
 
 
-def _replacement_item(
+def catalog_item(
     *,
     vault_root: Path,
     path: str,
     source: str,
     policy: Policy,
     target_key: projections.ProjectionNamespaceKey,
+    pending: Mapping[str, str] = MappingProxyType({}),
+    part_folder: str | None = None,
 ) -> projection_store.ProjectionItemVariants:
+    """The catalog row of the Markdown page at `path` whose text is `source`.
+
+    The one builder of a catalog row: its scopes, its variants, and on each full-text variant
+    the further parts of a Source's extracted text. `pending` holds the text of the pages the
+    same batch is about to write, by vault-relative path; `part_folder` is where the page's
+    parts are now when the page is about to move away from them.
+    """
+    from .. import extraction_parts, preserve
+
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
         vault_root / path,
@@ -497,13 +512,20 @@ def _replacement_item(
                 )
             )
         )
-        variants = projections.enumerate_projection_variants(
-            item_identity=path,
-            content_hash=content_hash,
-            scope_ids=scope_ids,
-            policy=policy,
-            projector_schema_version=target_key.projector_schema_version,
-            full_search_fields=search_fields(parsed),
+        parts = extraction_parts.stored_parts(
+            vault_root, path, source, pending=pending, folder=part_folder
+        )
+        variants = projections.with_parts(
+            projections.enumerate_projection_variants(
+                item_identity=path,
+                content_hash=content_hash,
+                scope_ids=scope_ids,
+                policy=policy,
+                projector_schema_version=target_key.projector_schema_version,
+                full_search_fields=search_fields(parsed),
+            ),
+            parts,
+            head=preserve.extracted_text(source) if parts else "",
         )
         return projection_store.ProjectionItemVariants(
             item_identity=path,
@@ -515,6 +537,54 @@ def _replacement_item(
         raise CatalogPublicationError(
             "catalog publication cannot classify the target Markdown"
         ) from error
+
+
+def fit_parts(
+    items: tuple[projection_store.ProjectionItemVariants, ...],
+) -> tuple[projection_store.ProjectionItemVariants, ...]:
+    """`items` with the part documents that fit in the catalog's capacity.
+
+    Each part counts as one catalog identity. Items keep their parts in identity order until
+    the catalog is full; an item past that point keeps the parts that still fit, and its
+    Source stays searchable by its own text. A warning names the first part page left out.
+    """
+    budget = projections.MAX_GOVERNED_CATALOG_ITEMS - len(items)
+    kept: dict[str, int] = {}
+    for item in sorted(items, key=lambda entry: entry.item_identity.encode("utf-16-be")):
+        count = projections.part_count(item.variants)
+        kept[item.item_identity] = max(0, min(count, budget))
+        budget -= kept[item.item_identity]
+    from .. import extraction_parts
+
+    fitted: list[projection_store.ProjectionItemVariants] = []
+    left_out: list[str] = []
+    for item in items:
+        keep = kept[item.item_identity]
+        count = projections.part_count(item.variants)
+        if keep < count:
+            left_out.extend(
+                extraction_parts.part_path(PurePosixPath(item.item_identity), number).as_posix()
+                for number in range(keep + 2, count + 2)
+            )
+            item = projection_store.ProjectionItemVariants(
+                item_identity=item.item_identity,
+                content_hash=item.content_hash,
+                variants=tuple(
+                    replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
+                    if len(variant.parts) > keep
+                    else variant
+                    for variant in item.variants
+                ),
+                scope_ids=item.scope_ids,
+            )
+        fitted.append(item)
+    if left_out:
+        logger.warning(
+            "the governed catalog is full: %d part page(s) stay out of projected search, first %s",
+            len(left_out),
+            left_out[0],
+        )
+    return tuple(fitted)
 
 
 def _normalize_markdown_mutations(
@@ -611,6 +681,10 @@ def _variant_ids(
         for item in items
         for variant in item.variants
     )
+
+
+def _text_digest(variant: projections.ProjectionVariant) -> bytes:
+    return hashlib.sha256(projected_retrieval.projection_text(variant).encode("utf-8")).digest()
 
 
 def _target_vector_measurements(
@@ -729,12 +803,29 @@ def _target_vector_measurements(
         for item in target_namespace.items
         for variant in item.variants
     )
-    missing = tuple(
-        variant
-        for variant in target_variants
-        if variant.projection_variant_id not in active_by_id
-    )
+    # A vector measures only a row's projection text, so a new row of the same item whose text
+    # an active row already measured takes that vector: a projector change that keeps every
+    # projection text re-embeds nothing.
+    active_items = {item.item_identity: item for item in active_namespace.items}
+    measured_texts: dict[str, dict[bytes, tuple[float, ...]]] = {}
     rebuilt: dict[str, tuple[float, ...]] = {}
+    missing_rows: list[projections.ProjectionVariant] = []
+    for variant in target_variants:
+        if variant.projection_variant_id in active_by_id:
+            continue
+        identity = variant.item_identity
+        if identity not in measured_texts:
+            predecessor = active_items.get(identity)
+            measured_texts[identity] = {
+                _text_digest(old): active_by_id[old.projection_variant_id].vector
+                for old in (predecessor.variants if predecessor is not None else ())
+            }
+        measured = measured_texts[identity].get(_text_digest(variant))
+        if measured is None:
+            missing_rows.append(variant)
+        else:
+            rebuilt[variant.projection_variant_id] = measured
+    missing = tuple(missing_rows)
     if missing:
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             raise CatalogPublicationError(
@@ -752,12 +843,13 @@ def _target_vector_measurements(
             )
             if len(vectors) != len(missing):
                 raise ValueError("vector count does not match target variants")
-            rebuilt = {
-                variant.projection_variant_id: tuple(
-                    float(component) for component in vector
+            rebuilt.update(
+                (
+                    variant.projection_variant_id,
+                    tuple(float(component) for component in vector),
                 )
                 for variant, vector in zip(missing, vectors, strict=True)
-            }
+            )
         except Exception as error:
             raise CatalogPublicationError(
                 "the target vector measurements cannot be rebuilt"
@@ -1316,7 +1408,7 @@ def prepare_policy_projection(
                     "the canonical corpus no longer matches the active catalog"
                 )
             target_items.append(
-                _replacement_item(
+                catalog_item(
                     vault_root=root,
                     path=item.item_identity,
                     source=held.data.decode("utf-8"),
@@ -1324,6 +1416,8 @@ def prepare_policy_projection(
                     target_key=key,
                 )
             )
+        fitted_items = fit_parts(tuple(target_items))
+        target_items = list(fitted_items)
         membership_changed = any(
             before.scope_ids != after.scope_ids
             for before, after in zip(active_items, target_items, strict=True)
@@ -1478,6 +1572,7 @@ def _prepare_markdown_batch(
     | None = None,
     now: int | None = None,
     activated_at: int | None = None,
+    part_folders: Mapping[str, str] = MappingProxyType({}),
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare one complete batch successor, or return ``None`` for v3/open.
 
@@ -1592,6 +1687,13 @@ def _prepare_markdown_batch(
 
     _validate_catalog_content_paths(content_paths)
     navigation_adoptions: frozenset[str] = frozenset()
+    # The batch's own text of each page it writes: a Source reads its parts from here first.
+    pending = {
+        write.path.absolute().relative_to(root.absolute()).as_posix(): write.content
+        for write in planned_writes or ()
+        if isinstance(write.content, str)
+        and write.path.absolute().is_relative_to(root.absolute())
+    }
     if normalized is None:
         assert planned_writes is not None
         if type(planned_writes) is not tuple:
@@ -1616,7 +1718,20 @@ def _prepare_markdown_batch(
     ]
     if len(membership_aliases) != len(set(membership_aliases)):
         raise CatalogPublicationError("catalog membership targets collide")
-    if not normalized and not normalized_removals:
+    from .. import extraction_parts
+
+    # A batch that writes a part page and not its Source (a rebuild of missing parts) publishes
+    # the Source again, so that its catalog row holds the part's text.
+    targeted = {relative for relative, _change in (*normalized_removals, *normalized)}
+    part_sources = sorted(
+        {
+            source.as_posix()
+            for relative in pending
+            if (source := extraction_parts.source_page_for(Path(relative))) is not None
+        }
+        - targeted
+    )
+    if not normalized and not normalized_removals and not part_sources:
         return None
 
     by_identity = {item.item_identity: item for item in active_namespace.items}
@@ -1648,14 +1763,39 @@ def _prepare_markdown_batch(
             raise CatalogPublicationError(
                 "catalog content identity no longer matches the reviewed predecessor"
             )
-        by_identity[relative] = _replacement_item(
+        by_identity[relative] = catalog_item(
             vault_root=root,
             path=relative,
             source=mutation.source,
             policy=snapshot.policy,
             target_key=target_key,
+            pending=pending,
+            part_folder=part_folders.get(relative),
         )
-    target_items = tuple(by_identity.values())
+    republished = 0
+    for relative in part_sources:
+        predecessor = by_identity.get(relative)
+        if predecessor is None:
+            continue
+        try:
+            held = reserved_paths.read_generic_bytes(root, relative)
+        except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+            continue
+        # A Source that changed since the catalog last published it waits for its own write.
+        if not hmac.compare_digest(hashlib.sha256(held.data).hexdigest(), predecessor.content_hash):
+            continue
+        by_identity[relative] = catalog_item(
+            vault_root=root,
+            path=relative,
+            source=held.data.decode("utf-8"),
+            policy=snapshot.policy,
+            target_key=target_key,
+            pending=pending,
+        )
+        republished += 1
+    if not normalized and not normalized_removals and not republished:
+        return None
+    target_items = fit_parts(tuple(by_identity.values()))
     try:
         descriptor = projection_store.catalog_descriptor_bytes(
             target_key, target_items
@@ -1735,7 +1875,7 @@ def _prepare_markdown_batch(
         namespace_seed=namespace_seed,
         target_publication=target_publication,
         activated_at=publication_time,
-        mutation_count=len(normalized) + len(normalized_removals),
+        mutation_count=len(normalized) + len(normalized_removals) + republished,
     )
 
 
@@ -1815,12 +1955,15 @@ def prepare_catalog_membership_batch(
     ]
     | None = None,
     now: int | None = None,
+    part_folders: Mapping[str, str] = MappingProxyType({}),
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare lazy write/removal membership changes for a product mutation.
 
     Open and schema-v3 vaults retain their existing behavior. Exact-v4 vaults
     validate every removal only after enrollment is established, so unsupported
-    content kinds fail before the caller mutates canonical bytes.
+    content kinds fail before the caller mutates canonical bytes. A page that
+    moves before its part pages follow names, in `part_folders`, the folder that
+    holds its parts until then, by its new vault-relative path.
     """
 
     return _prepare_markdown_batch(
@@ -1833,6 +1976,7 @@ def prepare_catalog_membership_batch(
         graph_replacements=graph_replacements,
         graph_replacement_provider=graph_replacement_provider,
         now=now,
+        part_folders=part_folders,
     )
 
 

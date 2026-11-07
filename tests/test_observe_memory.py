@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    capabilities,
     commands,
     index_paths,
     index_sync,
@@ -841,6 +842,34 @@ def test_legacy_correction_stays_with_its_existing_edit_owner(tmp_path, path, so
     assert error.resolution == {"action": "use-existing-edit-owner", "path": path}
     assert "existing authorized edit owner" in str(raised.value)
     assert "Do not create a dated child" in str(raised.value)
+    assert page.read_bytes() == before
+
+
+ENTITY_PAGE = "Knowledge Base/Entities/Harbour Co-op.md"
+
+
+def test_an_entity_target_is_refused_with_the_exact_edit_that_adds_the_unit(tmp_path):
+    source = (
+        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000083\nupdated: 2026-07-15\n---\n\n"
+        "# Harbour Co-op\n\nA member-owned supplier.\n"
+    )
+    page = _write_page(tmp_path, rel=ENTITY_PAGE, source=source)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE") as raised:
+        commands.op_observe_memory(
+            tmp_path,
+            path=ENTITY_PAGE,
+            operation="validate",
+            category="rule",
+            content="Opens at nine.",
+        )
+
+    message = str(raised.value)
+    assert capabilities.active_call_text("edit_memory", {}).split("(")[0] in message
+    for named in ("edit_section", "Observations", "create_missing", "expected_hash", ENTITY_PAGE):
+        assert named in message
     assert page.read_bytes() == before
 
 

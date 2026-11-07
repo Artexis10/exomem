@@ -22,6 +22,7 @@ import anyio
 
 from . import (
     env_compat,
+    media_jobs,
     media_processing,
     metrics,
     privacy_log,
@@ -980,17 +981,12 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     unavailable_action: str | None = None
     if worker is None:
         if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
-            unavailable_reason = (
-                "MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
-            )
-            unavailable_action = (
-                "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
-                "restart the service, then retry"
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.EXTRACTION_DISABLED_CODE, "EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
             )
         else:
-            unavailable_reason = "MediaRuntimeUnavailable: media worker construction failed"
-            unavailable_action = (
-                "fix the media runtime configuration, restart the service, then retry"
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.RUNTIME_UNAVAILABLE_CODE, "media worker construction failed"
             )
     if worker is not None:
         try:
@@ -1002,9 +998,8 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 pass
             log.warning("media runtime unavailable; core service continuing: %s", exc)
             worker = None
-            unavailable_reason = f"MediaRuntimeUnavailable: {type(exc).__name__}: {exc}"
-            unavailable_action = (
-                "fix the media runtime configuration, restart the service, then retry"
+            unavailable_reason, unavailable_action = media_jobs.runtime_block(
+                media_jobs.RUNTIME_UNAVAILABLE_CODE, f"{type(exc).__name__}: {exc}"
             )
     if unavailable_reason is not None and unavailable_action is not None:
         media_processing.set_media_runtime_unavailable(
@@ -1055,6 +1050,16 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         log.warning("media worker startup discovery failed: %s", exc)
     if worker is None:
         return None
+    try:
+        # This start has a runtime, so the work a start without one blocked is owed again. The
+        # reconcile above skips that work: each artifact already has a job. A blocked row cannot
+        # be claimed, so its sidecar is shown as pending first, before a child could extract it
+        # and find the sidecar rewritten under it. One row at a time, on the supervisor: a stop
+        # leaves at most the page of the row in hand ahead of its row, and the next start with a
+        # runtime heals it.
+        worker.requeue_runtime_blocks()
+    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media worker startup requeue failed: %s", exc)
     try:
         worker.scan_pending()
     except Exception as exc:  # noqa: BLE001 - startup scan is best-effort

@@ -55,6 +55,7 @@ from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
+from . import capture_carrier as capture_carrier_module
 from . import capabilities as capabilities_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
@@ -1753,7 +1754,11 @@ def op_bootstrap(
             "lifecycle": entity_lifecycle,
         },
         "workflow": {
-            "page_status": semantic_authoring_module.STATUS_CLASSIFICATION_RULE,
+            "page_status": (
+                semantic_authoring_module.STATUS_CLASSIFICATION_RULE_COMPACT
+                if profile == "compact"
+                else semantic_authoring_module.STATUS_CLASSIFICATION_RULE
+            ),
             "requested": requested_workflow,
             "loop": [
                 "reuse bootstrap policy; load only if missing or stale",
@@ -1769,7 +1774,7 @@ def op_bootstrap(
                 (
                     "Before saving: vocabulary_workflow (section vocabulary); resolve "
                     "recurring identities/relations, enrich entities. Add types only if "
-                    "current types distort evidence; skip incidental names."
+                    "current types distort evidence."
                     if profile == "compact" else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
@@ -1842,18 +1847,35 @@ def op_bootstrap(
             },
             "preflight": {
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
-                "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class",
+                "near_duplicate_warnings": (
+                    "if they fire, consider edit or replace instead of a parallel page; a write advisory "
+                    "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
+                    "signal stays quiet until "
+                    + (
+                        "it changes"
+                        if profile == "compact"
+                        else "the counterpart changes or the written page changes the detected signal class"
+                    )
+                ),
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",
                 "write_feedback": "create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with response_detail='full'",
                 "structure_suggestion": (
-                    "The committed response's advisory carries kind, strength (strong|moderate) and ordered reasons. scope_divergence means material exceeds declared scope; source_classification_debt counts sources without a chosen kind and their Sources/ folders."
+                    "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
-                    else "advisory signal in the default committed response, carrying kind, strength (strong|moderate), and ordered reasons. kind='scope_divergence': a compiled page's material now sits outside its declared scope. kind='source_classification_debt': the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                    else "advisory in the default committed response. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
-                "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then " + call_text("manage_memory_file", {"operation": "reclassify", "reason": "..."}) + ".",
-                "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
+                "structure_suggestion_handling": (
+                    "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
+                    + call_text("triage_memory", {"ref": "<ref>", "action": "dismiss", "expected_fingerprint": "<fingerprint>", "why": "intentional: <the one question>"})
+                    + "; it stays quiet until the next size step. Several: propose a split with "
+                    + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
+                    + " and apply it only after the user confirms the previewed plan. A hub by design: add a hub or snapshot tag with a governed edit. source_classification_debt: say it in the user's words, agree a real kind, then "
+                    + call_text("manage_memory_file", {"operation": "reclassify", "reason": "..."})
+                    + "."
+                ),
+                "structure_suggestion_authority": "advisory only; the runtime measures and asks, and never writes",
                 "records_routing": (
                     "a committed note or Evidence write may name one Records collection whose "
                     "claims or claims.match cover it; never append from the advisory alone. Its "
@@ -1886,7 +1908,7 @@ def op_bootstrap(
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
                     "Absent advice proves nothing; prefer silence. "
-                    "Backlog: review a batch of the largest category, group it by topic, "
+                    "Backlog: review a batch of the largest category, group by topic, "
                     "write each group with the usual writers, check outstanding fell. "
                     "Dismissal is not completion."
                     if profile == "compact"
@@ -4591,6 +4613,7 @@ def op_edit(
     replace_all: bool = False,
     heading: str | None = None,
     section_position: str = "append",
+    create_missing: bool = False,
     edits: list[multi_edit_module.EditItem] | None = None,
     row_key: str | None = None,
     take: str | None = None,
@@ -4684,6 +4707,8 @@ def op_edit(
             Raises HEADING_NOT_FOUND if absent.
         section_position: With `heading`, where to put `new_string`:
             "append" (default), "prepend", or "replace" the section body.
+        create_missing: With `heading`, add the section at the end of the page
+            when it is absent, instead of refusing HEADING_NOT_FOUND.
         edits: Batch-surgical mode — list of {old_string, new_string,
             replace_all?} applied sequentially in one atomic commit.
         row_key: Take-row mode — natural leading text of the row to fill
@@ -4821,6 +4846,7 @@ def op_edit(
                 replace_all=replace_all,
                 heading=heading,
                 section_position=section_position,
+                create_missing_section=create_missing,
                 expected_hash=expected_hash,
                 validate_only=validate_only,
                 semantic_transition_token=transition_token,
@@ -6888,6 +6914,11 @@ def op_activate_context(
                                     seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
                                 )
                             )
+                        # Owed before the body runs, so its characters come out of the map's budget
+                        # and a full map cannot starve it.
+                        capture_policy = capture_carrier_module.current(
+                            continuity, room=requested_chars - read_next_action.MAX_CHARS
+                        )
                         packet = _op_activate_context_body(
                             vault_root,
                             turn,
@@ -6903,11 +6934,14 @@ def op_activate_context(
                             observation_timings=observation_timings,
                             trigger=trigger,
                             intent_resolution=intent_resolution,
+                            reserved_chars=capture_policy.reserve if capture_policy else 0,
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
                             packet["budget"]["limit_chars"] = requested_chars
                         read_next_action.attach(packet)
+                        # Outside the packet cache, like `continuity`: the live disposition is read per request.
+                        capture_carrier_module.for_packet(packet, capture_policy)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -6925,6 +6959,8 @@ def op_activate_context(
                         # digest change and counted inside the packet's own `limit_chars`.
                         vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
+                    # Last among the paths that set the token: the token names the policy its holder holds.
+                    capture_carrier_module.stamp(packet, capture_policy)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
                         packet["trigger"] = trigger
@@ -7322,15 +7358,19 @@ def _op_activate_context_body(
     observation_timings: find_types.FindTimings | None = None,
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
+    reserved_chars: int = 0,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
-    has to wrap this function's many early returns."""
+    has to wrap this function's many early returns.
+
+    `reserved_chars` is room the wrapper spends after this returns, beyond the
+    next-action move: it comes out of the packet's own budget."""
     timings = observation_timings or (find_types.FindTimings() if include_timings else None)
     from . import read_next_action
 
-    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS
+    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS - reserved_chars
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
 
@@ -7647,6 +7687,7 @@ def _op_activate_context_body(
                     known_generation=(held_map or {}).get("map_generation"),
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
+                    spent_after=reserved_chars,
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -8913,7 +8954,9 @@ def op_episode_memory(
     unknown policy. At a durable stop, one-line
     items, never a transcript. Stores a Source in Sources/Episodes/; newest
     revision leads recall_context recent_context. Same episode adds a revision,
-    retiring the previous one; identical retry writes nothing.
+    retiring the previous one; identical retry writes nothing. The response's
+    `compile` block gives the ref and uncited Decided count. Compile or explicitly
+    dismiss every Decided item before citing the recap from updated compiled notes.
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.
@@ -9678,6 +9721,7 @@ def op_review_memory(
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     family: str | None = None,
+    window_days: int | None = None,
 ) -> dict:
     """Review health, provenance, drift and backlog.
 
@@ -9715,7 +9759,12 @@ def op_review_memory(
             consideration.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
+        window_days: Dispositions effect window in days, 1 to 90; default 7.
     """
+    if window_days is not None and mode != "dispositions":
+        raise ValueError(
+            "INVALID_REVIEW_ARGUMENTS: window_days is only supported by dispositions mode"
+        )
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(
@@ -9821,7 +9870,7 @@ def op_review_memory(
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "dispositions":
-        return _dispositions_view(vault_root)
+        return _dispositions_view(vault_root, window_days)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -10222,25 +10271,45 @@ def _set_family_disposition(
     return {"ref": review_state_module.family_ref(family), **recorded}
 
 
-def _dispositions_view(vault_root: Path) -> dict:
+def _dispositions_view(vault_root: Path, window_days: int | None = None) -> dict:
     """Every family with a non-default disposition, and what it has cost.
 
     The manual dismissal count rides along because a disposition without one is
     half the story: "you quieted this family, and you had put down N of its
     items by hand before you did" is what makes the decision legible later.
+    `window_days` sets the effect window; a value out of range is refused before
+    anything is read.
     """
     from .governance import egress
 
+    window = (
+        review_state_module.effect_window()
+        if window_days is None
+        else review_state_module.effect_window(window_days)
+    )
     store = review_state_module.ReviewStateStore(vault_root)
     payload = store.load()
     dispositions = payload.get("dispositions") or {}
     # Both counts reduce every decision record, withheld pages' included, so they
     # are the owner's aggregate: another audience gets the refusal, not a number.
     refusal = egress.owner_only_aggregate(Path(vault_root))
+    registered = review_state_module.registered_families()
     rows = []
-    for family in sorted(dispositions):
-        record = dispositions[family]
+    # A family that ships with a disposition is listed until its owner sets one.
+    records = {
+        **{
+            family: {"disposition": default, "why": "ships with this disposition until `normal` is set", "origin": "default"}
+            for family, default in review_state_module.DEFAULT_DISPOSITIONS.items()
+        },
+        **dispositions,
+    }
+    for family in sorted(records):
+        record = records[family]
         if not isinstance(record, dict):
+            continue
+        if family not in registered:
+            # A retired family's record governs nothing and cannot be reset, so
+            # listing it would offer the user a decision they cannot take.
             continue
         if str(record.get("disposition") or "") not in {"quiet", "off"}:
             # A slate-only row: the family carries a durable `quiet_offered_at`
@@ -10269,7 +10338,7 @@ def _dispositions_view(vault_root: Path) -> dict:
 
     return {
         "dispositions": rows,
-        "effect": refusal if refusal is not None else _effect_block(vault_root, payload),
+        "effect": refusal if refusal is not None else _effect_block(vault_root, payload, window),
         "registered_families": sorted(review_state_module.registered_families()),
         "reason_codes": list(review_state_module.REASON_CODES),
         "note": (
@@ -10295,20 +10364,27 @@ def _dispositions_view(vault_root: Path) -> dict:
     }
 
 
-def _effect_block(vault_root: Path, payload: dict) -> dict:
-    """Per-family effect over the last week, from records that already exist.
+def _effect_block(
+    vault_root: Path,
+    payload: dict,
+    effect_window: tuple[Any, Any, dict[str, Any]],
+) -> dict:
+    """Per-family effect over the chosen window, from records that already exist.
 
     The current set comes from the stored due-state projection and the
     dreamer's sidecar, never from an audit: a family neither holds reports
     `cleared` and `open` as unknown. When the sidecar cannot be read, every
     upkeep family is listed with the counts it holds as unknown, and the block
     says why: an absent family would read as one that surfaced nothing.
+
+    These records prove current state, not an action after surfacing, so every
+    family reports `acted` as unknown.
     """
     import datetime as dt
 
     from . import dreamer_families, dreamer_store, due_state
 
-    since, until, window = review_state_module.effect_window()
+    since, until, window = effect_window
     current: dict[str, set[str]] = {}
     projection = due_state.load(vault_root)
     for category, pages in ((projection or {}).get("categories") or {}).items():
@@ -10340,6 +10416,14 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
                 current.setdefault(family, set())
                 stamp = dt.datetime.fromtimestamp(delivered_at, dt.UTC)
                 extra.append((family, cid, fingerprint, stamp))
+    episode_family = due_state.EPISODE_BACKLOG
+    if projection is not None and any(
+        isinstance(entry, dict) and entry.get("family") == episode_family
+        for entry in (payload.get("surfaced") or {}).values()
+    ):
+        # An empty category is absent from the projection; its recorded surfacing
+        # still needs a known empty current set for the cleared count.
+        current.setdefault(episode_family, set())
     counts = review_state_module.effect_counts(
         payload,
         since=since,
@@ -10353,7 +10437,8 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
         "window": window,
         "sources": {
             "surfaced": (
-                "identities first stamped on the first-surfaced ledger in the window; "
+                "a lower bound: identities first stamped on the first-surfaced ledger in "
+                "the window, so an item shown where nothing is recorded is not counted; "
                 "for upkeep families, first deliveries recorded in the dreamer's sidecar"
             ),
             "dismissed": "manual dismiss decisions updated in the window, counted by item",
@@ -10361,7 +10446,12 @@ def _effect_block(vault_root: Path, payload: dict) -> dict:
             "cleared": (
                 "surfaced in the window, no decision recorded, and no longer in the "
                 "family's current set (the stored due-state projection, or the "
-                "dreamer's open candidates); unknown where only an audit could list it"
+                "dreamer's open candidates); unknown where only an audit "
+                "could list it"
+            ),
+            "acted": (
+                "unknown: current citation or queue state does not prove an action "
+                "after surfacing; no matching mutation receipt is recorded here"
             ),
             "open": "surfaced in the window, no decision recorded, still in the current set",
         },
@@ -10800,8 +10890,8 @@ def op_connect_memory(
             """`edit_note` for the relation queue: identical to op_edit_memory,
             but creates the canonical `## Relations` section when a note has none
             (create_note() doesn't emit one), so accepting the first relation into a
-            note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
-            only — it is not exposed on the edit_note MCP tool."""
+            note doesn't fail HEADING_NOT_FOUND. The queue always opts in; an
+            `edit_section` caller opts in with the operation's own flag."""
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
@@ -11206,7 +11296,7 @@ def op_observe_transfer(
     3. File it: start on the `next` path (`_Imports/<id>`), and again with `next_after` while a
        reply has one; select, plan and apply (at `apply_stop`, stop until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
-    Adoption removes each filed artifact's staged copy; notes stay until discard.
+    Finish removes each verified file's staged copy; the rest stay until discard.
     When an export is ready, status gives a Home link and a CLI command to download it.
 
     Args:

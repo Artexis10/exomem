@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.163.0](https://github.com/Artexis10/exomem/compare/v0.162.0...v0.163.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **review:** The `scope_divergence` structure suggestion and the `scope_divergence_semantic` audit category are removed; a caller that selects the audit category gets the unknown-category refusal. Compiled writes now ask one `note_cohesion` question when a page reaches a size step, and pages past a step form a review backlog. The due-state projection rebuilds once after upgrade.
+
+### Features
+
+* **activation:** deliver the live capture policy to every session ([#2498](https://github.com/Artexis10/exomem/issues/2498)) ([49e03a6](https://github.com/Artexis10/exomem/commit/49e03a6b2f721f088a61dc72dd64adc51cc6cc79))
+* **episode:** track recap citation coverage at session close ([#2391](https://github.com/Artexis10/exomem/issues/2391)) ([0a7aa80](https://github.com/Artexis10/exomem/commit/0a7aa80fd249fd1ef2c14e6214163f8298c9a5f2))
+* **projected-search:** find text anywhere in a long Source through the governed catalog ([#2486](https://github.com/Artexis10/exomem/issues/2486)) ([d16b911](https://github.com/Artexis10/exomem/commit/d16b91119f92bbe3391194d4d99718d06a025694))
+* **reconcile:** hold the mutation boundary per phase, not per run ([#2497](https://github.com/Artexis10/exomem/issues/2497)) ([0d9c02b](https://github.com/Artexis10/exomem/commit/0d9c02b23ab1fccf1a860f27c87bfb6d060a49af))
+* **review:** ask one cohesion question when a compiled note reaches a size step ([300f8fe](https://github.com/Artexis10/exomem/commit/300f8fec506a35304de5f955f4644e3a362e3b1e))
+
+
+### Bug Fixes
+
+* **context:** keep owner task discovery on an enrolled collection store ([#2496](https://github.com/Artexis10/exomem/issues/2496)) ([01c2547](https://github.com/Artexis10/exomem/commit/01c25471c1052c4428f49277ec4068d8d2c3c95f))
+* **import:** finish removes the text it filed and reports only what needs the person ([#2491](https://github.com/Artexis10/exomem/issues/2491)) ([6f6565b](https://github.com/Artexis10/exomem/commit/6f6565b434c867be05baf82027139196a96a1b01))
+* **media:** finish the pause, upload and part-hit follow-ups ([#2499](https://github.com/Artexis10/exomem/issues/2499)) ([93031dd](https://github.com/Artexis10/exomem/commit/93031dda90c336b8c69dae4addd637eacfd8b26c))
+* **media:** requeue each runtime-blocked row with its own page ([#2500](https://github.com/Artexis10/exomem/issues/2500)) ([3704215](https://github.com/Artexis10/exomem/commit/37042153dbe6d1aadbcc1c2e7168f763eca5f68b))
+* **media:** requeue runtime-blocked rows on the media supervisor ([#2501](https://github.com/Artexis10/exomem/issues/2501)) ([7497fb8](https://github.com/Artexis10/exomem/commit/7497fb80b46213f7bf9770f65e59e379a8d2385b))
+* **media:** retry requeues the blocked CLIP stage of a completed artifact ([#2480](https://github.com/Artexis10/exomem/issues/2480)) ([e4a6f8a](https://github.com/Artexis10/exomem/commit/e4a6f8acc3fe0fa1b048f512b60013a4d15ed3dc))
+* **upgrade:** settle a graph snapshot the standby proved unusable ([#2495](https://github.com/Artexis10/exomem/issues/2495)) ([e899217](https://github.com/Artexis10/exomem/commit/e8992177f952f2fcd1834dcdd0aef6d80a8407ff))
+
+
+### Performance
+
+* **artifacts:** store a fresh media original with its page already pending ([#2494](https://github.com/Artexis10/exomem/issues/2494)) ([370b95a](https://github.com/Artexis10/exomem/commit/370b95ac72fdbbac8ef3365c3633719eb1f1d6d1))
+* **containers:** share one vault root object across container memo keys ([#2493](https://github.com/Artexis10/exomem/issues/2493)) ([8bd04f5](https://github.com/Artexis10/exomem/commit/8bd04f547358692668c5ac049e47fb98b18e698d))
+* **due-state:** keep collection candidates out of each write's projection save ([#2489](https://github.com/Artexis10/exomem/issues/2489)) ([793608a](https://github.com/Artexis10/exomem/commit/793608ae68419854335c24bd790ed669bf0ce3bd))
+* **recall:** fill both scopes' recall rows in one unordered pass ([#2483](https://github.com/Artexis10/exomem/issues/2483)) ([cb1583f](https://github.com/Artexis10/exomem/commit/cb1583f0b2b68137c754f4bad169d9bbc6e83f5d))
+
 ## [0.162.0](https://github.com/Artexis10/exomem/compare/v0.161.1...v0.162.0) (2026-11-06)
 
 

@@ -23,7 +23,15 @@ The independent critique of the first draft found no route to byte loss: every c
 
 ### D1. Only artifacts in a recorded stage, and only listed files, are consumable
 
-A run consumes only artifact items. Text items, which are mostly Markdown notes owed draft notes, stay staged until discard. Text is a small share of bytes, and a text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact. Consuming text would also need fence-level verification, would interfere with the owed-note step, and would make the file watcher publish deletions for every note.
+`apply` consumes artifact items. `finish` consumes filed text items. Both consume only from a recorded stage, and only after the Knowledge Base copy is verified.
+
+A text item is not consumed in `apply`, because its note may still be owed. `finish` runs after the notes, so it removes a text copy only for an item whose outcome is `applied` or `already-applied`. The Source page holds the text between its fences. Before `finish` removes the copy, it reads that text with `adopt.text_source_body`, the inverse of the page format that `render_text_source` writes, and compares its bytes and SHA-256 with the plan. The Source page as a whole is not byte-stable, because a later note appends `ingested_into`. Only the fenced text is checked. A page that does not parse, or a text that differs, keeps the copy.
+
+The file watcher no longer matters: the vault scans skip `_Imports/<import_id>/` (task 3.5), so a removal publishes nothing. A text file over `INLINE_TEXT_MAX_BYTES` already imports as an artifact.
+
+`finish` stops starting removals when the call budget runs low. The copies that remain stay in the residual as `unchecked`, not yet verified against their Source pages, and count as unfiled. A finished run takes no second `finish`, so the person reviews them. A copy that stays because its staged file changed after the plan is `copy_changed`. A page of a paged collection removes only its own filed text.
+
+`finish` never offers the discard as a plain next action. It does not verify every filed copy that remains: an artifact copy is checked at `apply`, and a text copy of a run with `consume=false` is not checked at all. A staged copy may therefore be the only good one, so every file left gets the review and a discard that needs the person's agreement.
 
 A stage is recorded when its own manifest lists each staged file with its path, size and SHA-256:
 
@@ -50,7 +58,7 @@ The committed Source is the recovery record, not a flag in the run object. When 
 - `retry_failed`;
 - a concurrent run on the same stage.
 
-Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual (unselected, ineligible, failed and text items) with counts and bytes, and the discard route.
+Repeat-call re-verification and `probe_staleness` skip items whose staged copy is gone and whose Source verifies. A failed removal leaves the item applied and not consumed, never failed. The run reports a `consumed` count separately from `verified_unchanged`. `finish` removes empty stage folders and reports the residual with counts and bytes, and the discard route. The residual separates `unfiled` (failed, unselected, ineligible, over the ceiling, pending, outside the run, a filed text whose Source page no longer holds its text, a filed text whose staged copy changed after the plan, and a filed text not yet verified against its Source page) from the filed copies that remain, and a `summary` sentence names the groups that need review. The review and a discard that needs the person's agreement are offered while any file remains.
 
 ### D3. Free space is checked per chunk
 

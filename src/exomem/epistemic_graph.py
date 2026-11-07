@@ -10747,6 +10747,23 @@ class SnapshotAdoption:
     def __bool__(self) -> bool:
         return self.adopted
 
+    @property
+    def conclusive(self) -> bool:
+        """Whether this decline holds for as long as this build runs.
+
+        Waiting cannot turn such a snapshot into an adoptable one. Only a
+        whole-vault rebuild repairs it, and the worker that owns the vault runs
+        that rebuild.
+        """
+        return not self.adopted and self.reason in _CONCLUSIVE_DECLINES
+
+
+#: The adoption declines that no wait can change. They are a closed set of this
+#: module's own reason tokens: graph work is off, or `_declined_snapshot_state`
+#: proved the sidecar absent, another build's or corrupt. Every other decline
+#: may clear when the serving worker publishes or drains.
+_CONCLUSIVE_DECLINES = frozenset({"graph_disabled", "graph_sync_snapshot_unusable"})
+
 
 _REBUILD_LOCK = threading.Lock()
 _REBUILDING: set[str] = set()

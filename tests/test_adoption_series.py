@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import test_adoption_consume as consume
+from test_cloud_import_discard import _file_all_but
 
 from exomem import adoption_run, cloud_import_job, import_stage, state_paths
 
@@ -53,12 +54,12 @@ def _start(vault: Path, import_id: str, **options) -> dict:
     return adoption_run.start(vault, path=f"_Imports/{import_id}", today=consume.TODAY, **options)
 
 
-def _file_everything(vault: Path, import_id: str) -> None:
-    """Adopt every artifact of the stage, then finish, so that the folders that filing emptied are removed."""
-    run_id, _plan_id, _reply = consume._adopt(vault, f"_Imports/{import_id}")
-    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+def _file_all_but_one(vault: Path, import_id: str) -> None:
+    """Adopt the stage but `Notes/left.pdf`, then finish. That file keeps the stage, and so its collection root, in place."""
+    _file_all_but(vault, import_id, "Notes/left.pdf")
     stage = vault / "_Imports" / import_id
-    assert not (stage / "Recordings").exists() and (stage / "Notes" / "plan.md").exists()
+    assert not (stage / "Recordings").exists() and not (stage / "Notes" / "plan.md").exists()
+    assert (stage / "Notes" / "left.pdf").exists()
 
 
 def _plan_items(vault: Path, import_id: str) -> dict[str, dict]:
@@ -92,10 +93,11 @@ def test_a_resend_window_with_the_first_series_file_files_its_member_at_the_firs
 
 
 def test_a_stage_whose_artifacts_are_all_filed_keeps_its_collection_root_from_its_series_file(vault: Path) -> None:
-    import_id = _window(vault, {"Recordings/a.pdf": consume.PDF, "Notes/plan.md": b"# Plan\n"},
-                        series=["Recordings/a.pdf", "Notes/plan.md"])
+    import_id = _window(
+        vault, {"Recordings/a.pdf": consume.PDF, "Notes/plan.md": b"# Plan\n", "Notes/left.pdf": consume.PDF + b"left"},
+        series=["Recordings/a.pdf", "Notes/plan.md"])
     first = _start(vault, import_id)
-    _file_everything(vault, import_id)
+    _file_all_but_one(vault, import_id)
 
     again = _start(vault, import_id)
 
@@ -104,9 +106,10 @@ def test_a_stage_whose_artifacts_are_all_filed_keeps_its_collection_root_from_it
 
 
 def test_a_stage_without_a_series_file_keeps_its_collection_root_from_its_manifest_once_its_artifacts_are_filed(vault: Path) -> None:
-    import_id = _window(vault, {"Recordings/a.pdf": consume.PDF, "Notes/plan.md": b"# Plan\n"}, series=None)
+    import_id = _window(
+        vault, {"Recordings/a.pdf": consume.PDF, "Notes/plan.md": b"# Plan\n", "Notes/left.pdf": consume.PDF + b"left"}, series=None)
     first = _start(vault, import_id)
-    _file_everything(vault, import_id)
+    _file_all_but_one(vault, import_id)
 
     again = _start(vault, import_id)
 

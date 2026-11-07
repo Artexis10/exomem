@@ -1,0 +1,13 @@
+{
+  "id": "c09-insight",
+  "title": "The scope of an existing insight is narrowed",
+  "suite": "session-close",
+  "seed": "c09",
+  "engagement": "balanced",
+  "turns": [
+    "I'm about to start the edit for my last trip. Can you pull up what I have written about batching photos by theme?",
+    "Right. After the last two trips I've settled on a narrower rule: batching by theme only saved time for the landscape and street shots. For portraits I now edit each photo on its own, because skin tones need individual care. Everything else in that note still holds.",
+    "That's all for today, thanks."
+  ],
+  "recall_turn": "How should I approach editing my trip photos, and where does batching by theme help?"
+}

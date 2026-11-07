@@ -6,6 +6,7 @@ the atomic commit are real.
 """
 
 import os
+import time
 
 import pytest
 
@@ -496,7 +497,8 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
         )
         (job,) = media_jobs.status(vault)["jobs"]
         assert job["state"] == media_jobs.BLOCKED and job["retryable"] is False
-        assert "reprocess" in job["next_action"]
+        # The start that follows the fix requeues the request, so the restart is the whole remedy.
+        assert job["next_action"].endswith("restart the service")
 
         # The completed transcript stays complete for reconcile, and the request is refused.
         media_processing.reconcile_media(vault, binary, explicit=False)
@@ -509,11 +511,57 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
     finally:
         media_processing.set_media_runtime_available(vault)
 
+    # Once the pause ends, a retry still leaves the blocked reprocess to a new request.
+    assert media_processing.retry_media(vault, binary).requeued == 0
+    (job,) = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.BLOCKED
+
     media_processing.reprocess_media(vault, binary, language="et")
     _run_to_idle(vault, worker)
     assert engine.languages == [None, "et"]
     assert RIGHT in sidecar.read_text(encoding="utf-8")
     assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 1
+
+
+def test_a_reprocess_a_paused_start_blocked_runs_with_its_language_after_a_start_with_extraction(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    media_processing.reprocess_media(vault, binary, language="et")
+    # The supervisor requeues the request but starts no media child; the test runs the child itself.
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda _self: None)
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    started = None
+    try:
+        monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+        assert server_runtime._start_media_worker(vault) is None
+        (paused,) = media_jobs.status(vault)["jobs"]
+
+        monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+        started = server_runtime._start_media_worker(vault)
+        assert started is not None
+        deadline = time.monotonic() + 10
+        while media_jobs.MediaJobStore(vault).runtime_blocked_jobs():
+            assert time.monotonic() < deadline, "the supervisor did not requeue the paused request"
+            time.sleep(0.02)
+        (resumed,) = media_jobs.status(vault)["jobs"]
+    finally:
+        if started is not None:
+            started.stop()
+        media_processing.set_media_runtime_available(vault)
+
+    # A retry leaves a reprocess alone, and the start requeues it with its request, so the
+    # paused request says to restart and nothing more.
+    assert paused["state"] == media_jobs.BLOCKED and paused["retryable"] is False
+    assert paused["next_action"].endswith("restart the service")
+    assert "retry" not in paused["next_action"] and "reprocess" not in paused["next_action"]
+    assert resumed["state"] == media_jobs.PENDING
+    _run_to_idle(vault, worker)
+    assert engine.languages == [None, "et"]
+    assert RIGHT in sidecar.read_text(encoding="utf-8")
 
 
 def test_a_failed_reprocess_does_not_starve_the_retry_pass(

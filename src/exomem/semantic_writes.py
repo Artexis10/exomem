@@ -1023,12 +1023,12 @@ class CreationCommit:
     written_paths: tuple[str, ...]
     contract_result: semantic_contract.SemanticContractResult | None
     creation_commit: relation_review.CreationDraftCommit | None
-    # Advisory only. Absent unless the written page shows recurring durable
-    # material outside its own declared scope; never affects the commit.
+    # Advisory only. Absent unless the written page has an open note-cohesion item;
+    # never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
     records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
-    # evidence about the page just written, while this is a bounded count of what
+    # a question about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
@@ -1171,12 +1171,12 @@ class ExistingCommit:
     index_report: Any | None
     lifecycle_state: str | None
     transition_token: str
-    # Advisory only. Absent unless the written page shows recurring durable
-    # material outside its own declared scope; never affects the commit.
+    # Advisory only. Absent unless the written page has an open note-cohesion item;
+    # never affects the commit.
     structure_suggestion: dict[str, Any] | None = None
     records_routing: dict[str, Any] | None = None
     # Advisory only, and a DIFFERENT kind of advisory: `structure_suggestion` is
-    # evidence about the page just written, while this is a bounded count of what
+    # a question about the page just written, while this is a bounded count of what
     # the whole vault currently owes. It rides the same post-commit seam because
     # a second one would be a second thing to keep fail-open; it does not share
     # the seam's licence to skip a disclosure decision, and does not get one.
@@ -2737,26 +2737,21 @@ def _prepare_markdown_catalog_publication(
 
 
 @call_spans.timed("post_commit.structure_suggestion")
-def _structure_suggestion(
-    state: Any,
-    corpus: semantic_contract.SemanticCorpusContext | None = None,
-) -> dict[str, Any] | None:
-    """Measure structural divergence for a committed page. Advisory; never raises.
+def _structure_suggestion(vault_root: Path, state: Any) -> dict[str, Any] | None:
+    """The note-cohesion question for a committed page, while its item is open. Advisory; never raises.
 
     Runs only after the guarded write has returned, over the page state the
-    preflight already built, so it adds no I/O and holds no lock. A fault here
-    costs the caller a suggestion, never the write.
-
-    `corpus` is the context this mutation already built; it lets a cluster whose
-    material now has its own pages resolve instead of re-firing forever. Passing
-    None is safe and simply skips resolution — suppression is never the fallback.
+    preflight already built, and holds no lock. It reads the review-state file to
+    learn whether the page's item is already answered. A fault here, including an
+    unreadable review state, costs the caller the question, never the write:
+    asking on every write when decisions cannot be read would turn it into noise.
     """
     try:
-        from . import structure_promotion
+        from . import note_cohesion
 
-        return structure_promotion.suggest_for_state(state, corpus=corpus)
-    except Exception:  # noqa: BLE001 — structural advice never breaks a commit
-        log.debug("structural promotion analysis failed (non-fatal)", exc_info=True)
+        return note_cohesion.suggestion_for_state(vault_root, state)
+    except Exception:  # noqa: BLE001 -- a structural question never breaks a commit
+        log.debug("note cohesion question failed (non-fatal)", exc_info=True)
         return None
 
 
@@ -3159,7 +3154,7 @@ def commit_existing(
             corpus=preflight.after_corpus,
             transition_id=_existing_transition_id(preflight.transition_token),
         )
-    suggestion = _structure_suggestion(preflight.after, preflight.after_corpus)
+    suggestion = _structure_suggestion(vault_root, preflight.after)
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
     delivered_routing = _records_routing_for_delivery(
@@ -4446,6 +4441,7 @@ def commit_recovery(
                 census_guard.recheck(root)
             if preflight.recovery_sidecar_guard is not None:
                 preflight.recovery_sidecar_guard.recheck(root)
+            from . import extraction_parts
             from .governance import catalog_publication, graph_producer
 
             catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
@@ -4485,6 +4481,11 @@ def commit_recovery(
                     content_paths=preflight.catalog_content_paths,
                     graph_replacement_provider=graph_replacement_provider,
                     now=preflight.catalog_publication_now,
+                    # A restored page's part pages leave Trash only after the catalog is ready.
+                    part_folders={
+                        item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
+                        for item in preflight.entries
+                    },
                 )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
@@ -5068,7 +5069,7 @@ def _creation_post_commit(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
             origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
         )
-    suggestion = _structure_suggestion(preflight.semantic_state, preflight.corpus)
+    suggestion = _structure_suggestion(vault_root, preflight.semantic_state)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
     delivered_routing = _records_routing_for_delivery(

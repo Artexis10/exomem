@@ -1431,12 +1431,14 @@ new projections. Missing and withheld sources produce the same generic reset.
 A client that omits method continuity must read a source again before reuse.
 
 Task discovery has a fast path only when the caller has unrestricted content
-access and the vault has no file release policy, bound writer or enrolled
-collection store. Otherwise discovery must prepare the caller's complete released
-corpus on every request, and that preparation does not yet meet the activation
-latency ceiling at scale. This applies to a restricted caller, such as a shared
-or delegated audience. It also applies to the owner of a vault whose structured
-collections live in the collection store. By default such a request gets
+access and the vault has no file release policy or bound writer. A vault whose
+structured collections live in the collection store keeps the fast path for its
+owner, and each page the store owns is still decided on its own. Otherwise
+discovery must prepare the caller's complete released corpus on every request,
+and that preparation does not yet meet the activation latency ceiling at scale.
+This applies to a restricted caller, such as a shared or delegated audience. It
+also applies to every caller on a vault with a file release policy. By default
+such a request gets
 `task_context.state` of `unavailable`, and `task_context.methods.reset` is true
 when the client held methods.
 

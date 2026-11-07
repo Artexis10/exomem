@@ -265,6 +265,53 @@ def test_full_verifier_and_selected_loader_refuse_tamper(tmp_path: Path) -> None
         )
 
 
+def _parted_items() -> tuple[projection_store.ProjectionItemVariants, ...]:
+    """One Source whose full-text row holds two further parts and places part 1 in its body."""
+    identity, content_hash = "Knowledge Base/report.txt.md", "d" * 64
+    variant = projections.build_projection_variant(
+        item_identity=identity,
+        content_hash=content_hash,
+        decision=Decision(level=6),
+        projector_schema_version=1,
+        full_search_fields={"body": "## Extracted text\n\nfirst part text"},
+    )
+    assert variant is not None
+    [parted] = projections.with_parts(
+        (variant,), ((2, "second part text", 15), (3, "third part text", 31)), head="first part text"
+    )
+    assert parted.head is not None and len(parted.parts) == 2
+    return (projection_store.ProjectionItemVariants(item_identity=identity, content_hash=content_hash, variants=(parted,)),)
+
+
+@pytest.mark.parametrize(
+    ("table", "operation", "tamper"),
+    [
+        ("projection_variant_parts", "update", "UPDATE projection_variant_parts SET text='changed' WHERE part_number=3"),
+        ("projection_variant_parts", "delete", "DELETE FROM projection_variant_parts WHERE part_number=3"),
+        ("projection_variant_heads", "update", "UPDATE projection_variant_heads SET body_begin=body_begin+1"),
+    ],
+    ids=["changed part", "dropped part", "moved head"],
+)
+def test_the_rows_digest_binds_the_parts_and_head_of_a_full_text_row(
+    tmp_path: Path, table: str, operation: str, tamper: str
+) -> None:
+    key = _key()
+    manifest = projection_store.stage_variant_store(tmp_path, key=key, items=_parted_items())
+    connection = sqlite3.connect(projection_store.variant_store_path(tmp_path, key))
+    # Put the immutability trigger back after the change, so only the rows digest can catch it.
+    connection.execute(f"DROP TRIGGER {table}_no_{operation}")
+    connection.execute(tamper)
+    connection.execute(
+        f"CREATE TRIGGER {table}_no_{operation} BEFORE {operation.upper()} ON {table} "
+        f"BEGIN SELECT RAISE(ABORT, '{table} rows are immutable'); END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(projection_store.ProjectionStoreMismatch, match="digest"):
+        projection_store.verify_variant_store(tmp_path, key=key, expected_rows_digest=manifest.rows_digest)
+
+
 def test_selected_loader_refuses_a_valid_row_inserted_after_commit(tmp_path: Path) -> None:
     key = _key()
     items = _items()

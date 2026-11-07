@@ -549,7 +549,7 @@ _TOOL_HELP = {
     "change_observations": ("write", "Change observations", "Add, update or remove a semantic unit with the existing review and fingerprint guards."),
     "change_settings": ("write", "Change settings", "Set or clear saved engagement only on an explicit user setting-change request. Inspect settings through bootstrap first."),
     "read_episode": ("read", "Read episode", "Inspect episode recaps, candidates or coverage, or recover one preserved material's original and reading states."),
-    "record_episode": ("write", "Record episode", "Record episode recaps, bind preserved material, prepare captures or resume their workflow."),
+    "record_episode": ("write", "Record episode", "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes."),
     "check_memory": ("read", "Check memory", "Inspect maintenance findings and preview admitted repairs without writing."),
     "repair_memory": ("write", "Repair memory", "Apply admitted maintenance repairs with their current guards. Curation proposals persist workflow state."),
     "read_import": ("read", "Read import", "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true."),
@@ -618,7 +618,7 @@ _REMAINING = {
         _row("activation", "read_review", ("categories", "limit", "state")),
         _row("item", "read_review", ("ref", "limit"), ("ref",)),
         _row("audit", "read_review", ("categories", "detail", "legacy_sample_limit")),
-        _row("dispositions", "read_review", ()),
+        _row("dispositions", "read_review", ("window_days",)),
         _row("provenance", "read_review", ("tag", "key", "value", "path", "limit")),
         _row("evolution", "read_review", ("query", "path", "limit")),
         _row("compilation", "read_review", ("sources", "suggested_title"), ("sources",)),
@@ -1043,8 +1043,12 @@ def spell_call(
 
 def call_text(command: str, arguments: Mapping[str, Any], shape: str) -> str:
     """A call in prose: the tool name and its arguments, as `tool(key='value', ...)`."""
-    tool, spelled = spell_call(command, arguments, shape)
-    return f"{tool}({', '.join(f'{key}={value!r}' for key, value in spelled.items())})"
+    return format_call(*spell_call(command, arguments, shape))
+
+
+def format_call(tool: str, arguments: Mapping[str, Any]) -> str:
+    """A spelled call in prose: `tool(key='value', ...)`."""
+    return f"{tool}({', '.join(f'{key}={value!r}' for key, value in arguments.items())})"
 
 
 def call_route(command: str, arguments: Mapping[str, Any], shape: str) -> dict[str, Any]:

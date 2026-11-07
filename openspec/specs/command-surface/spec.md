@@ -912,114 +912,6 @@ The single command registry SHALL expose `verdict`, `check_by`, and `id` on `obs
 - **WHEN** a caller updates a rich unit carrying `- verdict: inconclusive` and passes `verdict` as `confirmed`
 - **THEN** the rewritten unit carries `- verdict: confirmed`
 
-### Requirement: Compiled writes may return one advisory structural-promotion suggestion
-
-When a compiled-note mutation commits, the system SHALL evaluate whether the written page now carries recurring durable material outside its own declared scope. When it does, the successful result SHALL include at most one `structure_suggestion`, carried on the existing commit result and projected into the default compact terminal, for every compiled writer: `remember`, `edit_memory`, `observe_memory`, and `replace_memory`.
-
-The suggestion SHALL report `kind`, a `strength` of exactly `strong` or `moderate`, a deterministically ordered list of reason codes, the count of off-scope durable units, and a bounded list of the recurring terms that formed the group. It SHALL NOT report a numeric confidence, score, probability, or any other continuous quantity.
-
-The suggestion is advisory. It SHALL NOT add a value to the closed set of keys a client branches on for mutation outcome, and it SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity, or replay behaviour. When no condition is detected the key SHALL be absent rather than null or empty.
-
-#### Scenario: A diverged compiled page returns a suggestion in the default response
-
-- **WHEN** a compiled page whose declared identity describes one subject accumulates recurring durable units describing a materially different subject, and a further compiled write commits
-- **THEN** the write succeeds with its existing committed terminal unchanged
-- **AND** the default compact response carries one `structure_suggestion` with `strength` of `strong` or `moderate`
-- **AND** the suggestion names at least two reason codes in deterministic order
-- **AND** the response reports no numeric confidence for the suggestion
-
-#### Scenario: Every compiled writer can carry the suggestion
-
-- **WHEN** the same diverged page is mutated through `remember`, `edit_memory`, `observe_memory`, or `replace_memory`
-- **THEN** each committed result can carry the suggestion
-- **AND** the suggestion has the same shape regardless of which writer produced it
-
-#### Scenario: A coherent page returns no suggestion
-
-- **WHEN** a compiled write commits to a page whose durable units remain within its declared scope
-- **THEN** the response contains no `structure_suggestion` key
-
-### Requirement: Structural detection is conservative and never triggered by size
-
-The system SHALL require convergent evidence before emitting a suggestion. It SHALL emit nothing on a single signal, and it SHALL reserve `strong` for the case where every reason code holds.
-
-Recurrence SHALL be established over durable semantic units rather than over write events, and the reported reason codes SHALL describe units accordingly. A term SHALL contribute to a group only when it recurs across more than one off-scope unit.
-
-Raw page length, byte size, unit count alone, section count, and category variety SHALL NOT be sufficient to emit a suggestion. A long page whose durable units remain within its declared scope SHALL produce no suggestion regardless of its size.
-
-#### Scenario: A long coherent research note stays quiet
-
-- **WHEN** a compiled write commits to a large note containing many durable units, many categories, and many sections that all remain within one declared subject
-- **THEN** no suggestion is emitted
-- **AND** the outcome does not depend on the page's length
-
-#### Scenario: One or two tangents do not trigger promotion
-
-- **WHEN** an otherwise coherent page contains one or two durable units outside its declared scope
-- **THEN** no suggestion is emitted, because no term recurs across enough off-scope units to form a group
-
-#### Scenario: A single signal is insufficient
-
-- **WHEN** fewer than two reason codes hold for a page
-- **THEN** no suggestion is emitted
-
-### Requirement: Structural detection is scoped to compiled knowledge
-
-The system SHALL evaluate only compiled note pages. Sources, evidence, media artifacts, structured collections, planning items, navigational pages, and any page ineligible for recall SHALL NOT be analysed and SHALL NOT produce a suggestion.
-
-A page whose declared identity announces deliberate breadth SHALL NOT be nagged toward further division. A page carrying the established hub or snapshot convention SHALL be excluded from analysis.
-
-#### Scenario: Source and evidence artifacts never enter the advisory path
-
-- **WHEN** a write commits to a source, evidence, or other non-compiled artifact, however large or heterogeneous
-- **THEN** no structural analysis runs and no suggestion is emitted
-
-#### Scenario: A deliberate hub is not told to split
-
-- **WHEN** a compiled write commits to a page that declares itself a hub by the established convention
-- **THEN** no suggestion is emitted
-
-#### Scenario: Advice stops once the material is correctly routed
-
-- **WHEN** the diverged material has been moved into a destination whose declared identity matches it, and further writes are directed there
-- **THEN** neither that destination nor the original page emits a suggestion
-- **AND** the silence follows from scope agreement rather than from any recorded dismissal
-
-### Requirement: Structural suggestions never weaken a committed write
-
-Structural analysis SHALL be failure-isolated. An exception, an unavailable optional signal, or an undecidable result SHALL cause the suggestion to be omitted, and SHALL NOT fail, delay, retry, roll back, or alter the committed mutation or its terminal.
-
-The system SHALL NOT move, rename, split, retitle, rescope, create, or delete any page, project, or folder as a consequence of structural detection.
-
-Existing write-latency requirements SHALL continue to hold unchanged, including the absolute commit ceilings and the bound on how commit cost may scale with page size.
-
-#### Scenario: A detector failure leaves the write committed
-
-- **WHEN** structural analysis raises during an otherwise successful compiled write
-- **THEN** the mutation remains committed with its existing terminal
-- **AND** no `structure_suggestion` is present
-- **AND** no warning, error code, or retry is produced for the caller
-
-#### Scenario: Detection never restructures the vault
-
-- **WHEN** a suggestion is emitted at any strength
-- **THEN** no page, project, or folder has been created, moved, renamed, or deleted by the system
-
-### Requirement: Structural evidence is confined to the written page
-
-Every fact reported in a suggestion SHALL be derived from the page named in the same response. The suggestion SHALL NOT include or allow inference of any other page's path, title, project, tags, or count, whether or not the caller is permitted to see that page.
-
-#### Scenario: The payload discloses nothing about other pages
-
-- **WHEN** a suggestion is emitted for a page in a vault containing pages the caller may not see
-- **THEN** the payload contains no path, title, project, or count belonging to any page other than the one written
-
-#### Scenario: The payload is bounded and deterministic
-
-- **WHEN** the same page state is evaluated twice
-- **THEN** the reason codes, counts, and recurring terms are identical and identically ordered
-- **AND** at most one suggestion is returned, with its recurring-term list bounded to a small fixed maximum
-
 ### Requirement: Source kind is an open, extensible vocabulary
 
 Source capture SHALL accept any source kind that normalizes to a safe canonical key, whether or not the product ships that key as a built-in. Acceptance SHALL NOT depend on a code release, a schema migration, or a prior administrative registration step.
@@ -1411,68 +1303,6 @@ The classification advisory SHALL remain advisory: it reports that debt exists a
 - **WHEN** a registry entry's path segment is changed after sources were filed under the previous segment
 - **THEN** those sources stay where they are
 - **AND** the operation reports no automatic migration
-
-### Requirement: A structural suggestion resolves when the corpus gives its material a home
-
-When the material a structural suggestion describes already has eligible compiled destinations declaring its vocabulary, the system SHALL NOT emit the suggestion, and it SHALL reach that outcome from corpus state alone.
-
-The system SHALL NOT record, read, or rely on any acceptance, dismissal, snooze, cooldown, or per-page suggestion history to reach this outcome. Removing the destinations SHALL restore the suggestion, because nothing about the earlier emission was retained.
-
-A destination SHALL contribute only when it is a compiled page eligible for the caller's own recall, is not the page just written, and its declared identity covers at least two of the cluster's recurring terms. Resolution SHALL be evaluated by removing the covered terms and re-applying the existing mass requirement, so a partially routed cluster still produces a suggestion for the part that has no home.
-
-Resolution SHALL be expressed only as the absence of a suggestion. It SHALL NOT add a key, a reason code, a destination name, a path, a count of destinations, or any other fact about a page other than the one written.
-
-#### Scenario: A suggestion acted on by creating destinations stops firing
-
-- **WHEN** a compiled page carries a recurring off-scope cluster that would otherwise produce a suggestion
-- **AND** the vault contains eligible compiled destinations whose declared identities together cover that cluster's recurring terms
-- **AND** a further compiled write to the original page commits
-- **THEN** the response contains no `structure_suggestion` key
-- **AND** the original page's own durable units are unchanged, having been neither removed nor rewritten
-
-#### Scenario: Resolution survives no dismissal record and reverses with the destinations
-
-- **WHEN** the destinations that resolved a cluster are removed from the corpus
-- **AND** a further compiled write to the original page commits
-- **THEN** the suggestion is emitted again with its existing shape
-- **AND** no stored acceptance or dismissal was consulted to reach either outcome
-
-#### Scenario: An incidental single-term match cannot silence a cluster
-
-- **WHEN** the only pages declaring any of a cluster's terms each cover exactly one of them
-- **THEN** no destination contributes
-- **AND** the suggestion is emitted unchanged
-
-#### Scenario: A partially routed cluster still reports the unrouted remainder
-
-- **WHEN** eligible destinations cover only part of a cluster's recurring terms
-- **AND** the remaining terms still satisfy the existing mass requirement
-- **THEN** a suggestion is emitted
-
-### Requirement: Structural resolution reads only corpus state the write already holds and fails open
-
-The system SHALL evaluate resolution using the corpus context the mutation already built. It SHALL NOT perform a corpus walk, index read, database query, embedding, or model call for this purpose, and it SHALL NOT build a second corpus context.
-
-The destination set SHALL be drawn from the pages eligible for the caller's own recall, so a page the caller is not entitled to see SHALL NOT affect the caller's suggestion.
-
-When no corpus context is available, or resolution cannot be evaluated for any reason, the system SHALL emit the suggestion exactly as it does without resolution. Suppression SHALL NEVER be the fallback behaviour, and a failure in this analysis SHALL NEVER affect the committed write, its terminal, its status, or its replay behaviour.
-
-#### Scenario: Every compiled writer evaluates resolution
-
-- **WHEN** a page whose cluster is fully routed is mutated through `remember`, `edit_memory`, `observe_memory`, or `replace_memory`
-- **THEN** none of the four responses carries a `structure_suggestion`
-
-#### Scenario: An unavailable corpus emits rather than suppresses
-
-- **WHEN** resolution cannot be evaluated because no corpus context is available
-- **THEN** the suggestion is emitted with its existing shape
-- **AND** the committed write, its terminal, and its status are unchanged
-
-#### Scenario: An ineligible destination does not resolve a cluster
-
-- **WHEN** the only page declaring a cluster's vocabulary is not eligible for the caller's own recall
-- **THEN** that page does not contribute
-- **AND** the suggestion is emitted unchanged
 
 ### Requirement: Simple Front-Door Actions Route To Typed Operations
 
@@ -2625,7 +2455,7 @@ When a kind that requires a URL is captured without one, the refusal SHALL tell 
 
 ### Requirement: Capture reports classification debt in one advisory suggestion
 
-When a capture commits while the vault holds sources with no chosen kind, the successful result SHALL include at most one bounded advisory suggestion, reported through the same advisory-suggestion channel already used for structural advice and distinguished by its own kind value. Sources with no chosen kind are those filed under the `unclassified` folder, the legacy `other` folder, and the legacy-vault import folder.
+When a capture commits while the vault holds sources with no chosen kind, the successful result SHALL include at most one bounded advisory suggestion. The suggestion SHALL be reported through the advisory-suggestion channel that compiled writes also use for the note-cohesion question, and SHALL be distinguished by its own kind value. Sources with no chosen kind are those filed under the `unclassified` folder, the legacy `other` folder, and the legacy-vault import folder.
 
 The suggestion SHALL report a `strength` of `moderate`, a deterministically ordered list of reason codes, the number of such sources, and the folders that hold them. It SHALL NOT report a numeric confidence, score, or probability.
 
@@ -2689,21 +2519,32 @@ When `review_memory(mode="upkeep")` answers `status: "unavailable"`, the respons
 
 ### Requirement: The dispositions view reports each family's effect
 
-The dispositions view SHALL carry an `effect` block computed from existing records only, without an audit. It SHALL state its window as whole UTC days (`days`, fixed at seven with today included, and `since` and `through` as UTC dates), the source of each count, and per family the counts `surfaced`, `dismissed`, `snoozed`, `cleared` and `open`:
+The dispositions view SHALL carry an `effect` block computed from existing records only, without an audit. It SHALL state its window as whole UTC days (`days`, with today included, and `since` and `through` as UTC dates), the source of each count, and per family the counts `surfaced`, `dismissed`, `snoozed`, `cleared`, `acted` and `open`. The window SHALL be seven days unless the request sets `window_days`, a whole number from 1 to 90. A value outside that range, or `window_days` on another mode, SHALL be refused with a message that names the allowed range or mode, and SHALL NOT be clamped:
 
-- `surfaced`: identities first stamped on the first-surfaced ledger in the window, and for upkeep families the first deliveries the Dreamer recorded in the window. An identity is one family's item, so an item whose fingerprint changed in the window counts once;
+- `surfaced`: identities first stamped on the first-surfaced ledger in the window, and for upkeep families the first deliveries the Dreamer recorded in the window. An identity is one family's item, so an item whose fingerprint changed in the window counts once. It is a lower bound, because an item shown where nothing is recorded is not counted, and the block's `sources` SHALL say so;
 - `dismissed` and `snoozed`: items with a manual decision of that action and family updated in the window;
 - `cleared`: items surfaced in the window with no decision recorded and absent from the family's current set;
+- `acted`: `unknown`, never 0. Current citation or queue state does not prove an action after surfacing, and current families record no matching mutation receipt for that attribution;
 - `open`: items surfaced in the window with no decision recorded and still in the current set.
 
 Events SHALL count from `since` 00:00Z through the time of the read. The stated window SHALL carry no time of day, so the block changes only when a count changes or at a UTC midnight.
 
-The current set SHALL come from the stored due-state projection and the Dreamer's open candidates. A family whose current set only an audit can enumerate SHALL report `cleared` and `open` as `unknown`, never 0. The block SHALL state the Dreamer sidecar's state as `dreamer_sidecar`: `readable`, `missing`, `schema_mismatch`, `unreadable` or `locked`. When it is not `readable`, every upkeep family SHALL be listed, never omitted, with `surfaced`, `cleared` and `open` as `unknown` and an `unknown_reason` that names that state. The count SHALL be named `cleared`, never `acted`. The due-state carrier and the attention surface SHALL stamp the family on the ledger; a row that carries no family SHALL be counted under `unattributed` and never assigned a guessed family. The manual dismissal counts SHALL be counted from the decision records without an audit. Both counts and the effect block SHALL be served to the owner only; another bound audience SHALL receive the owner-only aggregate refusal.
+The current set SHALL come from the stored due-state projection and the Dreamer's open candidates. A family whose current set only an audit can enumerate SHALL report `cleared` and `open` as `unknown`, never 0. The block SHALL state the Dreamer sidecar's state as `dreamer_sidecar`: `readable`, `missing`, `schema_mismatch`, `unreadable` or `locked`. When it is not `readable`, every upkeep family SHALL be listed, never omitted, with `surfaced`, `cleared` and `open` as `unknown` and an `unknown_reason` that names that state. A cleared item SHALL NOT count as acted without a family that can prove it. The due-state carrier and the attention surface SHALL stamp the family on the ledger; a row that carries no family SHALL be counted under `unattributed` and never assigned a guessed family. The manual dismissal counts SHALL be counted from the decision records without an audit. Both counts and the effect block SHALL be served to the owner only; another bound audience SHALL receive the owner-only aggregate refusal.
 
 #### Scenario: A family's surfacings are accounted for
 
 - **WHEN** a due-state family surfaced three items in the window, one was dismissed, one page was deleted and one is untouched
 - **THEN** the family reports `surfaced: 3`, `dismissed: 1`, `cleared: 1` and `open: 1`
+- **AND** its `acted` is `unknown` when the family cannot tell a change from a re-read
+
+#### Scenario: The caller chooses the window within one to ninety days
+
+- **WHEN** the dispositions view is requested with `window_days: 30`
+- **THEN** the window states 30 days
+- **WHEN** it is requested with `window_days: 1`
+- **THEN** `since` and `through` are the same UTC date
+- **WHEN** it is requested with a value outside 1 to 90, or with `window_days` on another mode
+- **THEN** the request is refused with a message that names the range or the mode
 
 #### Scenario: Two reads with no event between them are identical
 
@@ -3139,3 +2980,71 @@ Records and Planning schemas SHALL identify accepted collection selectors and de
 - **WHEN** an agent uses the selector returned by collection inspection and omits a filter operator
 - **THEN** the query applies the existing default operator
 - **AND** every surface describes the same accepted selector and filter structure
+
+### Requirement: Compiled writes may ask the writing agent one note-cohesion question
+
+When a compiled-note mutation commits to a page whose `note_cohesion` review item is open, the successful result SHALL include one `structure_suggestion` with `kind` `note_cohesion`. The suggestion is carried on the existing commit result and projected into the default compact terminal, for every compiled writer: `remember`, `edit_memory`, `observe_memory`, and `replace_memory`.
+
+The suggestion SHALL report the page's semantic-unit count as `units`, the size step it reached as `step_units`, the next size step as `next_step_units`, the review item's `ref` and `fingerprint`, and a fixed `question`. The question SHALL ask the agent whether the page answers more than one independent question. It SHALL tell the agent to keep a coherent page whole by dismissing the item, and to propose a split only through the curation lane. The suggestion SHALL NOT claim that the page is overloaded, and SHALL NOT report a strength, a score, a confidence, reason codes or terms.
+
+The suggestion SHALL be withheld when the `structural_suggestions` delegation class is `off`, or when the `note_cohesion` family disposition is `quiet` or `off`.
+
+The suggestion is advisory. It SHALL NOT add a value to the closed set of keys a client branches on for mutation outcome. It SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity, or replay behaviour. When the item is not open, the key SHALL be absent rather than null or empty. The response layer SHALL re-validate the payload against bounds declared for this kind, and SHALL drop a payload that fails them.
+
+#### Scenario: A page that reached a step asks the writing agent
+
+- **WHEN** a compiled write commits and leaves the page with 14 semantic units, and no decision is recorded for that page at the 14-unit step
+- **THEN** the write succeeds with its existing committed terminal unchanged
+- **AND** the default compact response carries one `structure_suggestion` with `kind` `note_cohesion`, `units` 14, `step_units` 14, `next_step_units` 21, the item's `ref` and `fingerprint`, and the question
+- **AND** the suggestion carries no strength, score, reason codes or terms
+
+#### Scenario: A kept-whole page stays quiet until its next step
+
+- **WHEN** the agent has dismissed the page's item at the 14-unit step, and a later write leaves the page with 20 units
+- **THEN** the response contains no `structure_suggestion` key
+- **AND** when a further write brings the page to 21 units, the response carries the question again with `step_units` 21
+
+#### Scenario: An unanswered item asks again on the next write
+
+- **WHEN** a page's item is open and nobody has answered it, and another compiled write commits to that page
+- **THEN** that response carries the question again with the same `ref` and `fingerprint`
+
+#### Scenario: A user who turned structural suggestions off is not asked
+
+- **WHEN** the `structural_suggestions` delegation class is `off`, or the `note_cohesion` family is quiet, and a compiled write commits to a page with an open item
+- **THEN** the response contains no `structure_suggestion` key
+- **AND** the item stays open in the review queue
+
+#### Scenario: A small page never asks
+
+- **WHEN** a compiled write commits and leaves the page with 8 semantic units
+- **THEN** the response contains no `structure_suggestion` key
+
+#### Scenario: Every compiled writer can carry the question
+
+- **WHEN** a page with an open item is mutated through `remember`, `edit_memory`, `observe_memory`, or `replace_memory`
+- **THEN** each committed result can carry the question
+- **AND** the question has the same shape whichever writer produced it
+
+### Requirement: The note-cohesion question never weakens a committed write
+
+The question SHALL be failure-isolated. An exception, an unreadable review state, or an undecidable result SHALL cause the suggestion to be omitted. It SHALL NOT fail, delay, retry, roll back, or alter the committed mutation or its terminal.
+
+The system SHALL NOT move, rename, split, retitle, rescope, create, or delete any page as a consequence of the question. Every fact in the suggestion SHALL come from the page named in the same response.
+
+#### Scenario: A failure leaves the write committed
+
+- **WHEN** the note-cohesion check raises during an otherwise successful compiled write
+- **THEN** the mutation remains committed with its existing terminal
+- **AND** no `structure_suggestion` is present
+- **AND** no warning, error code, or retry is produced for the caller
+
+#### Scenario: An unreadable review state asks nothing
+
+- **WHEN** the review state cannot be read while a compiled write commits to a page past a step
+- **THEN** the response contains no `structure_suggestion` key
+
+#### Scenario: The payload names only the written page
+
+- **WHEN** the question is returned in a vault with pages the caller may not see
+- **THEN** the payload contains no path, title, project or count that belongs to another page

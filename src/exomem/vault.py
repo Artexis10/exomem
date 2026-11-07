@@ -6008,7 +6008,10 @@ def _batch_atomic_write_locked(
         if fast_receipt is not None:
             canonical_commit_monotonic = _fast_ack_monotonic()
         if replaced and commit_point:
-            mark_active_mutation_committed()
+            # The `commit_tail.*` spans split `derived.fanout` on the fast
+            # route, where nothing fans out yet live writes spent 0.3-1.8 s there.
+            with call_spans.span("commit_tail.mutation_committed"):
+                mark_active_mutation_committed()
     except Exception as commit_error:
         if additive_guard is not None and additive_guard.committed:
             # Authority and canonical bytes are already committed together.
@@ -6122,7 +6125,8 @@ def _batch_atomic_write_locked(
         _remove_empty_created_dirs(created_dirs)
         raise
     else:
-        cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
+        with call_spans.span("commit_tail.workspace_cleanup"):
+            cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
     finally:
         if additive_guard is not None:
             additive_guard.abort()
@@ -6133,7 +6137,8 @@ def _batch_atomic_write_locked(
         # route follows. The fast-receipt route registers the self-write too.
         from .governance import artifact_census
 
-        artifact_census.note_created(vault_root, replaced)
+        with call_spans.span("commit_tail.census"):
+            artifact_census.note_created(vault_root, replaced)
 
     if fast_receipt is not None:
         if canonical_commit_monotonic is None:  # pragma: no cover - receipt implies a batch
@@ -6148,14 +6153,16 @@ def _batch_atomic_write_locked(
             # intent to abort.
             from . import file_watcher
 
-            file_watcher.register_self_write_and_close(
-                vault_root, replaced, publication_intents
-            )
+            with call_spans.span("commit_tail.self_write"):
+                file_watcher.register_self_write_and_close(
+                    vault_root, replaced, publication_intents
+                )
             publication_intents.clear()
-        complete_active_derived_batch(
-            fast_receipt,
-            canonical_commit_monotonic=canonical_commit_monotonic,
-        )
+        with call_spans.span("commit_tail.batch_complete"):
+            complete_active_derived_batch(
+                fast_receipt,
+                canonical_commit_monotonic=canonical_commit_monotonic,
+            )
 
     if post_commit_fanout and fast_receipt is None:
         created_paths = [

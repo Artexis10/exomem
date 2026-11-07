@@ -86,6 +86,16 @@ Wrapping uses AES-256-GCM, with the cell ID, purpose and version as additional d
 
 **Hetzner volumes.** The StorageClass names the volume Secret through the external provisioner's templated node-publish parameters, so each cell's volume reads a Secret in its own namespace. The pinned hcloud CSI driver reads `encryption-passphrase` from the NodePublish Secret (`infra/helm/platform/HCLOUD_CSI_PROVENANCE.md`). A real-volume create, mount and remount drill must pass before any cell moves, as that file requires.
 
+**Early check 1.1 result (2026-11-06).** The drill ran on a disposable Hetzner Cloud server (cx23, fsn1) in a dedicated, otherwise empty project. The drill operator deleted the server and its volumes afterwards. It used K3s `v1.35.6+k3s1`, the `hcloud-csi` chart `2.21.1` with this repository's `hcloud-csi` values and image digests, and the per-cell StorageClass from `cloud-storage-class.yaml` with its parameters unchanged. Three namespaces each claimed a 10 GiB volume:
+- `cell-a` and `cell-b` each held their own `cell-credentials` Secret. Both volumes were created, attached and mounted, and each pod wrote a marker. After both pods were deleted and recreated on the same node, each read back its own marker. The driver closes the LUKS mapping at unpublish, so this was a full close and reopen.
+- `cell-c` held no Secret. Its volume was created and attached, and kubelet refused the mount with `fetching NodePublishSecretRef cell-c/cell-credentials failed`, before the driver was called. The external provisioner resolves the Secret in the claim's namespace, and kubelet mounts nothing without it.
+- `cryptsetup luksDump` on both mounted volumes reported `Version: 1`, cipher `aes`, mode `xts-plain64`, hash `sha256`, and one enabled key slot. This confirms the LUKS1 format below.
+- `cryptsetup open --test-passphrase` accepted each volume's own namespace passphrase and refused the other namespace's.
+
+The drill used hand-made Secrets, so it proves the StorageClass and driver contract, not cellctl's rendering of them (task 1.3).
+
+**The driver fails open on an empty passphrase.** The pinned driver sets up LUKS only when `encryption-passphrase` is non-empty (`internal/volumes/mount.go`, tag `v2.21.1`). If the Secret exists but lacks the key or holds an empty value, a blank volume gets plain ext4 with no error. The drill did not test that case. cellctl's manifest default for the volume passphrase is an empty string, and the reconcile path always derives a value today. Task 1.3 makes cellctl refuse to render a `cell-credentials` Secret with an empty passphrase.
+
 **Existing volumes.** A LUKS keyslot change alone keeps a volume's master key. The pinned driver formats volumes as LUKS1 (`internal/volumes/cryptsetup.go`, tag `v2.21.1`), and cryptsetup re-encrypts LUKS1 only offline. Migration therefore reuses the existing relocation path of `move-cloud-cells-to-local-storage` (its D4):
 1. stop the cell under a hold and take a fresh backup;
 2. create a new volume under the cell's own passphrase, which gives it a new LUKS master key;
@@ -151,7 +161,7 @@ Observed node swap and core policy remain unknown until the deployed node suppli
 The custody observation separates configured scratch from proven compliance and never blocks unrelated service.
 Tenant lock and its new-Pod crash recovery remain group 5 work.
 
-The real CSI create, mount, remount and `luksDump` drill remains open.
+The real CSI create, mount, remount and `luksDump` drill passed on 2026-11-06 (D1, "Early check 1.1 result").
 Live capture/media/export canary inspection and per-size migration downtime also remain open.
 Static manifests, PostgreSQL tests and HTTP-boundary tests do not close those tasks.
 
@@ -202,6 +212,51 @@ The CSI node-publish Secret therefore cannot carry a content key. A Secret delet
 2. An **in-pod FUSE encryption layer** (for example, gocryptfs) holds the key in the runtime's memory.
 
 The criteria are the privileges each needs, the SQLite write latency measured on a real cell, and maintenance cost. cellctl does not connect to cells (the `cloud-cell` contract), so the key reaches a cell through the gateway's existing cell route or through the node agent. Backups and media jobs of an unlocked tenant-locked cell get their content keys through the same channel, never a Secret; task 5.1 covers that path too.
+
+#### Early check 5.1 measurements (2026-11-06)
+
+The channel decision is still open. This section records the evidence for it.
+
+**SQLite write latency.** The measurement ran on the cell storage stack from the 1.1 drill: a Hetzner CSI volume (LUKS1, ext4) on a cx23 server with AES-NI. It is a synthetic workload with the collection store's settings (`journal_mode=WAL`, `synchronous=FULL`), not a running cell. Each round made 1,000 single-row commits of 4 KiB, one 20,000-row bulk transaction of 1 KiB rows, and 5,000 point reads after a cache drop. Rounds rotated the layer order. The ranges below span three rounds per layer, and the baseline spans six.
+
+| Layer | Commit p50 (ms) | Commit p95 (ms) | Bulk 20k (s) | Cold 5k reads (s) |
+|---|---|---|---|---|
+| Baseline: CSI volume as in standard mode | 2.83 to 3.16 | 12.1 to 14.2 | 0.37 to 0.52 | 4.0 to 4.4 |
+| Inner LUKS2 nested on the outer dm-crypt device, one ext4 | 3.24 to 3.41 | 14.2 to 14.4 | 0.39 to 0.59 | 4.1 to 4.3 |
+| Inner LUKS2 on a file-backed loop inside the outer ext4 | 9.76 to 10.46 | 22.1 to 26.2 | 0.52 to 0.73 | 4.2 to 4.5 |
+| gocryptfs 2.4.0 (Ubuntu 24.04 package) over the outer ext4 | 10.63 to 11.08 | 17.5 to 20.5 | 4.61 to 5.09 | 4.1 to 4.5 |
+
+The nested-block row ran on a second volume of the same class, which the CSI driver had attached but never mounted. On it, the drill formatted the outer LUKS1 layer by hand with the driver's format type, then nested LUKS2 and one ext4. Its comparison with the baseline therefore also includes any difference between two volumes.
+
+These are descriptive single-host results, without confidence intervals. The block-level inner layer added 2% to 12% to commit p50 in each paired round. At three rounds that cost cannot be separated from run-to-run drift, because the baseline itself ranged from 2.83 ms to 3.16 ms. The file-backed variant cost 3.4 to 3.6 times the paired baseline, most likely through its second filesystem journal; the drill did not isolate the cause. On the bulk transaction, gocryptfs took 9 to 14 times as long as the paired baseline.
+
+**Privileges.**
+- *Node-local unlock agent.* A node DaemonSet needs device-mapper and mount privileges on the host. A block-level inner layer cannot sit under the CSI driver's own ext4. The pinned driver's source handles raw-block claims: it formats and opens LUKS before the bind mount, so the agent can take the opened outer device; a drill must still confirm this. The agent then owns the inner layer and the filesystem. Cell namespaces enforce the `restricted` Pod Security profile, which bars hostPath. The decrypted filesystem must therefore reach the cell pod through a path that Pod Security does not inspect, such as the agent's own CSI node plugin or a `local` PersistentVolume over the agent's mount. Task 5.1 chooses that path, and each option adds custom code.
+- *In-pod FUSE.* The cell pod needs `/dev/fuse` and `SYS_ADMIN`. Both the `baseline` and the `restricted` profiles bar `SYS_ADMIN`, so the cell namespace would move to `privileged`. The encryption key lives in the memory of the FUSE process inside the cell pod.
+- In both channels, root on the node can read the key (dm-crypt state or process memory), as the threat model states.
+
+**Maintenance.** gocryptfs is a maintained upstream project; the channel code around it is still custom. The unlock agent is custom code on top of maintained cryptsetup and dm-crypt, as "Reuse" already states for the handover channel.
+
+**WebAuthn PRF coverage, read 2026-11-06 from vendor documentation, release notes and issue trackers.**
+
+| Client or provider | PRF | Source |
+|---|---|---|
+| iCloud Keychain: Safari 18+ on iOS, iPadOS and macOS; Chrome 132+ on macOS | Supported at create and get | <https://webkit.org/blog/15865/webkit-features-in-safari-18-0/>, <https://chromium-review.googlesource.com/c/chromium/src/+/6001891> |
+| Google Password Manager: Chrome on Android | Supported at create and get; some Android 14 providers may not support it | <https://github.com/w3c/webauthn/issues/1830>, <https://groups.google.com/a/chromium.org/g/blink-dev/c/iTNOgLwD2bI/m/Oz1C7oEYAgAJ> |
+| Windows Hello | Partial: create needs Chrome or Edge 147+ or Firefox 147+ and a current Windows 11; the OS build that supports get is known only from secondary reports; no Microsoft statement found | <https://chromium-review.googlesource.com/c/chromium/src/+/7600513>, <https://bugzilla.mozilla.org/show_bug.cgi?id=1863819> |
+| Firefox | Security keys and Windows get from 135; Windows create from 147; macOS from 139; Android from 149 | <https://bugzilla.mozilla.org/show_bug.cgi?id=1863819>, <https://bugzilla.mozilla.org/show_bug.cgi?id=1958716> |
+| YubiKey 5 over USB | Supported at get; output at create needs firmware 5.8+; NFC on Android not supported | <https://developers.yubico.com/WebAuthn/Concepts/PRF_Extension/Developers_Guide_to_PRF.html>, <https://docs.yubico.com/yesdk/users-manual/application-fido2/hmac-secret.html> |
+| Safari with security keys | From 26.4; YubiKey Bio returns no output (bug open) | <https://webkit.org/blog/17862/webkit-features-for-safari-26-4/>, <https://bugs.webkit.org/show_bug.cgi?id=314934> |
+| 1Password | Supported (announced 2024); stable status per client not confirmed | <https://1password.com/blog/encrypt-data-saved-passkeys> |
+| Bitwarden | Not supported in a release | <https://github.com/orgs/bitwarden/discussions/13838> |
+| Dashlane | Not supported; the vendor states it is planned | <https://www.dashlane.com/blog/passkeys-long-way> |
+| KeePassXC | Not supported in a release; pull request open | <https://github.com/keepassxreboot/keepassxc/pull/13529> |
+| Cross-device (hybrid) | Partial: Apple fixed mismatched hybrid output in iOS 18.4 and macOS 15.4; earlier output differs from local output | <https://developer.apple.com/forums/thread/764730> |
+| Proton Pass, Chrome profile authenticator on desktop, in-app WebViews | Unknown: no primary source | none |
+
+The main risk is a provider that reports PRF as enabled and returns no output or a different output, not missing support. A passkey wrap therefore needs an enrolment round trip that unlocks twice, a key-check value, `userVerification: required`, and a per-credential salt. It never replaces a working wrap and is never the only one. The recovery code remains mandatory.
+
+**Recommendation for the decision.** Use the node-local unlock agent with the inner LUKS2 layer at the block layer, and confirm raw-block encryption with the pinned driver first. Ship the recovery code first. Add the passkey wrap after it, behind a default-off flag, until a real-device pass covers iCloud Keychain, Google Password Manager, current Windows 11 and 1Password.
 
 **Enabling the lock**
 - The tenant's client generates a recovery code. A passkey adds a second wrap where the platform supports the WebAuthn PRF extension. Each derives a key-encryption key through HKDF, and the cell root key is wrapped under each.
@@ -589,5 +644,5 @@ Task 7 checks the Scaleway row on a rented host. The other rows stay as read, wi
 ## Open Questions
 
 - Which FIDO2 authenticator works from the operator's workstation, and whether SOPS accepts a FIDO2 age plugin identity (tasks 4.2 and 4.5).
-- Which key channel the tenant lock uses: a node-local unlock agent or an in-pod FUSE layer (task 5.1).
+- Which key channel the tenant lock uses: a node-local unlock agent or an in-pod FUSE layer (task 5.1). D3 records the measurements and a recommendation; the decision is open.
 - Whether AMD's Fabricked fix raises the attested TCB (task 7).

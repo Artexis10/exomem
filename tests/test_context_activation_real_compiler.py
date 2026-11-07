@@ -52,7 +52,7 @@ from epistemic.corpora.context_activation import (
 from membench.utility import context_activation as audit
 from membench.utility import context_activation_product as product
 
-from exomem import activation_result
+from exomem import activation_result, capture_carrier
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 # The packets are compiled once per module, so the whole module runs on the `anchors` packet, the rollback
@@ -657,7 +657,8 @@ def test_recent_context_is_turn_independent_so_excluding_it_hides_no_activation(
     """Every packet leads with the recent-context block (close-memory-loop).
     The scorer counts turn-derived channels only; that is sound only while the
     block is the same for every turn on a tree, which it is. C6 injects
-    nothing turn-derived, and what it does carry is exactly that block."""
+    nothing turn-derived, and what it does carry is exactly that block and the capture-policy
+    block, which does not read the turn either."""
 
     for tree in run.trees:
         blocks = {
@@ -667,7 +668,9 @@ def test_recent_context_is_turn_independent_so_excluding_it_hides_no_activation(
     c6 = run.raw["C6"]
     assert c6["recent_context"], "the block is served even when nothing resolves"
     assert audit.injected_char_count(product.scored_packet(c6, distractor_count=0)) == 0
-    assert c6["budget"]["used_chars"] == sum(len(entry["title"]) for entry in c6["recent_context"])
+    assert c6["budget"]["used_chars"] == sum(len(entry["title"]) for entry in c6["recent_context"]) + (
+        capture_carrier.size(c6["capture_policy"])
+    )
 
 
 # --------------------------------------------------------------------------- #

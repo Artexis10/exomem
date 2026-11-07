@@ -119,7 +119,7 @@ def activation_released_corpus_tasks() -> bool:
     """Whether task discovery may prepare the caller's complete released corpus; `off` is the default.
 
     Discovery takes that path whenever the raw fast path is unavailable: for a restricted caller, and for every
-    caller on a vault with a file release policy, a bound writer or an enrolled collection store. It prepares the
+    caller on a vault with a file release policy or a bound writer. It prepares the
     whole corpus on each request, which does not yet meet the activation latency ceiling at scale, so such a
     request gets an unavailable task context unless the setting is `on`.
     """
@@ -480,6 +480,10 @@ def encode_continuity(
         )
         if mac:
             payload["mac"] = mac
+    return _pack(payload)
+
+
+def _pack(payload: Mapping[str, Any]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     # `surrogatepass`, symmetrically with `decode_continuity`. A vault path reaches
     # Python through filesystem decoding, so a filename with invalid UTF-8 arrives
@@ -490,6 +494,24 @@ def encode_continuity(
     return (
         base64.urlsafe_b64encode(raw.encode("utf-8", "surrogatepass")).decode("ascii").rstrip("=")
     )
+
+
+def with_capture_policy(token: str | None, digest: str) -> str:
+    """`token` with the digest of the capture policy its holder was last handed.
+
+    The caller echoes the token on every call, on any transport, so the digest travels with the
+    conversation and the server keeps no state for it. The digest is unsigned on purpose: a forged
+    digest only withholds advice from its own holder and grants no authority. The signed thread fields are untouched. A
+    token this server did not write, or one the digest would push past `CONTINUITY_MAX_CHARS`,
+    comes back unchanged, and its holder is then owed the policy again.
+    """
+    text = str(token or "").strip()
+    if decode_continuity(text) is None:
+        return text
+    payload = json.loads(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8", "surrogatepass"))
+    payload["capture_policy"] = str(digest)
+    stamped = _pack(payload)
+    return stamped if len(stamped) <= CONTINUITY_MAX_CHARS else text
 
 
 def decode_continuity(token: str | None) -> dict[str, Any] | None:
@@ -570,6 +592,9 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     }
     if isinstance(payload.get("map_generation"), str):
         decoded["map_generation"] = payload["map_generation"]
+    # Optional: a token minted before the capture policy rode the packet names none.
+    if isinstance(payload.get("capture_policy"), str):
+        decoded["capture_policy"] = payload["capture_policy"]
     methods = payload.get("method_versions")
     decoded["method_versions"] = []
     if isinstance(methods, list) and len(methods) + len(refs) <= CONTINUITY_MAX_REFS:

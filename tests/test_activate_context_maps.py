@@ -26,6 +26,7 @@ from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
+    capture_carrier,
     commands,
     context_catalogue,
     context_views,
@@ -43,6 +44,11 @@ def _activate(root: Path, caller=OWNER, **kwargs):
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
     with principal.request_scope(caller):
         return invoke_command(command, root, **kwargs)
+
+
+def _capture_chars(packet: dict) -> int:
+    """The characters a packet spent on the live capture policy, which the first request of a session carries."""
+    return capture_carrier.size(packet["capture_policy"]) if "capture_policy" in packet else 0
 
 
 def _without_response_id(packet: dict) -> dict:
@@ -121,6 +127,8 @@ def test_an_empty_vault_returns_an_empty_map(vault: Path, monkeypatch: pytest.Mo
     )
     waiting = _activate(vault, turn="", continuity=previous)
     assert waiting["abstention"] == {"reason": "index_warming"}
+    assert waiting["next_action"]["state"] == "index_warming"
+    assert waiting["next_action"]["tool"] == "search_memory"
     assert "map" not in waiting
     assert "continuity" not in waiting
 
@@ -145,7 +153,7 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"]), block["overflow"]]
         if description := packet.get("turn_slice", {}).get("description"):
             rendered.append(description)
-        used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", ""))
+        used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", "")) + _capture_chars(packet)
         # `used_chars` charges the prose; `serialized_chars` is the wire size of the packet without that field.
         sent = json.dumps({**packet, "budget": {"limit_chars": budget, "used_chars": used}}, separators=(",", ":"), ensure_ascii=False)
         assert packet["budget"] == {"limit_chars": budget, "used_chars": used, "serialized_chars": len(sent)}

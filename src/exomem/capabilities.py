@@ -137,12 +137,20 @@ def current_tool_shape() -> str:
 
 def active_spell_call(command: str, arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """The tool and arguments that call a grouped command on the surface serving this call."""
-    return operation_entries.spell_call(command, arguments, current_tool_shape())
+    tool, spelled = operation_entries.spell_call(command, arguments, current_tool_shape())
+    active = current_active_surface()
+    if tool == command and active is not None and active.tool_shape != "grouped":
+        # A command without renderings is listed under its public name, which the registry name
+        # can differ from (the same answer `active_tools` gives).
+        source = next((item for item in active.contributing_commands if command in item.callable_names), None)
+        if source is not None and not source.renderings:
+            tool = source.public_name
+    return tool, spelled
 
 
 def active_call_text(command: str, arguments: Mapping[str, Any]) -> str:
     """A grouped-command call written the way the surface serving this call spells it."""
-    return operation_entries.call_text(command, arguments, current_tool_shape())
+    return operation_entries.format_call(*active_spell_call(command, arguments))
 
 
 def active_tools(command: str, effect: operation_entries.Effect | None = None) -> tuple[str, ...]:

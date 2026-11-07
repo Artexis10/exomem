@@ -170,9 +170,17 @@ _WORKING_SET_MAX_CHARS = 4000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
+# The server sends its live capture policy at most once per session or policy change, in at most 1,200
+# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
+# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+_CAPTURE_POLICY_MAX_CHARS = 1600
+# Unlike the working set below it, this is service policy: it is not retrieved memory.
+_CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
 _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
               'and `anchor` set to the ref you mean.',
+ 'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
+                  'relevant stored material.',
  'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
                  'and exclusions before applying it within existing authority.',
  'related': 'Related pages (not loaded). Use `read_memory` to read a relevant ref before relying '
@@ -1673,6 +1681,25 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
         lines.append(f"- … {more} more added, not shown.")
     text = "\n".join([_VOCABULARY_DELTA_HEADER, *lines])
     return text if len(text) <= max_chars else ""
+
+
+def _capture_policy_text(block: object) -> str:
+    """The served capture policy under its own header, or `""` when the packet carries none.
+
+    The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
+    """
+    say = block.get("say") if isinstance(block, dict) else None
+    if not isinstance(say, str) or not say.strip():
+        return ""
+    text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
+    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
+        return text
+    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+    # with the live disposition as one sentence; its first sentence end is the cut.
+    lead = say.strip().split(". ", 1)[0]
+    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -3420,6 +3447,7 @@ def main(argv: list[str] | None = None) -> int:
         # has. The exception is a rendered `unresolved` block, where nothing
         # resolved and ordinary recall may still be exactly what is wanted — there
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
+        policy_text = ""
         try:
             continuity = _read_activation_token(session_id)
             try:
@@ -3450,7 +3478,12 @@ def main(argv: list[str] | None = None) -> int:
             hit_count = len(packet.get("anchors") or ())
             delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
             delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-            render_cap = max(0, _working_set_max_chars() - (len(delta_text) + 1 if delta_text else 0))
+            policy_text = _capture_policy_text(packet.get("capture_policy"))
+            render_cap = max(
+                0,
+                _working_set_max_chars()
+                - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+            )
             if isinstance(packet.get("map"), dict):
                 block, complete, stance_complete = _format_map_with_slice(packet, render_cap, last_generation, last_stance)
                 if generation_path is not None and overhead_path is not None:
@@ -3500,6 +3533,10 @@ def main(argv: list[str] | None = None) -> int:
             additional_context = _mcp_activation_context()
         elif not global_ok:
             additional_context = ""
+        if policy_text:
+            # First, before any retrieved material or reminder: the agent reads its authority before its
+            # context, and whatever would have followed is unchanged.
+            additional_context = f"{policy_text}\n{additional_context}" if additional_context else policy_text
     elif mode == _STUB_MODE:
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any

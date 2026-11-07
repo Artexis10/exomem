@@ -66,6 +66,7 @@ _EPISODE_RECEIPT_FIELDS = (
     "recovery",
     "ledger",
     "about_skipped",
+    "compile",
 )
 _EPISODE_WORKFLOW_FIELDS = (
     "operation",
@@ -857,18 +858,24 @@ _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
 _MAX_UNCLASSIFIED_FOLDERS = 4
 
 
+#: Longest question text a compiled write may carry. The text is one constant in
+#: `note_cohesion`; this bound only stops a malformed payload from widening the wire.
+_MAX_COHESION_QUESTION_CHARS = 800
+
+
 def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
-    """Lift one advisory structural suggestion out of a write leaf.
+    """Lift one advisory structure suggestion out of a write leaf.
 
     Compiled creations carry it under `creation`, compiled edits under `semantic`,
     and a source capture carries it under `source`. The shape is re-validated
     here rather than trusted, so a malformed or oversized advisory is dropped
     instead of widening the wire contract.
 
-    Each advisory kind declares the payload it is allowed to carry. Adding a kind
-    therefore extends these bounds rather than bypassing them — the alternative,
-    passing an unvalidated body through, is how an advisory channel turns into an
-    arbitrary one.
+    Each advisory kind declares the payload it is allowed to carry, in its own
+    projector below. Adding a kind therefore adds a projector with its own bounds
+    rather than bypassing them -- the alternative, passing an unvalidated body
+    through, is how an advisory channel turns into an arbitrary one. A kind with no
+    projector is dropped.
     """
     if not isinstance(leaf, Mapping):
         return None
@@ -879,34 +886,80 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
         value = container.get("structure_suggestion")
         if not isinstance(value, Mapping):
             continue
-        kind = value.get("kind")
-        strength = value.get("strength")
-        reasons = value.get("reasons")
-        if not isinstance(kind, str) or not kind or len(kind) > _MAX_STRUCTURE_TOKEN_CHARS:
-            continue
-        if strength not in _STRUCTURE_STRENGTHS:
-            continue
-        if not _bounded_tokens(reasons, _MAX_STRUCTURE_REASONS):
-            continue
-        common = {"kind": kind, "strength": strength, "reasons": list(reasons)}
-        if kind == _SOURCE_CLASSIFICATION_KIND:
-            sources = value.get("unclassified_sources")
-            folders = value.get("folders")
-            if type(sources) is not int or sources < 1:
-                continue
-            if not isinstance(folders, list) or not _bounded_tokens(
-                folders, _MAX_UNCLASSIFIED_FOLDERS
-            ):
-                continue
-            return {**common, "unclassified_sources": sources, "folders": list(folders)}
-        terms = value.get("cluster_terms")
-        units = value.get("off_scope_units")
-        if type(units) is not int or units < 0:
-            continue
-        if not _bounded_tokens(terms, _MAX_STRUCTURE_TERMS):
-            continue
-        return {**common, "off_scope_units": units, "cluster_terms": list(terms)}
+        projected = _structure_suggestion_kind_projection(value)
+        if projected is not None:
+            return projected
     return None
+
+
+def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    from .note_cohesion import KIND as note_cohesion_kind
+
+    kind = value.get("kind")
+    if kind == _SOURCE_CLASSIFICATION_KIND:
+        return _source_classification_projection(value)
+    if kind == note_cohesion_kind:
+        return _note_cohesion_projection(value)
+    return None
+
+
+def _source_classification_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    strength = value.get("strength")
+    reasons = value.get("reasons")
+    if strength not in _STRUCTURE_STRENGTHS:
+        return None
+    if not _bounded_tokens(reasons, _MAX_STRUCTURE_REASONS):
+        return None
+    sources = value.get("unclassified_sources")
+    folders = value.get("folders")
+    if type(sources) is not int or sources < 1:
+        return None
+    if not isinstance(folders, list) or not _bounded_tokens(folders, _MAX_UNCLASSIFIED_FOLDERS):
+        return None
+    return {
+        "kind": _SOURCE_CLASSIFICATION_KIND,
+        "strength": strength,
+        "reasons": list(reasons),
+        "unclassified_sources": sources,
+        "folders": list(folders),
+    }
+
+
+def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The question a compiled write asks: three counts, the item's identity, the text."""
+    from . import review_state
+    from .note_cohesion import BASE_STEP_UNITS, KIND
+
+    units = value.get("units")
+    step = value.get("step_units")
+    following = value.get("next_step_units")
+    if any(type(count) is not int for count in (units, step, following)):
+        return None
+    if not (step >= BASE_STEP_UNITS and units >= step and following > step):
+        return None
+    try:
+        ref = review_state.review_ref(review_state.parse_review_ref(str(value.get("ref") or "")))
+    except ValueError:
+        return None
+    fingerprint = value.get("fingerprint")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 24
+        or any(char not in "0123456789abcdef" for char in fingerprint)
+    ):
+        return None
+    question = value.get("question")
+    if not isinstance(question, str) or not 0 < len(question) <= _MAX_COHESION_QUESTION_CHARS:
+        return None
+    return {
+        "kind": KIND,
+        "units": units,
+        "step_units": step,
+        "next_step_units": following,
+        "ref": ref,
+        "fingerprint": fingerprint,
+        "question": question,
+    }
 
 
 def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:

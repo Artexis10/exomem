@@ -95,6 +95,7 @@ class EditSectionOperation(_GuardedSemanticEditOperation):
     heading: str
     new_string: str
     section_position: Literal["append", "prepend", "replace"] = "append"
+    create_missing: bool = False
     tags: list[str] | None = None
 
 

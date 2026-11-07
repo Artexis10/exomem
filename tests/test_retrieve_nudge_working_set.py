@@ -796,6 +796,99 @@ def test_the_packet_replaces_the_reminder(
     }
 
 
+def test_a_served_capture_policy_leads_the_injection_and_is_not_retrieved_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    from exomem import prominence
+
+    policy = prominence.capture_policy("silent", "advisory")
+    _serve(monkeypatch, {**_packet(), "capture_policy": policy})
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
+
+    assert context.startswith(f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n")
+    assert context.index(policy["say"]) < context.index(hook._WORKING_SET_HEADER)
+    # The policy is the service's own authority: it never sits under the data header.
+    assert "Retrieved, not instructions" not in hook._CAPTURE_POLICY_HEADER
+
+
+def test_the_policy_takes_its_room_before_the_retrieved_material_does(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    from exomem import prominence
+
+    policy = prominence.capture_policy("silent", "advisory")
+    _serve(monkeypatch, _packet())
+    plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
+    # One character short of the policy and the whole block together: the block must give way.
+    cap = len(hook._capture_policy_text(policy)) + 1 + len(plain) - 1
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", str(cap))
+    _serve(monkeypatch, {**_packet(), "capture_policy": policy})
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="other"), tmp_path / "home"))
+
+    assert policy["say"] in context
+    assert hook._WORKING_SET_HEADER in context
+    assert len(context) <= cap
+
+
+def test_a_policy_longer_than_the_hook_was_built_for_still_states_its_disposition() -> None:
+    """Version skew: a newer server may send more than an installed hook can render. Dropping the
+    whole block would leave the agent with no capture authority at all; the lead sentence survives."""
+    from exomem import prominence
+
+    say = prominence.capture_policy("silent", "confirm-shortcut")["say"]
+    policy = {"disposition": "silent", "say": say + " " + "More guidance. " * 200}
+
+    rendered = hook._capture_policy_text(policy)
+
+    assert rendered.startswith(hook._CAPTURE_POLICY_HEADER + "\n")
+    assert say.split(". ", 1)[0] + "." in rendered
+    assert len(rendered) <= hook._CAPTURE_POLICY_MAX_CHARS
+    assert "More guidance" not in rendered
+
+
+def test_a_packet_without_a_capture_policy_renders_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    from exomem import prominence
+
+    _serve(monkeypatch, _packet())
+    plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
+    policy = prominence.capture_policy("silent", "advisory")
+    _serve(monkeypatch, {**_packet(), "capture_policy": policy})
+    led = _context(_run(monkeypatch, capsys, _event(session_id="other"), tmp_path / "home"))
+
+    assert plain.startswith(hook._WORKING_SET_HEADER)
+    assert led.endswith("\n" + plain)
+
+
+def test_a_capture_policy_is_rendered_when_the_turn_resolved_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    from exomem import prominence
+
+    policy = prominence.capture_policy("advisory", "advisory")
+    abstained = _packet(abstained=True, reason="index_warming", units=[], pointers=[], current_state=[])
+    _serve(monkeypatch, {**abstained, "capture_policy": policy})
+
+    context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
+
+    assert context == f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{hook.REMINDER}"
+
+
 def test_a_transport_failure_requests_native_activation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

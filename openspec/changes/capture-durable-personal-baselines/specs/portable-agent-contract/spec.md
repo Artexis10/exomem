@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Portable capture carriers preserve the personal baseline predicate
-The hand-authored scaffold, capture workflow skill, relevant operations reference, prominence rendering and documentation, capture reminder, and generated Claude Code copies SHALL carry one coherent generic personal-baseline predicate. Each proactive carrier SHALL preserve both eligibility discriminators, at least one eligible route, and the quiet negative boundary. The capture reminder SHALL remain advisory and structural rather than becoming a semantic classifier.
+The hand-authored scaffold, capture workflow skill, relevant operations reference, prominence rendering and documentation, the activation capture-policy block, and generated Claude Code copies SHALL carry one coherent generic personal-baseline predicate. Each proactive carrier SHALL preserve both eligibility discriminators, at least one eligible route, and the quiet negative boundary. The capture reminder SHALL NOT carry the predicate: it SHALL remain an advisory and structural check rather than becoming a semantic classifier.
 
 #### Scenario: Carrier parity is semantic
 - **WHEN** portable carriers are checked

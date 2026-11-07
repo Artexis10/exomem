@@ -822,8 +822,18 @@ def apply_section_edit(
                 missing=["heading"],
                 reason=(
                     f"heading {heading!r} not found{where}. Match an existing `## Heading` "
-                    "(the `#` markers are optional in the arg); read the page first."
+                    "(the `#` markers are optional in the arg); read the page first. To add "
+                    "the section instead, send the same `edit_section` operation with "
+                    "`create_missing=true`."
                 ),
+            )
+        # The title becomes one heading line. A multi-line argument would write whatever heading
+        # its later lines parse as, and an empty one writes a bare `##`.
+        if not want_title or "\n" in heading.strip() or "\r" in heading.strip():
+            raise EditError(
+                code="INVALID_EDIT",
+                missing=["heading"],
+                reason="`heading` must be one non-empty line to create a section.",
             )
         # Append a new level-2 section (the scaffold's convention) with `content`.
         if resolver is None:

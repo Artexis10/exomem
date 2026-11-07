@@ -1,0 +1,31 @@
+## Context
+
+The disposition that governs unasked capture has three inputs: the saved prominence preference (per principal and vault), the delegation-envelope overrides in the per-machine config file, and the gate that combines them. Bootstrap serves the result. The capture doctrine itself is product text in `prominence.CONTRACTS`, shared word for word by `balanced` and `maximal`. It is not vault data, because a vault must not redefine capture law.
+
+## Decision
+
+Deliver the disposition in the activation packet, computed by the server per request.
+
+- **Why the packet.** It is the one per-turn channel that the server computes from the same gate as bootstrap. One code path reaches hooked and hookless clients, and the block arrives before the answer.
+- **Why not the Stop check.** It fires after the answer, only on landings below `maximal`, and reads the level from the client machine, not the saved preference. The canonical Stop-hook requirement also forbids it to carry capture doctrine.
+- **Why not the MCP server instructions.** There is one string per process while the preference is per principal and vault. The string has no room and its bound SHALL NOT rise.
+- **Round 3 (2026-11-07).** The blind acceptance run passed 10 of 13 cases. The three failures were guidance gaps in the block, not delivery gaps: a confirmed relation never reached the relation queue, a selected draft was read as barred from capture under `silent`, and a reported delivery never searched for its Evidence receipt. The repair rewords the shared constants once, for both carriers, and states `link_acceptance` because the queue route is only right for the vault's own setting (`advisory` names a match and stops; `confirm-shortcut` accepts it on the user's exact confirmation). The block raises its bound from 800 to 1,200 bytes rendered; the worst case measures 1,175.
+
+## Shape
+
+- `prominence` owns the doctrine constants and `capture_policy(disposition, link_acceptance)`, the one place that builds the block, including its quiet `off` shape. The second argument is required, because a default would state a vault's setting wrongly. Both `CONTRACTS` levels are rebuilt from the same constants, so bootstrap and the block cannot state different routes.
+- `envelope.PROACTIVE_CAPTURE_MEANING` and `envelope.LINK_ACCEPTANCE_MEANING` hold one plain sentence for each value of the closed `proactive_capture` and `link_acceptance` ranges. A test pins each map to its range, because a missing key makes the never-raising carrier drop the whole block.
+- `capture_carrier` computes the block (the `link_acceptance` value comes from the same resolved envelope that bootstrap serves, so an override is stated, not the derived value) and its digest, decides whether the block is owed, and stamps the digest into the continuity token that the response returns. It never reads the turn.
+- The caller echoes the token on every call, on any transport, so the token carries the delivery state. The shipped HTTP transport is stateless and gives each request a fresh session, so a per-session ledger would send the block on every call. An old token has no digest field, so its holder is owed the block.
+- `op_activate_context` reserves the block's characters in the packet budget when the block is owed and the map keeps at least the smallest budget a request may ask for. It attaches the block outside the packet cache. The turn slice keeps its share of the budget as if the block were not owed, so the block costs the map's index and never the leads the turn reached. Standing stance lines are compiled from the reduced room, so at small budgets the first owed call can carry fewer of them; the next call carries them all. A smaller request leaves the block owed, and the token is not stamped.
+- A packet that carries no token, such as the abstention under `EXOMEM_DISABLE_WORKING_SET`, has nothing to stamp and so carries the block on every request.
+- The hook prints the block as served. The server owns de-duplication, so the hook keeps no state file. The hook's cap is 1,600 characters, looser than the 1,200 byte bound, so later server growth inside the spec is not dropped by an installed hook. A block over the cap renders its lead sentence, which states the live disposition, and not nothing.
+
+## Risks
+
+- A token near its length limit cannot take the digest. It is returned unchanged and its holder is owed the block again.
+- The line may lower precision, so quiet cases start writing. The proof plan includes negative cases.
+- The shared adoption sentence suppressed a save under `silent` in the round-3 trial. The repair states the positive rule first and keeps "Selection is not write consent" in bootstrap only, after it. The next round shows whether that is enough.
+- Version skew: release 0.163 ships the earlier block with the 900 character hook cap. A 0.163 plugin that meets a newer server drops the larger block whole until the plugin updates, because that hook returns nothing for a block over its cap. The hook in this change renders the lead sentence instead, so later skew degrades to the disposition and not to silence. The skew is transient: the plugin ships in the same release as the server. A running session on the older plugin does not regain the block: the server still stamps the new digest into the token that it returns, so the block is owed again only after a policy change or in a new session (a new session carries no token). No code addresses this.
+- Bootstrap margin: the populated-vault cells of the compact core have far less room than an empty vault. The repair adds 250 bytes of doctrine and recovers them from the compact profile only: `workflow.page_status` drops a migration note and the semantic-unit sentence that `capture_semantics.minimum_unit` already serves, `near_duplicate_warnings` keeps the dismissal and snooze condition and drops only the counterpart clause, and `workflow.loop` drops "skip incidental names", which the capture contract and `capture_semantics.entity_capture_rule` already state. The full profile serves all of these unchanged. The ceiling does not rise. The `lifecycle-status-registry` delta records that the compact profile no longer carries the migration note.
+- If a trial shows agents still ask permission with the block in context, the limit is model caution, not delivery.

@@ -36,7 +36,9 @@ checkpoint = _load("exomem_continuation_checkpoint")
 #: Byte ceilings for what a hook injects (served-JSON is a few bytes larger).
 CEILINGS = {
     "capture short": (capture.REMINDER_SHORT, 285),
-    "episode ask": (capture.EPISODE_ASK, 195),
+    # 195 -> 270 (189 -> 268 in use): the ask gains the close sentence, which keeps the
+    # live-policy condition, a valid record call and the completion-before-citation rule.
+    "episode ask": (capture.EPISODE_ASK, 270),
     # 300 -> 332 (was 272 in use): the two rules the diet dropped (no repeat searches on a recurring
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
@@ -65,7 +67,7 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
     key = capture.episode_key("claude", "s-size")
     fires = {
         "capture": (_mcp_fire(capture.REMINDER_SHORT), 370),
-        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 310),
+        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 385),
     }
     for name, (reason, ceiling) in fires.items():
         assert len(reason.encode("utf-8")) <= ceiling, (name, len(reason.encode("utf-8")))

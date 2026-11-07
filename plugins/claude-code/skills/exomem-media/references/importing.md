@@ -32,12 +32,12 @@ If another import is open, inspect its progress through MCP and agree whether to
 3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
 5. While a `start` or later reply carries `next_after`, call `start` again with only `after` set to it, then repeat step 4. Pages file in order and share one collection.
-6. Review the residual with the person. The last page's `finish` reports `residual`: the files still staged, by reason, with counts and bytes.
+6. Read the `residual` that the last page's `finish` reports: the files still staged, by reason, with counts and bytes. Its `summary` says in plain words how many files need review. Review those files with the person.
 7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
 8. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
-   - A discard keeps a residual record of each member that adoption did not file. Status lists those members as "discarded, not filed".
+   - A discard keeps a residual record of each member that adoption did not file or `finish` did not verify. Status lists those members as "discarded, not filed", with the reason as the `code`.
    - If a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `read_import` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
    - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it, and the person cannot either. Keep the source, tell the person, and leave the stage. Only the operator of Exomem Cloud can discard it, with `--walk-stage`.
 9. Acknowledge residual paths only when the person confirms they no longer need to keep them: `import_memory(operation={"kind": "acknowledge", "import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
@@ -58,7 +58,7 @@ On servers through v0.161.1, per-run status includes the full inventory, plan an
 If that reply is too large, `read_import(operation={"kind":"status"})` lists compact run rows without a `run_id`.
 That listing does not reconcile the interrupted call.
 
-On a server whose status schema includes `view`, use this sequence:
+On v0.162.0 and later servers, the status schema includes `view`. Use this sequence:
 
 1. Read `status` with the existing `run_id`; expect a compact summary with counts, `plan_id`, `revision` and interruption state.
 2. Read details with `view="outcomes"`, `limit=100` and that `revision`; expect a bounded page with `next_offset`.
@@ -69,7 +69,8 @@ Other detail views are `inventory`, `selection`, `plan` and `stale`.
 One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
 `view="full"` remains unbounded for the browser and explicit compatibility callers.
 
-After the server recovery repair is deployed, repeat the interrupted `import_memory` apply call exactly once.
+On a v0.162.0 or later server, repeat the interrupted `import_memory` apply call exactly once.
+The `view` field in the status schema shows that the server has this repair; an older server cannot reconcile the call.
 Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
 The server reconciles the same abandoned mutation identity before it resumes the retained scope.
 Do not substitute a continuation from a later status reply or change retry filters for this call.
@@ -85,7 +86,10 @@ Recovery confirms filing and custody; `finish` must still report recall coverage
 
 ## What adoption leaves staged
 - Each file that is filed as an artifact loses its staged copy once its Knowledge Base copy matches (`consumed` in the reply). `consume=false` on `start` keeps every staged copy.
-- A text file stays staged until the discard. Adoption does not consume it.
+- A text file loses its staged copy at `finish`, once its Source page holds the exact text.
+- A text file keeps its copy while its note is owed. `apply` is refused after `finish`, so the copy stays staged and the residual lists the file as `pending`.
+- A text file also keeps its copy when `finish` finds a difference, and the residual lists it as unfiled. `source_differs` means the Source page no longer holds the exact text, so the staged copy is the only exact one. `copy_changed` means the Source page holds the text, but `finish` could not safely remove the staged copy: it changed after the plan, the stage manifest does not list it, or the removal failed. Review it with the person; do not discard it unreviewed.
+- `finish` removes only the text of its own page. When its time budget runs low it keeps the rest and reports them as `unchecked`: not yet verified against their Source pages. Review them with the person; a finished run takes no second `finish`.
 - A folder made by hand under `_Imports/` is never consumed.
 
 Report the `coverage` from `finish`, including what was refused or is pending, and then the residual.

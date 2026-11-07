@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pytest
+from test_media_processing import _handle_stat
 
 from exomem import backfill, embeddings, extract, preserve
 
@@ -60,6 +63,29 @@ def test_backfill_creates_sidecar_ocr_clip(vault, monkeypatch: pytest.MonkeyPatc
     stats2 = backfill.backfill_media(vault, log_fn=_quiet)
     assert (stats2.sidecars_created, stats2.extracted, stats2.clip_indexed) == (0, 0, 0)
     assert stats2.skipped >= 1
+
+
+def test_backfill_records_the_hints_of_a_page_stored_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `preserve_artifacts` stores the page with null hints; completing it must not leave them null.
+    stored = preserve.preserve_stream(
+        vault, scope="Old", category="photos", filename="born.jpg",
+        stream=io.BytesIO(b"\xff\xd8\xffBORN"), media_pending=True,
+    )
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda p, media_type=None, vault_root=None: extract.ExtractResult(
+            text="born pending receipt", media_type="image", engine="tesseract"
+        ),
+    )
+
+    stats = backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)
+
+    info = _handle_stat(vault / stored.path)
+    body = (vault / stored.sidecar_path).read_text("utf-8")
+    assert stats.extracted == 1
+    assert "born pending receipt" in body
+    assert f"binary_mtime_ns: {info.st_mtime_ns}\n" in body
+    assert f"binary_ctime_ns: {info.st_ctime_ns}\n" in body
 
 
 FINANCE_REL = "Knowledge Base/Finance/invoices/inv.jpg"
