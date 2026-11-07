@@ -63,6 +63,12 @@ def restore(run_root: Path, name: str = "base") -> None:
     if paths["work"].exists():
         shutil.rmtree(paths["work"])
     shutil.copytree(run_root / name, paths["work"], symlinks=True)
+    # Lock and lease directories are ephemeral. A copy inherits its parent's
+    # Windows ACL, which Exomem refuses; Exomem recreates them privately.
+    for ephemeral in ("writer-lease", "mutation-locks"):
+        target = paths["state"] / ephemeral
+        if target.exists():
+            shutil.rmtree(target)
 
 
 def run_child(run_root: Path, module: str, *args: str, timeout: float | None = None,

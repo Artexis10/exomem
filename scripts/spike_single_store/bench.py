@@ -24,9 +24,14 @@ HERE = Path(__file__).resolve().parent
 def step(log, name: str, module: str, *args: str, run_root: Path, timeout: float = 7200,
          env_root: Path | None = None) -> str:
     started = time.perf_counter()
+    try:  # machine load at the step's start, so contention is visible in the record
+        load = [round(x, 1) for x in __import__("os").getloadavg()]
+    except (AttributeError, OSError):
+        load = None
     proc = spike_env.run_child(env_root or run_root, module, *args, timeout=timeout,
                                capture_output=True, text=True)
     record = {"step": name, "rc": proc.returncode, "wall_s": round(time.perf_counter() - started, 1),
+              "loadavg_at_start": load,
               "stdout_tail": proc.stdout.strip().splitlines()[-1][:2000] if proc.stdout.strip() else "",
               "stderr_tail": proc.stderr[-1500:] if proc.returncode else ""}
     log.write(json.dumps(record) + "\n")
@@ -46,6 +51,8 @@ def main() -> None:
     ap.add_argument("--ops", type=int, default=100)
     ap.add_argument("--kills-files", type=int, default=6)
     ap.add_argument("--kills-single", type=int, default=10)
+    ap.add_argument("--kill-delay-single", type=float, default=3.0)
+    ap.add_argument("--kill-delay-files", type=float, default=60.0)
     ap.add_argument("--reuse-base", action="store_true",
                     help="the run root already holds a warm base (vault copy plus sidecars)")
     ap.add_argument("--stream", type=Path, help="an existing op stream instead of a new one")
@@ -91,8 +98,8 @@ def main() -> None:
                            str(out / "arm-a" / "replay.jsonl")], capture_output=True, text=True)
     (out / "compare_tables.json").write_text(diff.stdout)
     for arm, count, source, delay in (
-            ("single", args.kills_single, out / "arm-a" / "replay.jsonl", 3.0),
-            ("files", args.kills_files, out / "stream.jsonl", 60.0)):
+            ("single", args.kills_single, out / "arm-a" / "replay.jsonl", args.kill_delay_single),
+            ("files", args.kills_files, out / "stream.jsonl", args.kill_delay_files)):
         if count:
             started = time.perf_counter()
             subprocess.run([sys.executable, str(HERE / "kill_trials.py"), str(root), arm, str(source),
