@@ -488,6 +488,81 @@ def test_a_page_written_after_the_corpus_read_keeps_the_unit_rows_its_write_inde
     assert report.semantic_unit_index_remaining == []
 
 
+def test_the_unit_repair_leaves_a_page_edited_after_the_unit_audit_with_the_rows_its_edit_indexed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A page edited between the unit audit and the units hold keeps the rows that its edit indexed.
+
+    Both pages have missing unit rows when the run audits them. One is then edited and indexed, as a
+    governed write does between two holds. The run reports that page as moved and leaves it, and it
+    repairs the page that nobody edited. The rows check is the outcome a reader depends on; each sidecar
+    also re-parses a planned state whose bytes moved, so only the report shows the run left the page.
+    """
+    from exomem import index_sync, maintenance_jobs
+    from exomem.vault import content_hash
+
+    control_rel = "Knowledge Base/Sources/reconcile-units-control.md"
+    control = tmp_path / control_rel
+    control.parent.mkdir(parents=True)
+    control.write_text(
+        "---\ntype: source\ntitle: Control\nexomem_id: 66666666-6666-4666-8666-666666666666\n---\n"
+        "# Control\n\n- [config] control observation ^control\n",
+        encoding="utf-8",
+    )
+    _seed_sidecars(tmp_path)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        for rel in (_REL, control_rel):
+            rowids = conn.execute(
+                "SELECT rowid FROM semantic_units WHERE parent_path = ?", (rel,)
+            ).fetchall()
+            conn.executemany("DELETE FROM unit_fts WHERE rowid = ?", rowids)
+            conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (rel,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_audit = semantic_index.audit_semantic_unit_sidecars
+    edited: list[str] = []
+
+    def edit_after_the_unit_audit(*args, **kwargs):
+        drift = real_audit(*args, **kwargs)
+        if not edited:
+            path = _write(tmp_path, "- [config] edited observation ^edited\n")
+            index_sync.upsert_after_write(tmp_path, [path])
+            edited.append(content_hash(path.read_text(encoding="utf-8")))
+        return drift
+
+    real_checkpoint = maintenance_jobs.checkpoint
+    rows_after_the_units_phase: dict[str, list[tuple[str, str]]] = {}
+
+    def read_rows_after_the_units_phase(phase, *args, **kwargs):
+        if phase == "lifecycle":
+            conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+            try:
+                for rel in (_REL, control_rel):
+                    rows_after_the_units_phase[rel] = conn.execute(
+                        "SELECT anchor, parent_source_hash FROM semantic_units"
+                        " WHERE parent_path = ? ORDER BY anchor",
+                        (rel,),
+                    ).fetchall()
+            finally:
+                conn.close()
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_index, "audit_semantic_unit_sidecars", edit_after_the_unit_audit)
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", read_rows_after_the_units_phase)
+    report = reconcile.reconcile(tmp_path)
+
+    assert {item["parent_path"] for item in report.semantic_unit_index_drift} >= {_REL, control_rel}
+    assert rows_after_the_units_phase[_REL] == [("edited", edited[0])]
+    assert report.semantic_unit_parents_moved == [_REL]
+    # The control: the same drift on a page that nobody edited is repaired in the same hold.
+    assert report.semantic_unit_parents_refreshed == 1
+    assert [anchor for anchor, _ in rows_after_the_units_phase[control_rel]] == ["control"]
+
+
 def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     tmp_path: Path, monkeypatch
 ) -> None:
