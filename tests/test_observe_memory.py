@@ -859,7 +859,11 @@ def test_an_entity_target_is_refused_with_the_exact_edit_that_adds_the_unit(tmp_
 
     with pytest.raises(ValueError, match="OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE") as raised:
         commands.op_observe_memory(
-            tmp_path, path=ENTITY_PAGE, operation="validate", category="rule", content="Opens at nine.",
+            tmp_path,
+            path=ENTITY_PAGE,
+            operation="validate",
+            category="rule",
+            content="Opens at nine.",
         )
 
     message = str(raised.value)

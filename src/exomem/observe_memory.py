@@ -81,7 +81,10 @@ def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
 
 
 def _entity_observation_remediation(rel_path: str) -> str:
-    """The exact edit that adds one compact unit line to an Entity page, which observe_memory does not write."""
+    """The exact edit that adds one compact unit line to an Entity page.
+
+    observe_memory does not write Entity pages.
+    """
     section = semantic_authoring.build_semantic_authoring_contract().compact["canonical_section"]
     call = capabilities.active_call_text(
         "edit_memory",
@@ -434,7 +437,8 @@ def observe_memory(
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
             "observe_memory only mutates writable compiled pages",
-            # `role` is a closed attribute that the note-type registry schema declares, not an entry key.
+            # `role` is a closed attribute the note-type registry schema declares,
+            # not an entry key.
             _entity_observation_remediation(editable.rel_path)
             if note_type is not None and note_type.role == "entity"
             else _legacy_routing_remediation(resolution),
