@@ -210,9 +210,10 @@ REMINDER_SHORT = (
 
 #: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] Decision or stopping point? record_episode once: "
-    'operation.kind="record", episode="{key}", subject, summary, short worked_on/decided/open items. '
-    "Otherwise do nothing."
+    "[Exomem episode check] If live policy permits capture at a durable stop, "
+    'record_episode once: operation.kind="record", episode="{key}", subject, summary, '
+    "decided. Compile or dismiss every Decided item before citing it from updated "
+    "compiled notes. Otherwise do nothing."
 )
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.

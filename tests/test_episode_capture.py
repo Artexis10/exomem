@@ -275,3 +275,31 @@ def test_the_order_token_never_goes_back_past_the_newest_revision() -> None:
         recap.digest[:8],
     )
     assert recap.slug_at("20260518t091233000000") == recap.slug
+
+
+def test_a_rendered_recap_parses_back_to_its_fields() -> None:
+    """`parse` is `_render`'s inverse, so coverage reads exactly what the agent recorded."""
+    recap = _prepare(decided=["Buy the brass Harbor Lamp", "Skip the chrome one"])
+
+    parsed = capture.parse(recap.body)
+
+    assert parsed is not None
+    assert parsed.sections == {
+        "worked_on": ("Compared two lamps for Project Alpha",),
+        "decided": ("Buy the brass Harbor Lamp", "Skip the chrome one"),
+        "open": ("Confirm the delivery date",),
+    }
+    assert parsed.said == ("I want the brass one, not the chrome.",)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda body: body + "\n\nA paragraph a person added later.",
+        lambda body: body.replace("- Buy the", "-  Buy the"),
+    ],
+    ids=["prose the renderer never writes", "spacing the renderer would normalise"],
+)
+def test_a_body_that_is_not_rendered_output_is_not_parsed(edit) -> None:
+    """A hand-written note that borrows the headings must not yield claims."""
+    assert capture.parse(edit(_prepare().body)) is None

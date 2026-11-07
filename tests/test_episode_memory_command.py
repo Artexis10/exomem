@@ -295,7 +295,8 @@ def test_record_writes_one_recap_and_binds_revision_one(vault: Path) -> None:
     with request_scope(owner_principal(surface="mcp")):
         result = _record(vault, client="claude-code")
 
-    assert set(result) == RESULT_KEYS
+    # The default recap holds one Decided item that links no page, so it carries the compile block.
+    assert set(result) == RESULT_KEYS | {"compile"}
     assert result["episode"] == KEY
     assert result["revision"] == 1
     assert result["idempotent"] is False

@@ -6533,6 +6533,10 @@
                 "kind": {
                   "const": "dispositions",
                   "type": "string"
+                },
+                "window_days": {
+                  "type": "integer",
+                  "description": "Dispositions effect window in days, 1 to 90; default 7."
                 }
               },
               "required": [
@@ -7976,7 +7980,7 @@
     }
   },
   "record_episode": {
-    "description": "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Select one operation.kind.",
+    "description": "Record episode recaps, bind preserved material, prepare captures or resume their workflow. Compile or dismiss every Decided item before citing the recap from updated compiled notes. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {

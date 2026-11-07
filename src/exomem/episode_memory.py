@@ -26,6 +26,7 @@ from . import (
     call_spans,
     curation,
     episode_capture,
+    episode_compile,
     episode_nudge,
     freshness,
     memory_refs,
@@ -183,8 +184,8 @@ def _write(
     recap: episode_capture.Recap,
     when: Any,
     audience: str,
-) -> tuple[dict[str, str], bool]:
-    """The committed recap page for `recap`, writing it only when it is new.
+) -> tuple[dict[str, str], bool, list[str]]:
+    """The committed recap page for `recap`, writing it only when it is new, and the episode's recap paths.
 
     Identical to this audience's newest live revision means a retry: nothing is
     written. Otherwise the new page is written, ordered after every revision
@@ -201,7 +202,7 @@ def _write(
             live = [item for item in revisions if item.live]
             revision_counts["live_revisions"] = len(live)
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
-            return _source(live[-1].path, live[-1].frontmatter), True
+            return _source(live[-1].path, live[-1].frontmatter), True, [item.path for item in revisions]
         # Never before the newest revision on disk, whatever the clock says.
         order = episode_capture.order_token(
             when, after=revisions[-1].order if revisions else None
@@ -226,7 +227,11 @@ def _write(
                 raise
             continue
         query_log.log_write_call(tool="episode_memory", written_path=result.path, cited_sources=[])
-        return {"ref": result.ref, "path": result.path, "title": recap.subject}, False
+        return (
+            {"ref": result.ref, "path": result.path, "title": recap.subject},
+            False,
+            [*(item.path for item in revisions), result.path],
+        )
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -354,7 +359,7 @@ def record(
                 # Reject before the first revision read or any canonical effect.
                 if preparation is not None and not preparation.current(vault_root, diagnostics=diagnostics):
                     continue
-                source, idempotent = _write(vault_root, source_schema, recap, when, audience)
+                source, idempotent, revision_paths = _write(vault_root, source_schema, recap, when, audience)
                 revision: int | None
                 ledger_warnings: list[str] = []
                 try:
@@ -417,6 +422,9 @@ def record(
     if not defer_housekeeping_until_terminal_persisted(record_housekeeping):
         record_housekeeping()
     warnings = [*about_warnings, *ledger_warnings]
+    compiled = episode_compile.block(
+        vault_root, ref=source["ref"], revisions=revision_paths, decided=len(recap.decided)
+    )
     return {
         "operation": "episode_memory",
         "episode": recap.key,
@@ -426,6 +434,7 @@ def record(
         "recovery": recovery,
         "ledger": ledger,
         "about_skipped": about_skipped,
+        **({"compile": compiled} if compiled else {}),
         **({"warnings": warnings} if warnings else {}),
     }
 

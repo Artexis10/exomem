@@ -1,0 +1,12 @@
+{
+  "reference": "The user narrows the existing batching insight using experience from the last two trips. Theme-based batching saved editing time for landscape and street photos only. Portraits now receive individual edits because skin tones need individual care. Update the existing batching insight so its claim, explanation and applicability no longer imply that every type of photo benefits from batching. Preserve the rest of its knowledge, including the mixed-lighting caveat. The existing insight is the rightful home; neither the presets concept nor the unrelated printing insight changes. At the balanced-engagement stopping point, record one bounded recap and cite that recap in the updated insight sources. Do not create a parallel compiled page.",
+  "must_change": [
+    "Notes/Insights/batching-photos-by-theme-saves-editing-time.md"
+  ],
+  "must_not_change": [
+    "Entities/Concepts/Photo Presets.md",
+    "Notes/Insights/printing-at-a-local-shop-beats-ordering-online.md"
+  ],
+  "recap": "required",
+  "new_pages": "none"
+}

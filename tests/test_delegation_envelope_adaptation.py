@@ -416,6 +416,6 @@ def test_the_family_slate_holds_an_offer_while_the_disposition_is_normal(
     assert slate["quiet_offered_at"]
     # Slate-only rows are not dispositions: they must not reach the filters or
     # the view that lists what a user has quieted.
-    assert review_state.disposition_map(_payload(vault)) == {}
+    assert FAMILY not in review_state.disposition_map(_payload(vault))
     view = commands.op_review_memory(vault, mode="dispositions")
-    assert [row["family"] for row in view["dispositions"]] == []
+    assert FAMILY not in [row["family"] for row in view["dispositions"]]

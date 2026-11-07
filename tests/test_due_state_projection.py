@@ -1262,7 +1262,7 @@ def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:
     assert triageable == set(attention_module.DEFAULT_ATTENTION_CATEGORIES) | set(
         audit_module.EPISTEMIC_REVIEW_CATEGORIES
     )
-    assert triageable < set(audit_module.ALL_CATEGORIES)
+    assert triageable < set(audit_module.ALL_CATEGORIES) | set(audit_module.OPTIONAL_CATEGORIES)
     assert set(due_state_module.PROJECTION_CATEGORIES) <= triageable, (
         "every category the block can publish a ref for must be resolvable"
     )

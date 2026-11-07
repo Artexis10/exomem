@@ -51,6 +51,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # the complete local wire measures 167,706 B, so its budget rises to 168,000 B.
 # A required `expected_hash` on replace_body, with its one-line instruction, adds 99 B:
 # edit_note measures 7,210 B and its ceiling rounds to 7,250 B. The total budget is unchanged.
+# The record_episode close step and the `window_days` field on the dispositions kind of
+# read_review add 196 B. record_episode measures 5,493 B and its ceiling rounds to 5,500 B;
+# with main's edit_note change, the complete local wire measures 167,985 B, so the budget
+# stays at 168,000 B. The next description change needs a budget increase.
 TOTAL_BUDGET = 168_000
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
@@ -101,7 +105,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_review": 7550,
     "read_schema": 16700,
     "recall_context": 2950,
-    "record_episode": 5450,
+    "record_episode": 5500,
     "record_memory": 4600,
     "repair_memory": 6050,
     "review_item_context": 1300,

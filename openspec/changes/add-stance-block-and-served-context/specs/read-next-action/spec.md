@@ -24,6 +24,7 @@ Add the move after cache lookup, never inside the cached packet. Reserve 240 cha
 
 One central source SHALL select the first applicable activation move:
 
+0. `index_warming`: preserve the temporary abstention, distinguish it from an empty search, and point to the exposed search route.
 1. `ambiguous`: existing anchors ambiguity or unresolved worded candidates; ask for the supported anchor selection.
 2. `review_due`: an admitted served stance line needs review; apply it with the review caveat.
 3. `slice_empty`: an empty maps slice; explain compiled coverage and point to the exposed search route.
@@ -35,6 +36,12 @@ For search, `search_miss` SHALL carry the current miss rule when no result exist
 
 - **WHEN** an anchors packet is unresolved, carries related pages and has no worded candidate or stronger move
 - **THEN** the central move says that the pages are related and not loaded, and directs a relevant read
+
+#### Scenario: Warming is not an empty search
+
+- **WHEN** activation abstains with `reason: "index_warming"`
+- **THEN** the move preserves that state and explains that recall is still warming
+- **AND** it names the exposed search route without claiming that the vault lacks relevant knowledge
 
 #### Scenario: Review wins over an empty slice
 

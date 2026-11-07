@@ -50,6 +50,10 @@ accumulates reusable facts, history, or relations, **a method was actually
 carried out and the user reports how it went**, **a stated intent or commitment
 is made**, or **an observed outcome or event is reported** — capture it:
 
+Judge reusable facts independently of the task or artifact that carried them.
+A passing mention can supply knowledge that matters for a later decision.
+Updating a resolved entity follows the live capture disposition; the threshold for creating an entity does not exclude that update.
+
 - A **durable personal baseline** is also a stepping-stone: a stable preference,
   recurring routine, historical baseline, or durable affiliation. Capture it only
   when both stability or recurrence and reusable comparison, interpretation, or
@@ -83,7 +87,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
   editing frontmatter around the registry rule.
-  A single incidental mention, unresolved identity, or transient participant
+  An incidental name without reusable facts, unresolved identity, or transient participant
   stays in source/note context.
 - **Recurring-identity maintenance boundary (balanced/maximal only).** On the
   first user turn after bootstrap, after primary work and before the final
@@ -161,17 +165,39 @@ qualifies. A write response may carry a
 prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
-**Record the conversation.** At a decision or stopping point, record one bounded
-recap with `record_episode(operation={'kind': 'record'})`: a one-line subject and summary,
-what was worked on, decided and left open, and at most three verbatim user
-statements worth keeping. It is raw material about the conversation, not a
-compiled conclusion, and it is what the next session on any client sees first in
-`recent_context`. Reuse the `episode` key a hook named or an earlier record
-returned; an identical retry writes nothing. A Stop hook's episode check or an
-`episode_due` block in an activation packet is a reminder, not permission;
-skip it when nothing durable happened. Record only when the user asks or the
-live `proactive_capture` disposition permits it. At `off` and `light`, an
-unrequested hook reminder does not authorize capture.
+**Close the session: record the conversation, then cite it.** At a decision or
+stopping point, you hold the most context. The recap is a Source, and a live page that
+names it in `sources:` covers it.
+
+1. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
+   one-line subject and summary, what was worked on, decided and left open, and at
+   most three verbatim user statements worth keeping.
+2. Compile or explicitly dismiss every Decided item; the pass is complete before citation.
+3. Cite the recap from each updated compiled note; the citation records the completed pass.
+
+Use the ordinary writers (`edit_note`, `change_observations`, `supersede_note`) for
+each item's canonical page. An item that changes no page needs no write; make its
+disposition explicit. Entity, plan and record pages take no citation. Their updates
+alone leave an episode uncited. In a mixed recap, one compiled note's citation holds
+every Decided line, including entity items. Finish or dismiss every item before that
+citation. This is the agent's completion convention, not a server check of meaning.
+At `off`, or when the user asked only for a recap, a recap request alone does not
+authorize page edits.
+
+The recap is raw material about the conversation, not a compiled conclusion, and it
+is what the next session on any client sees first in `recent_context`. Its response
+may carry a `compile` block: the `cite` ref of the recap, how many Decided items it
+holds, and how many of them no recap cited by a live page holds (`open`, or
+`unchecked` when the server did not check). Its `outcome` states that result and
+counts recaps and lines; it never says that a page states an item. When live policy
+permits capture, a `next_step` asks you to compile or explicitly dismiss every
+Decided item before citing the recap from updated compiled notes. Never record again
+to cite. Reuse the `episode` key a hook named or
+an earlier record returned; an identical retry writes nothing. A Stop hook's episode
+check or an `episode_due` block in an activation packet is a reminder, not
+permission; skip it when nothing durable happened, and then write and record nothing.
+Record only when the user asks or the live `proactive_capture` disposition permits
+it. At `off` and `light`, an unrequested hook reminder does not authorize capture.
 
 **Episode candidates, where the service runs them.** When
 `read_episode(operation={'kind': 'candidates'})` reports `execution: enabled`, the same

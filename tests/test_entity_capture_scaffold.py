@@ -17,7 +17,6 @@ def test_capture_workflow_checks_existing_entity_before_create() -> None:
     assert "read_connections(operation={'kind': 'resolve-entity'" in text
     assert "edit_note" in text
     assert "change_connections(operation={'kind': 'create-entity'})" in text
-    assert "single incidental mention" in text
 
 
 def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() -> None:
@@ -32,7 +31,6 @@ def test_main_scaffold_treats_entities_as_stepping_stones_without_frozen_list() 
     assert "selected knowledge packs" in text
     assert "read_connections(operation={'kind': 'resolve-entity'" in text
     assert "change_connections(operation={'kind': 'create-entity'})" in text
-    assert "single incidental mention" in text
     assert "person, organization, concept, library, decision" not in text
 
 

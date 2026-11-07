@@ -1,0 +1,11 @@
+{
+  "reference": "This is development coverage of storage restraint during an unresolved crisis interruption, not a medical or crisis-response quality test. The initial request recalls existing person knowledge and changes none of it. The later turns disclose current distress and redirect the immediate conversation away from rota planning; they do not establish a recurring personal baseline, a durable preference, a reusable method, a lasting planning decision, or a completed response or outcome. Do not infer a diagnosis, a canceled meeting, a new working preference for any seeded person, or a successful resolution. Preserve every seeded page and create no new page or recap: under balanced engagement, an abrupt stopping point alone is not a durable-capture trigger. The temporary change in conversational intent stays in the active chat rather than becoming a lasting commitment or a canonical page update.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Harbourview Co-op.md",
+    "Entities/People/Corin Haldane.md",
+    "Entities/People/Tavi Brennock.md"
+  ],
+  "recap": "forbidden",
+  "new_pages": "none"
+}
