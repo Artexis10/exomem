@@ -183,3 +183,7 @@ return at once.
   In the service, that retry slows a running reconcile job to its progress
   floor meanwhile. → A `maintain_memory` reconcile write from a request
   surface runs only as a job, and a job thread is not a foreground request.
+  A request-bound surface refuses a write through the legacy `reconcile` leaf
+  with `MAINTENANCE_PLAN_REQUIRED` before the writer manager, so it never
+  reaches the run lock. Only the in-process CLI retries the refusal, and it
+  runs in its own process, so it cannot slow the service's job.

@@ -40,6 +40,9 @@
   - Evidence: `tests/test_reconcile.py::test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile` and `tests/test_maintenance_jobs.py::test_an_ordinary_write_commits_between_two_holds_of_a_reconcile_job` pass. On `main`, the write gets `MUTATION_BUSY`.
 - [x] 3.2 Prove that a purge entry that moved is reported and left unchanged.
   - Evidence: `tests/test_records_recall_reconcile.py::test_a_record_restored_after_the_plan_is_reported_and_keeps_its_rows` passes. On `main`, the purge removes the restored record as missing.
-- [ ] 3.3 Repeat the profile from 1.1 and record the longest hold before and after.
-- [ ] 3.4 Run Ruff, the privacy gate, `openspec validate --all --strict` and the full suite.
-- [ ] 3.5 Obtain an independent review, then merge.
+- [x] 3.3 Repeat the profile from 1.1 and record the longest hold before and after.
+  - Evidence: [after-profile](https://github.com/Artexis10/exomem/pull/2497#issuecomment-6703825324) on the same copy and harness. The longest mutation-boundary hold fell from 2,249.1 s to 5.8 s cold and from 2,898.7 s to 26.9 s warm. Total run times do not compare, because the machine load differed.
+- [x] 3.4 Run Ruff, the privacy gate, `openspec validate --all --strict` and the full suite.
+  - Evidence: PR #2497 CI on 970f8ac21 passed 48 checks, including all core test shards, with 15 skipped and none failed.
+- [x] 3.5 Obtain an independent review, then merge.
+  - Evidence: two independent review rounds approved PR #2497 with no blocking findings. It merged as 0d9c02b23 and shipped in v0.163.0.

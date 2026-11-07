@@ -54,8 +54,12 @@ A `fix` or `backfill-ids` job SHALL commit its page writes in chunks of at most
 re-check each page's content hash inside that hold. The job SHALL skip a page
 that changed since planning and SHALL record it as `skipped_changed`. The job
 SHALL commit derived index refreshes last, in one short hold. A `reconcile`
-job SHALL hold the boundary for its run, as the local CLI does. Every hold
-SHALL carry holder kind `maintenance-job` and the job's `run_id`.
+job SHALL NOT hold the boundary for its whole run, and no hold SHALL span a
+derived rebuild that another coordinator serializes. A `reconcile` job SHALL
+re-read inside each hold what that hold applies, and SHALL report the purge
+and orphan entries that it left unchanged because they moved. Two `reconcile`
+writes SHALL NOT run at once in one vault. Every hold SHALL carry holder kind
+`maintenance-job` and the job's `run_id`.
 
 #### Scenario: A foreground write runs between chunks
 - **WHEN** a `fix` job commits several chunks and a client writes a page outside the change set
@@ -68,6 +72,18 @@ SHALL carry holder kind `maintenance-job` and the job's `run_id`.
 #### Scenario: A blocked writer finds the job
 - **WHEN** a client write receives `MUTATION_BUSY` while a job holds the boundary
 - **THEN** the busy details name holder kind `maintenance-job` and the job's `run_id`
+
+#### Scenario: A foreground write runs between reconcile holds
+- **WHEN** a `reconcile` job runs and a client writes a page while the job holds no boundary
+- **THEN** the client's write commits without `MUTATION_BUSY`
+
+#### Scenario: A purge entry that moved is left unchanged
+- **WHEN** a planned purge entry is no longer in the isolation census read inside the purge hold
+- **THEN** the job leaves that entry unchanged and names it in its receipt
+
+#### Scenario: A second reconcile starts while one runs
+- **WHEN** a `reconcile` write starts while another `reconcile` write runs in the same vault
+- **THEN** the second gets `MUTATION_BUSY` and writes nothing, and the first continues
 
 ### Requirement: Jobs run behind foreground requests
 
