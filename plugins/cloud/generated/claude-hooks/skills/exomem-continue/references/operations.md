@@ -41,8 +41,8 @@ confirmed `restructure_execution`.
 
 For a resolved Entity, add the facet as one compact unit line under `## Observations`
 with `edit_note` and `{"kind": "edit_section", "heading": "Observations", "create_missing": true,
-"new_string": "<unit line>", "expected_hash": "<content_hash>"}`; `observe_memory` does not
-write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
+"new_string": "<unit line>", "expected_hash": "<content_hash>"}`; `prepare_note/change_observations`
+does not write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
 
 ## Planning
 

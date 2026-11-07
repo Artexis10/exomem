@@ -8,7 +8,8 @@
 
 ## 3. Server carrier
 
-- [x] 3.1 Build the carrier, attach it in `op_activate_context` outside the packet cache, and reserve its characters inside `limit_chars`.
+- [x] 3.1 Build the carrier, attach it in `op_activate_context` outside the packet cache, and reserve its characters inside `limit_chars` while the map keeps its smallest budget.
+- [x] 3.2 Carry the delivered digest in the continuity token so delivery needs no server state and holds over the stateless transport.
 
 ## 4. Hook
 
@@ -16,12 +17,12 @@
 
 ## 5. Additive Entity fact
 
-- [x] 5.1 Expose `create_missing` on `edit_section`, name the exact retry in both refusals, and update the scaffold route.
+- [x] 5.1 Expose `create_missing` on `edit_section`, refuse a heading that is empty or spans lines, name the exact retry in both refusals with the tool names the serving surface lists, and update the scaffold route.
 - [x] 5.2 Regenerate the tool schemas, tool-surface contract, ChatGPT pending digest, capabilities documentation and skill stamps; raise the tool-schema budget by the measured bytes.
 
 ## 6. Guarding tests
 
-- [x] 6.1 Add the tests for authority agreement, staleness, re-arm, budget, hook render, ceiling, and the edit and observe remediations. Watch each fail on the unfixed code.
+- [x] 6.1 Add the tests for authority agreement, staleness, re-arm, stateless delivery, budget, hook render, ceiling, and the edit and observe remediations. Watch each fail on the unfixed code or on a mutation of the fix.
 
 ## 7. Round A on real models
 
