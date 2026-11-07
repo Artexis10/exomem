@@ -1,5 +1,5 @@
 {
-  "acknowledged_on": null,
+  "acknowledged_on": "2026-11-08",
   "affected_sections": [
     "\u00a71 Scenario families",
     "\u00a77 Amendments"
@@ -19,9 +19,9 @@
     "upstream/clbench/data/database_exploration/questions_post_drift.json": "c05aa6a33def3878e6b655a1cba6454e55e1a9c16ded8c1fe53b7811986a45de"
   },
   "parent_contract_sha256": "e3a119c85569765a624404e458c889deb825c46820acce1bf7da2ce9f8678d5e",
-  "ratifier": null,
+  "ratifier": "Hugo Ander Kivi",
   "rationale": "Register three outcome families on the owner's 2026-11-07 request that public outcome benchmarks become first-class: f35 clbench_outcome_over_sessions (CL-Bench database_exploration, pinned upstream; arms no memory, plain folder and Exomem as shipped, the Claude Code plugin with skills, hooks and the documented balanced custom instructions, with bare-MCP and hook-only Exomem as ablations), f36 multidoc_synthesis_outcome (Harvey LAB, 20 held-out matters; arms file search and Exomem as shipped, with bare read tools and graph-off as ablations) and f37 planted_governance_ablation (32 independently authored planted stale or wrong notes, governed against plain vaults with identical page bodies). Freezes the held-out inputs by SHA-256, relative to the outcome run root and held in evaluator custody outside the repository. States the arms, sampling units, measures, blind cross-family judging, the bootstrap and Newcombe method-10 intervals, the decision rules, fault handling and the run holds. No assertion, operation kind, catastrophic assertion or budget constant changes.",
-  "repository_revision": null,
+  "repository_revision": "69599c346c631a0722c56b1634eb862329a9f09b",
   "schema_version": 1,
   "sequence": 9
 }
