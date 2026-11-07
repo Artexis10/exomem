@@ -26,7 +26,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -378,11 +378,6 @@ def _result_binary_identity(
     identity: tuple[tuple[int, int, int, int, int], str | None]
 ) -> dict[str, object]:
     return {"stat": list(identity[0]), "sha256": identity[1]}
-
-
-def _timestamp_hints(stat: Sequence[int]) -> tuple[int, int]:
-    """The mtime and ctime of a `_stat_identity`, which a completed sidecar records."""
-    return (stat[3], stat[4])
 
 
 def _within_result_limit(text: str, name: str) -> str:
@@ -1276,7 +1271,6 @@ class MediaWorker:
                 speaker_verification=speaker_verification,
                 asr=asr,
                 ocr=ocr,
-                binary_hints=_timestamp_hints(expected_binary[0]),
                 reprocessing=replaces is not None,
             )
             receipts = deferred_index.add_full_receipts(
@@ -1313,7 +1307,6 @@ class MediaWorker:
         speaker_verification: str | None,
         asr: AsrFacts | None,
         ocr: OcrFacts | None,
-        binary_hints: tuple[int, int],
         reprocessing: bool,
     ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
         """The writes for a finished extraction, and the part pages to retire once they commit.
@@ -1323,6 +1316,8 @@ class MediaWorker:
         parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
         text where it was.
         """
+        from . import media_processing
+
         fields = dict(
             engine=engine,
             speakers=speakers,
@@ -1330,7 +1325,8 @@ class MediaWorker:
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
-            binary_hints=binary_hints,
+            # Both callers have just revalidated the original; a page stored with it records these.
+            binary_hints=media_processing.read_timestamp_hints(job.binary_path),
         )
         if not reprocessing:
             plan, write = preserve.sidecar_extraction_writes(
@@ -2314,7 +2310,6 @@ class MediaWorker:
                         speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
                         asr=AsrFacts.from_payload(asr) if asr is not None else None,
                         ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
-                        binary_hints=_timestamp_hints(result.binary_identity["stat"]),
                         reprocessing=replaces is not None,
                     )
                     target = writes[0].content

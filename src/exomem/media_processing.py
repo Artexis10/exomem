@@ -1595,6 +1595,21 @@ def _read_provenance(
     )
 
 
+def read_timestamp_hints(binary: Path) -> tuple[int, int] | None:
+    """The mtime and ctime of `binary` as `_read_provenance` reads them: from the open handle.
+
+    Reconciliation compares the handle's values with a page's hints. `Path.stat` reports another
+    ctime on Windows, so a caller that records hints for a page reads them here. The result is
+    None when the file cannot be opened; the page then keeps its hints unread.
+    """
+    try:
+        with binary.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _verify_binary_identity(
     binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
 ) -> None:

@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -223,6 +224,43 @@ def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_r
     page, info = _parsed_frontmatter(sidecar), binary.stat()
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
     assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
+    assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
+
+
+def test_a_page_stored_pending_records_the_open_handle_hints_when_path_stat_disagrees(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows `Path.stat` reports another ctime than the open handle, which reconcile compares."""
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    stored = _preserve_media_pending(vault, "windows-like.mp3")
+    binary, sidecar = vault / stored.path, vault / stored.sidecar_path
+    resolved = binary.resolve(strict=True)
+    original_stat = Path.stat
+
+    def windows_like_path_stat(self: Path, *args, **kwargs):
+        result = original_stat(self, *args, **kwargs)
+        if self != resolved:
+            return result
+        fields = {name: getattr(result, name) for name in dir(result) if name.startswith("st_")}
+        fields["st_ctime_ns"] -= 1_000_000_000
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(Path, "stat", windows_like_path_stat)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="a recorded sentence", media_type="audio", engine="faster-whisper:test"
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    page, handle = _parsed_frontmatter(sidecar), os.stat(binary)
+    assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
+    assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (handle.st_mtime_ns, handle.st_ctime_ns)
     assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
 
 
