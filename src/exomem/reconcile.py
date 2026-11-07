@@ -782,10 +782,18 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             }
         )
         # A parent outside the corpus was no page that the corpus read. Its bytes are recorded now, at
-        # the audit, so the hold removes its rows only while it stays as the audit found it.
-        outside_corpus_hashes = _read_hashes(
-            vault_root, sorted({item.parent_path for item in unit_drift if item.parent_path not in semantic_states})
-        )
+        # the audit, so the hold removes its rows only while it stays as the audit found it. Rows
+        # stamped with the parent's bytes now were indexed by a write that the corpus read missed:
+        # that parent is not recorded, so it counts as moved and its rows stay with that write.
+        indexed_for: dict[str, set[str]] = {}
+        for item in unit_drift:
+            if item.parent_path not in semantic_states:
+                indexed_for.setdefault(item.parent_path, set()).update(item.actual_source_hashes)
+        outside_corpus_hashes = {
+            rel: digest
+            for rel, digest in _read_hashes(vault_root, indexed_for).items()
+            if digest not in indexed_for[rel]
+        }
         with _phase_hold(vault_root, "reconcile units", dry_run=dry_run):
             # A parent whose bytes moved since they were read was indexed by the write that moved it;
             # a repair from the old read would undo that write, so the run leaves it and reports it.
