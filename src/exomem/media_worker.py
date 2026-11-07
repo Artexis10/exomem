@@ -447,6 +447,8 @@ class MediaWorker:
         self._gpu_preflight: cuda_containment.Preflight | None = None
         #: The supervisor killed the running child itself, so its signal exit is not a crash.
         self._child_stopped = False
+        #: A stop of the dead child that the ledger has not recorded yet: its kind, cell and settings.
+        self._unrecorded_stop: tuple[str, media_brakes.CellMemory, media_brakes.Settings] | None = None
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
@@ -1260,12 +1262,25 @@ class MediaWorker:
                 f", brakes unavailable: {cell.problem}" if cell.problem else "",
             )
         self._child_stopped = True
+        self._unrecorded_stop = (kind, cell, config)
         with contextlib.suppress(OSError):
             os.killpg(child.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             child.wait(timeout=5)
         if child.returncode is not None:
             _reap_group(child.pid)
+        self._record_stop()
+
+    def _record_stop(self) -> None:
+        """Record the stop that `_stop_child` made for each job its child ran, once.
+
+        A held ledger leaves the stop unrecorded, and the child's exit records it before the exit
+        returns the job. A recorded stop takes the job out of running, so a second pass counts it once.
+        """
+        assert self._store is not None
+        if self._unrecorded_stop is None:
+            return
+        kind, cell, config = self._unrecorded_stop
         if kind == media_brakes.TIMEOUT:
             exceeded = media_brakes.timeout_context(config)
             for job in self._store.running_jobs():
@@ -1282,17 +1297,18 @@ class MediaWorker:
                         config.stop_limit,
                     )
                     self.publish_over_budget(job, exceeded)
-            return
-        context = self._context_for(cell, config)
-        for job in self._store.running_jobs():
-            self._store.record_memory_stop(
-                job,
-                kind=kind,
-                stop_limit=config.stop_limit,
-                context=context(job),
-                progress=self._speech_progress(job),
-            )
-        self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
+        else:
+            context = self._context_for(cell, config)
+            for job in self._store.running_jobs():
+                self._store.record_memory_stop(
+                    job,
+                    kind=kind,
+                    stop_limit=config.stop_limit,
+                    context=context(job),
+                    progress=self._speech_progress(job),
+                )
+            self._memory_hold_until = _clock() + _MEMORY_WAIT_SECONDS
+        self._unrecorded_stop = None
 
     def _commit_sidecar_extraction(
         self,
@@ -1929,6 +1945,8 @@ class MediaWorker:
         idle_signature: tuple[object, ...] | None = None
         forced_recheck_at = 0.0
         recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
+        #: When a pass first found the job ledger held, while it stays held; `None` while it is free.
+        ledger_held_since: float | None = None
         brakes = media_brakes.enabled()
         #: A GPU wait is recorded that no idle pass has re-checked yet; a restart can keep one for waiting jobs.
         gpu_wait_recorded = bool(
@@ -2010,14 +2028,16 @@ class MediaWorker:
                     if child is not None and child.poll() is not None:
                         returncode = child.returncode
                         child_pid = child.pid
-                        # The ledger first: when it is held, the child stays in place and the next pass
-                        # replays this exit whole. Each of these writes holds when it runs twice.
+                        self._release_slot()  # idempotent, so a held ledger below does not hold the node slot
+                        # The ledger next: when it is held, the child stays in place and the next pass
+                        # replays this exit whole. Each of these writes holds when it runs twice. A stop
+                        # is recorded first, so the recovery below does not return its job uncounted.
+                        self._record_stop()
                         owns_runtime = self._store.worker_pid() == child_pid
                         recovered = self._store.recover_interrupted() if owns_runtime else 0
                         if owns_runtime:
                             self._store.clear_worker(child_pid)
                         self._child = None
-                        self._release_slot()
                         idle_signature = None
                         gpu_hold = False
                         crashed = returncode is not None and returncode < 0 and not self._child_stopped
@@ -2169,14 +2189,27 @@ class MediaWorker:
                     # Another connection holds the job ledger past its busy timeout. The pass ends here and the
                     # next one starts after one poll. Nothing recorded an answer, so it asks the store again.
                     idle_signature = None
-                    log.warning(
+                    # The first held pass warns, the passes after it log at debug, and the first free pass
+                    # warns again, so a long hold writes two warnings.
+                    first = ledger_held_since is None
+                    if first:
+                        ledger_held_since = _clock()
+                    log.log(
+                        logging.WARNING if first else logging.DEBUG,
                         "media worker: the job ledger is held; supervisor pass retried after %.1fs "
                         "(child running: %s, handed-over rows waiting: %d)",
                         _SUPERVISE_POLL_SECONDS,
                         self._child is not None and self._child.poll() is None,
                         len(self._runtime_requeues),
-                        exc_info=True,
+                        exc_info=first,
                     )
+                else:
+                    if ledger_held_since is not None:
+                        log.warning(
+                            "media worker: the job ledger is free again; supervisor passes resumed after %.1fs",
+                            _clock() - ledger_held_since,
+                        )
+                        ledger_held_since = None
                 if self._wake.wait(0 if requeuing else _SUPERVISE_POLL_SECONDS):
                     # Cleared only once it has fired, so a wake that lands
                     # after a timed-out wait is still seen on the next one. A

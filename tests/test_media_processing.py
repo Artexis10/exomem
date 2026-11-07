@@ -2010,6 +2010,27 @@ def test_a_start_writes_no_page_for_a_paused_row_that_a_retry_returned_and_a_chi
     assert _frontmatter_and_body(sidecar)[0]["processing_state"] == "pending"
 
 
+def test_a_paused_row_is_read_again_without_waiting_for_a_writer_that_holds_the_job_ledger(vault: Path) -> None:
+    # The supervisor reads the row again under the vault's mutation boundary, so a wait here holds every
+    # foreground write for up to the ledger's busy timeout.
+    media_processing = _media_processing()
+    media_processing.reconcile_media(vault, _drop_media(vault, "paused-memo.m4a"))
+    media_processing.mark_processing_unavailable(
+        vault, reason="MediaRuntimeUnavailable: startup failed", next_action=media_jobs.RUNTIME_UNAVAILABLE_ACTION
+    )
+    store = media_jobs.MediaJobStore(vault)
+    [blocked] = store.runtime_blocked_jobs()
+    holder = sqlite3.connect(media_jobs.job_store_path(vault), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        current = store.current_runtime_block(blocked)
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert current is not None and (current.id, current.claim_revision) == (blocked.id, blocked.claim_revision)
+
+
 def test_a_start_skips_a_paused_row_claimed_and_blocked_again_after_the_handover(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
