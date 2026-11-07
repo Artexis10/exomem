@@ -127,6 +127,45 @@ def remove_carriers(content: str, spans: Iterable[tuple[int, int]]) -> str:
     of them, so the paragraphs around it keep a single separator. A carrier
     sharing its line with prose removes only its own characters.
     """
+    return _carrier_removal(content, spans)[0]
+
+
+def carrier_cuts(content: str, spans: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """The ranges of `content` that `remove_carriers(content, spans)` removes, merged and in order.
+
+    The ranges are the carriers widened as `remove_carriers` widens them, so they map a
+    position in the text without carriers back to the same character in `content`.
+    """
+    _text, cuts = _carrier_removal(content, spans)
+    kept = [(0, len(content))]
+    for cut_start, cut_end in cuts:
+        remaining: list[tuple[int, int]] = []
+        at = 0
+        for begin, end in kept:
+            low, high = at, at + end - begin
+            if high <= cut_start or low >= cut_end:
+                remaining.append((begin, end))
+            else:
+                if low < cut_start:
+                    remaining.append((begin, begin + cut_start - low))
+                if high > cut_end:
+                    remaining.append((begin + cut_end - low, end))
+            at = high
+        kept = remaining
+    removed: list[tuple[int, int]] = []
+    cursor = 0
+    for begin, end in kept:
+        if begin > cursor:
+            removed.append((cursor, begin))
+        cursor = end
+    if cursor < len(content):
+        removed.append((cursor, len(content)))
+    return tuple(removed)
+
+
+def _carrier_removal(content: str, spans: Iterable[tuple[int, int]]) -> tuple[str, list[tuple[int, int]]]:
+    """`content` without its carriers, and each cut made, in the coordinates of the text it cut."""
+    cuts: list[tuple[int, int]] = []
     for start, end in sorted(spans, reverse=True):
         line_start = max(content.rfind("\n", 0, start), content.rfind("\r", 0, start)) + 1
         after = _blank_rest(content, end)
@@ -136,7 +175,8 @@ def remove_carriers(content: str, spans: Iterable[tuple[int, int]]) -> str:
             if following is not None and _follows_blank_line(content, start):
                 end = following
         content = content[:start] + content[end:]
-    return content
+        cuts.append((start, end))
+    return content, cuts
 
 
 def _blank_rest(content: str, index: int) -> int | None:

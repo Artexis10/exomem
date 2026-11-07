@@ -1119,6 +1119,9 @@ def _wire_hit(
     rerank_score: float | None = None,
     rerank_raw_score: float | None = None,
     rerank_input_rank: int | None = None,
+    variant: projections.ProjectionVariant | None = None,
+    part: projections.ProjectionPart | None = None,
+    query: str = "",
 ) -> Hit:
     decision = selection.decision
     if decision is None or decision.level != hit.decision_level:
@@ -1165,6 +1168,7 @@ def _wire_hit(
         status=fields.get("status"),
         snapshot_hash=selection.content_hash,
         decision=decision,
+        **(projected_retrieval.matched_passage(variant, part, query) if variant is not None else {}),
     )
 
 
@@ -1289,12 +1293,8 @@ def _retain_projected_bm25_hits(
         if hit.item_identity in corroborated:
             retained.append(hit)
             continue
-        text = " ".join(
-            hit.search_fields[key]
-            for key in sorted(
-                hit.search_fields,
-                key=lambda value: value.encode("utf-16-be"),
-            )
+        text = (
+            hit.part.text if hit.part is not None else _projected_text(hit.search_fields)
         )
         present, total, content_present = find_policy.stem_word_coverage(
             frozenset(bm25.tokenize(text)),
@@ -1314,6 +1314,20 @@ def _projected_text(search_fields: Mapping[str, str]) -> str:
         search_fields[key]
         for key in sorted(search_fields, key=lambda value: value.encode("utf-16-be"))
     )
+
+
+def _matched_parts(
+    lane_hits: Mapping[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]],
+) -> dict[str, projections.ProjectionPart]:
+    """The further part each item matched: the one BM25 matched, else the one keyword matched.
+
+    An item whose first lexical match is its own fields has no entry.
+    """
+    first: dict[str, projections.ProjectionPart | None] = {}
+    for lane in ("bm25", "keyword"):
+        for hit in lane_hits.get(lane, ()):
+            first.setdefault(hit.item_identity, hit.part)
+    return {identity: part for identity, part in first.items() if part is not None}
 
 
 class _ProjectedTextView:
@@ -1351,13 +1365,18 @@ def _guard_projected_lexical_votes(
     for lane in ("vector", "bm25", "keyword"):
         for hit in lane_hits.get(lane, ()):
             fields.setdefault(hit.item_identity, hit.search_fields)
+    # A lexical vote on a further part is judged on the text of that part, which holds the match.
+    matched_parts = _matched_parts(lane_hits)
     views: dict[str, _ProjectedTextView] = {}
 
     def view_of(identity: str) -> _ProjectedTextView | None:
         if identity not in fields:
             return None
         if identity not in views:
-            views[identity] = _ProjectedTextView(_projected_text(fields[identity]))
+            part = matched_parts.get(identity)
+            views[identity] = _ProjectedTextView(
+                part.text if part is not None else _projected_text(fields[identity])
+            )
         return views[identity]
 
     weights = rank_config.intent_weights(find_policy.classify_intent(query))
@@ -1913,6 +1932,7 @@ def _find_projected_hits_pinned(
     ]
     fused.sort(key=lambda item: (-item[1], item[0]))
     ordered_identities = tuple(identity for identity, _score in fused)
+    matched_parts = _matched_parts(lane_hits)
     reranked: tuple[projected_retrieval.ProjectedLexicalHit, ...] | None = None
     rerank_raw_scores: dict[str, float] = {}
     rerank_inputs = {
@@ -1990,6 +2010,9 @@ def _find_projected_hits_pinned(
                 ordered_identities,
                 scorer=score_projected_passages,
                 k=len(ordered_identities),
+                matched_parts={
+                    identity: part.number for identity, part in matched_parts.items()
+                },
             )
             ordered_identities = tuple(hit.item_identity for hit in reranked)
         except projected_retrieval.ProjectedLaneUnavailable:
@@ -2103,6 +2126,9 @@ def _find_projected_hits_pinned(
                     if identity in reranked_by_identity
                     else None
                 ),
+                variant=selected_variants.get(identity),
+                part=matched_parts.get(identity),
+                query=query,
             )
         )
     return ProjectedFindResult(

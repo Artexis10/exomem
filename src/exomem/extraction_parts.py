@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 from . import media_engines, media_types, memory_refs, preserve, runtime_resources, temporal
 from .governance import raw_protection
@@ -397,12 +398,58 @@ def listed(part: Path) -> bool:
         return False
 
 
+def bounds_of(first_length: int, lengths: Iterable[int]) -> list[int]:
+    """Where each part starts in the whole text, then where the text ends.
+
+    `first_length` is the length of the Source page's own text and `lengths` those of parts
+    2, 3 and so on, in order.
+    """
+    bounds = [0, first_length]
+    for length in lengths:
+        bounds.append(bounds[-1] + length)
+    return bounds
+
+
 def _bounds(vault_root: Path, page: Path, first: str, count: int) -> list[int]:
     """Where each part starts in the whole text as it is now, then where the text ends."""
-    bounds = [0, len(first)]
+    return bounds_of(len(first), (_part_length(vault_root, page, number) for number in range(2, count + 1)))
+
+
+def stored_parts(
+    vault_root: Path,
+    page: str,
+    content: str,
+    *,
+    pending: Mapping[str, str] = MappingProxyType({}),
+    folder: str | None = None,
+) -> tuple[tuple[int, str, int], ...]:
+    """`(number, text, start)` of each further part of the extraction on `page`, for a catalog.
+
+    `page` is the vault-relative path of the Source page and `content` its text. A part is
+    one the page lists (2 up to its `extraction_parts`) that carries `part_of`, the rule every
+    reader that folds parts applies; the run stops at the first part that is missing or is not
+    one, so no part after a gap gets in. `start` is where the part starts in the whole stored
+    text. `pending` holds the text of the pages a batch is about to write, by vault-relative
+    path; `folder` is where the parts are now when the page is about to move away from them.
+    """
+    count = count_of(parse_frontmatter(content)[0])
+    if count < 2:
+        return ()
+    location = Path(folder) if folder is not None else folder_for(Path(page))
+    texts: list[str] = []
     for number in range(2, count + 1):
-        bounds.append(bounds[-1] + _part_length(vault_root, page, number))
-    return bounds
+        relative = (location / part_path(Path(page), number).name).as_posix()
+        raw = pending.get(relative)
+        if raw is None:
+            try:
+                raw, _guard = read_guarded_text(vault_root, vault_root / relative)
+            except (OSError, ValueError):  # a guard refusal or bad UTF-8 is a part that does not read
+                break
+        if "part_of" not in parse_frontmatter(raw)[0]:
+            break
+        texts.append(text_of_part(raw))
+    starts = bounds_of(len(preserve.extracted_text(content)), (len(text) for text in texts))
+    return tuple((number, text, starts[number - 1]) for number, text in enumerate(texts, 2))
 
 
 def part_start(vault_root: Path, page: Path, first: str, number: int) -> int:

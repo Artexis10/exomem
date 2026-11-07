@@ -6,6 +6,7 @@ read_memory. Nothing is replaced: the original is plain UTF-8 text, which needs 
 
 import os
 import random
+from pathlib import Path
 
 import pytest
 
@@ -203,15 +204,20 @@ def test_moving_a_source_moves_its_parts_with_it(vault, monkeypatch) -> None:
     assert [hit.path for hit in hits] == [new_page.relative_to(vault).as_posix()]
 
 
-def _adopted_parted_source(vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "") -> tuple[str, str]:
+def _adopted_parted_source(
+    vault, monkeypatch: pytest.MonkeyPatch, beside_planted: str = "", *, planted_at: int = 55, lead: str = ""
+) -> tuple[str, str]:
     """A text file dropped into a project folder and extracted by the worker into several parts.
 
     Outside Sources/ and Evidence/, so its page may be edited, trashed and moved alone, and its
-    origin carriers are withheld from other audiences.
+    origin carriers are withheld from other audiences. A part holds about 11 of the 60
+    paragraphs, each of which starts with `lead`; paragraph `planted_at` ends with `PLANTED`.
     """
     monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 4000)
     text = "\n\n".join(
-        f"paragraph {number} " + "alpha beta gamma " * 20 + (f"{PLANTED} {beside_planted}" if number == 55 else "")
+        f"{lead}paragraph {number} "
+        + "alpha beta gamma " * 20
+        + (f"{PLANTED} {beside_planted}" if number == planted_at else "")
         for number in range(60)
     ).strip()
     binary = vault / "Knowledge Base" / "Projects" / "demo" / "report.txt"
@@ -403,3 +409,350 @@ def test_parts_are_not_counted_as_unprocessed_sources(vault, monkeypatch) -> Non
     flagged = {finding.path for finding in report.findings}
     assert stub.sidecar_path in flagged
     assert not parts & flagged
+
+
+# Governed projection search: an enrolled vault serves `find` from its catalog, where a part's text
+# is content of its Source's full-text row and nothing else.
+
+#: Two invented words that no page of a governed vault holds.
+ABSENT = "quorvane plinthwhistle"
+_RESTRICTED_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+_VAULTED_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+
+
+@pytest.fixture
+def governed_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Offline custody for a vault that the test enrolls itself; query models stay off."""
+    from contextlib import contextmanager
+
+    import test_governance_schema_migration_plan as migration_tests
+
+    for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_CLIP", "EXOMEM_DISABLE_RANKING"):
+        monkeypatch.setenv(name, "1")
+    vault = tmp_path / "vault"
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes" / "restricted.yaml").write_text(
+        f"governance_version: 1\nid: {_RESTRICTED_SCOPE}\ntags: [restricted]\n", encoding="utf-8"
+    )
+    (governance / "scopes" / "vaulted.yaml").write_text(
+        f'governance_version: 1\nid: {_VAULTED_SCOPE}\npaths: ["Knowledge Base/Vaulted/**"]\n', encoding="utf-8"
+    )
+    # "external" may not read either scope at all; "partner" reads only an excerpt of it.
+    for rule_id, audience, ceiling in (("01ARZ3NDEKTSV4RRFFQ69G5FB0", "external", 0), ("01ARZ3NDEKTSV4RRFFQ69G5FB1", "partner", 5)):
+        (governance / "rules" / f"{audience}.yaml").write_text(
+            f'governance_version: 1\nid: {rule_id}\nscope_ids: ["{_RESTRICTED_SCOPE}", "{_VAULTED_SCOPE}"]\n'
+            f"audience: {audience}\nceiling: {ceiling}\n",
+            encoding="utf-8",
+        )
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    (notes / "plain.md").write_text("---\ntype: insight\n---\n\n# Plain\n\nAn ordinary note about gardens.\n", encoding="utf-8")
+    with contextmanager(migration_tests._offline_state.__wrapped__)(tmp_path, monkeypatch):
+        yield vault
+
+
+def _enroll(vault) -> None:
+    """Migrate the vault to the governed store, which publishes its first catalog."""
+    import time
+
+    import test_governance_schema_migration_plan as migration_tests
+
+    from exomem import state_migration
+    from exomem.governance import schema_migration, store
+
+    state_migration.migrate_vault_state_offline(
+        vault, authority=state_migration.assert_offline_migration_authority(source="full text fixture")
+    )
+    store.open_connection(vault).close()
+    now = int(time.time()) - 10  # custody refuses a control record issued in the future
+    plan = migration_tests._stage_reviewed_migration(vault, now=now)
+    schema_migration.commit_forward_migration(vault, expected_plan_digest=plan.plan_digest, now=now + 2)
+
+
+@pytest.fixture
+def governed(governed_state):
+    _enroll(governed_state)
+    return governed_state
+
+
+def _owner():
+    from exomem.governance.principal import owner_principal
+
+    return owner_principal(surface="mcp")
+
+
+def _audience(audience_id: str):
+    from exomem.governance.principal import RequestPrincipal
+
+    return RequestPrincipal(audience_id=audience_id, surface="mcp")
+
+
+def _projected_find(vault, query: str, who) -> dict:
+    """`find` as `who` asks it, served from the catalog the last write published."""
+    from exomem.governance import projection_runtime
+    from exomem.governance.principal import request_scope
+
+    projection_runtime.preactivate_projection_runtime(vault)
+    with request_scope(who):
+        return commands.op_find(vault, query=query, limit=5, graph=False, rerank=False)
+
+
+def _as_owner(call, *args, **kwargs):
+    from exomem.governance.principal import request_scope
+
+    with request_scope(_owner()):
+        return call(*args, **kwargs)
+
+
+def _part_count(vault, page_rel: str) -> int:
+    return extraction_parts.count_of(parse_frontmatter((vault / page_rel).read_text(encoding="utf-8"))[0])
+
+
+def test_a_restricted_source_matches_in_its_last_part_only_for_an_audience_that_reads_it_in_full(
+    governed, monkeypatch
+) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Restrict the report", tags=["restricted"])
+
+    for audience in ("external", "partner"):
+        who = _audience(audience)
+        assert _projected_find(governed, PLANTED, who) == _projected_find(governed, ABSENT, who)
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    window = _as_owner(commands.op_read_memory, governed, path=page_rel, offset=hit["passage"]["offset"])
+
+    assert (hit["path"], hit["matched_part"]) == (page_rel, _part_count(governed, page_rel))
+    assert PLANTED in hit["passage"]["text"] and PLANTED in window["body"]
+
+
+def test_a_tag_edit_takes_the_parts_of_a_source_out_of_an_audience_and_back(governed, monkeypatch) -> None:
+    partner = _audience("partner")
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+
+    readable = _projected_find(governed, PLANTED, partner)["hits"]
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Restrict the report", tags=["restricted"])
+    restricted = _projected_find(governed, PLANTED, partner)
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Release the report", tags=[])
+    released = _projected_find(governed, PLANTED, partner)["hits"]
+
+    assert [hit["path"] for hit in readable] == [hit["path"] for hit in released] == [page_rel]
+    assert restricted == _projected_find(governed, ABSENT, partner)
+
+
+def test_moving_a_source_into_a_restricted_folder_takes_its_parts_with_it(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+    count = _part_count(governed, page_rel)
+    # A governed catalog publishes Markdown only, so the page moves without its original.
+    (governed / page_rel.removesuffix(".md")).unlink()
+
+    _as_owner(commands.op_move_file, governed, old_path=page_rel, new_path="Knowledge Base/Vaulted/report.md")
+
+    owner_hits = _projected_find(governed, PLANTED, _owner())["hits"]
+    assert [(hit["path"], hit["matched_part"]) for hit in owner_hits] == [("Knowledge Base/Vaulted/report.md", count)]
+    partner = _audience("partner")
+    assert _projected_find(governed, PLANTED, partner) == _projected_find(governed, ABSENT, partner)
+
+
+def test_a_shorter_extraction_replaces_the_parts_in_the_catalog(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+    shorter = "\n\n".join(
+        f"paragraph {number} " + "delta epsilon " * 30 + ("plumquorx" if number == 19 else "") for number in range(20)
+    )
+
+    _as_owner(preserve.update_sidecar_extraction, governed, governed / page_rel, text=shorter, engine="text")
+
+    [hit] = _projected_find(governed, "plumquorx", _owner())["hits"]
+    assert 1 < hit["matched_part"] == _part_count(governed, page_rel)
+    assert _projected_find(governed, PLANTED, _owner())["hits"] == []
+
+
+def test_trashing_a_source_and_recovering_it_takes_its_parts_out_and_back(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+
+    trashed = _as_owner(delete_file.delete_file, governed, path=page_rel, confirm=True)
+    trashed_hits = _projected_find(governed, PLANTED, _owner())["hits"]
+    _as_owner(commands.op_recover_from_trash, governed, trash_path=trashed.trash_path)
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+
+    assert trashed_hits == []
+    assert (hit["path"], hit["matched_part"]) == (page_rel, _part_count(governed, page_rel))
+
+
+def test_a_catalog_published_before_parts_gains_them_when_the_projector_refresh_runs(
+    governed_state, monkeypatch
+) -> None:
+    import os
+    import sqlite3
+
+    from exomem import state_paths
+    from exomem.governance import projections, projector_refresh
+
+    vault = governed_state
+    # As the release before parts published the catalog: the projector before this one, no part
+    # text in any row, and stores without the parts table.
+    with monkeypatch.context() as previous_release:
+        previous_release.setattr(projections, "PROJECTOR_SCHEMA_VERSION", projections.PROJECTOR_SCHEMA_VERSION - 1)
+        previous_release.setattr(extraction_parts, "stored_parts", lambda *_args, **_options: ())
+        _enroll(vault)
+        page_rel, _text = _as_owner(_adopted_parted_source, vault, monkeypatch)
+        assert _projected_find(vault, PLANTED, _owner())["hits"] == []
+    for rows in state_paths.vault_state_dir(vault).rglob("rows.sqlite"):
+        os.chmod(rows, 0o600)
+        with sqlite3.connect(rows) as connection:
+            for table in ("projection_variant_parts", "projection_variant_heads"):
+                for operation in ("insert", "update", "delete"):
+                    connection.execute(f"DROP TRIGGER {table}_no_{operation}")
+                connection.execute(f"DROP TABLE {table}")
+            connection.execute("PRAGMA user_version=2")
+
+    assert projector_refresh.converge(vault) == "refreshed"
+
+    [hit] = _projected_find(vault, PLANTED, _owner())["hits"]
+    assert (hit["path"], hit["matched_part"]) == (page_rel, _part_count(vault, page_rel))
+
+
+def test_a_projector_refresh_measures_no_unchanged_projection_text_again(vault, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from governance_projection_support import verified_namespace
+    from test_governance_clip_successor_publication import _vector_family, _vector_measurements
+
+    from exomem import embeddings
+    from exomem.governance import (
+        catalog_publication,
+        projection_measurement_store,
+        projection_store,
+        projections,
+        schema_v4,
+    )
+    from exomem.governance.policy import Policy
+
+    stub, _text = _small_parted_source(vault, monkeypatch)
+    old_key = projections.ProjectionNamespaceKey("a" * 64, projections.PROJECTOR_SCHEMA_VERSION - 1, 1)
+    policy = Policy(fingerprint=old_key.policy_fingerprint)
+    current = catalog_publication.catalog_item(
+        vault_root=vault, path=stub.sidecar_path, source=(vault / stub.sidecar_path).read_text(encoding="utf-8"),
+        policy=policy, target_key=old_key,
+    )
+    # The row as the release before parts published it: the same projection text, no parts.
+    active_items = (
+        replace(current, variants=tuple(replace(variant, parts=(), head=None) for variant in current.variants)),
+    )
+    vector_family = _vector_family(old_key)
+    vectors = projection_measurement_store.stage_measurement_store(
+        vault, namespace=verified_namespace(old_key, active_items), family=vector_family,
+        measurements=_vector_measurements(vector_family, *active_items),
+    )
+    manifest = projection_store.stage_variant_store(vault, key=old_key, items=active_items)
+    snapshot = schema_v4.ActivePolicySnapshot(
+        active=schema_v4.VerifiedActiveGovernanceState(
+            "fixture-vault", "fixture-store", 1, "e" * 64, "fixture-policy", old_key.policy_fingerprint,
+            old_key.projector_schema_version, old_key.catalog_generation, old_key.namespace_id,
+        ),
+        policy=policy,
+        source_documents=(),
+        catalog_descriptor=projection_store.catalog_descriptor_bytes(old_key, active_items),
+        projection_namespace_evidence=projection_store.projection_namespace_evidence_bytes(
+            manifest, required_measurement_roots=(projection_measurement_store.measurement_root(vectors),)
+        ),
+    )
+    measured: list[str] = []
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda texts, **_options: measured.extend(texts) or [(0.0, 1.0) for _ in texts]
+    )
+
+    prepared = catalog_publication.prepare_policy_projection(
+        vault, active_snapshot=snapshot, target_policy=policy, ready_at=19
+    )
+
+    [variant] = prepared.items[0].variants
+    assert measured == [] and PLANTED in variant.parts[-1].text
+    [root] = projection_store.decode_projection_namespace_evidence(
+        prepared.evidence, expected_key=prepared.manifest.namespace_key
+    ).required_measurement_roots
+    _manifest, rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=projection_store.prepare_projection_namespace(
+            key=prepared.manifest.namespace_key, manifest=prepared.manifest, items=prepared.items
+        ),
+        family=projection_measurement_store.MeasurementFamilyKey(
+            root.namespace_key, root.lane, root.extractor_version, root.model_version
+        ),
+        expected_rows_digest=root.rows_digest,
+    )
+    assert [row.vector for row in rows] == [row.vector for row in _vector_measurements(vector_family, *active_items)]
+
+
+def test_a_rebuilt_missing_part_becomes_searchable(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+    count = _part_count(governed, page_rel)
+    extraction_parts.part_path(governed / page_rel, count).unlink()  # the part that holds PLANTED
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Tag the report", tags=["report"])
+    missing = _projected_find(governed, PLANTED, _owner())["hits"]
+
+    _as_owner(reconcile.reconcile, governed)
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    assert missing == [] and hit["matched_part"] == count
+
+
+def test_a_full_catalog_publishes_a_source_without_the_parts_that_do_not_fit(governed, monkeypatch, caplog) -> None:
+    from exomem.governance import projection_runtime, projections
+
+    projection_runtime.preactivate_projection_runtime(governed)
+    held = len(projection_runtime.load_active_projection_runtime(governed).namespace.items)
+    monkeypatch.setattr(projections, "MAX_GOVERNED_CATALOG_ITEMS", held + 2)  # the Source and one part
+
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+
+    assert [hit["path"] for hit in _projected_find(governed, "paragraph 0", _owner())["hits"]] == [page_rel]
+    assert _projected_find(governed, PLANTED, _owner())["hits"] == []
+    first_left_out = extraction_parts.part_path(Path(page_rel), 3).as_posix()
+    assert any(first_left_out in record.getMessage() for record in caplog.records)
+
+
+def test_a_match_in_the_first_part_of_a_source_names_it_and_opens_read_memory_there(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, planted_at=2)
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    window = _as_owner(commands.op_read_memory, governed, path=page_rel, offset=hit["passage"]["offset"])
+
+    assert (hit["path"], hit["matched_part"], hit["passage"]["part"]) == (page_rel, 1, 1)
+    assert PLANTED in hit["passage"]["text"] and window["body"].startswith(hit["passage"]["text"])
+
+
+def test_a_passage_across_withheld_carriers_counts_stored_characters(governed, monkeypatch) -> None:
+    carrier = "<!-- exomem-origin:v1 SECRETNOTE -->"
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, lead=f"{carrier} ")
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    passage = hit["passage"]
+    part = extraction_parts.text_of_part(
+        (governed / extraction_parts.part_path(Path(page_rel), passage["part"])).read_text(encoding="utf-8")
+    )
+    base = extraction_parts.part_start(
+        governed, governed / page_rel, preserve.extracted_text((governed / page_rel).read_text(encoding="utf-8")),
+        passage["part"],
+    )
+    stored = part[passage["offset"] - base : passage["offset"] - base + passage["length"]]
+    window = _as_owner(commands.op_read_memory, governed, path=page_rel, offset=passage["offset"])
+
+    # A carrier before the passage moves where it starts, and one inside it adds to its length.
+    assert carrier in part[: passage["offset"] - base] and carrier in stored
+    assert "SECRETNOTE" not in passage["text"] and stored.replace(carrier, "") == passage["text"]
+    assert window["body"].startswith(passage["text"])
+
+
+def test_a_part_too_large_to_search_ends_the_parts_of_its_source_without_refusing_writes(governed, monkeypatch) -> None:
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, planted_at=15)
+    third = governed / extraction_parts.part_path(Path(page_rel), 3)
+    content = third.read_text(encoding="utf-8")
+    third.write_text(content.removesuffix("\n") + " brindlewick" * 100_000 + "\n", encoding="utf-8")  # 1.2 MB
+
+    _as_owner(commands.op_edit, governed, path=page_rel, why="Tag the report", tags=["report"])
+
+    [hit] = _projected_find(governed, PLANTED, _owner())["hits"]
+    assert (hit["path"], hit["matched_part"]) == (page_rel, 2)
+    assert _projected_find(governed, "brindlewick", _owner())["hits"] == []
