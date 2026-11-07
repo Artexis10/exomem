@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -106,6 +106,8 @@ EPISODE_PATH_LABEL = "Episodes"
 _REGISTRY_FILENAME = "source-taxonomy.yaml"
 _KIND_SECTION = "source_kinds"
 _DOMAIN_SECTION = "domains"
+# The YAML core-schema tag for an empty or `~`/`null` value (fixed by the YAML spec).
+_YAML_NULL_TAG = "tag:yaml.org,2002:null"
 _STATUSES = frozenset({"active", "deprecated"})
 
 # Reserved on Windows regardless of case or extension. A perfectly valid slug
@@ -968,45 +970,78 @@ def _append_introductions(
     An empty `{}` placeholder heading is rewritten to a block heading the first
     time that axis gains an entry.
     """
-    if not text.endswith("\n"):
-        text += "\n"
     for introduction in introductions:
         section = (
             _KIND_SECTION if introduction.axis == "source_kind" else _DOMAIN_SECTION
         )
         entry = (
-            f"  # auto-registered by exomem\n"
-            f"  {introduction.key}:\n"
-            f"    label: {introduction.label}\n"
-            f"    path_label: {introduction.path_label}\n"
+            "# auto-registered by exomem",
+            f"{introduction.key}:",
+            f"  label: {introduction.label}",
+            f"  path_label: {introduction.path_label}",
         )
         text = _insert_in_section(text, section, entry)
     return text
 
 
-def _top_level_line_at(text: str, line: str) -> int:
-    """Index of `line` starting at column 0, or -1.
+def _insert_in_section(text: str, section: str, entry: Sequence[str]) -> str:
+    """Add `entry` under the top-level `section` key and keep the rest of the file.
 
-    Anchored to the start of a line so the commented example in the file header
-    (`#   domains:`) never matches the real section key.
+    The YAML parser locates the key: a text search cannot tell it from the
+    commented example in the file header, or from a heading that carries a
+    trailing comment, and a missed match would append a second `section:` key
+    that silently replaces the owner's entries. Comments, the line ending and
+    the entries' indent are kept.
     """
-    if text.startswith(line):
-        return 0
-    index = text.find(f"\n{line}")
-    return -1 if index == -1 else index + 1
+    newline = "\r\n" if "\r\n" in text else "\n"
 
+    def block(indent: int) -> str:
+        return "".join(f"{' ' * indent}{line}{newline}" for line in entry)
 
-def _insert_in_section(text: str, section: str, entry: str) -> str:
-    empty_heading = f"{section}: {{}}\n"
-    index = _top_level_line_at(text, empty_heading)
-    if index != -1:
-        return f"{text[:index]}{section}:\n{entry}{text[index + len(empty_heading):]}"
-    heading = f"{section}:\n"
-    index = _top_level_line_at(text, heading)
-    if index == -1:
-        return f"{text}{heading}{entry}"
-    insert_at = index + len(heading)
-    return text[:insert_at] + entry + text[insert_at:]
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        raise vocabulary_registry.RegistryError(
+            f"INVALID_REGISTRY_OVERLAY: {_REGISTRY_FILENAME} does not parse; fix it or "
+            f"restore a kept version ({exc})"
+        ) from exc
+    if root is not None and (not isinstance(root, yaml.MappingNode) or root.flow_style):
+        raise vocabulary_registry.RegistryError(
+            f"INVALID_REGISTRY_OVERLAY: {_REGISTRY_FILENAME} is not a block mapping; "
+            "fix it or restore a kept version"
+        )
+    # The last duplicate key wins, as it does when the file is loaded.
+    value = None
+    if root is not None:
+        value = next((node for key, node in reversed(root.value) if key.value == section), None)
+    if value is None:
+        separator = "" if text.endswith("\n") or not text else newline
+        return f"{text}{separator}{section}:{newline}{block(2)}"
+
+    start, end = value.start_mark.index, value.end_mark.index
+    placeholder = (
+        isinstance(value, yaml.MappingNode) and value.flow_style and not value.value
+    ) or (isinstance(value, yaml.ScalarNode) and value.tag == _YAML_NULL_TAG)
+    if placeholder:
+        # `section: {}` or a bare `section:` becomes a block heading. The entry goes
+        # on the next line and the heading line keeps its trailing comment.
+        while start > 0 and text[start - 1] in " \t":
+            start -= 1
+        line_end = text.find("\n", end)
+        line_end = len(text) if line_end == -1 else line_end + 1
+        rest = text[end:line_end]
+        if not rest.endswith("\n"):
+            rest += newline
+        return f"{text[:start]}{rest}{block(2)}{text[line_end:]}"
+    if isinstance(value, yaml.MappingNode) and not value.flow_style:
+        first = value.start_mark
+        line_start = first.index - first.column
+        return text[:line_start] + block(first.column) + text[line_start:]
+    raise vocabulary_registry.RegistryError(
+        f"INVALID_REGISTRY_OVERLAY: `{section}` in {_REGISTRY_FILENAME} is not a block "
+        f"mapping; write `{section}:` followed by indented entries so exomem can add to "
+        "it and keep your comments"
+    )
 
 
 def register(
