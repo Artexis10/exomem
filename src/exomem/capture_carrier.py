@@ -61,12 +61,10 @@ def block() -> dict[str, str]:
     served = envelope.resolved(
         level=engagement["level"], capture_gate=engagement["contract"]["effective_capture"]
     )
-    disposition = served["classes"]["proactive_capture"]["disposition"]
-    link_acceptance = served["classes"]["link_acceptance"]["disposition"]
-    say = prominence.capture_policy_text(disposition, link_acceptance)
-    if disposition == "off":
-        return {"disposition": disposition, "say": say}
-    return {"disposition": disposition, "link_acceptance": link_acceptance, "say": say}
+    return prominence.capture_policy(
+        served["classes"]["proactive_capture"]["disposition"],
+        served["classes"]["link_acceptance"]["disposition"],
+    )
 
 
 def _digest(served: dict[str, str]) -> str:

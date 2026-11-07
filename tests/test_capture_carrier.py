@@ -256,9 +256,7 @@ def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> 
     """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,200 bytes."""
     from test_retrieve_nudge_working_set import hook
 
-    rendered = hook._capture_policy_text(
-        {"disposition": "silent", "say": prominence.capture_policy_text("silent", "confirm-shortcut")}
-    )
+    rendered = hook._capture_policy_text(prominence.capture_policy("silent", "confirm-shortcut"))
 
     assert rendered.isascii()
     assert 0 < len(rendered.encode("ascii")) <= 1200
@@ -267,7 +265,7 @@ def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))
 def test_a_carrying_block_names_the_relation_adoption_and_delivery_routes(disposition) -> None:
     """The round-3 miss: each of these routes was reachable but nothing at the point of decision named it."""
-    say = prominence.capture_policy_text(disposition, "confirm-shortcut")
+    say = prominence.capture_policy(disposition, "confirm-shortcut")["say"]
 
     assert "relation queue" in say
     assert "Keep the exact bytes of the one the user selects or sends" in say
@@ -280,6 +278,7 @@ def test_every_disposition_the_envelope_allows_has_a_meaning() -> None:
     assert set(envelope.PROACTIVE_CAPTURE_MEANING) == set(envelope.RANGES["proactive_capture"])
 
 
-def test_every_link_acceptance_the_envelope_allows_has_a_meaning() -> None:
-    """The same guard for the second class the block states."""
-    assert set(envelope.LINK_ACCEPTANCE_MEANING) == set(envelope.RANGES["link_acceptance"])
+def test_a_proactive_meaning_is_one_sentence_so_the_hooks_fallback_keeps_all_of_it() -> None:
+    """An over-cap block is cut at its first ". "; a longer meaning would be cut with it."""
+    for meaning in envelope.PROACTIVE_CAPTURE_MEANING.values():
+        assert ". " not in meaning

@@ -78,6 +78,7 @@ RANGES: dict[str, tuple[str, ...]] = {
 #: One plain sentence per `RANGES["proactive_capture"]` value, for the activation `capture_policy`
 #: block. Keyed on the closed range the spec fixes (a unit test pins key parity), not on vocabulary:
 #: a model needs the disposition in words, and the key set cannot grow without a spec change.
+#: Holds no ". ": the hook's over-cap fallback keeps the block's first sentence, which this opens.
 PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
     "silent": "save durable material without asking, then report the write in one line",
     "advisory": "offer the save in one line and stop",

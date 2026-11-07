@@ -145,10 +145,12 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     # The next three each prevent a failure the blind acceptance run of 2026-11-07 showed. The same
     # sentences ride the activation `capture_policy` block, so bootstrap and the block cannot differ.
-    # Confirmed relation: the agent wrote a facet and never opened the relation queue.
+    # Confirmed relation: the agent wrote a facet and never opened the relation queue. Only a match
+    # the user confirmed leaves the facet route, so a plain stated affiliation is still kept.
     "check-the-relation-queue-before-an-affiliation-facet": (
         CARRYING,
-        lambda core: "check the relation queue" in core["engagement"]["contract"]["capture"],
+        lambda core: "check the relation queue: a confirmed match goes to link_acceptance"
+        in core["engagement"]["contract"]["capture"],
     ),
     # Selected draft: the agent read "not write consent" as a ban and kept nothing.
     "keep-the-selected-draft-under-proactive-capture": (

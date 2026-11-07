@@ -1774,7 +1774,7 @@ def op_bootstrap(
                 (
                     "Before saving: vocabulary_workflow (section vocabulary); resolve "
                     "recurring identities/relations, enrich entities. Add types only if "
-                    "current types distort evidence; skip incidental names."
+                    "current types distort evidence."
                     if profile == "compact" else
                     f"before saving, use vocabulary_workflow{vocabulary_workflow_home} to resolve recurring identities "
                     "and useful relationship meanings; enrich existing entities, and define "
@@ -1849,10 +1849,13 @@ def op_bootstrap(
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": (
                     "if they fire, consider edit or replace instead of a parallel page; a write advisory "
-                    "carries a review ref and fingerprint, so a dismissed or snoozed signal stays quiet "
-                    "until it changes"
-                    if profile == "compact"
-                    else "if they fire, consider edit or replace instead of a parallel page; a write advisory carries a review ref and fingerprint so an exact dismissed or unexpired snoozed signal stays quiet until the counterpart changes or the written page changes the detected signal class"
+                    "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
+                    "signal stays quiet until "
+                    + (
+                        "it changes"
+                        if profile == "compact"
+                        else "the counterpart changes or the written page changes the detected signal class"
+                    )
                 ),
             },
             "post_write": {
@@ -1905,7 +1908,7 @@ def op_bootstrap(
                     "Keep mentions through compaction and renewal; receipts are not mentions. "
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
                     "Absent advice proves nothing; prefer silence. "
-                    "Backlog: review a batch of the largest category, group it by topic, "
+                    "Backlog: review a batch of the largest category, group by topic, "
                     "write each group with the usual writers, check outstanding fell. "
                     "Dismissal is not completion."
                     if profile == "compact"

@@ -250,10 +250,17 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
     assert (vault / receipt["stored_path"]).read_bytes() == ORIGINAL
 
 
-def _hold_evidence_through_the_cli(key, app, tmp_path, capsys):
+# The tool that adopts a held upload of each lane, and the arguments it takes besides the files.
+_ADOPTING = {
+    "evidence": ("preserve_artifacts", {"scope": "client-work", "category": "drafts"}),
+    "source": ("capture_source", {"title": "Chosen draft", "source_kind": "session"}),
+}
+
+
+def _hold_through_the_cli(key, app, tmp_path, capsys, lane):
     """The agent's `exomem attach`: a held handle for the original, issued to LOGIN_A."""
     descriptor = _run(app, lambda client: _tool(
-        client, "transfer_artifact", _prepare_arguments("evidence"), _mcp_origin(key, LOGIN_A)))
+        client, "transfer_artifact", _prepare_arguments(lane), _mcp_origin(key, LOGIN_A)))
     (tmp_path / "handoff.json").write_text(json.dumps(descriptor))
     (tmp_path / "original.bin").write_bytes(ORIGINAL)
     assert _attach_main(
@@ -263,33 +270,33 @@ def _hold_evidence_through_the_cli(key, app, tmp_path, capsys):
     return json.loads(capsys.readouterr().out)["file"]
 
 
-def _adopt(app, key, handle, **handle_fields):
+def _adopt(app, key, lane, handle, **handle_fields):
+    tool, destination = _ADOPTING[lane]
     adoption = {"key": "client:chosen-draft", "trigger": "user selected the draft",
                 "selected_file_id": handle["file_id"]}
-    arguments = {"scope": "client-work", "category": "drafts", "adoption": adoption,
-                 "files": [{**handle, **handle_fields}]}
+    arguments = {**destination, "adoption": adoption, "files": [{**handle, **handle_fields}]}
     origin = _mcp_origin(key, LOGIN_A)
-    return _run(app, lambda client: _tool(client, "preserve_artifacts", arguments, origin))
+    return _run(app, lambda client: _tool(client, tool, arguments, origin))
 
 
-def test_adopting_a_held_upload_stores_its_exact_bytes_as_evidence(cell, tmp_path, capsys):
+@pytest.mark.parametrize("lane", ["source", "evidence"])
+def test_adopting_a_held_upload_stores_its_exact_bytes(cell, tmp_path, capsys, lane):
     key, app, vault = cell
-    handle = _hold_evidence_through_the_cli(key, app, tmp_path, capsys)
+    handle = _hold_through_the_cli(key, app, tmp_path, capsys, lane)
 
-    adopted = _adopt(app, key, handle)
+    [receipt] = _adopt(app, key, lane, handle)["files"]
 
-    [receipt] = adopted["files"]
     assert receipt["outcome"] == "stored", receipt
     assert (vault / receipt["stored_path"]).read_bytes() == ORIGINAL
 
 
 def test_a_refused_adoption_leaves_the_held_upload_to_retry(cell, tmp_path, capsys):
     key, app, vault = cell
-    handle = _hold_evidence_through_the_cli(key, app, tmp_path, capsys)
+    handle = _hold_through_the_cli(key, app, tmp_path, capsys, "evidence")
 
     # A file name that sanitizes to nothing is refused after the hold was claimed.
-    [refused] = _adopt(app, key, handle, file_name="...")["files"]
-    [retried] = _adopt(app, key, handle, file_name="draft.bin")["files"]
+    [refused] = _adopt(app, key, "evidence", handle, file_name="...")["files"]
+    [retried] = _adopt(app, key, "evidence", handle, file_name="draft.bin")["files"]
 
     assert (refused["outcome"], refused["code"]) == ("failed", "INVALID_PRESERVE")
     assert retried["outcome"] == "stored", retried

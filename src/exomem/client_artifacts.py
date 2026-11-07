@@ -466,7 +466,7 @@ def _release_staged(
         outcome = outcomes[index] if index < len(outcomes) else None
         try:
             if artifact.held is not None and (
-                outcome is None or outcome.get("outcome") != "stored"
+                outcome is None or outcome.get("outcome") not in {"stored", "replayed"}
             ):
                 held_uploads.restore(vault_root, artifact.held)
             else:

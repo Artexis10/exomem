@@ -211,8 +211,8 @@ _BASELINE_CAPTURE = (
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
     "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Before an affiliation facet, check the relation queue: a match goes to "
-    "link_acceptance instead. Fleeting preferences, one-offs, incidental associations, "
+    "measurement. Before an affiliation facet, check the relation queue: a confirmed match goes "
+    "to link_acceptance instead. Fleeting preferences, one-offs, incidental associations, "
     "trivia, and tentative claims stay quiet."
 )
 
@@ -765,21 +765,26 @@ def effective_capture(authored_capture: dict[str, str], prominence_level: str) -
     }
 
 
-def capture_policy_text(disposition: str, link_acceptance: str) -> str:
-    """The live capture authority in plain words, for the activation `capture_policy` block.
+def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
+    """The activation `capture_policy` block: the live capture authority in plain words.
 
-    Branches only on the closed `proactive_capture` range. Under `off` it carries the meaning
-    alone: no class list, so a quiet vault is not handed doctrine it may not act on. The routes
-    are the constants bootstrap serves, so the two carriers cannot drift. `link_acceptance` is
-    required: the queue route is only right for the vault's own setting, never a default.
+    Branches only on the closed `proactive_capture` range. Under `off` the block is the meaning
+    alone: no class list and no second disposition, so a quiet vault is not handed doctrine it may
+    not act on. The routes are the constants bootstrap serves, so the two carriers cannot drift.
+    `link_acceptance` is required: the queue route is only right for the vault's own setting,
+    never a default.
     """
     from . import envelope
 
     meaning = f"proactive_capture is {disposition}: {envelope.PROACTIVE_CAPTURE_MEANING[disposition]}."
     if disposition == "off":
-        return meaning
+        return {"disposition": disposition, "say": meaning}
     link = f"link_acceptance is {link_acceptance}: {envelope.LINK_ACCEPTANCE_MEANING[link_acceptance]}."
-    return f"{meaning} {link} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}"
+    return {
+        "disposition": disposition,
+        "link_acceptance": link_acceptance,
+        "say": f"{meaning} {link} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
+    }
 
 
 def capture_policy_projection() -> dict:
