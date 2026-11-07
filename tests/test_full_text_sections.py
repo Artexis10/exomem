@@ -723,6 +723,18 @@ def test_a_match_in_the_first_part_of_a_source_names_it_and_opens_read_memory_th
     assert PLANTED in hit["passage"]["text"] and window["body"].startswith(hit["passage"]["text"])
 
 
+def test_a_projected_hit_with_no_text_match_in_a_long_source_names_neither_part_nor_passage(
+    governed, monkeypatch
+) -> None:
+    """A title match is a hit on the Source, as direct search finds it, with nothing in the text to anchor."""
+    page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch)
+
+    [hit] = _projected_find(governed, "report.txt", _owner())["hits"]
+
+    assert hit["path"] == page_rel
+    assert "matched_part" not in hit and "passage" not in hit
+
+
 def test_a_passage_across_withheld_carriers_counts_stored_characters(governed, monkeypatch) -> None:
     carrier = "<!-- exomem-origin:v1 SECRETNOTE -->"
     page_rel, _text = _as_owner(_adopted_parted_source, governed, monkeypatch, lead=f"{carrier} ")
