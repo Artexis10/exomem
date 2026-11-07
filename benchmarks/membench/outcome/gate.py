@@ -15,6 +15,7 @@ from protocol.contracts import ContractIdentityError, working_amendment_receipts
 
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import DECISION_JUDGE
+from .record import checkout_state
 from .workspace import RUN_ROOT, sha256_of
 
 #: The pre-registered family each suite is filed under.
@@ -76,8 +77,13 @@ def heldout_gate(
     """Refuse a held-out run unless its family is released and its inputs match the receipt.
 
     Raises ``AmendmentAcknowledgmentPendingError`` while the amendment is unacknowledged,
-    and ``HeldoutGateError`` for a missing or changed input. Returns the verified digests.
+    and ``HeldoutGateError`` for a missing or changed input, or a product checkout with uncommitted
+    changes: a decision run names a revision, and a dirty checkout is not one. Returns the verified digests.
     """
+    if checkout_state(repo_root)["product_dirty"]:
+        raise HeldoutGateError(
+            f"the product checkout at {repo_root} has uncommitted changes; a decision run needs a clean checkout"
+        )
     require_family_released(FAMILIES[suite], repo_root=repo_root)
     verified: dict[str, str] = {}
     for relative, expected in sorted(frozen_digests(suite, repo_root).items()):

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+from collections import defaultdict
 from collections.abc import Callable, Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -83,6 +84,19 @@ def park(run_dir: Path, folder: Path) -> Path:
     while (parked / f"{folder.name}-{number}").exists():
         number += 1
     return Path(shutil.move(folder, parked / f"{folder.name}-{number}"))
+
+
+def replayed(run_dir: Path, unit: str) -> list[dict]:
+    """The units that the run played again from their first step: ``{<unit>: name, replays: n, parked: [...]}``.
+
+    A parked folder is named ``<name>-<n>`` (see ``park``), one per earlier attempt that did not finish.
+    """
+    parked: dict[str, list[str]] = defaultdict(list)
+    for folder in sorted((run_dir / PARKED_DIR).glob("*")):
+        parked[folder.name.rpartition("-")[0]].append(folder.name)
+    return [
+        {unit: name, "replays": len(folders), "parked": folders} for name, folders in parked.items()
+    ]
 
 
 def init_faults(init: dict, *, model: str, exomem: bool) -> list[str]:

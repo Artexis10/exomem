@@ -17,7 +17,7 @@ from functools import partial
 from pathlib import Path
 
 from . import gate, record
-from .faults import REPLACEMENT_RUN, LimitRejected, park, run_pool
+from .faults import REPLACEMENT_RUN, LimitRejected, park, replayed, run_pool
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL
 from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows
 from .workspace import RUN_ROOT, require_pinned_checkout
@@ -106,12 +106,9 @@ def write_record(run_dir: Path, entry: dict) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     if path.exists():
         have = json.loads(path.read_text())
-        for key in ("suite", "split", "model", "effort", "limit"):
-            if have[key] != entry[key]:
-                raise refuse(
-                    f"{path} records {key} {have[key]!r} and this call asks for {entry[key]!r}; "
-                    "use another --run-id"
-                )
+        record.require_same_run(
+            path, have, entry, ("suite", "split", "model", "effort", "limit", *record.IDENTITY_KEYS)
+        )
         order = suite_arms(entry["suite"])
         entry = {
             **have,
@@ -299,6 +296,7 @@ def run_suite(
             "effort": effort,
             "gate": verdict,
             **record.checkout_state(),
+            "cli": record.cli_version(),
         },
     )
     if suite == "clbench":
@@ -364,6 +362,14 @@ def report_suite(
             "run_id": run_ids[0],
             **judge.score(judge_run, wanted, heldout=heldout),
         }
+        if suite == "lab":
+            built["runs"] = {
+                "replayed": [
+                    {"run": run_id, **entry}
+                    for run_id in run_ids
+                    for entry in replayed(runs_dir() / run_id, "matter")
+                ]
+            }
     built["actor"] = record.run_identity(*(runs_dir() / r for r in run_ids))
     return built
 

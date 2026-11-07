@@ -58,7 +58,8 @@ from ..workspace import RUN_ROOT, require_pinned_checkout, sha256_of
 from .prepare import CASES, UPSTREAM, slug
 
 SESSION_TIMEOUT_SECONDS = 1800.0
-#: What a second call under the same run id must repeat: the inputs of every matter it completes.
+#: What a second call under the same run id must repeat: the inputs of every matter it completes,
+#: and the product and CLI that play it.
 RESUME_KEYS = (
     "prepared",
     "tasks",
@@ -66,8 +67,8 @@ RESUME_KEYS = (
     "model_requested",
     "effort",
     "upstream_commit",
-    "product_revision",
     "instruction_block",
+    *record.IDENTITY_KEYS,
 )
 
 
@@ -504,12 +505,9 @@ def run_lab(
     manifest_file = run_dir / "manifest.json"
     if manifest_file.exists():
         # A second call completes the matters that a stop left unfinished, so it must be the same run.
-        have = json.loads(manifest_file.read_text())
-        changed = [key for key in RESUME_KEYS if have.get(key) != manifest[key]]
-        if changed:
-            raise SystemExit(
-                f"{run_dir} was run with other {', '.join(changed)}; choose a new --run-id"
-            )
+        record.require_same_run(
+            manifest_file, json.loads(manifest_file.read_text()), manifest, RESUME_KEYS
+        )
     else:
         manifest_file.write_text(json.dumps(manifest, indent=2))
     run_pool(jobs, [partial(run_task, lab, prepared_dir, t, arms) for t in task_ids])

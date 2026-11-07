@@ -20,6 +20,7 @@ from epistemic.journeys.f27_replay import PLUGIN_DIR, AgentEnvelope
 from membench.outcome.clbench import report as clbench_report
 from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, QuestionLog, run_cell
 from membench.outcome.clbench.run import UPSTREAM as CLBENCH_UPSTREAM
+from membench.outcome.command import write_record
 from membench.outcome.faults import LimitRejected, init_faults
 from membench.outcome.isolation import child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
@@ -548,3 +549,45 @@ def test_a_rerun_replays_only_the_matter_a_stop_left_unfinished(tmp_path, monkey
 
     assert played == [("stopped", "S"), ("stopped", "WP")]
     assert (run / "unfinished" / f"{slug('stopped')}-0" / "WP").is_dir()
+
+
+def test_a_resume_with_another_product_revision_or_cli_is_refused_before_any_session(
+    tmp_path, monkeypatch
+):
+    """Units that two calls play must come from one product and one CLI, or the report mixes them."""
+    run = tmp_path / "run"
+    first = {
+        "suite": "planted",
+        "split": "dev",
+        "model": "m",
+        "effort": "high",
+        "limit": None,
+        "arms": ["E"],
+        "seeds": None,
+        "product_revision": "a1",
+        "product_dirty": False,
+        "cli": "2.0",
+    }
+    write_record(run, first)
+    write_record(run, {**first, "arms": ["P"]})  # the same product and CLI: a resume adds the arm
+    for field, value in (("product_revision", "b2"), ("cli", "2.1"), ("product_dirty", True)):
+        with pytest.raises(SystemExit, match=f"records {field}.*use a new --run-id"):
+            write_record(run, {**first, field: value})
+
+    # The planted arm manifest is written once, and a resume with another CLI stops before its first session.
+    launches = tmp_path / "launches"
+    cli = rejecting_cli(tmp_path / "claude", launches)
+    monkeypatch.setattr(
+        planted_answer, "discover_agent_envelope", lambda: AgentEnvelope(cli, "2.0")
+    )
+    arm = tmp_path / "arm" / "E"
+    (arm / "built" / "vault").mkdir(parents=True)
+    (arm / "built" / "exomem-state").mkdir()
+    with pytest.raises(LimitRejected):
+        answer_all(planted_cases(2), arm, "m", "high")
+    monkeypatch.setattr(
+        planted_answer, "discover_agent_envelope", lambda: AgentEnvelope(cli, "2.1")
+    )
+    with pytest.raises(SystemExit, match="records cli"):
+        answer_all(planted_cases(2), arm, "m", "high")
+    assert launches.read_text().count("launched") == 1

@@ -19,7 +19,7 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-from ..faults import PARKED_DIR, REPLACEMENT_RUN, books, incomplete_why
+from ..faults import REPLACEMENT_RUN, books, incomplete_why, replayed
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from ..workspace import pin
 
@@ -88,20 +88,6 @@ def unfinished_cells(
                     f"{name} has {cell['questions']} of {cell['instances']} questions"
                 )
     return unfinished
-
-
-def replayed_cells(run_dir: Path) -> list[dict]:
-    """The cells that the run played again from their first question, and the parked folders of their old attempts.
-
-    A parked folder is named ``<cell>-<n>`` (see ``faults.park``), one per attempt that did not finish.
-    """
-    parked: dict[str, list[str]] = defaultdict(list)
-    for folder in sorted((run_dir / PARKED_DIR).glob("*")):
-        parked[folder.name.rpartition("-")[0]].append(folder.name)
-    return [
-        {"cell": cell, "replays": len(folders), "parked": folders}
-        for cell, folders in parked.items()
-    ]
 
 
 def instances_of(run_dir: Path) -> int | None:
@@ -343,7 +329,7 @@ def build(
     rows_by_arm = load_arms(run_dir)
     scheduled = scheduled or [None]
     runs = runs_state(rows_by_arm, scheduled, heldout=heldout)
-    runs["replayed"] = replayed_cells(run_dir)
+    runs["replayed"] = replayed(run_dir, "cell")
     voided = set(voided_runs(rows_by_arm))
     runs["unfinished"] = (
         unfinished_cells(cell_states(run_dir), arms or sorted(rows_by_arm), runs["counted"], voided)

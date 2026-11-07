@@ -5,9 +5,38 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
+from epistemic.journeys.f27_replay import discover_agent_envelope
+
 from .isolation import REPO_ROOT, product_version
+
+#: What a call that continues a run shares with that run: the product under test and the CLI that drives it.
+IDENTITY_KEYS = ("product_revision", "product_dirty", "cli")
+
+
+def cli_version() -> str:
+    """``claude --version``: the CLI that runs every session of this call."""
+    return discover_agent_envelope().version
+
+
+def require_same_run(path: Path, stored: dict, now: dict, keys: Iterable[str]) -> None:
+    """Refuse a call that continues the run recorded at ``path`` when it differs from that run in any of ``keys``.
+
+    Units that two calls play must come from one product and one CLI, or the report mixes them.
+    """
+    for key in keys:
+        if stored.get(key) != now.get(key):
+            fix = (
+                "restore the checkout and CLI"
+                if key in IDENTITY_KEYS
+                else "repeat that call's inputs"
+            )
+            raise SystemExit(
+                f"refused: {path} records {key} {stored.get(key)!r} and this call has {now.get(key)!r}; "
+                f"use a new --run-id, or {fix}"
+            )
 
 
 def checkout_state(repo: Path = REPO_ROOT) -> dict:

@@ -55,7 +55,7 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
 - **heldout** is a decision run (`--split heldout`). Before its first session it requires the
   family's amendment to be acknowledged, and every held-out input file to match the digest the
   amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
-  Any failure is a one-line refusal. The run refuses any `--model` or `--effort` other than the
+  The Exomem checkout must have no uncommitted changes either. Any failure is a one-line refusal. The run refuses any `--model` or `--effort` other than the
   frozen actor (`claude-sonnet-5-5` at `high`). The report of LAB or planted refuses any judge
   other than `gpt-6.1-sol` on Codex. Only a run that passes all of this reports
   `"evidence": "decision"`. CL-Bench runs upstream's `default` schedule at seed 42, run indexes
@@ -95,15 +95,21 @@ checked.
    than 2 struck units.
 6. A held-out report says the decision is incomplete, and decides nothing, while a judgement has
    failed, a unit is missing or a scheduled CL-Bench cell has not finished. It names each one.
-   Run the same command again, with the same run id. The judge retries failed items.
+   Run the same command again, with the same run id. The judge retries failed items. A resume
+   must match the run it continues: `outcome.json` records the product revision, whether the
+   checkout had changes, and the CLI version (`claude --version`). A call that differs in any of
+   them refuses before it starts a session. Use a new run id, or restore the checkout and CLI.
    - CL-Bench: a finished cell is not replayed. A cell that never reached its evaluation replays
      from its first question, and the run keeps the old one under `unfinished/`. The report's
      `runs.replayed` lists each replayed cell, how many times it replayed and its parked folders.
-   - Planted: the run answers only the cases that have no answer file.
+   - Planted: the run answers only the cases that have no answer file. Each arm's
+     `manifest.json` is written once, and a resume must match it.
    - LAB: the run plays only the matters that lack a `result.json` for a requested arm. A matter
      that stopped half way replays every arm, because a copying arm starts from its source's
      snapshot, and the run keeps the old matter under `unfinished/`. The same run id must repeat
-     the tasks, arms, model, effort and product revision of the first call.
+     the tasks, arms, model, effort, product revision, checkout state and CLI of the first call.
+     The report's `runs.replayed` lists each replayed matter (its folder name), the run it belongs
+     to, how many times it replayed and its parked folders.
 
 Every report lists each arm's scheduled, valid, invalid and missing units.
 

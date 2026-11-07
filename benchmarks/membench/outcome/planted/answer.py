@@ -68,6 +68,11 @@ def answer_actor(
     return argv, claude_env()[0], mcp_config
 
 
+def with_cli(manifest: dict) -> dict:
+    """The manifest with the CLI version that its actor record holds, under the key the identity check reads."""
+    return {**manifest, "cli": manifest["actor"]["cli"]}
+
+
 def answer_all(cases: list[dict], arm_dir: Path, model: str, effort: str) -> Path:
     arm_dir = refuse_unsafe_out_dir(arm_dir)
     built = arm_dir / "built"
@@ -82,6 +87,7 @@ def answer_all(cases: list[dict], arm_dir: Path, model: str, effort: str) -> Pat
     manifest_file = arm_dir / "manifest.json"
     manifest = {
         "arm": arm_dir.name,
+        **record.checkout_state(),
         "actor": {
             **record.actor_record(cli=envelope.version, model=model, effort=effort, root=arm_dir),
             "mcp_config_sha256": mcp_config_sha256,
@@ -89,7 +95,15 @@ def answer_all(cases: list[dict], arm_dir: Path, model: str, effort: str) -> Pat
             "env_removed": list(removed),
         },
     }
-    manifest_file.write_text(json.dumps(manifest, indent=2))
+    if manifest_file.exists():
+        # A resume answers the cases that have no answer yet, so it must be the run that wrote this manifest.
+        stored = json.loads(manifest_file.read_text())
+        record.require_same_run(
+            manifest_file, with_cli(stored), with_cli(manifest), record.IDENTITY_KEYS
+        )
+        manifest = stored
+    else:
+        manifest_file.write_text(json.dumps(manifest, indent=2))
     work = arm_dir / "answer-cwd"
     work.mkdir(exist_ok=True)
     for case in cases:
