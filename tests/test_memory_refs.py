@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from record_fixtures import copy_vehicle_maintenance_fixture
 
 from exomem import (
     add,
@@ -515,6 +516,21 @@ def test_backfill_is_dry_run_by_default_and_preserves_content(tmp_path: Path) ->
     assert memory_refs.normalize_id(fm["exomem_id"])
     assert body == "# Legacy\n\nExact body.\n"
     assert applied["updated"] == ["Knowledge Base/Notes/legacy.md"]
+
+
+def test_backfill_leaves_record_files_to_the_records_writer(tmp_path: Path) -> None:
+    # A stamp on an audited record item would change its bytes behind the records writer.
+    vault = tmp_path / "vault"
+    collection = copy_vehicle_maintenance_fixture(vault)
+    record_bytes = {path: path.read_bytes() for path in collection.rglob("*.md")}
+    note = vault / "Knowledge Base" / "Notes" / "legacy.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(_page(None, "# Legacy\n"), encoding="utf-8")
+
+    applied = memory_refs.backfill_ids(vault, dry_run=False)
+
+    assert applied["updated"] == ["Knowledge Base/Notes/legacy.md"]
+    assert {path: path.read_bytes() for path in collection.rglob("*.md")} == record_bytes
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
