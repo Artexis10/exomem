@@ -76,11 +76,16 @@ read before the hold has not moved:
   applies only the entries that the plan and the fresh read share. It reports
   the other entries (`semantic_isolation_changed`) and marks the repair
   incomplete, so the isolation cursors do not advance.
+- The orphans repair of a planned write does the same for CLIP orphans and frame
+  directories, and reports the rest in `orphans_changed`. A run without a plan
+  applies its fresh read.
 - The units repair and the lifecycle cleanup compare each page with the bytes
-  that the corpus read. A page whose bytes moved belongs to the write that moved
-  it: the units repair leaves it and reports it
-  (`semantic_unit_parents_moved`), and the lifecycle cleanup reports it as
-  `LIFECYCLE_PRIMARY_RACE`.
+  that the run read: a corpus page with the bytes that the corpus read, and a
+  unit parent outside the corpus with the bytes recorded at the unit audit. A
+  page whose bytes moved belongs to the write that moved it: the units repair
+  leaves it and reports it (`semantic_unit_parents_moved`), and the lifecycle
+  cleanup reports it as `LIFECYCLE_PRIMARY_RACE`. A parent outside the corpus
+  that did not move loses its unit rows, as before this change.
 - The indexes are counted inside their hold. The embeddings refresh and the
   orphans repair check each found file again inside their hold.
 
@@ -112,12 +117,32 @@ between attempts, through `maintenance_jobs.chunk_hold`. A busy boundary in the
 middle of a run no longer fails a half-finished job. A stop lands between holds,
 never inside a hold's write.
 
+### D5. One reconcile write run at a time
+
+The whole-run hold also kept two reconciles from interleaving their phases. A
+write run now holds a vault-scoped run lock for its whole run, and no ordinary
+writer takes that lock. A second write run waits for it as long as a writer
+waits for a busy boundary (`EXOMEM_MUTATION_TIMEOUT`). It then gets
+`MUTATION_BUSY` with `committed: false` before it reads or writes anything. A
+preview takes no run lock.
+
+The lock is a file lock in the vault's private state, as the one archive
+expansion per vault holds. It is not a mutation coordinator: a thread that holds
+a coordinator counts as holding a boundary, so its foreground yields would
+return at once.
+
 ## Risks / Trade-offs
 
 - A foreground write between holds can change what a later phase reads. → D2
   re-reads inside each hold.
 - More holds cost more total wall time. → The reconcile pays it, not
   foreground writers. The profile records the before and after.
+- A page created outside the corpus after the corpus read, and unchanged from
+  the unit audit to the units hold, loses its unit rows. → Its next write or the
+  next reconcile indexes it again.
+- A hold that waits out its busy budget fails the run with `MUTATION_BUSY`. The
+  phases before it keep their effect. The CLI does not run it again, because one
+  attempt outlasts the CLI's wait budget. → Run the reconcile again.
 - A phase that repairs many pages holds the boundary for that whole repair: the
   units repair, the embeddings refresh and the orphans repair, which can rebuild
   extraction parts. → The profile puts each well under the old hold. Chunking

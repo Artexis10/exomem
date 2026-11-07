@@ -10,8 +10,9 @@ SHALL commit derived index refreshes last, in one short hold. A `reconcile`
 job SHALL NOT hold the boundary for its whole run, and no hold SHALL span a
 derived rebuild that another coordinator serializes. A `reconcile` job SHALL
 re-read inside each hold what that hold applies, and SHALL report the purge
-entries that it left unchanged because they moved. Every hold SHALL carry
-holder kind `maintenance-job` and the job's `run_id`.
+and orphan entries that it left unchanged because they moved. Two `reconcile`
+writes SHALL NOT run at once in one vault. Every hold SHALL carry holder kind
+`maintenance-job` and the job's `run_id`.
 
 #### Scenario: A foreground write runs between chunks
 - **WHEN** a `fix` job commits several chunks and a client writes a page outside the change set
@@ -32,3 +33,7 @@ holder kind `maintenance-job` and the job's `run_id`.
 #### Scenario: A purge entry that moved is left unchanged
 - **WHEN** a planned purge entry is no longer in the isolation census read inside the purge hold
 - **THEN** the job leaves that entry unchanged and names it in its receipt
+
+#### Scenario: A second reconcile starts while one runs
+- **WHEN** a `reconcile` write starts while another `reconcile` write runs in the same vault
+- **THEN** the second gets `MUTATION_BUSY` and writes nothing, and the first continues

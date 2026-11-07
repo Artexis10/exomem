@@ -12,13 +12,19 @@
 - [x] 2.1 Add a reconcile narrowing row in `writer_lease`, honouring `EXOMEM_WIDE_MUTATION_BOUNDARY`.
   - Evidence: `narrow_reconcile` in `LeaseManager.invoke` covers the `reconcile` command and `maintain_memory` mode `reconcile`.
 - [x] 2.2 Remove reconcile from `WHOLE_RUN_MODES` and keep the graph join outside every hold.
-  - Evidence: `WHOLE_RUN_MODES`, `narrows_boundary` and the dispatch retry are deleted. `tests/test_graph_rebuild_availability.py::test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild` passes.
+  - Evidence: `WHOLE_RUN_MODES`, `narrows_boundary` and the dispatch retry are deleted. `tests/test_graph_rebuild_availability.py::test_manager_reconcile_releases_canonical_boundary_before_graph_rebuild` checks the graph join; it has not run yet (task 3.4).
 - [x] 2.3 Give each group from 1.2 its own hold, with a bounded busy wait and stop checks.
   - Evidence: `reconcile._phase_hold` wraps each phase's writes in `maintenance_jobs.chunk_hold`. The receipts phase holds the boundary too, because it closes intents and tombstones from the vault as it reads it.
 - [x] 2.4 Re-read each phase's inputs inside its hold under design D2.
   - Evidence: design D2 lists each phase's re-read and each run-long value.
 - [x] 2.5 Apply only the purge entries that the plan and the fresh read share, and report the rest.
   - Evidence: `semantic_isolation_changed` in the report and the job receipt; the repair is marked `changed_since_plan`, so the isolation cursors stay put.
+- [x] 2.6 Apply only the CLIP and frame orphans that a planned write's plan and its fresh read share, and report the rest.
+  - Evidence: `reconcile._planned_orphans` and `orphans_changed` in the report and the job receipt. A run without a plan applies its fresh read.
+- [x] 2.7 Remove the unit rows of a parent outside the corpus when its bytes did not move since the unit audit.
+  - Evidence: the unit audit records those parents' bytes (`_read_hashes`), and the units hold compares them again.
+- [x] 2.8 Serialize reconcile write runs with a vault-scoped run lock that no ordinary writer takes, under design D5.
+  - Evidence: `reconcile._run_lock`; `tests/test_reconcile.py::test_a_second_reconcile_is_refused_while_one_runs`, which has not run yet (task 3.4).
 
 ## 3. Verify
 
