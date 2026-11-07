@@ -167,6 +167,27 @@ The older release prepares its own manifest on the first write that needs one,
 and writes stop refusing. The new manifest takes the corpus at that moment as
 its activation baseline.
 
+### Parts in projected search: downgrading below this release
+
+The release that adds the parts of a long Source to projected search refreshes
+the governed catalog of an enrolled vault when the service starts. The refresh
+writes the catalog rows at store version 3, which holds the part text. An older
+release reads only store version 2 and cannot rebuild a catalog that it cannot
+read. On an older release, an enrolled vault serves no projected search, and
+every content write refuses with `GOVERNANCE_CATALOG_PUBLICATION_BLOCKED`.
+
+Do not downgrade the service of an enrolled vault below this release. The same
+failure occurs on a replica that runs an older release than the replica that
+refreshed the catalog. If a service or a replica runs an older release:
+
+1. Upgrade that service or replica to this release or a later one.
+2. Make one ordinary write.
+
+The write succeeds, and projected search answers again. The upgraded release
+reads the refreshed catalog as it is, so no rebuild step is necessary. A vault
+that is not enrolled in governance has no governed catalog, and a downgrade
+does not affect it.
+
 ## Commit convention
 
 Release Please reads Conventional Commit messages after the latest release tag:

@@ -8,7 +8,7 @@ Projected search therefore finds text only in the first part of a long extractio
 ## What Changes
 
 - Store the text of each further part on its Source's full-text catalog row, never as a catalog item.
-- Search part text as text of that row: one hit on the Source, with `matched_part` and a `passage` that opens a `read_memory` window.
+- Search part text as text of that row: one hit on the Source, with `matched_part` (1 for the Source's own text) and a `passage` that opens a `read_memory` window.
 - Republish a Source when its parts change: a scope change, a move, a trash and recovery, a new extraction or a rebuilt part.
 - Count each part against the catalog capacity, and log the parts that a full catalog leaves out.
 - Raise the projector version, so that the startup refresh adds parts to an existing catalog. The refresh reuses each stored vector whose projection text is unchanged.
@@ -22,4 +22,4 @@ Projected search therefore finds text only in the first part of a long extractio
 
 ## Impact
 
-The change affects catalog publication, the projection store (schema version 3, which still reads version 2), projected retrieval and the projected find wire. Direct search, authorization and content hashes keep their contracts.
+The change affects catalog publication, the projection store (schema version 3, which still reads version 2), projected retrieval and the projected find wire. Direct search, authorization and content hashes keep their contracts. An older release reads only store version 2, so an enrolled vault cannot go back below this release: on an older release or replica it serves no projected search and refuses content writes. `docs/release.md` names the recovery, an upgrade back to this release.
