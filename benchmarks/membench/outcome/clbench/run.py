@@ -31,13 +31,11 @@ import os
 import queue
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from collection_ingest.mcp_session import isolated_env
 from epistemic.journeys.f27_replay import (
     Arm,
     build_turn_argv,
@@ -46,10 +44,11 @@ from epistemic.journeys.f27_replay import (
     refuse_unsafe_out_dir,
 )
 
+from ..isolation import REPO_ROOT, mcp_server
+
 RUN_ROOT = Path(os.environ.get("OUTCOME_EVAL_ROOT", "/var/tmp/exomem-outcome-evals"))
 UPSTREAM = RUN_ROOT / "upstream" / "clbench"
 ENV_SERVER = Path(__file__).with_name("env_server.py")
-REPO_ROOT = Path(__file__).resolve().parents[4]
 
 #: Upstream's Claude system gives each CLI invocation 300 s; the task's own 60 s
 #: value is declared but never enforced by upstream's runner.
@@ -205,7 +204,14 @@ class ClaudeSession:
             if kind == "system" and event.get("subtype") == "init" and log.init is None:
                 log.init = {
                     key: event.get(key)
-                    for key in ("model", "tools", "mcp_servers", "permissionMode", "apiKeySource", "cwd")
+                    for key in (
+                        "model",
+                        "tools",
+                        "mcp_servers",
+                        "permissionMode",
+                        "apiKeySource",
+                        "cwd",
+                    )
                 }
             elif kind == "assistant":
                 for block in event.get("message", {}).get("content", []):
@@ -218,7 +224,9 @@ class ClaudeSession:
                         log.usage[key] = log.usage.get(key, 0) + value
                 log.notional_cost_usd += float(event.get("total_cost_usd") or 0.0)
                 if event.get("is_error"):
-                    log.faults.append(f"result error: {event.get('subtype')}: {event.get('result')}")
+                    log.faults.append(
+                        f"result error: {event.get('subtype')}: {event.get('result')}"
+                    )
                 return event.get("result") or ""
 
     def close(self) -> None:
@@ -235,7 +243,9 @@ class ClaudeSession:
 class ClaudeActor:
     """The model under test, behind one memory arm."""
 
-    def __init__(self, spec: ArmSpec, arm_dir: Path, model: str, effort: str, memory_instruction: str) -> None:
+    def __init__(
+        self, spec: ArmSpec, arm_dir: Path, model: str, effort: str, memory_instruction: str
+    ) -> None:
         self.spec = spec
         self.arm_dir = arm_dir
         self.work = arm_dir / "work"
@@ -248,7 +258,7 @@ class ClaudeActor:
             else memory_instruction.format(memory_dir=str(self.work / "memory"))
         )
         self.mcp_config = arm_dir / "mcp.json"
-        servers = {"exomem": self._exomem_server()} if spec.exomem else {}
+        servers = {"exomem": mcp_server(arm_dir)} if spec.exomem else {}
         self.mcp_config.write_text(json.dumps({"mcpServers": servers}, indent=2))
         # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's memory.
         allowed = ["Read(./**)", "Write(./**)", "Edit(./**)"]
@@ -269,35 +279,12 @@ class ClaudeActor:
         self.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         self._reset_work()
 
-    def _exomem_server(self) -> dict:
-        state = self.arm_dir / "exomem-state"
-        vault = self.arm_dir / "vault"
-        pins = isolated_env(
-            state=state,
-            vault=vault,
-            server_root=REPO_ROOT,
-            extra={
-                # No service credential and a private lease coordinator: nothing reaches a running service.
-                "EXOMEM_SERVICE_ENV": str(state / "no-service.env"),
-                "EXOMEM_LEASE_COORDINATOR_DB": str(state / "lease-coordinator.sqlite"),
-            },
-        )
-        pins = {k: v for k, v in pins.items() if k.startswith("EXOMEM_") or k in _SERVER_KEYS}
-        if not vault.exists():
-            vault.mkdir(parents=True)
-            subprocess.run(  # noqa: S603 - fixed argv
-                [sys.executable, "-c", "import sys; from pathlib import Path; "
-                 "from exomem.init import init_vault; init_vault(Path(sys.argv[1]))", str(vault)],
-                env={**{k: v for k, v in os.environ.items() if not k.startswith("EXOMEM_")}, **pins},
-                check=True,
-                capture_output=True,
-            )
-        return {"command": sys.executable, "args": ["-m", "exomem", "--transport", "stdio"], "env": pins}
-
     def _reset_work(self) -> None:
         if self.work.exists():
             shutil.rmtree(self.work)
-        (self.work / "memory").mkdir(parents=True) if self.spec.persists == "folder" else self.work.mkdir(parents=True)
+        (self.work / "memory").mkdir(
+            parents=True
+        ) if self.spec.persists == "folder" else self.work.mkdir(parents=True)
 
     def argv(self) -> list[str]:
         argv = build_turn_argv(
@@ -313,7 +300,12 @@ class ClaudeActor:
             plugin_dir=None,
         )
         protected = [UPSTREAM, self.arm_dir / "vault", self.arm_dir / "exomem-state"]
-        argv += ["--effort", self.effort, "--disallowedTools", ",".join(f"Read(/{p}/**)" for p in protected)]
+        argv += [
+            "--effort",
+            self.effort,
+            "--disallowedTools",
+            ",".join(f"Read(/{p}/**)" for p in protected),
+        ]
         return argv
 
     def prompt(self, pending: str | None, turn: dict) -> str:
@@ -351,20 +343,24 @@ class ClaudeActor:
                     if not result["valid"]:
                         # Upstream's Claude system repairs once in the same conversation.
                         log.repairs += 1
-                        repair = "\n".join([
-                            "Your previous response did not match the required benchmark schema.",
-                            f"Validation error: {result['error']}",
-                            "Previous response:",
-                            reply,
-                            "Return ONLY a corrected JSON object for the same task.",
-                            "Original prompt:",
-                            text,
-                        ])
+                        repair = "\n".join(
+                            [
+                                "Your previous response did not match the required benchmark schema.",
+                                f"Validation error: {result['error']}",
+                                "Previous response:",
+                                reply,
+                                "Return ONLY a corrected JSON object for the same task.",
+                                "Original prompt:",
+                                text,
+                            ]
+                        )
                         reply = session.send(repair, log, TURN_TIMEOUT_SECONDS)
                         log.turns += 1
                         result = env.call("respond", text=reply or "")
                         if not result["valid"]:
-                            log.faults.append("schema: no valid action after one repair (scored as an empty answer)")
+                            log.faults.append(
+                                "schema: no valid action after one repair (scored as an empty answer)"
+                            )
                             result = env.call("step", action={"action": "ANSWER", "content": ""})
                 pending = result["observation"]
                 if result["instance_complete"] or result["done"]:
@@ -373,12 +369,6 @@ class ClaudeActor:
         finally:
             log.seconds = round(time.monotonic() - start, 1)
             session.close()
-
-
-_SERVER_KEYS = frozenset(
-    {"XDG_STATE_HOME", "PYTHONPATH", "PYTHONPYCACHEPREFIX", "HF_HUB_OFFLINE",
-     "FASTMCP_CHECK_FOR_UPDATES", "FASTMCP_SHOW_SERVER_BANNER"}
-)
 
 
 # --------------------------------------------------------------------------
@@ -396,18 +386,31 @@ def run(args: argparse.Namespace) -> Path:
     env = Env(arm_dir / "env-server.log")
     try:
         opened = env.call(
-            "open", task="database_exploration", variant=args.variant, schedule=args.schedule,
-            seed=args.seed, run_index=args.run_index, num_instances=args.limit,
+            "open",
+            task="database_exploration",
+            variant=args.variant,
+            schedule=args.schedule,
+            seed=args.seed,
+            run_index=args.run_index,
+            num_instances=args.limit,
         )
         if args.actor == "claude":
-            actor = ClaudeActor(ARMS[args.arm], arm_dir, args.model, args.effort, opened["file_memory_instruction"])
+            actor = ClaudeActor(
+                ARMS[args.arm], arm_dir, args.model, args.effort, opened["file_memory_instruction"]
+            )
         else:
             actor = KeyActor(wrong=args.actor == "wrong")
         manifest = {
             "run_id": args.run_id,
             "arm": arm_id,
-            "task": {"name": "database_exploration", "variant": args.variant, "schedule": args.schedule,
-                     "seed": args.seed, "run_index": args.run_index, "instances": opened["instances"]},
+            "task": {
+                "name": "database_exploration",
+                "variant": args.variant,
+                "schedule": args.schedule,
+                "seed": args.seed,
+                "run_index": args.run_index,
+                "instances": opened["instances"],
+            },
             "upstream_commit": subprocess.run(
                 ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], capture_output=True, text=True
             ).stdout.strip(),
@@ -417,9 +420,13 @@ def run(args: argparse.Namespace) -> Path:
         }
         if isinstance(actor, ClaudeActor):
             manifest["actor"] = {
-                "cli": actor.envelope.version, "model_requested": args.model, "effort": args.effort,
-                "argv": actor.argv(), "env_removed": list(actor.removed_env),
-                "memory_instruction": actor.memory_instruction, "retrieval": "lexical" if actor.spec.exomem else None,
+                "cli": actor.envelope.version,
+                "model_requested": args.model,
+                "effort": args.effort,
+                "argv": actor.argv(),
+                "env_removed": list(actor.removed_env),
+                "memory_instruction": actor.memory_instruction,
+                "retrieval": "lexical" if actor.spec.exomem else None,
             }
         (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -430,12 +437,19 @@ def run(args: argparse.Namespace) -> Path:
             result = actor.play_question(env, turn, log, pending)
             outcomes.write(json.dumps({"outcome": result["outcome"], "log": log.__dict__}) + "\n")
             outcomes.flush()
-            print(f"q{index:03d} {log.question_id} reward={result['outcome'] and result['outcome']['reward']} "
-                  f"turns={log.turns} s={log.seconds} faults={len(log.faults)}", flush=True)
+            print(
+                f"q{index:03d} {log.question_id} reward={result['outcome'] and result['outcome']['reward']} "
+                f"turns={log.turns} s={log.seconds} faults={len(log.faults)}",
+                flush=True,
+            )
             if result["done"]:
                 break
             # N is upstream's stateless baseline: no feedback crosses a question boundary.
-            pending = None if (isinstance(actor, ClaudeActor) and actor.spec.persists == "none") else result["observation"]
+            pending = (
+                None
+                if (isinstance(actor, ClaudeActor) and actor.spec.persists == "none")
+                else result["observation"]
+            )
             turn, index = result["turn"], index + 1
         outcomes.close()
         evaluation = env.call("evaluate")["result"]
@@ -455,7 +469,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--schedule", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--run-index", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=None, help="Run only the first N instances (smoke runs).")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Run only the first N instances (smoke runs)."
+    )
     parser.add_argument("--model", default="claude-sonnet-5-5")
     parser.add_argument("--effort", default="high")
     args = parser.parse_args(argv)

@@ -80,7 +80,6 @@ class Server:
 
     def step(self, req: dict) -> dict:
         from pydantic import ValidationError
-
         from src.interface import Response
 
         try:
@@ -96,7 +95,7 @@ class Server:
 
         try:
             action = _parse_action_text(req["text"], self.query.response_schema)
-        except Exception as exc:  # upstream raises several types; all mean "no valid action"
+        except Exception as exc:  # noqa: BLE001 - upstream raises several types; all mean "no valid action"
             return {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
         return self._advance(self.task.step(Response(action=action)))
 
@@ -134,7 +133,7 @@ def main() -> None:
         req = json.loads(line)
         try:
             reply = getattr(server, req["op"])(req)
-        except Exception as exc:  # the driver records the fault; it is never a scored loss
+        except Exception as exc:  # noqa: BLE001 - the driver records the fault; it is never a scored loss
             reply = {"fault": f"{type(exc).__name__}: {exc}"}
         sys.stdout.write(json.dumps(reply) + "\n")
         sys.stdout.flush()

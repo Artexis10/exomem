@@ -44,8 +44,12 @@ def arm_summary(rows: dict[str, dict]) -> dict:
     return {
         "questions": len(rows),
         "mean_reward": round(statistics.mean(rewards), 4) if rewards else None,
-        "accuracy": round(sum(o["success"] for o in outcomes) / len(outcomes), 4) if outcomes else None,
-        "mean_queries": round(statistics.mean(o["metadata"]["num_queries"] for o in outcomes), 2) if outcomes else None,
+        "accuracy": round(sum(o["success"] for o in outcomes) / len(outcomes), 4)
+        if outcomes
+        else None,
+        "mean_queries": round(statistics.mean(o["metadata"]["num_queries"] for o in outcomes), 2)
+        if outcomes
+        else None,
         "turns": sum(log["turns"] for log in logs),
         "seconds": round(sum(log["seconds"] for log in logs), 1),
         "timeouts": sum(log["timeouts"] for log in logs),
@@ -68,18 +72,26 @@ def paired(a: dict[str, dict], b: dict[str, dict]) -> dict:
         "mean_difference": round(statistics.mean(diffs), 4),
         "ci95": [round(low, 4), round(high, 4)],
         "verdict": "no change" if low <= 0 <= high else ("better" if low > 0 else "worse"),
-        "wins_losses_ties": [sum(d > 0 for d in diffs), sum(d < 0 for d in diffs), sum(d == 0 for d in diffs)],
+        "wins_losses_ties": [
+            sum(d > 0 for d in diffs),
+            sum(d < 0 for d in diffs),
+            sum(d == 0 for d in diffs),
+        ],
     }
 
 
 def build(run_id: str, pairs: list[tuple[str, str]]) -> dict:
     run_dir = RUN_ROOT / "runs" / run_id
-    arms = {p.name: load_arm(p) for p in sorted(run_dir.iterdir()) if (p / "outcomes.jsonl").exists()}
+    arms = {
+        p.name: load_arm(p) for p in sorted(run_dir.iterdir()) if (p / "outcomes.jsonl").exists()
+    }
     return {
         "run_id": run_id,
         "interval": "percentile bootstrap over questions, 10,000 resamples, one run per arm",
         "arms": {name: arm_summary(rows) for name, rows in arms.items()},
-        "pairs": {f"{a}-{b}": paired(arms[a], arms[b]) for a, b in pairs if a in arms and b in arms},
+        "pairs": {
+            f"{a}-{b}": paired(arms[a], arms[b]) for a, b in pairs if a in arms and b in arms
+        },
     }
 
 
