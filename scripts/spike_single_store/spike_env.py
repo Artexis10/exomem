@@ -71,6 +71,26 @@ def restore(run_root: Path, name: str = "base") -> None:
         target = paths["state"] / ephemeral
         if target.exists():
             shutil.rmtree(target)
+    secure_state_tree(paths["state"])
+    secure_state_tree(paths["xdg"])
+
+
+def secure_state_tree(root: Path) -> None:
+    """On Windows, give a copied state tree the private DACL Exomem requires.
+
+    Exomem sets that DACL only on directories its own mkdir creates and refuses
+    inherited ones. These are the grants its refusal message prescribes: the
+    current user, SYSTEM and Administrators, inherited by every descendant.
+    """
+    if os.name != "nt" or not root.exists():
+        return
+    sid = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True,
+                         text=True, check=True).stdout.strip().split(",")[-1].strip('"')
+    subprocess.run(["icacls", str(root), "/reset", "/T", "/C", "/Q"], check=True,
+                   capture_output=True)
+    subprocess.run(["icacls", str(root), "/inheritance:r", "/grant:r",
+                    f"*{sid}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F",
+                    "/C", "/Q"], check=True, capture_output=True)
 
 
 def _delta_restore(src: Path, dst: Path) -> None:
