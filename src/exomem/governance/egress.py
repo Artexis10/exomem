@@ -2167,14 +2167,9 @@ def name_lookup_required(vault_root: Path) -> bool:
 def _file_policy_empty(vault_root: Path, policy: Policy, *, rel_path: str | None = None) -> bool:
     from ..collection_store import ownership
 
-    if not policy.empty:
-        return False
-    writer = bound_writer(vault_root)
-    if rel_path is None and writer is not None:
-        return False
     if rel_path is not None:
-        return ownership.owned(vault_root, rel_path) is None
-    return writer is None and ownership.file_only(vault_root)
+        return policy.empty and ownership.owned(vault_root, rel_path) is None
+    return policy_empty_without_writer(vault_root, policy) and ownership.file_only(vault_root)
 
 
 #: How a command's store-owned pages share one store request (`collection_store.preview.Batch`). A call that
@@ -7684,7 +7679,8 @@ def policy_empty_without_writer(vault_root: Path, policy: Policy) -> bool:
 
     A page the collection store owns still gets its own per-path decision, through `_marker_owned_paths`
     in `release_walk_filter` and through `quick_page_visible`, so an enrolled store alone does not change
-    what the owner may read.
+    what the owner may read. Under an empty policy the store gives the owner level 0 or full release for its
+    page, so a raw reader that admits the page reads the same bytes as the canonical read.
     """
     return policy.empty and bound_writer(vault_root) is None
 

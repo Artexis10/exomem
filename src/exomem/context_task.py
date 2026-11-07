@@ -157,7 +157,8 @@ def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
     """The raw fast path requires unrestricted content, an empty policy and no bound writer.
 
     An enrolled collection store keeps the fast path: each page it owns is still decided on its own by the
-    walk filter and by `quick_page_visible`, so a store outage withholds that page and nothing else.
+    walk filter and by `quick_page_visible`, so a store outage withholds the pages the store owns. A failure
+    to prove ownership still makes the walk filter raise, and the task context reports unavailable.
     """
     policy, _active = egress.gate_state(root)
     who = principal.effective_principal().with_purpose(caller.purpose)
