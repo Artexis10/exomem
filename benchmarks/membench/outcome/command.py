@@ -10,14 +10,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import gate, record
-from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
-from .judging import DEFAULT_MODELS, JudgeSpec
-from .workspace import RUN_ROOT
+from .faults import REPLACEMENT_RUN
+from .isolation import ACTOR_EFFORT, ACTOR_MODEL
+from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows
+from .workspace import RUN_ROOT, require_pinned_checkout
 
 SUITES = ("clbench", "lab", "planted")
 PLANTED_ARMS = ("E", "P")
@@ -27,10 +27,12 @@ PAIRS = {
     "lab": ("WP-S", "W-S", "WP-W"),
     "planted": ("E-P",),
 }
+SPLITS = ("dev", "heldout", "panel")
 #: CL-Bench's decision schedule: upstream's default schedule at seed 42, three independent orderings.
+#: Development rounds and the panel play the ``multi_group`` variant only, so the post-migration
+#: questions of this schedule stay unseen until the decision run.
 SCHEDULE = {"schedule": "default", "seed": 42}
 HELDOUT_RUN_INDEXES = (1, 2, 3)
-PANEL_RUN_INDEX = 0
 #: The share of items a judge sees twice, to measure how often it repeats itself.
 REJUDGE_FRACTION = 0.2
 
@@ -49,17 +51,13 @@ def suite_arms(suite: str) -> tuple[str, ...]:
     return tuple(ARMS)
 
 
-def load_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-
-
 def data_split(split: str) -> str:
     """The case files a split plays: the release panel draws on the dev cases."""
     return "dev" if split == "panel" else split
 
 
 def planted_cases(split: str, limit: int | None) -> list[dict]:
-    return load_jsonl(RUN_ROOT / "cases" / "planted" / f"{data_split(split)}.jsonl")[:limit]
+    return read_rows(RUN_ROOT / "cases" / "planted" / f"{data_split(split)}.jsonl")[:limit]
 
 
 # --------------------------------------------------------------------------
@@ -77,6 +75,10 @@ def passed_gate(suite: str, split: str) -> dict | None:
         return None
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
+    if suite in ("clbench", "lab"):
+        # The questions, documents and criteria are the pinned upstream's files: edited ones are not.
+        require_pinned_checkout(suite, unedited=True)
+
     try:
         return gate.heldout_gate(suite)
     except (AmendmentAcknowledgmentPendingError, gate.HeldoutGateError) as error:
@@ -89,7 +91,7 @@ def write_record(run_dir: Path, entry: dict) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     if path.exists():
         have = json.loads(path.read_text())
-        for key in ("suite", "split", "model", "effort", "product_python", "limit"):
+        for key in ("suite", "split", "model", "effort", "limit"):
             if have[key] != entry[key]:
                 raise refuse(
                     f"{path} records {key} {have[key]!r} and this call asks for {entry[key]!r}; "
@@ -113,36 +115,28 @@ def read_record(run_dir: Path) -> dict:
     return {"split": "dev", "limit": None, "arms": None}
 
 
-def git_state() -> dict:
-    def git(*args: str) -> str:
-        done = subprocess.run(  # noqa: S603 - fixed argv
-            ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
-        )
-        return done.stdout.strip()
-
-    return {
-        "product_revision": git("rev-parse", "HEAD"),
-        "product_dirty": bool(git("status", "--porcelain")),
-    }
-
-
 # --------------------------------------------------------------------------
 # Running a suite.
 # --------------------------------------------------------------------------
 
 
-def clbench_cells(run_dir: Path, split: str, arms, seeds, limit, model, effort, product_python):
+def clbench_indexes(split: str, seeds: list[int] | None) -> tuple[int | None, ...]:
+    """The ``run_index`` values a split plays: the decision's three, or one plain run."""
+    if split == "heldout":
+        return tuple(seeds or HELDOUT_RUN_INDEXES)
+    return tuple(seeds or (None,))
+
+
+def clbench_cells(run_dir: Path, split: str, arms, seeds, limit, model, effort):
     from .clbench.run import CellSpec
 
     if split == "heldout":
-        schedule, indexes = SCHEDULE, tuple(seeds or HELDOUT_RUN_INDEXES)
-    elif split == "panel":
-        schedule, indexes = SCHEDULE, (PANEL_RUN_INDEX,)
+        schedule = SCHEDULE
     elif limit:
         # A variant fixes its own question count, so a limited dev run takes upstream's plain defaults.
-        schedule, indexes = {}, tuple(seeds or (None,))
+        schedule = {}
     else:
-        schedule, indexes = {"variant": "multi_group"}, tuple(seeds or (None,))
+        schedule = {"variant": "multi_group"}
     return [
         CellSpec(
             run_dir=run_dir,
@@ -152,17 +146,30 @@ def clbench_cells(run_dir: Path, split: str, arms, seeds, limit, model, effort, 
             limit=limit,
             model=model,
             effort=effort,
-            product_python=product_python,
         )
-        for index in indexes
+        for index in clbench_indexes(split, seeds)
         for arm in arms
     ]
 
 
-def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort, product_python) -> None:
+def require_replacement(run_dir: Path) -> None:
+    """``run_index`` 4 is the one replacement for a held-out run that a harness fault voided."""
+    from .clbench import report
+
+    voided = [i for i in report.voided_runs(report.load_arms(run_dir)) if i in HELDOUT_RUN_INDEXES]
+    if len(voided) != 1:
+        raise refuse(
+            f"run_index {REPLACEMENT_RUN} replaces exactly one voided held-out run; "
+            f"{run_dir.name} has {len(voided)} voided ({voided})"
+        )
+
+
+def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort) -> None:
     from .clbench.run import run_cell
 
-    cells = clbench_cells(run_dir, split, arms, seeds, limit, model, effort, product_python)
+    if split == "heldout" and REPLACEMENT_RUN in clbench_indexes(split, seeds):
+        require_replacement(run_dir)
+    cells = clbench_cells(run_dir, split, arms, seeds, limit, model, effort)
     todo = []
     for cell in cells:
         if (cell.dir / "evaluation.json").exists():
@@ -174,7 +181,7 @@ def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort, product
             future.result()
 
 
-def run_lab_suite(run_dir, split, arms, jobs, limit, model, effort, product_python) -> None:
+def run_lab_suite(run_dir, split, arms, jobs, limit, model, effort) -> None:
     from .lab import prepare
     from .lab import run as lab_run
 
@@ -188,28 +195,32 @@ def run_lab_suite(run_dir, split, arms, jobs, limit, model, effort, product_pyth
         jobs=jobs,
         model=model,
         effort=effort,
-        product_python=product_python,
     )
 
 
-def run_planted(run_dir, split, arms, jobs, limit, model, effort, product_python) -> None:
+def run_planted(run_dir, split, arms, jobs, limit, model, effort) -> None:
     from .planted.answer import answer_all
-    from .planted.build import build
+    from .planted.build import build, require_identical_text
 
     cases = planted_cases(split, limit)
-    distractors = load_jsonl(RUN_ROOT / "cases" / "planted" / "distractors.jsonl")
+    distractors = read_rows(RUN_ROOT / "cases" / "planted" / "distractors.jsonl")
 
-    def one(arm: str) -> None:
+    def built(arm: str) -> None:
         arm_dir = run_dir / arm
-        if not (arm_dir / "pages.json").exists():
+        if not (arm_dir / "built").is_dir():
             if arm_dir.exists():
                 raise refuse(f"{arm_dir} holds an unfinished build; move it aside and run again")
             arm_dir.mkdir(parents=True)
-            asyncio.run(build(cases, distractors, arm, arm_dir, product_python))
-        answer_all(cases, arm_dir, model, effort, product_python)
+            asyncio.run(build(cases, distractors, arm, arm_dir))
 
+    # Both arms are always built: the identical-text proof needs the pair, and a build costs no session.
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for future in [pool.submit(one, arm) for arm in arms]:
+        list(pool.map(built, PLANTED_ARMS))
+    require_identical_text(run_dir)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for future in [
+            pool.submit(answer_all, cases, run_dir / arm, model, effort) for arm in arms
+        ]:
             future.result()
 
 
@@ -224,9 +235,17 @@ def run_suite(
     limit: int | None = None,
     model: str = ACTOR_MODEL,
     effort: str = ACTOR_EFFORT,
-    product_python: Path | None = None,
 ) -> Path:
     """Play ``suite``'s arms on ``split``. A held-out run passes the gate before any session starts."""
+    if split not in SPLITS:
+        raise refuse(f"--split takes {', '.join(SPLITS)}, not {split!r}")
+    if split == "heldout" and (model, effort) != (ACTOR_MODEL, ACTOR_EFFORT):
+        raise refuse(
+            f"a held-out run uses the frozen actor {ACTOR_MODEL} at {ACTOR_EFFORT} effort, "
+            f"not {model} at {effort}"
+        )
+    if split == "panel" and (seeds or limit):
+        raise refuse("the panel plays its fixed slice of development cases: no --seeds or --limit")
     known = suite_arms(suite)
     requested = arms or list(known)
     if set(requested) - set(known):
@@ -234,11 +253,17 @@ def run_suite(
     arms = [a for a in known if a in requested]
     if seeds and suite != "clbench":
         raise refuse(f"--seeds selects CL-Bench run indexes; {suite} has no seeds")
-    if split == "heldout" and seeds and not set(seeds) <= set(HELDOUT_RUN_INDEXES):
-        raise refuse(f"a held-out run uses run indexes {HELDOUT_RUN_INDEXES}, not {sorted(seeds)}")
+    if split == "heldout" and seeds and not set(seeds) <= {*HELDOUT_RUN_INDEXES, REPLACEMENT_RUN}:
+        raise refuse(
+            f"a held-out run uses run indexes {HELDOUT_RUN_INDEXES}, and {REPLACEMENT_RUN} "
+            f"once as the replacement for a voided one, not {sorted(seeds)}"
+        )
     if limit and split != "dev":
         raise refuse("--limit is for dev runs; a decision run plays the whole split")
     verdict = passed_gate(suite, split)
+    indexes = (
+        [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
+    )
     run_dir = runs_dir() / run_id
     write_record(
         run_dir,
@@ -246,21 +271,21 @@ def run_suite(
             "suite": suite,
             "split": split,
             "arms": arms,
-            "seeds": sorted(seeds) if seeds else None,
+            # The run indexes played: a report reads them as the schedule.
+            "seeds": sorted(indexes) or None,
             "limit": limit,
             "model": model,
             "effort": effort,
-            "product_python": str(product_python) if product_python else None,
             "gate": verdict,
-            **git_state(),
+            **record.checkout_state(),
         },
     )
     if suite == "clbench":
-        run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort, product_python)
+        run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort)
     elif suite == "lab":
-        run_lab_suite(run_dir, split, arms, jobs, limit, model, effort, product_python)
+        run_lab_suite(run_dir, split, arms, jobs, limit, model, effort)
     else:
-        run_planted(run_dir, split, arms, jobs, limit, model, effort, product_python)
+        run_planted(run_dir, split, arms, jobs, limit, model, effort)
     return run_dir
 
 
@@ -285,7 +310,9 @@ def report_suite(
 ) -> dict:
     """The unstamped report of runs of one suite. Lab and planted judge first; CL-Bench needs no judge."""
     run_dir = runs_dir() / run_ids[0]
-    have = arms or read_record(run_dir)["arms"] or list(suite_arms(suite))
+    stored = read_record(run_dir)
+    heldout = stored["split"] == "heldout"
+    have = arms or stored["arms"] or list(suite_arms(suite))
     pairs = PAIRS[suite]
     if suite == "lab":
         # WG ablates the arm whose vault it copied: W in runs before WP existed, WP since.
@@ -295,7 +322,9 @@ def report_suite(
     if suite == "clbench":
         from .clbench import report
 
-        built = report.build(run_dir, wanted)
+        built = report.build(
+            run_dir, wanted, scheduled=stored.get("seeds") if heldout else None, heldout=heldout
+        )
     else:
         if spec is None:
             raise refuse(f"{suite} needs a judge: add --judge claude or --judge codex")
@@ -307,16 +336,19 @@ def report_suite(
         else:
             from .planted import judge
 
-            stored = read_record(run_dir)
             judge.items(planted_cases(stored["split"], stored["limit"]), run_dir, judge_run, have)
         judge.judge(judge_run, spec, REJUDGE_FRACTION, jobs)
-        built = {"suite": suite, "run_id": run_ids[0], **judge.score(judge_run, wanted)}
+        built = {
+            "suite": suite,
+            "run_id": run_ids[0],
+            **judge.score(judge_run, wanted, heldout=heldout),
+        }
     built["actor"] = record.run_identity(*(runs_dir() / r for r in run_ids))
     return built
 
 
 def summary(report: dict) -> list[str]:
-    """One line per paired measure: what differs, by how much, with its interval."""
+    """One line per paired measure and per arm's units, then the decision when the report has one."""
     lines = []
     for pair, body in report["pairs"].items():
         measures = {"": body} if "mean_difference" in body else body
@@ -328,6 +360,19 @@ def summary(report: dict) -> list[str]:
                 lines.append(
                     f"{label}: {m['mean_difference']:+} (95% CI {m['ci95'][0]} to {m['ci95'][1]}) {m['verdict']}"
                 )
+    for arm, body in report["arms"].items():
+        units = body["units"]
+        lines.append(
+            f"{arm} units: {units['scheduled']} scheduled, {units['valid']} valid, "
+            f"{units['invalid']} invalid, {'unknown' if units['missing'] is None else units['missing']} missing"
+            + (f", {body['unanswered']} unanswered" if "unanswered" in body else "")
+        )
+    decision = report.get("decision")
+    if decision:
+        lines.append(f"decision: {decision['status']}")
+        lines += [
+            f"{name}: {rule['result']}" for name, rule in decision.items() if isinstance(rule, dict)
+        ]
     return lines
 
 
@@ -342,12 +387,6 @@ def _model_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--effort", default=ACTOR_EFFORT, help="the actor effort (default %(default)s)"
-    )
-    parser.add_argument(
-        "--product-python",
-        type=Path,
-        default=None,
-        help="an interpreter with the Exomem release to test; default is this checkout",
     )
 
 
@@ -373,7 +412,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         limit=args.limit,
         model=args.model,
         effort=args.effort,
-        product_python=args.product_python,
     )
     print(
         f"{args.suite} {args.split} run in {run_dir}; next: membench outcome report {args.suite} --run-id {args.run_id}"
@@ -393,11 +431,14 @@ def _cmd_report(args: argparse.Namespace) -> int:
         if args.suite != "clbench"
         else None
     )
+    if spec and stored["split"] == "heldout" and (spec.backend, spec.model) != DECISION_JUDGE:
+        raise refuse(
+            f"a held-out {args.suite} report is judged by {DECISION_JUDGE[1]} on {DECISION_JUDGE[0]}: "
+            f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
+        )
     built = report_suite(args.suite, [args.run_id], spec, jobs=args.jobs)
-    built["run"] = {
-        k: stored.get(k) for k in ("model", "effort", "product_python", "arms", "seeds", "gate")
-    }
-    stamped = gate.stamp(built, stored["split"])
+    built["run"] = {k: stored.get(k) for k in ("model", "effort", "arms", "seeds", "gate")}
+    stamped = gate.stamp(built, stored)
     target = run_dir / (f"report-{spec.backend}.json" if spec else "report.json")
     target.write_text(json.dumps(stamped, indent=2))
     print(f"{stamped['label']} ({stamped['evidence']} evidence, {stamped['split']} split)")
@@ -417,7 +458,6 @@ def _cmd_panel(args: argparse.Namespace) -> int:
         jobs=args.jobs,
         model=args.model,
         effort=args.effort,
-        product_python=args.product_python,
         controls=args.controls,
     )
     print("\n".join(str(path) for path in written))

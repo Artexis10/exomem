@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from collection_ingest.mcp_session import isolated_env
@@ -43,11 +45,11 @@ _SERVER_KEYS = frozenset(
 )
 
 
-def server_pins(root: Path, product_python: Path | None = None) -> dict[str, str]:
+def server_pins(root: Path) -> dict[str, str]:
     """The environment a disposable server needs, and nothing inherited: vault and state under ``root``.
 
-    ``product_python`` names an interpreter with its own Exomem installed (a release under
-    test). Without it the product is this checkout, which ``PYTHONPATH`` puts on the path.
+    The product is this checkout, which ``PYTHONPATH`` puts on the path. A release is tested by
+    running from a clean checkout of its tag.
     """
     state = root / "exomem-state"
     pins = isolated_env(
@@ -60,19 +62,13 @@ def server_pins(root: Path, product_python: Path | None = None) -> dict[str, str
             "EXOMEM_LEASE_COORDINATOR_DB": str(state / "lease-coordinator.sqlite"),
         },
     )
-    kept = {k: v for k, v in pins.items() if k.startswith("EXOMEM_") or k in _SERVER_KEYS}
-    if product_python is not None:
-        # An installed release imports itself; a path to this checkout would shadow it.
-        kept.pop("PYTHONPATH", None)
-    return kept
+    return {k: v for k, v in pins.items() if k.startswith("EXOMEM_") or k in _SERVER_KEYS}
 
 
-def child_env(root: Path, product_python: Path | None = None) -> dict[str, str]:
+def child_env(root: Path) -> dict[str, str]:
     """This process's environment without any inherited Exomem setting, plus the pins."""
     base = {k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "KB_"))}
-    if product_python is not None:
-        base.pop("PYTHONPATH", None)
-    return {**base, **server_pins(root, product_python)}
+    return {**base, **server_pins(root)}
 
 
 def claude_env() -> tuple[dict[str, str], tuple[str, ...]]:
@@ -114,51 +110,84 @@ def lay_instruction_block(path: Path) -> dict:
     }
 
 
-def product_python_of(product_python: Path | None) -> str:
-    return str(product_python) if product_python is not None else sys.executable
-
-
-def product_version(root: Path, product_python: Path | None = None) -> str:
-    """``exomem --version`` as the product interpreter reports it, run under the pins."""
+def product_version(root: Path) -> str:
+    """``exomem --version`` as this checkout reports it, run under the pins."""
     done = subprocess.run(  # noqa: S603 - fixed argv
-        [product_python_of(product_python), "-m", "exomem", "--version"],
-        env=child_env(root, product_python),
+        [sys.executable, "-m", "exomem", "--version"],
+        env=child_env(root),
         capture_output=True,
         text=True,
         timeout=120,
     )
     if done.returncode != 0:
         raise SystemExit(
-            f"{product_python_of(product_python)} -m exomem --version failed: {done.stderr.strip()[-300:]}"
+            f"{sys.executable} -m exomem --version failed: {done.stderr.strip()[-300:]}"
         )
     return done.stdout.strip()
 
 
-def fresh_vault(root: Path, product_python: Path | None = None) -> Path:
+def fresh_vault(root: Path) -> Path:
     """Lay the shipped starter scaffold into ``root/vault`` once, under the pins."""
     vault = root / "vault"
     if not vault.exists():
         vault.mkdir(parents=True)
         subprocess.run(  # noqa: S603 - fixed argv
             [
-                product_python_of(product_python),
+                sys.executable,
                 "-c",
                 "import sys; from pathlib import Path; "
                 "from exomem.init import init_vault; init_vault(Path(sys.argv[1]))",
                 str(vault),
             ],
-            env=child_env(root, product_python),
+            env=child_env(root),
             check=True,
             capture_output=True,
         )
     return vault
 
 
-def mcp_server(root: Path, product_python: Path | None = None) -> dict:
+def mcp_server(root: Path) -> dict:
     """An ``--mcp-config`` server entry for the disposable Exomem under ``root``."""
-    fresh_vault(root, product_python)
+    fresh_vault(root)
     return {
-        "command": product_python_of(product_python),
+        "command": sys.executable,
         "args": ["-m", "exomem", "--transport", "stdio"],
-        "env": server_pins(root, product_python),
+        "env": server_pins(root),
     }
+
+
+# --------------------------------------------------------------------------
+# Copies of an arm's vault and state.
+# --------------------------------------------------------------------------
+
+SERVER_EXIT_SECONDS = 60.0
+
+
+def server_alive(root: Path) -> bool:
+    """Whether any process still serves the state root under ``root`` (its environment names it)."""
+    needle = f"EXOMEM_STATE_ROOT={server_pins(root)['EXOMEM_STATE_ROOT']}".encode()
+    for env_file in Path("/proc").glob("[0-9]*/environ"):
+        try:
+            if needle in env_file.read_bytes().split(b"\0"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def copy_state(source: Path, target: Path) -> None:
+    """Replace ``target``'s vault and state with a copy of ``source``'s, once no server holds either.
+
+    Used to snapshot a compiled vault, to hand each f37 case its own copy, and to put a vault back
+    before a retry. The interpreter bytecode cache under the state root is left out: it rebuilds itself.
+    """
+    deadline = time.monotonic() + SERVER_EXIT_SECONDS
+    while server_alive(source) or server_alive(target):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"an Exomem server still holds {source} or {target}; copy refused")
+        time.sleep(1)
+    for name in ("vault", "exomem-state"):
+        shutil.rmtree(target / name, ignore_errors=True)
+        shutil.copytree(
+            source / name, target / name, symlinks=True, ignore=shutil.ignore_patterns("pycache")
+        )

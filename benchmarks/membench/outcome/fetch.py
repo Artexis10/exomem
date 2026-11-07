@@ -7,13 +7,23 @@ must run the code the pin names.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
-from .lab import prepare as lab_prepare
-from .workspace import RUN_ROOT, Pin, head_of, pins, wrong_commit_fix
+from .gate import CLBENCH_DATABASES
+from .workspace import (
+    RUN_ROOT,
+    Pin,
+    edited_files,
+    edited_fix,
+    head_of,
+    pins,
+    sha256_of,
+    wrong_commit_fix,
+)
 
 
 def _run(argv: list[str], *, cwd: Path | None = None) -> None:
@@ -48,17 +58,8 @@ def clone_pinned(upstream: Pin, root: Path) -> Path:
             )
         if head != upstream.commit:
             raise SystemExit(wrong_commit_fix(upstream, checkout, head))
-        edited = subprocess.run(  # noqa: S603 - fixed argv
-            ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.splitlines()
-        if edited:
-            raise SystemExit(
-                f"{checkout} has {len(edited)} edited tracked file(s), so it is not the pinned code. "
-                f"Run `git -C {checkout} checkout -- .`, then `membench outcome fetch`."
-            )
+        if edited := edited_files(checkout):
+            raise SystemExit(edited_fix(checkout, edited))
         print(f"{upstream.key}: {checkout} already at {upstream.commit[:12]}", flush=True)
         return checkout
     # Build beside the target and rename at the end: an interrupted clone leaves no half checkout.
@@ -81,6 +82,29 @@ def clone_pinned(upstream: Pin, root: Path) -> Path:
     return checkout
 
 
+def record_databases(root: Path) -> Path:
+    """Write the digests of the downloaded CL-Bench databases to ``upstream/clbench-databases.json``.
+
+    CL-Bench's setup downloads them from a dataset without a revision pin, so the amendment
+    receipt freezes their digests and a held-out run checks them; this file shows what was fetched.
+    """
+    found = {rel: sha256_of(root / rel) for rel in CLBENCH_DATABASES}
+    target = root / "upstream" / "clbench-databases.json"
+    target.write_text(json.dumps(found, indent=2) + "\n")
+    for rel, digest in found.items():
+        print(f"clbench: {rel} sha256 {digest}", flush=True)
+    return target
+
+
+def prepare_lab(root: Path, checkout: Path) -> None:
+    """LAB's venv from its own lock file, and the pandoc release its sandbox image pins."""
+    _run([_uv(), "sync", "--frozen", "--no-dev", "--project", str(checkout)])
+    prefix = root / "tools" / "pandoc"
+    if not (prefix / "bin" / "pandoc").exists():
+        # LAB's installer checks the download against the release's published SHA-256.
+        _run(["sh", str(checkout / "lab_core" / "sandbox" / "install_pandoc.sh"), str(prefix)])
+
+
 def fetch(root: Path = RUN_ROOT) -> None:
     """Clone both pinned upstreams under ``root/upstream`` and prepare each one's environment."""
     upstream = pins()
@@ -88,6 +112,6 @@ def fetch(root: Path = RUN_ROOT) -> None:
     # The same two steps CL-Bench documents: a frozen environment, then the task's own data download.
     _run([_uv(), "sync", "--frozen", "--extra", "database_exploration", "--project", str(clbench)])
     _run([str(clbench / ".venv" / "bin" / "clbench"), "setup", "database_exploration"], cwd=clbench)
-    clone_pinned(upstream["lab"], root)
-    lab_prepare.setup(root)
+    record_databases(root)
+    prepare_lab(root, clone_pinned(upstream["lab"], root))
     print(f"outcome upstreams ready under {root / 'upstream'}", flush=True)

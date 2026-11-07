@@ -22,18 +22,13 @@ arm:
 
 Every arm has the same built-in file tools, scoped to its workspace. The
 ``oracle`` and ``wrong`` actors play no model: they prove the grader before any
-model run (R0).
+model run (R0), through ``run_cell``.
 
-``membench outcome run clbench`` drives this module. Its own command line only
-proves the grader (``oracle`` and ``wrong`` actors, from the repository root with
-``PYTHONPATH=benchmarks:src``)::
-
-    python -m membench.outcome.clbench.run --run-id r0-oracle --actor oracle
+``membench outcome run clbench`` drives this module.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import queue
@@ -41,6 +36,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,18 +52,19 @@ from epistemic.journeys.f27_replay import (
 from membench.utility.switch_eval.session import hook_push
 
 from .. import record
+from ..faults import init_faults, with_retries
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
     PLUGIN_READ_ALLOW,
-    REPO_ROOT,
     SHIPPED_PROMINENCE,
     claude_env,
+    copy_state,
     hook_env,
     lay_instruction_block,
     mcp_server,
 )
-from ..workspace import RUN_ROOT, pin, require_pinned_checkout
+from ..workspace import pin, require_pinned_checkout, sha256_of
 
 UPSTREAM = pin("clbench").checkout()
 ENV_SERVER = Path(__file__).with_name("env_server.py")
@@ -160,12 +157,25 @@ class QuestionLog:
     tool_uses: dict[str, int] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=dict)
     notional_cost_usd: float = 0.0
+    #: Everything that went wrong in the session, product failures and harness faults alike.
     faults: list[str] = field(default_factory=list)
+    #: The subset that is evidence the harness failed to run the product; it voids the unit (see ``faults``).
+    harness_faults: list[str] = field(default_factory=list)
+    #: One entry per attempt that was retried: ``{"attempt": n, "faults": [...]}``.
+    retries: list[dict] = field(default_factory=list)
     init: dict | None = None
     #: One entry per user turn sent: hook event name -> characters that hook injected.
     hook_chars: list[dict[str, int]] = field(default_factory=list)
     #: Tools the CLI refused for want of permission. A denied tool cripples an arm without another trace.
     permission_denials: list[str] = field(default_factory=list)
+    #: ``result`` events the CLI sent. A session with none reports no usage, which the reports mark as partial.
+    results: int = 0
+
+    def harness(self, fault: str) -> None:
+        """Record evidence of a harness fault; it also shows in ``faults``."""
+        if fault not in self.harness_faults:
+            self.harness_faults.append(fault)
+            self.faults.append(fault)
 
 
 def injected_chars(event: dict) -> int:
@@ -203,7 +213,19 @@ class KeyActor:
 class ClaudeSession:
     """One headless Claude Code process, fed user turns as stream-json."""
 
-    def __init__(self, argv: list[str], env: dict[str, str], cwd: Path, transcript: Path) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        env: dict[str, str],
+        cwd: Path,
+        transcript: Path,
+        *,
+        model: str,
+        exomem: bool,
+    ) -> None:
+        """``model`` and ``exomem`` say what every ``init`` event must show (see ``faults.init_faults``)."""
+        self._model, self._exomem = model, exomem
+        self._path = transcript
         self._transcript = transcript.open("a")
         self._proc = subprocess.Popen(  # noqa: S603 - argv from the shared f27 builder
             argv,
@@ -228,6 +250,14 @@ class ClaudeSession:
 
     def send(self, text: str, log: QuestionLog, timeout: float) -> str | None:
         """Send one user turn and return the final reply text, or None on timeout or exit."""
+        try:
+            return self._exchange(text, log, timeout)
+        finally:
+            # The pump flushes every line, so a transcript that is still empty here is lost.
+            if not self._path.exists() or self._path.stat().st_size == 0:
+                log.harness(f"transcript {self._path.name} is missing or empty")
+
+    def _exchange(self, text: str, log: QuestionLog, timeout: float) -> str | None:
         assert self._proc.stdin
         message = {"type": "user", "message": {"role": "user", "content": text}}
         self._proc.stdin.write(json.dumps(message) + "\n")
@@ -237,34 +267,41 @@ class ClaudeSession:
         log.hook_chars.append(injected)
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
             try:
+                if remaining <= 0:
+                    raise queue.Empty
                 line = self._lines.get(timeout=remaining)
             except queue.Empty:
+                # A timeout is a scored loss, unless the CLI never started its session at all.
+                if log.init is None:
+                    log.harness("the CLI sent no init event before the timeout")
                 return None
             if line is None:
-                log.faults.append(f"actor exited with {self._proc.poll()}")
+                log.harness(f"the CLI exited with {self._proc.poll()} before it answered")
                 return None
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
             kind = event.get("type")
-            if kind == "system" and event.get("subtype") == "init" and log.init is None:
-                log.init = {
-                    key: event.get(key)
-                    for key in (
-                        "model",
-                        "tools",
-                        "mcp_servers",
-                        "skills",
-                        "plugins",
-                        "permissionMode",
-                        "apiKeySource",
-                        "cwd",
-                    )
-                }
+            if kind == "system" and event.get("subtype") == "init":
+                # Every user turn brings an init event; each one is checked, the first is kept.
+                for fault in init_faults(event, model=self._model, exomem=self._exomem):
+                    log.harness(fault)
+                if log.init is None:
+                    log.init = {
+                        key: event.get(key)
+                        for key in (
+                            "model",
+                            "tools",
+                            "mcp_servers",
+                            "skills",
+                            "plugins",
+                            "permissionMode",
+                            "apiKeySource",
+                            "cwd",
+                        )
+                    }
             elif kind == "system" and event.get("subtype") == "hook_response":
                 name = str(event.get("hook_event"))
                 injected[name] = injected.get(name, 0) + injected_chars(event)
@@ -274,6 +311,7 @@ class ClaudeSession:
                         name = block.get("name", "?")
                         log.tool_uses[name] = log.tool_uses.get(name, 0) + 1
             elif kind == "result":
+                log.results += 1
                 for key, value in (event.get("usage") or {}).items():
                     if isinstance(value, int):
                         log.usage[key] = log.usage.get(key, 0) + value
@@ -282,9 +320,9 @@ class ClaudeSession:
                     str(d.get("tool_name", "?")) for d in event.get("permission_denials") or []
                 ]
                 if event.get("is_error"):
-                    log.faults.append(
-                        f"result error: {event.get('subtype')}: {event.get('result')}"
-                    )
+                    # The CLI ended in an error instead of an answer; whether the model or the
+                    # service caused it, no answer was scored, so the unit is retried and may be voided.
+                    log.harness(f"result error: {event.get('subtype')}: {event.get('result')}")
                 return event.get("result") or ""
 
     def close(self) -> None:
@@ -298,6 +336,52 @@ class ClaudeSession:
         self._transcript.close()
 
 
+def single_turn(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    transcript: Path,
+    prompt: str,
+    log: QuestionLog,
+    *,
+    model: str,
+    exomem: bool,
+    timeout: float,
+    reset: Callable[[int], None],
+) -> str | None:
+    """One fresh session and one user turn, replayed with the same inputs on a harness fault (at most twice).
+
+    ``reset(n)`` puts back what attempt ``n`` starts from. A retry keeps its own transcript, and the
+    session's usage adds up over every attempt: the log shows what the unit cost. A timeout is a
+    scored loss and is not retried. Returns the reply, or None when there was none.
+    """
+    attempts = 0
+    replies: list[str | None] = []
+
+    def before(number: int) -> None:
+        log.harness_faults.clear()
+        log.init = None
+        log.hook_chars.clear()
+        reset(number)
+
+    def attempt() -> dict:
+        nonlocal attempts
+        path = transcript if not attempts else transcript.with_suffix(f".retry{attempts}.jsonl")
+        attempts += 1
+        session = ClaudeSession(argv, env, cwd, path, model=model, exomem=exomem)
+        start = time.monotonic()
+        try:
+            replies.append(session.send(prompt, log, timeout))
+        finally:
+            log.seconds = round(log.seconds + time.monotonic() - start, 1)
+            session.close()
+        return {}
+
+    _, log.retries = with_retries(attempt, lambda _result: list(log.harness_faults), before)
+    log.turns = 1
+    return replies[-1]
+
+
 class ClaudeActor:
     """The model under test, behind one memory arm."""
 
@@ -309,7 +393,6 @@ class ClaudeActor:
         effort: str,
         memory_instruction: str,
         *,
-        product_python: Path | None = None,
         envelope: AgentEnvelope | None = None,
     ) -> None:
         self.spec = spec
@@ -317,7 +400,6 @@ class ClaudeActor:
         self.work = arm_dir / "work"
         self.model = model
         self.effort = effort
-        self.product_python = product_python
         self.envelope = envelope or discover_agent_envelope()
         # The shipped arm's task prompt says nothing about memory: the plugin and the block do.
         self.memory_instruction = (
@@ -328,7 +410,7 @@ class ClaudeActor:
             else memory_instruction.format(memory_dir=str(self.work / "memory"))
         )
         self.mcp_config = arm_dir / "mcp.json"
-        servers = {"exomem": mcp_server(arm_dir, product_python)} if spec.exomem else {}
+        servers = {"exomem": mcp_server(arm_dir)} if spec.exomem else {}
         self.mcp_config.write_text(json.dumps({"mcpServers": servers}, indent=2))
         self.block = arm_dir / "custom-instructions.txt"
         self.block_record = lay_instruction_block(self.block) if spec.shipped else None
@@ -364,12 +446,15 @@ class ClaudeActor:
             return self.env
         return {**self.env, **hook_env(self.arm_dir, f"q{index:03d}")}
 
-    def _reset_work(self) -> None:
-        if self.work.exists():
-            shutil.rmtree(self.work)
-        (self.work / "memory").mkdir(
-            parents=True
-        ) if self.spec.persists == "folder" else self.work.mkdir(parents=True)
+    def _reset_work(self, memory: Path | None = None) -> None:
+        """An empty workspace. The folder arm's memory folder is copied in from ``memory``, or starts empty."""
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True)
+        if self.spec.persists == "folder":
+            if memory is None:
+                (self.work / "memory").mkdir()
+            else:
+                shutil.copytree(memory, self.work / "memory")
 
     def argv(self) -> list[str]:
         argv = build_turn_argv(
@@ -404,21 +489,78 @@ class ClaudeActor:
             parts.append("\n\n" + self.memory_instruction)
         return "\n".join(parts)
 
+    def _checkpoint(self) -> None:
+        """Keep what the question starts from, so a retry has the same inputs."""
+        checkpoint = self.arm_dir / "checkpoint"
+        if self.spec.exomem:
+            copy_state(self.arm_dir, checkpoint)
+        elif self.spec.persists == "folder":
+            shutil.rmtree(checkpoint, ignore_errors=True)
+            shutil.copytree(self.work / "memory", checkpoint / "memory")
+
+    def _restore(self, index: int) -> None:
+        """Put the arm back to the checkpoint: its memory, an empty workspace and the question's hook home."""
+        checkpoint = self.arm_dir / "checkpoint"
+        if self.spec.exomem:
+            copy_state(checkpoint, self.arm_dir)
+        self._reset_work(checkpoint / "memory")
+        if self.spec.plugin:
+            hook_home = hook_env(self.arm_dir, f"q{index:03d}")["EXOMEM_HOOK_HOME"]
+            shutil.rmtree(hook_home, ignore_errors=True)
+
+    def _first_turn(
+        self, log: QuestionLog, text: str, transcript: Path
+    ) -> tuple[ClaudeSession, str | None]:
+        """Start the question's session and send its first turn, retrying a harness fault with the same inputs.
+
+        Only the first turn can be replayed: upstream's task cannot rewind, so a fault after the
+        question's first step stands and voids the run.
+        """
+        if self.spec.persists != "none":
+            self._checkpoint()
+        sessions: list[ClaudeSession] = []
+
+        def reset(number: int) -> None:
+            if sessions:
+                sessions.pop().close()
+            log.harness_faults.clear()
+            log.init = None
+            log.hook_chars.clear()
+            if number:
+                self._restore(log.index)
+            elif self.spec.persists != "folder":
+                self._reset_work()
+
+        def attempt() -> dict:
+            session = ClaudeSession(
+                self.argv(),
+                self.session_env(log.index),
+                self.work,
+                transcript,
+                model=self.model,
+                exomem=self.spec.exomem,
+            )
+            sessions.append(session)
+            return {"reply": session.send(text, log, TURN_TIMEOUT_SECONDS)}
+
+        result, log.retries = with_retries(attempt, lambda _result: list(log.harness_faults), reset)
+        return sessions[-1], result["reply"]
+
     def play_question(self, env: Env, turn: dict, log: QuestionLog, pending: str | None) -> dict:
-        if self.spec.persists != "folder":
-            self._reset_work()
         transcript = self.arm_dir / "transcripts" / f"q{log.index:03d}-{log.question_id}.jsonl"
         transcript.parent.mkdir(exist_ok=True)
-        session = ClaudeSession(self.argv(), self.session_env(log.index), self.work, transcript)
         start = time.monotonic()
+        text = self.prompt(pending, turn)
+        turn_start = time.monotonic()
+        session, reply = self._first_turn(log, text, transcript)
         try:
             while True:
-                text = self.prompt(pending, turn)
-                turn_start = time.monotonic()
-                reply = session.send(text, log, TURN_TIMEOUT_SECONDS)
                 log.turns += 1
                 if reply is None:
-                    log.timeouts += 1
+                    # A timeout is a scored loss; a crash is a harness fault and voids the unit, but the
+                    # question still ends through upstream's own fallback so the task stays consistent.
+                    if not log.harness_faults:
+                        log.timeouts += 1
                     result = env.call(
                         "timeout",
                         timeout_seconds=TURN_TIMEOUT_SECONDS,
@@ -452,6 +594,9 @@ class ClaudeActor:
                 if result["instance_complete"] or result["done"]:
                     return result
                 turn = result["turn"]
+                text = self.prompt(pending, turn)
+                turn_start = time.monotonic()
+                reply = session.send(text, log, TURN_TIMEOUT_SECONDS)
         finally:
             log.seconds = round(time.monotonic() - start, 1)
             session.close()
@@ -475,7 +620,6 @@ class CellSpec:
     limit: int | None = None
     model: str = ACTOR_MODEL
     effort: str = ACTOR_EFFORT
-    product_python: Path | None = None
 
     @property
     def dir(self) -> Path:
@@ -508,7 +652,6 @@ def run_cell(cell: CellSpec) -> Path:
                 cell.model,
                 cell.effort,
                 opened["file_memory_instruction"],
-                product_python=cell.product_python,
             )
         else:
             actor = KeyActor(wrong=cell.arm == "wrong")
@@ -524,20 +667,14 @@ def run_cell(cell: CellSpec) -> Path:
                 "instances": opened["instances"],
             },
             "upstream_commit": pin("clbench").commit,
-            "product_revision": subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
-            ).stdout.strip(),
+            **record.checkout_state(),
         }
         if isinstance(actor, ClaudeActor):
             manifest["actor"] = {
                 **record.actor_record(
-                    cli=actor.envelope.version,
-                    model=cell.model,
-                    effort=cell.effort,
-                    mcp_config=actor.mcp_config,
-                    root=arm_dir,
-                    product_python=cell.product_python,
+                    cli=actor.envelope.version, model=cell.model, effort=cell.effort, root=arm_dir
                 ),
+                "mcp_config_sha256": sha256_of(actor.mcp_config),
                 "argv": actor.argv(),
                 "env_removed": list(actor.removed_env),
                 "memory_instruction": actor.memory_instruction,
@@ -556,6 +693,7 @@ def run_cell(cell: CellSpec) -> Path:
 
         turn, pending, index = opened["turn"], None, 0
         first_init: dict | None = None
+        voided: dict | None = None
         outcomes = (arm_dir / "outcomes.jsonl").open("a")
         while True:
             log = QuestionLog(question_id=str(turn["instance_id"]), index=index)
@@ -569,6 +707,15 @@ def run_cell(cell: CellSpec) -> Path:
                 f"turns={log.turns} s={log.seconds} faults={len(log.faults)}",
                 flush=True,
             )
+            if log.harness_faults:
+                # Memory carries across a run's questions, so a surviving harness fault voids the whole
+                # run for every arm: nothing after it is worth playing.
+                voided = {
+                    "question_id": log.question_id,
+                    "index": index,
+                    "faults": log.harness_faults,
+                }
+                break
             if result["done"]:
                 break
             # N is upstream's stateless baseline: no feedback crosses a question boundary.
@@ -582,39 +729,13 @@ def run_cell(cell: CellSpec) -> Path:
         if isinstance(actor, ClaudeActor):
             manifest["actor"]["observed"] = record.observed(first_init)
             (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-        evaluation = env.call("evaluate")["result"]
+        # An unfinished cell has no upstream score; the marker keeps the cell from being replayed.
+        evaluation = {"voided": voided} if voided else env.call("evaluate")["result"]
         (arm_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2))
-        print(f"{arm_dir.name} score={evaluation.get('score')}", flush=True)
+        print(
+            f"{arm_dir.name} {'VOIDED' if voided else 'score=' + str(evaluation.get('score'))}",
+            flush=True,
+        )
     finally:
         env.close()
     return arm_dir
-
-
-def main(argv: list[str] | None = None) -> None:
-    """Prove the grader: the oracle must score 1 on every question, the wrong actor 0."""
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--actor", choices=("oracle", "wrong"), required=True)
-    parser.add_argument("--variant", default=None)
-    parser.add_argument("--schedule", default=None)
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--run-index", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=None)
-    args = parser.parse_args(argv)
-    if args.variant is None and args.schedule is None and args.limit is None:
-        args.variant = "multi_group"
-    run_cell(
-        CellSpec(
-            run_dir=RUN_ROOT / "runs" / args.run_id,
-            arm=args.actor,
-            variant=args.variant,
-            schedule=args.schedule,
-            seed=args.seed,
-            run_index=args.run_index,
-            limit=args.limit,
-        )
-    )
-
-
-if __name__ == "__main__":
-    main()

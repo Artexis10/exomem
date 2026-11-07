@@ -54,33 +54,57 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
   the gate. Its report says `"evidence": "instrument"`.
 - **heldout** is a decision run (`--split heldout`). Before its first session it requires the
   family's amendment to be acknowledged, and every held-out input file to match the digest the
-  amendment receipt froze. Either failure is a one-line refusal. Its report says
+  amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
+  Any failure is a one-line refusal. The run refuses any `--model` or `--effort` other than the
+  frozen actor (`claude-sonnet-5-5` at `high`). The report of LAB or planted refuses any judge
+  other than `gpt-6.1-sol` on Codex. Only a run that passes all of this reports
   `"evidence": "decision"`. CL-Bench runs upstream's `default` schedule at seed 42, run indexes
-  1, 2 and 3.
-- **panel** is the release panel. It runs the Exomem arms on a fixed slice: CL-Bench `P` and `E` at
-  run index 0, the LAB dev matters with `WP`, and the planted dev cases with `E`. It is evidence and
-  never a gate. If the actor's CLI version or reported model differs from the previous panel, the
-  control arms (`N`, `F`, `S`, `P`) run too, and the `.md` names the change.
+  1, 2 and 3. Run index 4 is allowed once, as the replacement for one voided run.
+- **panel** is the release panel. It runs from a clean checkout of the release tag `v<version>` and
+  refuses any other checkout. It runs the Exomem arms on a fixed slice of development cases:
+  CL-Bench `P` and `E` on the `multi_group` variant (never the `default` schedule), the LAB dev
+  matters with `WP`, and the planted dev cases with `E`. It is evidence and never a gate. If the
+  actor's CLI version or reported model differs from the previous panel, the control arms (`N`,
+  `F`, `S`, `P`) run too, and the `.md` names the change. The stored files hold numbers, ids and
+  arm codes only.
 
 Every report carries `"label": "internal diagnostic"`.
+
+## Faults
+
+A product failure is scored: a wrong answer, a refusal, a timeout, a missing deliverable. An
+unanswered planted case scores as `stale_trusted` and not `correct`. A LAB matter with no
+deliverable scores 0. A harness fault is the harness failing to run the product. The evidence is a
+CLI crash, an Exomem MCP server that is not `connected`, a lost transcript, a reported model other
+than the requested one, or a credential source other than `none`. Every session's `init` event is
+checked.
+
+1. The run retries a session with a harness fault, with the same inputs, at most twice.
+2. In CL-Bench, a fault that survives voids the whole run index for every arm.
+3. In LAB and planted, a fault that survives strikes the matter or case from every arm.
+4. A held-out report says the decision is void after a second voided CL-Bench run, or after more
+   than 2 struck units.
+
+Every report lists each arm's scheduled, valid, invalid and missing units.
 
 ## Commands
 
 Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -m membench.cli`.
 
 1. Fetch the upstreams once: `membench outcome fetch`. It clones each pinned commit, syncs its
-   environment and downloads the CL-Bench databases. A second run changes nothing. A checkout at
-   another commit is refused, and the message gives the fix.
+   environment, downloads the CL-Bench databases and prints their digests. A second run changes
+   nothing. A checkout at another commit is refused, and the message gives the fix.
 2. Run a suite: `membench outcome run clbench --run-id r1`. Add `--arms E,F`, `--seeds 1,2`,
    `--jobs 2`, `--model`, `--effort` or `--limit 3` as needed. `--limit` plays the first N
    questions, matters or cases and is for dev runs only.
 3. Report it: `membench outcome report clbench --run-id r1`. LAB and planted also judge, with
    `--judge claude` (default) or `--judge codex`. The judge model id is recorded in the report.
-4. Test an installed release instead of this checkout by adding `--product-python PATH` to `run`
-   or `panel`. Each arm manifest records `exomem --version`, the CLI version, the requested and
-   reported model, the tools served and the MCP config digest.
-5. Run the release panel: `membench outcome panel --run-id p1 --version X.Y.Z`. Add `--controls`
-   to run the control arms without an actor change.
+4. The product under test is this checkout. Each arm manifest records `exomem --version`, the
+   checkout's commit, the CLI version, the requested and reported model, the tools served and the
+   MCP config digest.
+5. Check out the release tag `vX.Y.Z` in a clean worktree. Then run the release panel there:
+   `membench outcome panel --run-id p1 --version X.Y.Z`. Add `--controls` to run the control arms
+   without an actor change.
 6. Run a decision: `membench outcome run lab --split heldout --run-id h1`.
 
 A run spends subscription quota. State the cost before starting one.

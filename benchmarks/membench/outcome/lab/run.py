@@ -25,9 +25,8 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
-import time
 import traceback
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import cached_property
@@ -43,24 +42,22 @@ from epistemic.journeys.f27_replay import (
 )
 
 from .. import record
-from ..clbench.run import ClaudeSession, QuestionLog
+from ..clbench.run import QuestionLog, single_turn
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
     PLUGIN_READ_ALLOW,
-    REPO_ROOT,
     SHIPPED_PROMINENCE,
     claude_env,
+    copy_state,
     hook_env,
     lay_instruction_block,
     mcp_server,
-    server_pins,
 )
-from ..workspace import RUN_ROOT, require_pinned_checkout
+from ..workspace import RUN_ROOT, require_pinned_checkout, sha256_of
 from .prepare import CASES, UPSTREAM, slug
 
 SESSION_TIMEOUT_SECONDS = 1800.0
-SERVER_EXIT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -124,14 +121,12 @@ class Lab:
         task_slugs: list[str],
         model: str,
         effort: str,
-        product_python: Path | None = None,
         envelope: AgentEnvelope | None = None,
     ) -> None:
         self.run_dir = run_dir
         self.task_slugs = task_slugs
         self.model = model
         self.effort = effort
-        self.product_python = product_python
         self.envelope = envelope or discover_agent_envelope()
         self.env, self.removed_env = claude_env()
         #: The instruction block of the shipped arms, laid once by ``run_lab``.
@@ -139,7 +134,7 @@ class Lab:
 
     @cached_property
     def product(self) -> dict:
-        return record.product_record(self.run_dir, self.product_python)
+        return record.product_record(self.run_dir)
 
     def protected(self, task_slug: str, arm: str) -> list[Path]:
         """Paths a session must not read: the rubric, every other run, and every other arm's files."""
@@ -154,6 +149,7 @@ class Lab:
             own / "vault",
             own / "exomem-state",
             own / "transcripts",
+            own / "checkpoint",
         ]
 
     def argv(
@@ -199,25 +195,33 @@ class Lab:
         cwd: Path,
         transcript: Path,
         prompt: str,
+        *,
+        exomem: bool,
+        reset: Callable[[int], None],
     ) -> dict:
         """One fresh session, one user turn. Timeouts and exits are recorded as faults, not raised."""
         refuse_unsafe_out_dir(cwd)
         transcript.parent.mkdir(exist_ok=True)
         log = QuestionLog(question_id=name, index=0)
-        session = ClaudeSession(argv, env, cwd, transcript)
-        start = time.monotonic()
-        try:
-            reply = session.send(prompt, log, SESSION_TIMEOUT_SECONDS)
-        finally:
-            log.seconds = round(time.monotonic() - start, 1)
-            session.close()
-        log.turns = 1
-        # No reply means a timeout, or an exit, which ``send`` records as a fault.
-        timed_out = reply is None and not log.faults
+        reply = single_turn(
+            argv,
+            env,
+            cwd,
+            transcript,
+            prompt,
+            log,
+            model=self.model,
+            exomem=exomem,
+            timeout=SESSION_TIMEOUT_SECONDS,
+            reset=reset,
+        )
+        # No reply means a timeout, or an exit that the session recorded as a harness fault.
+        timed_out = reply is None and not log.harness_faults
         if timed_out:
             log.faults.append(f"timeout after {SESSION_TIMEOUT_SECONDS:.0f} s")
         print(
-            f"  {name} s={log.seconds} tools={sum(log.tool_uses.values())} faults={len(log.faults)}",
+            f"  {name} s={log.seconds} tools={sum(log.tool_uses.values())} "
+            f"faults={len(log.faults)} harness={len(log.harness_faults)}",
             flush=True,
         )
         return {
@@ -245,29 +249,6 @@ def count_pages(vault: Path) -> int:
     return sum(1 for _ in vault.rglob("*.md"))
 
 
-def server_alive(arm_dir: Path) -> bool:
-    """Whether any process still serves this arm's state root (its environment names it)."""
-    needle = f"EXOMEM_STATE_ROOT={server_pins(arm_dir)['EXOMEM_STATE_ROOT']}".encode()
-    for env_file in Path("/proc").glob("[0-9]*/environ"):
-        try:
-            if needle in env_file.read_bytes().split(b"\0"):
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def snapshot(source: Path, target: Path) -> None:
-    """Copy a compiled vault and its state once nothing writes to them."""
-    deadline = time.monotonic() + SERVER_EXIT_SECONDS
-    while server_alive(source):
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"an Exomem server still holds {source}; snapshot refused")
-        time.sleep(1)
-    for name in ("vault", "exomem-state"):
-        shutil.copytree(source / name, target / name, symlinks=True)
-
-
 def deliverable_of(work: Path, name: str) -> tuple[str | None, list[str], str | None]:
     """``(text, output files, fault)``. A lone Markdown file under another name is taken, with a fault."""
     out = work / "output"
@@ -293,22 +274,22 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
     if arm in COPIES and not (arm_dir / "exomem-state").exists():
         # Without the snapshot ``mcp_server`` would lay a fresh empty vault and the arm would measure nothing.
         fault = f"no snapshot of {COPIES[arm]}'s vault: {arm} not run"
-        return write_result(lab, case, arm, {}, None, [], [fault])
-    work = arm_dir / "work"
-    lay_work_dir(prepared_task, work, output=True)
+        return write_result(lab, case, arm, {}, None, [], [fault], harness=[fault])
     task_prompt = TASK_PROMPT.format(
         instructions=case["instructions"], deliverable=case["deliverable"]
     )
     protected = lab.protected(task_slug, arm)
     sessions: dict[str, dict] = {}
     faults: list[str] = []
+    #: Faults of the harness itself that no session recorded: the arm did not get the run it was meant to.
+    harness: list[str] = []
 
     mcp_config = arm_dir / "mcp.json"
     if not spec.exomem:
         mcp_config.write_text(json.dumps({"mcpServers": {}}, indent=2))
         allowed = compile_allowed = list(FILE_ALLOWS)
     else:
-        server = mcp_server(arm_dir, lab.product_python)
+        server = mcp_server(arm_dir)
         if spec.graph_off:
             server["env"]["EXOMEM_DISABLE_GRAPH_INDEX"] = "1"
         mcp_config.write_text(json.dumps({"mcpServers": {"exomem": server}}, indent=2))
@@ -319,18 +300,37 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
             compile_allowed = [*FILE_ALLOWS, "mcp__exomem"]
             task_prompt += f"\n\n{MEMORY_SENTENCE}"
 
+    def play(name: str, prompt: str, tools: list[str], work: Path, *, output: bool) -> dict:
+        """One session of this arm. A retry starts from the folder, the vault and the hook state the session began with."""
+        checkpoint = arm_dir / "checkpoint"
+        if spec.exomem:
+            copy_state(arm_dir, checkpoint)
+        hook_home = hook_env(arm_dir, name)["EXOMEM_HOOK_HOME"]
+
+        def reset(number: int) -> None:
+            shutil.rmtree(work, ignore_errors=True)
+            lay_work_dir(prepared_task, work, output=output)
+            if number and spec.exomem:
+                copy_state(checkpoint, arm_dir)
+            if number and spec.shipped:
+                shutil.rmtree(hook_home, ignore_errors=True)
+
+        return lab.play(
+            f"{task_slug}:{arm}:{name}",
+            lab.argv(mcp_config, tools, protected, shipped=spec.shipped),
+            lab.env_for(arm_dir, name, shipped=spec.shipped),
+            work,
+            arm_dir / "transcripts" / f"{name}.jsonl",
+            prompt,
+            exomem=spec.exomem,
+            reset=reset,
+        )
+
     if spec.compiles:
         # The compile session has its own folder: no task, no output folder, nothing to carry over.
-        compile_work = arm_dir / "compile-work"
-        lay_work_dir(prepared_task, compile_work, output=False)
         pages_before = count_pages(arm_dir / "vault")
-        sessions["compile"] = lab.play(
-            f"{task_slug}:{arm}:compile",
-            lab.argv(mcp_config, compile_allowed, protected, shipped=spec.shipped),
-            lab.env_for(arm_dir, "compile", shipped=spec.shipped),
-            compile_work,
-            arm_dir / "transcripts" / "compile.jsonl",
-            COMPILE_PROMPT,
+        sessions["compile"] = play(
+            "compile", COMPILE_PROMPT, compile_allowed, arm_dir / "compile-work", output=False
         )
         compiled = count_pages(arm_dir / "vault") - pages_before
         sessions["compile"]["pages_added"] = compiled
@@ -338,26 +338,24 @@ def run_arm(lab: Lab, case: dict, prepared_task: Path, arm: str, snapshot_to: st
             faults.append("the compile session added no pages to the vault")
         if snapshot_to:
             try:
-                snapshot(arm_dir, lab.run_dir / task_slug / snapshot_to)
+                copy_state(arm_dir, lab.run_dir / task_slug / snapshot_to)
             except Exception as exc:  # noqa: BLE001 - the copying arm is skipped and the fault stays visible
-                faults.append(f"snapshot for {snapshot_to} failed: {exc}")
+                harness.append(f"snapshot for {snapshot_to} failed: {exc}")
 
-    sessions["task"] = lab.play(
-        f"{task_slug}:{arm}:task",
-        lab.argv(mcp_config, allowed, protected, shipped=spec.shipped),
-        lab.env_for(arm_dir, "task", shipped=spec.shipped),
-        work,
-        arm_dir / "transcripts" / "task.jsonl",
-        task_prompt,
-    )
+    work = arm_dir / "work"
+    sessions["task"] = play("task", task_prompt, allowed, work, output=True)
+    shutil.rmtree(arm_dir / "checkpoint", ignore_errors=True)
     text, files, fault = deliverable_of(work, case["deliverable"])
     if fault:
         faults.append(fault)
     if text is not None:
         (arm_dir / "deliverable.md").write_text(text, encoding="utf-8")
+    # A session's harness faults are already among its faults; only the arm's own are added.
+    faults += harness
     for session in sessions.values():
         faults += session["log"]["faults"]
-    return write_result(lab, case, arm, sessions, text, files, faults, mcp_config)
+        harness += session["log"]["harness_faults"]
+    return write_result(lab, case, arm, sessions, text, files, faults, mcp_config, harness=harness)
 
 
 def write_result(
@@ -369,7 +367,10 @@ def write_result(
     files: list[str],
     faults: list[str],
     mcp_config: Path | None = None,
+    *,
+    harness: Sequence[str] = (),
 ) -> dict:
+    """Store one arm's result. ``faults`` is everything that went wrong; ``harness`` is the part that voids the unit."""
     first_init = next((s["log"]["init"] for s in sessions.values() if s["log"]["init"]), None)
     result = {
         "run_id": lab.run_dir.name,
@@ -380,13 +381,14 @@ def write_result(
         "actor": {
             "cli": lab.envelope.version,
             "product": lab.product,
-            "mcp_config_sha256": record.sha256_of(mcp_config) if mcp_config else None,
+            "mcp_config_sha256": sha256_of(mcp_config) if mcp_config else None,
             "observed": record.observed(first_init),
         },
         "deliverable": None if text is None else {"file": "deliverable.md", "chars": len(text)},
         "output_files": files,
         "sessions": sessions,
         "faults": faults,
+        "harness_faults": list(harness),
     }
     arm_dir = lab.run_dir / slug(case["task_id"]) / arm
     arm_dir.mkdir(parents=True, exist_ok=True)
@@ -405,7 +407,8 @@ def run_task(lab: Lab, prepared: Path, task_id: str, arms: list[str]) -> None:
             run_arm(lab, case, prepared_task, arm, copy_to)
         except Exception:  # noqa: BLE001 - one arm's failure must not stop the others
             error = traceback.format_exc()
-            write_result(lab, case, arm, {}, None, [], [f"arm crashed: {error.splitlines()[-1]}"])
+            crash = f"arm crashed: {error.splitlines()[-1]}"
+            write_result(lab, case, arm, {}, None, [], [crash], harness=[crash])
             (lab.run_dir / task_slug / arm / "fault.txt").write_text(error)
             print(f"{task_id} {arm}: FAULT {error.splitlines()[-1]}", flush=True)
 
@@ -413,12 +416,6 @@ def run_task(lab: Lab, prepared: Path, task_id: str, arms: list[str]) -> None:
 # --------------------------------------------------------------------------
 # The run.
 # --------------------------------------------------------------------------
-
-
-def git(*args: str) -> str:
-    return subprocess.run(  # noqa: S603 - fixed argv
-        ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
-    ).stdout.strip()
 
 
 def run_lab(
@@ -430,7 +427,6 @@ def run_lab(
     jobs: int = 1,
     model: str = ACTOR_MODEL,
     effort: str = ACTOR_EFFORT,
-    product_python: Path | None = None,
 ) -> Path:
     """Play ``arms`` over the tasks of a converted tree (``prepared`` is its run id)."""
     require_pinned_checkout("lab")
@@ -450,14 +446,13 @@ def run_lab(
             raise SystemExit(f"--arms: {copier} needs {source}, whose vault it copies")
     arms = [a for a in ARMS if a in arms]
     run_dir.mkdir(parents=True, exist_ok=True)
-    lab = Lab(run_dir, [slug(t) for t in task_ids], model, effort, product_python)
+    lab = Lab(run_dir, [slug(t) for t in task_ids], model, effort)
     shipped_arms = [a for a in arms if SPECS[a].shipped]
     manifest = {
         "run_id": run_dir.name,
         "prepared": prepared,
         "upstream_commit": prepared_manifest["upstream_commit"],
-        "product_revision": git("rev-parse", "HEAD"),
-        "product_dirty": bool(git("status", "--porcelain")),
+        **record.checkout_state(),
         "product": lab.product,
         "cli": lab.envelope.version,
         "model_requested": model,

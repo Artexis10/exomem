@@ -1,24 +1,26 @@
 """The release panel: a small fixed slice of every suite, run once per Exomem release.
 
-The panel is evidence and never a gate. It runs the Exomem arms, writes
-``docs/benchmarks/outcome/<version>.json`` and ``.md``, and compares them, paired by case,
-with the newest earlier version's file. When the actor itself changed since that file (the
-CLI version or the model it reports), a movement may come from the actor and not from Exomem,
-so the control arms run again and the report says which of the two changed.
+The panel is evidence and never a gate. It runs from a clean checkout of the release's tag,
+plays the Exomem arms on development cases only (CL-Bench ``multi_group``, LAB dev matters,
+planted dev cases), writes ``docs/benchmarks/outcome/<version>.json`` and ``.md``, and compares
+them, paired by case, with the newest earlier version's file. When the actor itself changed since
+that file (the CLI version or the model it reports), a movement may come from the actor and not
+from Exomem, so the control arms run again and the report says which of the two changed.
+
+The stored files are public: they hold numbers, ids and arm codes, never a fault string or a
+judge's reason (``projection``).
 """
 
 from __future__ import annotations
 
 import json
-import statistics
 from pathlib import Path
-
-from recall_parity.scoring import percentile_bootstrap_ci
 
 from . import gate, record
 from .command import SUITES, refuse, report_suite, run_suite, runs_dir, summary
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import JudgeSpec
+from .stats import paired_interval
 
 DOCS = REPO_ROOT / "docs" / "benchmarks" / "outcome"
 #: The Exomem arms of the panel, and the controls that explain an actor change.
@@ -34,6 +36,23 @@ MEASURES = {
     },
 }
 SEED = 20261109
+#: What a stored report keeps per suite: numbers, ids and arm codes. Fault strings, judge reasons
+#: and the like stay in the run's own files. ``arms`` keeps these keys of each arm's summary.
+PUBLIC_ARM_KEYS = {
+    "clbench": (
+        "units",
+        "scored_questions",
+        "mean_reward",
+        "accuracy",
+        "mean_queries",
+        "spent",
+        "timeouts",
+        "schema_repairs",
+        "retries",
+    ),
+    "lab": ("units", "tasks_judged", "mean_pass_fraction", "all_pass_tasks", "spent"),
+    "planted": ("units", "cases_judged", "unanswered", "spent"),
+}
 
 
 def version_key(stem: str) -> tuple[int, ...] | None:
@@ -72,20 +91,33 @@ def compare(suite: str, current: dict, previous: dict) -> dict:
         for name, read in MEASURES[suite].items():
             now = {c: read(v[arm]) for c, v in current["cases"].items() if arm in v}
             then = {c: read(v[arm]) for c, v in previous["cases"].items() if arm in v}
-            shared = sorted(set(now) & set(then))
-            diffs = [now[c] - then[c] for c in shared]
-            entry: dict = {"cases": len(shared)}
-            if len(diffs) < 2:
-                entry["verdict"] = "unknown: too few shared cases"
-            else:
-                low, high = percentile_bootstrap_ci(diffs, seed=SEED)
-                entry |= {
-                    "mean_difference": round(statistics.mean(diffs), 4),
-                    "ci95": [round(low, 4), round(high, 4)],
-                    "verdict": "no change" if low <= 0 <= high else "differs",
-                }
-            out[f"{arm} {name}"] = entry
+            diffs = [now[c] - then[c] for c in sorted(set(now) & set(then))]
+            out[f"{arm} {name}"] = paired_interval(diffs, seed=SEED, unit="case")
     return out
+
+
+def projection(suite: str, report: dict) -> dict:
+    """The part of a suite's report that the stored panel keeps: numbers, ids and arm codes."""
+    kept = PUBLIC_ARM_KEYS[suite]
+    cases = {
+        case: {
+            arm: {name: read(v) for name, read in MEASURES[suite].items()}
+            for arm, v in by_arm.items()
+        }
+        for case, by_arm in report["cases"].items()
+    }
+    return {
+        "suite": suite,
+        "run_id": report["run_id"],
+        "arms": {
+            arm: {k: body[k] for k in kept if k in body} for arm, body in report["arms"].items()
+        },
+        "pairs": report["pairs"],
+        "cases": cases,
+        "failed_judgements": len(report.get("failed_judgements") or []),
+        "struck_units": report.get("struck_units") or [],
+        "judge": report.get("judge"),
+    }
 
 
 def run_panel(
@@ -96,25 +128,31 @@ def run_panel(
     jobs: int = 1,
     model: str = ACTOR_MODEL,
     effort: str = ACTOR_EFFORT,
-    product_python: Path | None = None,
     controls: bool = False,
 ) -> list[Path]:
     """Run the panel for ``version`` and write its two files. Returns their paths."""
     if version_key(version) is None:
         raise refuse(f"--version is a dotted release number such as 1.4.0, not {version!r}")
+    checkout = record.checkout_state()
+    if checkout["product_dirty"] or f"v{version}" not in checkout["product_tags"]:
+        raise refuse(
+            f"the panel runs from a clean checkout of the tag v{version}: this checkout is at "
+            f"{checkout['product_revision']} with tags {checkout['product_tags'] or 'none'}"
+            f"{' and has local changes' if checkout['product_dirty'] else ''}"
+        )
     target = DOCS / f"{version}.json"
     if target.exists():
         raise refuse(f"{target} exists; panels are stored once per version")
     previous = previous_panel(version)
     ids = {suite: f"{run_id}-{suite}" for suite in SUITES}
-    play = {"model": model, "effort": effort, "product_python": product_python, "jobs": jobs}
+    play = {"model": model, "effort": effort, "jobs": jobs}
     again = (
         "when the actor differs from the previous panel"
         if previous
         else "only with --controls (no earlier panel)"
     )
     print(
-        f"panel {version}: CL-Bench P,E on the default schedule at run index 0; LAB dev WP; planted dev E. "
+        f"panel {version}: CL-Bench P,E on multi_group; LAB dev WP; planted dev E. "
         f"Control arms run {again}.",
         flush=True,
     )
@@ -135,12 +173,16 @@ def run_panel(
     for suite in SUITES:
         every = [*PANEL[suite], *(CONTROLS[suite] if controls or changed else ())]
         run_ids = lab_runs if suite == "lab" else [ids[suite]]
-        suites[suite] = report_suite(
-            suite, run_ids, None if suite == "clbench" else spec, jobs=jobs, arms=every
+        suites[suite] = projection(
+            suite,
+            report_suite(
+                suite, run_ids, None if suite == "clbench" else spec, jobs=jobs, arms=every
+            ),
         )
     document = gate.stamp(
         {
             "version": version,
+            "checkout": {k: checkout[k] for k in ("product_revision", "product_tags")},
             "run_ids": {**ids, **({"lab_controls": lab_runs[-1]} if len(lab_runs) > 1 else {})},
             "actor": record.run_identity(*(runs_dir() / i for i in [*ids.values(), *lab_runs])),
             "controls": {
@@ -164,7 +206,7 @@ def run_panel(
                 },
             },
         },
-        "panel",
+        {"split": "panel"},
     )
     DOCS.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(document, indent=2))
@@ -221,10 +263,9 @@ def render(document: dict) -> str:
         ]
     for suite, report in document["suites"].items():
         lines += [f"## {suite}", ""]
-        failed = report.get("failed_judgements") or []
-        if failed:
+        if report["failed_judgements"]:
             lines += [
-                f"{len(failed)} judgement(s) failed and are missing from the figures below.",
+                f"{report['failed_judgements']} judgement(s) failed and are missing from the figures below.",
                 "",
             ]
         lines += table(suite, report) + [""]
@@ -233,14 +274,14 @@ def render(document: dict) -> str:
         lines += [f"## Against {document['vs_previous']['version']}", ""]
         for suite, arms in document["vs_previous"]["suites"].items():
             for label, entry in arms.items():
-                if entry.get("mean_difference") is None:
+                if entry["mean_difference"] is None:
                     lines.append(
-                        f"- {suite} {label}: {entry['verdict']} ({entry['cases']} shared cases)"
+                        f"- {suite} {label}: {entry['verdict']} ({entry['paired_cases']} shared cases)"
                     )
                 else:
                     lines.append(
                         f"- {suite} {label}: {entry['mean_difference']:+} "
-                        f"(95% CI {entry['ci95'][0]} to {entry['ci95'][1]}, {entry['cases']} shared cases) {entry['verdict']}"
+                        f"(95% CI {entry['ci95'][0]} to {entry['ci95'][1]}, {entry['paired_cases']} shared cases) {entry['verdict']}"
                     )
         lines.append("")
     return "\n".join(lines)

@@ -5,14 +5,13 @@ a rubric of ``match_criteria``. Its own grader needs paid API keys, so this
 suite plays only the agent side and judges with its own blind judge against the
 same criteria.
 
-``setup`` builds LAB's own environment and pins its parser. ``sample`` draws
-the dev and held-out task ids. ``convert`` turns a task's documents into
+``sample`` draws the dev and held-out task ids. ``convert`` turns a task's documents into
 Markdown text with LAB's own ``parse_doc.py``, and copies the task and rubric
 into a prepared tree that ``run`` and ``judge`` read, so neither touches the
 LAB checkout.
 
-``membench outcome fetch`` runs ``setup``; ``membench outcome run lab`` runs ``convert`` when
-a split has no converted tree yet. The fixed draw is made once, from ``/var/tmp`` with
+``membench outcome fetch`` builds LAB's own environment; ``membench outcome run lab`` runs
+``convert`` when a split has no converted tree yet. The fixed draw is made once, from ``/var/tmp`` with
 ``PYTHONPATH=benchmarks:src``::
 
     python -m membench.outcome.lab.prepare sample
@@ -21,7 +20,6 @@ a split has no converted tree yet. The fixed draw is made once, from ``/var/tmp`
 from __future__ import annotations
 
 import argparse
-import hashlib
 import inspect
 import json
 import random
@@ -32,7 +30,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from ..workspace import RUN_ROOT, pin, require_pinned_checkout
+from ..workspace import RUN_ROOT, head_of, pin, require_pinned_checkout, sha256_of
 
 UPSTREAM = pin("lab").checkout()
 UPSTREAM_COMMIT = pin("lab").commit
@@ -110,10 +108,6 @@ def draw(eligible: dict[str, list[str]], rng: random.Random) -> tuple[list[str],
     return picks[:DEV_SIZE], picks[DEV_SIZE:]
 
 
-def sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def sample() -> None:
     CASES.mkdir(parents=True, exist_ok=True)
     targets = {name: CASES / f"{name}.json" for name in ("dev", "heldout")}
@@ -160,24 +154,6 @@ share no area.
 """
     (CASES / "README.md").write_text(readme)
     print(f"dev={len(dev)} heldout={len(heldout)} areas={len(eligible)} -> {CASES}")
-
-
-# --------------------------------------------------------------------------
-# LAB's own environment.
-# --------------------------------------------------------------------------
-
-
-def setup(root: Path = RUN_ROOT) -> None:
-    """LAB's venv from its own lock file, and the pandoc release its sandbox image pins."""
-    checkout = require_pinned_checkout("lab", root)
-    subprocess.run(  # noqa: S603 - fixed argv
-        ["uv", "sync", "--frozen", "--no-dev", "--project", str(checkout)], check=True
-    )
-    pandoc_prefix = root / "tools" / "pandoc"
-    if not (pandoc_prefix / "bin" / "pandoc").exists():
-        # LAB's installer checks the download against the release's published SHA-256.
-        installer = checkout / "lab_core" / "sandbox" / "install_pandoc.sh"
-        subprocess.run(["sh", str(installer), str(pandoc_prefix)], check=True)  # noqa: S603
 
 
 # --------------------------------------------------------------------------
@@ -262,11 +238,13 @@ def convert(run_id: str, task_ids: list[str]) -> Path:
     prepared = RUN_ROOT / "runs" / run_id
     if prepared.exists():
         raise SystemExit(f"{prepared} exists; choose a new --run-id")
+    # The documents come from this checkout: record the commit it is at, after it is checked against the pin.
+    observed = head_of(require_pinned_checkout("lab"))
     scratch = prepared / "parser-scratch"
     scratch.mkdir(parents=True)
     manifest = {
         "run_id": run_id,
-        "upstream_commit": UPSTREAM_COMMIT,
+        "upstream_commit": observed,
         "parser": str(PARSE_DOC.relative_to(UPSTREAM)),
         "pandoc": subprocess.run(  # noqa: S603 - fixed argv
             [str(PANDOC_PREFIX / "bin" / "pandoc"), "--version"], capture_output=True, text=True
@@ -321,16 +299,13 @@ def task_ids_from(cases: str | None, tasks: str | None) -> list[str]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("setup", help="build LAB's venv and install its pinned pandoc")
     sub.add_parser("sample", help="draw the dev and held-out task ids")
     p_convert = sub.add_parser("convert", help="convert the documents of selected tasks")
     p_convert.add_argument("--run-id", required=True)
     p_convert.add_argument("--cases", help="`dev`, `heldout` or a path to a JSON list of task ids")
     p_convert.add_argument("--tasks", help="comma-separated task ids, instead of --cases")
     args = parser.parse_args(argv)
-    if args.cmd == "setup":
-        setup()
-    elif args.cmd == "sample":
+    if args.cmd == "sample":
         sample()
     else:
         if not (args.cases or args.tasks):

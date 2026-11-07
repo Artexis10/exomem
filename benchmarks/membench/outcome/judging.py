@@ -27,6 +27,9 @@ from .isolation import claude_env
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 #: The Codex judge's reasoning effort. The Claude judge takes the CLI default, as before.
 DEFAULT_EFFORT = {"claude": None, "codex": "high"}
+#: The judge a decision needs: another model family than the actor, on the Codex subscription.
+#: A held-out report judged by anything else never reads as decision evidence.
+DECISION_JUDGE = ("codex", DEFAULT_MODELS["codex"])
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,9 @@ class JudgeSpec:
         return {"backend": self.backend, "model": self.model, "effort": self.effort}
 
 
+_STDIN_PROMPT = "<prompt on stdin>"
+
+
 @dataclass
 class Judgement:
     verdict: dict | None
@@ -76,20 +82,24 @@ class Judge:
         self.schema_file = work / "verdict-schema.json"
         self.env = claude_env()[0]
 
-    def argv(self, prompt: str, schema: dict, out: Path) -> list[str]:
+    def argv(self, schema: dict, out: Path) -> list[str]:
+        """The judge's command. Both backends read the prompt from stdin: a matter's deliverable can
+        outgrow one argv string, and an argv is readable by every process on the machine."""
         spec = self.spec
         if spec.backend == "claude":
             executable = spec.executable or str(discover_agent_envelope().executable)
-            return claude_argv(
+            argv = claude_argv(
                 executable=executable,
                 model=spec.model,
                 effort=spec.effort,
                 schema=schema,
-                prompt=prompt,
+                prompt=_STDIN_PROMPT,
                 mcp_config=self.empty_mcp,
             )
+            # ``claude -p`` with no prompt argument reads its prompt from stdin.
+            argv.remove(_STDIN_PROMPT)
+            return argv
         self.schema_file.write_text(json.dumps(schema, indent=2))
-        # The prompt goes in on stdin ("-"): a matter's deliverable can outgrow one argv string.
         argv = codex_argv(
             model=spec.model,
             effort=spec.effort or "",
@@ -101,13 +111,15 @@ class Judge:
         return [spec.executable, *argv[1:]] if spec.executable else argv
 
     def call(self, prompt: str, schema: dict, *, out: Path, timeout: float) -> Judgement:
-        argv = self.argv(prompt, schema, out)
+        argv = self.argv(schema, out)
         codex = self.spec.backend == "codex"
+        # Codex writes its verdict to ``out``. A file left by an earlier call would otherwise read
+        # as this call's verdict whenever the CLI wrote nothing.
+        out.unlink(missing_ok=True)
         try:
             proc = subprocess.run(  # noqa: S603 - argv from the shared judge builders
                 argv,
-                input=prompt if codex else None,
-                stdin=None if codex else subprocess.DEVNULL,
+                input=prompt,
                 cwd=self.cwd,
                 env=self.env,
                 capture_output=True,
@@ -117,6 +129,8 @@ class Judge:
         except subprocess.TimeoutExpired:
             return Judgement(None, 0.0, [], f"timeout after {timeout} s")
         tail = f"{proc.stdout[-200:]} {proc.stderr[-200:]}"
+        if proc.returncode != 0:
+            return Judgement(None, 0.0, [], f"judge exited with {proc.returncode}: {tail}")
         if codex:
             try:
                 _refuse_tool_use(proc.stdout)
@@ -143,15 +157,22 @@ def grade_item(
     schema: dict,
     *,
     out_dir: Path,
+    pass_name: str,
     timeout: float,
     problem: Callable[[dict], str | None],
     attempts: int = 3,
 ) -> dict:
-    """One item's verdict row: retry until the verdict has the schema's shape and ``problem`` finds nothing wrong."""
+    """One item's verdict row: retry until the verdict has the schema's shape and ``problem`` finds nothing wrong.
+
+    ``pass_name`` ("verdicts" or "rejudge") keeps the first judgement's output file apart from the second's.
+    """
     cost, errors, reported = 0.0, [], []
     for attempt in range(attempts):
         call = judge.call(
-            prompt, schema, out=out_dir / f"{item_id}-{attempt}.codex-out.json", timeout=timeout
+            prompt,
+            schema,
+            out=out_dir / f"{item_id}.{pass_name}.{attempt}.codex-out.json",
+            timeout=timeout,
         )
         cost += call.cost_usd
         reported = call.model_reported or reported
@@ -178,11 +199,16 @@ def grade_item(
     }
 
 
+def read_rows(path: Path) -> list[dict]:
+    """The rows of a JSON-lines file; a file that does not exist yet has none."""
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
 def judge_all(
     judge_dir: Path,
     spec: JudgeSpec,
     items: list[dict],
-    grade: Callable[[dict, Judge], dict],
+    grade: Callable[[dict, Judge, str], dict],
     *,
     rejudge_fraction: float,
     jobs: int,
@@ -202,12 +228,10 @@ def judge_all(
     judge = Judge(spec, judge_dir)
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)
-    work = [(i, "verdicts.jsonl") for i in items] + [(i, "rejudge.jsonl") for i in rejudge]
+    work = [(i, "verdicts") for i in items] + [(i, "rejudge") for i in rejudge]
     done = {
-        name: {json.loads(line)["id"] for line in (judge_dir / name).read_text().splitlines()}
-        if (judge_dir / name).exists()
-        else set()
-        for name in ("verdicts.jsonl", "rejudge.jsonl")
+        name: {row["id"] for row in read_rows(judge_dir / f"{name}.jsonl")}
+        for name in ("verdicts", "rejudge")
     }
     lock = threading.Lock()
 
@@ -215,8 +239,8 @@ def judge_all(
         item, name = job
         if item["id"] in done[name]:
             return
-        row = grade(item, judge)
-        with lock, (judge_dir / name).open("a") as fh:
+        row = grade(item, judge, name)
+        with lock, (judge_dir / f"{name}.jsonl").open("a") as fh:
             fh.write(json.dumps(row) + "\n")
         print(item["id"], name, "ok" if row["verdict"] else "FAILED", flush=True)
 

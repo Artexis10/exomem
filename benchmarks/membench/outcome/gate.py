@@ -3,18 +3,19 @@
 A held-out run is a comparative, decision-bearing run. Before its first session it
 needs two things: the family's amendment acknowledged, and every held-out input file
 equal to the digest the amendment receipt froze. A dev run needs neither and says so.
+Only a gated held-out run by the frozen actor and judge is stamped as decision evidence.
 """
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from epistemic.amendments import require_family_released
 from protocol.contracts import ContractIdentityError, working_amendment_receipts
 
-from .isolation import REPO_ROOT
-from .workspace import RUN_ROOT
+from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
+from .judging import DECISION_JUDGE
+from .workspace import RUN_ROOT, sha256_of
 
 #: The pre-registered family each suite is filed under.
 FAMILIES = {"clbench": "f35", "lab": "f36", "planted": "f37"}
@@ -24,11 +25,21 @@ PREFIXES = {
     "lab": "cases/lab/",
     "planted": "cases/planted/",
 }
-#: The input a decision cannot run without, per suite. The receipt must freeze each of them.
+#: CL-Bench's two databases come from a dataset without a revision pin: the receipt's digests freeze them.
+CLBENCH_DATABASES = (
+    "upstream/clbench/data/database_exploration/products.db",
+    "upstream/clbench/data/database_exploration/products_drifted.db",
+)
+#: The inputs a decision cannot run without, per suite: every file the amendment freezes. The
+#: receipt must freeze each of them, and a held-out run checks each against its digest.
 REQUIRED = {
-    "clbench": ("upstream/clbench/data/database_exploration/questions.json",),
+    "clbench": (
+        "upstream/clbench/data/database_exploration/questions.json",
+        "upstream/clbench/data/database_exploration/questions_post_drift.json",
+        *CLBENCH_DATABASES,
+    ),
     "lab": ("cases/lab/heldout.json",),
-    "planted": ("cases/planted/heldout.jsonl",),
+    "planted": ("cases/planted/heldout.jsonl", "cases/planted/distractors.jsonl"),
 }
 LABEL = "internal diagnostic"
 
@@ -59,14 +70,6 @@ def frozen_digests(suite: str, repo_root: Path = REPO_ROOT) -> dict[str, str]:
     return frozen
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def heldout_gate(
     suite: str, root: Path = RUN_ROOT, repo_root: Path = REPO_ROOT
 ) -> dict[str, object]:
@@ -81,7 +84,7 @@ def heldout_gate(
         path = root / relative
         if not path.is_file():
             raise HeldoutGateError(f"{path} is missing; the receipt freezes digest {expected}")
-        actual = sha256_file(path)
+        actual = sha256_of(path)
         if actual != expected:
             raise HeldoutGateError(
                 f"{path} differs from the receipt: expected {expected}, found {actual}"
@@ -90,11 +93,29 @@ def heldout_gate(
     return {"family": FAMILIES[suite], "verified_sha256": verified}
 
 
-def stamp(report: dict, split: str) -> dict:
-    """Every report says what it is: an internal diagnostic, and instrument or decision evidence."""
+def evidence_of(report: dict, stored: dict) -> str:
+    """What a report is worth, from what the run recorded: ``instrument``, ``void`` or ``decision``.
+
+    A decision report is a gated held-out run whose actor and judge are the frozen ones and whose
+    decision no harness fault voided. Anything else is instrument evidence, whatever the split says.
+    """
+    if stored["split"] != "heldout" or not stored.get("gate"):
+        return "instrument"
+    if (stored["model"], stored["effort"]) != (ACTOR_MODEL, ACTOR_EFFORT):
+        return "instrument"
+    if report["actor"]["model_reported"] != [ACTOR_MODEL]:
+        return "instrument"
+    judge = report.get("judge")
+    if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
+        return "instrument"
+    return "void" if report.get("decision", {}).get("status") == "void" else "decision"
+
+
+def stamp(report: dict, stored: dict) -> dict:
+    """Every report says what it is: an internal diagnostic, and instrument, void or decision evidence."""
     return {
         "label": LABEL,
-        "evidence": "decision" if split == "heldout" else "instrument",
-        "split": split,
+        "evidence": evidence_of(report, stored),
+        "split": stored["split"],
         **report,
     }

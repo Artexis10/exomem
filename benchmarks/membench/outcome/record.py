@@ -2,36 +2,45 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
-from .isolation import product_python_of, product_version
+from .isolation import REPO_ROOT, product_version
 
 
-def sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def checkout_state(repo: Path = REPO_ROOT) -> dict:
+    """The product checkout under test: its commit, the tags on that commit, and whether it has changes."""
 
+    def git(*args: str) -> str:
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            ["git", "-C", str(repo), *args], capture_output=True, text=True
+        )
+        return done.stdout.strip()
 
-def product_record(root: Path, product_python: Path | None) -> dict:
-    """The Exomem under test: the interpreter that serves it and the version it reports."""
     return {
-        "python": product_python_of(product_python),
-        "exomem_version": product_version(root, product_python),
-        "source": "installed interpreter" if product_python is not None else "this checkout",
+        "product_revision": git("rev-parse", "HEAD"),
+        "product_tags": git("tag", "--points-at", "HEAD").split(),
+        "product_dirty": bool(git("status", "--porcelain")),
     }
 
 
-def actor_record(
-    *, cli: str, model: str, effort: str, mcp_config: Path, root: Path, product_python: Path | None
-) -> dict:
-    """The requested half of the actor record; ``observed`` adds what the CLI reported."""
+def product_record(root: Path) -> dict:
+    """The Exomem under test: the interpreter that serves it and the version it reports."""
+    return {"python": sys.executable, "exomem_version": product_version(root)}
+
+
+def actor_record(*, cli: str, model: str, effort: str, root: Path) -> dict:
+    """The requested half of the actor record; ``observed`` adds what the CLI reported.
+
+    The caller adds ``mcp_config_sha256``: each arm, and each f37 case, has its own configuration.
+    """
     return {
         "cli": cli,
         "model_requested": model,
         "effort": effort,
-        "mcp_config_sha256": sha256_of(mcp_config),
-        "product": product_record(root, product_python),
+        "product": product_record(root),
     }
 
 

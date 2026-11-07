@@ -7,6 +7,10 @@ arm, and requires a structured verdict that covers every criterion. ``score``
 joins the verdicts to the arm key and reports each arm's pass fraction per task,
 the paired differences with a bootstrap interval over tasks, and cost.
 
+A matter with no deliverable scores 0 for that arm: a product failure is scored. A matter where any
+arm met a harness fault (``faults``) is struck from every arm, and more than ``STRIKE_LIMIT`` struck
+matters void the decision. Every arm's report lists its scheduled, valid, invalid and missing matters.
+
 ``membench outcome report lab`` drives this module.
 """
 
@@ -18,16 +22,15 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-from recall_parity.scoring import percentile_bootstrap_ci
-
-from ..judging import Judge, JudgeSpec, grade_item, judge_all
+from ..faults import STRIKE_LIMIT, books
+from ..judging import Judge, JudgeSpec, grade_item, judge_all, read_rows
+from ..stats import paired_interval, usage_totals
 from ..workspace import RUN_ROOT
 from .prepare import slug
 from .run import ARMS
 
 SEED = 20261108
 JUDGE_TIMEOUT_SECONDS = 1200
-MIN_PAIRED_TASKS = 2
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -66,9 +69,14 @@ def run_path(name: str) -> Path:
 # --------------------------------------------------------------------------
 
 
+def struck_tasks(sessions: list[dict]) -> set[str]:
+    """Matters where any arm met a harness fault: they are struck from every arm."""
+    return {e["task_id"] for e in sessions if e["state"] == "harness_fault"}
+
+
 def items(judge_run: Path, run_ids: list[str], arms: list[str]) -> None:
     """Pool the deliverables under ``judge_run``. Pooling twice from an unchanged run is a no-op."""
-    pool, sessions = [], []
+    rows = []
     for run_id in run_ids:
         manifest = json.loads((run_path(run_id) / "manifest.json").read_text())
         for task_id in manifest["tasks"]:
@@ -77,31 +85,41 @@ def items(judge_run: Path, run_ids: list[str], arms: list[str]) -> None:
             )
             for arm in (a for a in arms if a in manifest["arms"]):
                 arm_dir = run_path(run_id) / slug(task_id) / arm
+                entry = {"run": run_id, "task_id": task_id, "arm": arm, "item": None}
                 result_file = arm_dir / "result.json"
                 if not result_file.exists():
-                    sessions.append({"run": run_id, "task_id": task_id, "arm": arm, "item": None})
+                    rows.append({"entry": {**entry, "state": "missing"}})
                     continue
                 result = json.loads(result_file.read_text())
-                entry = {"run": run_id, "task_id": task_id, "arm": arm, "item": None}
                 entry["faults"] = result["faults"]
-                if result["deliverable"] is None:
-                    sessions.append(entry)
-                    continue
-                pool.append(
-                    {
-                        "entry": entry,
-                        "instructions": case["instructions"],
-                        "criteria": case["criteria"],
-                        "deliverable": (arm_dir / "deliverable.md").read_text(),
-                    }
-                )
+                if result["harness_faults"]:
+                    entry |= {"state": "harness_fault", "harness_faults": result["harness_faults"]}
+                    rows.append({"entry": entry})
+                elif result["deliverable"] is None:
+                    rows.append({"entry": {**entry, "state": "no_deliverable"}})
+                else:
+                    rows.append(
+                        {
+                            "entry": {**entry, "state": "delivered"},
+                            "instructions": case["instructions"],
+                            "criteria": case["criteria"],
+                            "deliverable": (arm_dir / "deliverable.md").read_text(),
+                        }
+                    )
+    struck = struck_tasks([r["entry"] for r in rows])
+    # A struck matter counts for no arm, so its deliverables are not worth a judge call.
+    pool = [
+        r
+        for r in rows
+        if r["entry"]["state"] == "delivered" and r["entry"]["task_id"] not in struck
+    ]
     random.Random(SEED).shuffle(pool)
     lines = []
     for i, row in enumerate(pool):
         row["entry"]["item"] = f"it-{i:04d}"
-        sessions.append(row["entry"])
         item = {key: row[key] for key in ("instructions", "criteria", "deliverable")}
         lines.append(json.dumps({"id": row["entry"]["item"], **item}) + "\n")
+    sessions = [r["entry"] for r in rows]
     items_file = judge_run / "judge" / "items.jsonl"
     if items_file.exists():
         if items_file.read_text() != "".join(lines):
@@ -114,8 +132,7 @@ def items(judge_run: Path, run_ids: list[str], arms: list[str]) -> None:
     items_file.write_text("".join(lines))
     # The arm key lives apart from the items; judge processes never receive it.
     (judge_run / "unblinding" / "sessions.json").write_text(json.dumps(sessions, indent=2))
-    missing = [s for s in sessions if s["item"] is None]
-    print(f"{len(pool)} items, {len(missing)} sessions without a deliverable", flush=True)
+    print(f"{len(pool)} items, {len(struck)} struck matters", flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -148,13 +165,14 @@ def judge(judge_run: Path, spec: JudgeSpec, rejudge_fraction: float, jobs: int) 
     judge_dir = judge_run / "judge"
     items_in = [json.loads(line) for line in (judge_dir / "items.jsonl").read_text().splitlines()]
 
-    def grade(item: dict, judge: Judge) -> dict:
+    def grade(item: dict, judge: Judge, pass_name: str) -> dict:
         return grade_item(
             judge,
             item["id"],
             build_prompt(item),
             VERDICT_SCHEMA,
             out_dir=judge_dir,
+            pass_name=pass_name,
             timeout=JUDGE_TIMEOUT_SECONDS,
             problem=lambda verdict: coverage_error(item, verdict),
         )
@@ -169,66 +187,60 @@ def judge(judge_run: Path, spec: JudgeSpec, rejudge_fraction: float, jobs: int) 
 # --------------------------------------------------------------------------
 
 
-def read_rows(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-
-
 def passed_fraction(verdict: dict) -> tuple[int, int]:
     flags = [c["pass"] for c in verdict["criteria"]]
     return sum(flags), len(flags)
 
 
-def session_cost(entry: dict) -> dict[str, dict]:
-    """Seconds, tokens and notional cost of each session an arm used, from the run's own record."""
-    result = json.loads(
-        (run_path(entry["run"]) / slug(entry["task_id"]) / entry["arm"] / "result.json").read_text()
-    )
-    return {
-        name: {
-            "seconds": s["log"]["seconds"],
-            "notional_usd": s["log"]["notional_cost_usd"],
-            "tokens": s["log"]["usage"],
-        }
-        for name, s in result["sessions"].items()
-    }
-
-
-def add_tokens(total: dict[str, int], more: dict[str, int]) -> None:
-    for key, value in more.items():
-        total[key] = total.get(key, 0) + value
+def session_logs(entries: list[dict]) -> dict[str, list[dict]]:
+    """The logs of every session the arm's entries ran, by session name, from each run's own record."""
+    logs: dict[str, list[dict]] = defaultdict(list)
+    for entry in entries:
+        result_file = run_path(entry["run"]) / slug(entry["task_id"]) / entry["arm"] / "result.json"
+        if entry["state"] != "missing":
+            for name, session in json.loads(result_file.read_text())["sessions"].items():
+                logs[name].append(session["log"])
+    return logs
 
 
 def difference(by_task: dict[str, dict], a: str, b: str, measure: str) -> dict:
     tasks = sorted(t for t, arms in by_task.items() if a in arms and b in arms)
-    diffs = [by_task[t][a][measure] - by_task[t][b][measure] for t in tasks]
-    out: dict = {
-        "tasks": len(tasks),
+    return {
         f"mean_{a}": round(statistics.mean(by_task[t][a][measure] for t in tasks), 4)
         if tasks
         else None,
         f"mean_{b}": round(statistics.mean(by_task[t][b][measure] for t in tasks), 4)
         if tasks
         else None,
+        **paired_interval(
+            [by_task[t][a][measure] - by_task[t][b][measure] for t in tasks], seed=SEED, unit="task"
+        ),
     }
-    if len(tasks) < MIN_PAIRED_TASKS:
+
+
+def decision(pairs: dict, struck: set[str]) -> dict:
+    """PREREGISTRATION §7: WP beats S when the lower bound of the per-matter WP-S difference is above 0."""
+    if len(struck) > STRIKE_LIMIT:
         return {
-            **out,
-            "mean_difference": None,
-            "ci95": None,
-            "verdict": "unknown: too few paired tasks",
+            "status": "void",
+            "why": f"{len(struck)} matters are struck by harness faults: {sorted(struck)}",
         }
-    low, high = percentile_bootstrap_ci(diffs, seed=SEED)
+    verdict = pairs.get("WP-S", {}).get("pass_fraction", {}).get("verdict")
     return {
-        **out,
-        "mean_difference": round(statistics.mean(diffs), 4),
-        "ci95": [round(low, 4), round(high, 4)],
-        "verdict": "no change" if low <= 0 <= high else "differs",
+        "status": "complete",
+        "wp_beats_s": {
+            "rule": "lower bound of the per-matter WP-S pass fraction difference above 0",
+            "result": None
+            if verdict is None or verdict.startswith("insufficient")
+            else verdict == "better",
+        },
     }
 
 
-def score(judge_run: Path, pairs: list[tuple[str, str]]) -> dict:
+def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = False) -> dict:
     sessions = json.loads((judge_run / "unblinding" / "sessions.json").read_text())
     by_item = {s["item"]: s for s in sessions if s["item"]}
+    struck = struck_tasks(sessions)
     rows = read_rows(judge_run / "judge" / "verdicts.jsonl")
     failed = [r["id"] for r in rows if r["verdict"] is None]
     # Per task and arm, the mean over runs of the pass fraction and of the all-pass flag.
@@ -240,6 +252,10 @@ def score(judge_run: Path, pairs: list[tuple[str, str]]) -> dict:
             continue
         entry, (ok, total) = by_item[row["id"]], passed_fraction(row["verdict"])
         repeats[entry["task_id"]][entry["arm"]].append((ok / total, float(ok == total)))
+    for entry in sessions:
+        if entry["state"] == "no_deliverable" and entry["task_id"] not in struck:
+            # A product failure is scored: a matter without a deliverable fails every criterion.
+            repeats[entry["task_id"]][entry["arm"]].append((0.0, 0.0))
     by_task = {
         task: {
             arm: {
@@ -258,46 +274,36 @@ def score(judge_run: Path, pairs: list[tuple[str, str]]) -> dict:
             {m for r in rows for m in r.get("judge_model_reported") or []}
         ),
         "failed_judgements": failed,
+        "struck_units": sorted(struck),
         "arms": {},
         "pairs": {},
         "cases": by_task,
     }
     for arm in arms_seen:
         mine = [s for s in sessions if s["arm"] == arm]
+        scheduled = {s["task_id"] for s in mine}
         judged = [t for t, a in by_task.items() if arm in a]
-        cost: dict[str, dict] = {}
-        for entry in mine:
-            if not (run_path(entry["run"]) / slug(entry["task_id"]) / arm / "result.json").exists():
-                continue
-            for name, spent in session_cost(entry).items():
-                bucket = cost.setdefault(
-                    name, {"sessions": 0, "seconds": 0.0, "notional_usd": 0.0, "tokens": {}}
-                )
-                bucket["sessions"] += 1
-                bucket["seconds"] = round(bucket["seconds"] + spent["seconds"], 1)
-                bucket["notional_usd"] = round(bucket["notional_usd"] + spent["notional_usd"], 4)
-                add_tokens(bucket["tokens"], spent["tokens"])
+        logs = session_logs(mine)
         report["arms"][arm] = {
-            "sessions": len(mine),
+            # Matters of this arm: valid (scored), invalid (struck by any arm's harness fault) or missing.
+            "units": books(len(scheduled), set(judged), scheduled & struck),
             "tasks_judged": len(judged),
-            "without_deliverable": [
-                {"run": s["run"], "task_id": s["task_id"], "faults": s.get("faults")}
-                for s in mine
-                if s["item"] is None
-            ],
+            "no_deliverable": sorted(s["task_id"] for s in mine if s["state"] == "no_deliverable"),
             "mean_pass_fraction": round(
                 statistics.mean(by_task[t][arm]["pass_fraction"] for t in judged), 4
             )
             if judged
             else None,
             "all_pass_tasks": f"{sum(by_task[t][arm]['all_pass'] == 1.0 for t in judged)}/{len(judged)}",
-            # WG reuses W's compile session and snapshot: its own cost is the task session alone.
-            "cost": cost,
+            "spent": usage_totals(log for name_logs in logs.values() for log in name_logs),
+            "spent_by_session": {name: usage_totals(named) for name, named in logs.items()},
         }
     for a, b in pairs:
         report["pairs"][f"{a}-{b}"] = {
             measure: difference(by_task, a, b, measure) for measure in ("pass_fraction", "all_pass")
         }
+    if heldout:
+        report["decision"] = decision(report["pairs"], struck)
     report["judge_noise"] = judge_noise(judge_run, rows)
     (judge_run / "score.json").write_text(json.dumps(report, indent=2))
     return report

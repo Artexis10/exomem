@@ -1,19 +1,24 @@
 """The outcome evaluation harness measures what it says it measures.
 
-Three failures a green run would not reveal: an actor that reaches the live vault, a judge
-that can tell which arm wrote an answer, and a scorer that disagrees with the upstream key.
+Failures a green run would not reveal: an actor that reaches the live vault, a judge that can
+tell which arm wrote an answer, a scorer that disagrees with the upstream key, a judge verdict
+that is really a stale file, a report that counts a faulted run, and an arm that gains by not
+answering.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import stat
 from pathlib import Path
 
 import pytest
 from epistemic.journeys.f27_replay import PLUGIN_DIR, AgentEnvelope
-from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, run_cell
+from membench.outcome.clbench import report as clbench_report
+from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, QuestionLog, run_cell
 from membench.outcome.clbench.run import UPSTREAM as CLBENCH_UPSTREAM
+from membench.outcome.faults import init_faults
 from membench.outcome.isolation import child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
 from membench.outcome.lab import judge as lab_judge
@@ -21,8 +26,10 @@ from membench.outcome.lab import run as lab_run
 from membench.outcome.lab.prepare import CASES, slug
 from membench.outcome.lab.prepare import UPSTREAM as LAB_UPSTREAM
 from membench.outcome.lab.run import FILE_ALLOWS, SHIPPED_ALLOWS, Lab
+from membench.outcome.planted import build as planted_build
 from membench.outcome.planted import judge as planted_judge
 from membench.outcome.planted.answer import answer_actor
+from membench.outcome.stats import paired_interval
 from membench.outcome.workspace import head_of, pin
 
 # What the operator's real service and vault would put in the environment of a shell that runs the harness.
@@ -92,7 +99,7 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
         None,
     )
     answer_dir = tmp_path / "planted-E"
-    argv, env, mcp_config = answer_actor(answer_dir, "model-under-test", "high", None, ENVELOPE)
+    argv, env, mcp_config = answer_actor(answer_dir, "model-under-test", "high", ENVELOPE)
     server = json.loads(mcp_config.read_text())["mcpServers"]["exomem"]["env"]
     surfaces["planted E"] = (answer_dir, [env], [server], argv, mcp_config)
     pins = tmp_path / "pins"
@@ -102,7 +109,7 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
         tmp_path / "judge",
         [judge.env],
         [],
-        judge.argv("prompt", {}, tmp_path / "out"),
+        judge.argv({}, tmp_path / "out"),
         None,
     )
 
@@ -144,8 +151,8 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
         argv = surfaces[name][3]
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
         disallowed = argv[argv.index("--disallowedTools") + 1].split(",")
-        reads = [rule for rule in allowed if rule.startswith("Read(")]
-        assert reads == ["Read(./**)", f"Read(/{PLUGIN_DIR}/**)"], f"{name} reads {reads}"
+        reads = {rule for rule in allowed if rule.startswith("Read(")}
+        assert reads == {"Read(./**)", f"Read(/{PLUGIN_DIR}/**)"}, f"{name} reads {reads}"
         for path in paths:
             assert f"Read(/{path}/**)" in disallowed, f"{name} may read {path}"
 
@@ -175,7 +182,9 @@ def test_judge_input_never_names_the_arm(tmp_path, monkeypatch):
             arm_dir = run / slug(task) / arm
             arm_dir.mkdir(parents=True)
             arm_dir.joinpath("result.json").write_text(
-                json.dumps({"faults": [], "deliverable": {"file": "deliverable.md"}})
+                json.dumps(
+                    {"faults": [], "harness_faults": [], "deliverable": {"file": "deliverable.md"}}
+                )
             )
             arm_dir.joinpath("deliverable.md").write_text(f"The deadline in {task} is 30 days.")
     lab_run = run / "judge-claude"
@@ -196,7 +205,12 @@ def test_judge_input_never_names_the_arm(tmp_path, monkeypatch):
         answers.mkdir(parents=True)
         for case in cases:
             answers.joinpath(f"{case['case_id']}.json").write_text(
-                json.dumps({"answer": f"Use 14 days for {case['case_id']}."})
+                json.dumps(
+                    {
+                        "answer": f"Use 14 days for {case['case_id']}.",
+                        "log": {"harness_faults": []},
+                    }
+                )
             )
     planted_judge.items(cases, planted_run, planted_run / "judge-claude", list(planted_arms))
     seen += [
@@ -240,3 +254,161 @@ def test_clbench_scorer_agrees_with_an_oracle_replay(tmp_path):
         rewards[actor] = [row["outcome"]["reward"] for row in rows]
     assert rewards["oracle"] == [1.0] * 3
     assert rewards["wrong"] == [0.0] * 3
+
+
+# --------------------------------------------------------------------------
+# What a decision rests on.
+# --------------------------------------------------------------------------
+
+
+def stub_cli(path: Path, *, exit_code: int) -> str:
+    """A judge CLI that reads its prompt, writes no verdict file and exits with ``exit_code``."""
+    path.write_text(f"#!/bin/sh\ncat > /dev/null\nexit {exit_code}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return str(path)
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_codex_judge_never_reads_an_old_verdict_file_as_its_own(tmp_path, exit_code):
+    """A verdict file left by an earlier call must not pass as the verdict of a call whose CLI wrote none."""
+    spec = JudgeSpec.of("codex", executable=stub_cli(tmp_path / "codex", exit_code=exit_code))
+    out = tmp_path / "it-0001.verdicts.0.codex-out.json"
+    out.write_text(json.dumps({"stale_trusted": False, "correct": True}))
+    call = Judge(spec, tmp_path / "judge").call("prompt", {}, out=out, timeout=30)
+    assert call.verdict is None and call.error
+
+
+@pytest.mark.parametrize(
+    ("init", "fault"),
+    [
+        ({"model": "claude-other", "apiKeySource": "none"}, "model"),
+        ({"model": "m", "apiKeySource": "ANTHROPIC_API_KEY"}, "credential"),
+        (
+            {
+                "model": "m",
+                "apiKeySource": "none",
+                "mcp_servers": [{"name": "exomem", "status": "failed"}],
+            },
+            "connected",
+        ),
+    ],
+)
+def test_a_session_that_did_not_run_as_configured_is_a_harness_fault(init, fault):
+    """A fallback model, an API key or an Exomem server that never connected must void the unit, not score as a loss."""
+    assert any(fault in text for text in init_faults(init, model="m", exomem=True))
+
+
+def test_fewer_than_two_paired_units_is_never_better():
+    """One paired unit makes a bootstrap interval a single point, which would read as a win."""
+    assert paired_interval([0.5], seed=1, unit="question")["verdict"].startswith("insufficient")
+
+
+def clbench_cell(
+    run_dir: Path, arm: str, run_index: int, rewards: dict[str, float], faulty=()
+) -> None:
+    cell = run_dir / f"{arm}-r{run_index}"
+    cell.mkdir(parents=True)
+    manifest = {"arm": arm, "task": {"run_index": run_index, "instances": len(rewards)}}
+    (cell / "manifest.json").write_text(json.dumps(manifest))
+    rows = []
+    for index, (question, reward) in enumerate(rewards.items()):
+        log = QuestionLog(question_id=question, index=index, turns=1)
+        if question in faulty:
+            log.harness_faults.append("the CLI exited with 1 before it answered")
+        outcome = {"reward": reward, "success": reward > 0, "metadata": {"num_queries": 1}}
+        rows.append(json.dumps({"outcome": outcome, "log": log.__dict__}))
+    (cell / "outcomes.jsonl").write_text("\n".join(rows) + "\n")
+
+
+def test_a_voided_clbench_run_leaves_the_figures_and_run_index_4_replaces_it_once(tmp_path):
+    """A run with a harness fault in any arm must not count, and its replacement is run_index 4 only."""
+    questions = [str(i) for i in range(1, 7)]
+    for run_index in (1, 2, 3):
+        clbench_cell(tmp_path, "N", run_index, dict.fromkeys(questions, 0.0))
+        # Run 2's P cell has a harness fault on one question: the whole run is void for every arm.
+        faulty = ("3",) if run_index == 2 else ()
+        clbench_cell(tmp_path, "P", run_index, dict.fromkeys(questions, 1.0), faulty=faulty)
+
+    built = clbench_report.build(tmp_path, [("P", "N")], scheduled=[1, 2, 3], heldout=True)
+    assert built["runs"]["valid"] == [1, 3] and list(built["runs"]["voided"]) == ["2"]
+    assert built["decision"]["status"].startswith("incomplete")
+    assert [r["run_index"] for r in built["pairs"]["P-N"]["per_run_mean_difference"]] == [1, 3]
+
+    clbench_cell(tmp_path, "N", 4, dict.fromkeys(questions, 0.0))
+    clbench_cell(tmp_path, "P", 4, dict.fromkeys(questions, 1.0))
+    built = clbench_report.build(tmp_path, [("P", "N")], scheduled=[1, 2, 3, 4], heldout=True)
+    assert built["runs"]["replacement"] == {"run_index": 4, "replaces": 2}
+    assert built["runs"]["valid"] == [1, 3, 4] and built["decision"]["status"] == "complete"
+
+
+def planted_answers(run: Path, case_ids: list[str], unanswered: dict[str, set[str]]) -> None:
+    """Answers for arms E and P; ``unanswered[arm]`` are the cases the arm gave no reply to."""
+    for arm in ("E", "P"):
+        answers = run / arm / "answers"
+        answers.mkdir(parents=True)
+        for case_id in case_ids:
+            reply = None if case_id in unanswered.get(arm, ()) else f"Use 14 days for {case_id}."
+            answers.joinpath(f"{case_id}.json").write_text(
+                json.dumps({"answer": reply, "log": QuestionLog(case_id, 0).__dict__})
+            )
+
+
+def test_an_arm_that_answers_nothing_cannot_read_as_protected(tmp_path):
+    """An unanswered case counts as a stale answer, so governance cannot win by leaving the agent silent."""
+    case_ids = [f"c{i}" for i in range(8)]
+    cases = [
+        {"case_id": c, "task": "Plan.", "key": {"correct": "14 days", "stale": "7 days"}}
+        for c in case_ids
+    ]
+    planted_answers(tmp_path / "run", case_ids, unanswered={"E": set(case_ids)})
+    judge_run = tmp_path / "run" / "judge-claude"
+    planted_judge.items(cases, tmp_path / "run", judge_run, ["E", "P"])
+    ids = [
+        json.loads(line)["id"]
+        for line in (judge_run / "judge" / "items.jsonl").read_text().splitlines()
+    ]
+    assert len(ids) == len(case_ids), "only the answered cases go to the judge"
+    verdict = {
+        "value_used": "correct",
+        "stale_trusted": False,
+        "correct": True,
+        "flags_conflict": False,
+        "rationalises": False,
+        "reason": "",
+    }
+    (judge_run / "judge" / "verdicts.jsonl").write_text(
+        "".join(json.dumps({"id": i, "verdict": verdict}) + "\n" for i in ids)
+    )
+    (judge_run / "judge" / "judge.json").write_text(
+        json.dumps({"backend": "codex", "model": "gpt-6.1-sol"})
+    )
+
+    report = planted_judge.score(judge_run, [("E", "P")], heldout=True)
+
+    assert report["arms"]["E"]["unanswered"] == len(case_ids)
+    assert report["pairs"]["E-P"]["stale_trusted"]["mean_difference"] == 1.0
+    assert report["decision"]["governance_protects"]["result"] is False
+
+
+def write_arm(run: Path, arm: str, body: str, *, status: str = "active") -> None:
+    page = "Knowledge Base/Notes/Insights/rule.md"
+    path = run / arm / "built" / "vault" / page
+    path.parent.mkdir(parents=True)
+    path.write_text(f"---\nexomem_id: {arm}-id\nstatus: {status}\n---\n{body}")
+    (run / arm / "authored.json").write_text(json.dumps([page]))
+    governance = {"inserted": "- verdict: refuted\n"} if arm == "E" else None
+    pages = [{"stale_path": page, "correction_path": page, "governance": governance}]
+    (run / arm / "pages.json").write_text(json.dumps(pages))
+
+
+def test_arm_e_may_differ_from_arm_p_only_by_its_own_governance_lines(tmp_path):
+    """If the authored text drifts between arms, the governance is no longer the only difference."""
+    write_arm(tmp_path, "P", "- id: u1\n\nThe rule is 7 days.\n")
+    write_arm(tmp_path, "E", "- id: u1\n- verdict: refuted\n\nThe rule is 7 days.\n")
+    planted_build.require_identical_text(tmp_path)
+
+    shutil_rmtree = __import__("shutil").rmtree
+    shutil_rmtree(tmp_path / "E")
+    write_arm(tmp_path, "E", "- id: u1\n- verdict: refuted\n\nThe rule is 14 days.\n")
+    with pytest.raises(RuntimeError, match="differ beyond the builder's governance"):
+        planted_build.require_identical_text(tmp_path)
