@@ -1,0 +1,13 @@
+{
+  "id": "c10-research",
+  "title": "An open thread of an existing research note is settled",
+  "suite": "session-close",
+  "seed": "c10",
+  "engagement": "balanced",
+  "turns": [
+    "I'm ordering for the balcony herb garden this week. Can you pull up my notes on the planter options?",
+    "Okay. I've decided: I'm buying the cedar box, because it fits the rail and stays cooler. And I'm skipping the drip saucer, since I'll drill drainage holes in the base. The other findings stay as they are.",
+    "That's all for today, thanks."
+  ],
+  "recall_turn": "Which planter and drainage setup should I use for my balcony herb garden, and why?"
+}

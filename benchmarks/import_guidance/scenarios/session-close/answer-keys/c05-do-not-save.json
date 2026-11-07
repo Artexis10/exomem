@@ -1,0 +1,11 @@
+{
+  "reference": "The person shared new working preferences of Tavi Brennock but explicitly asked that nothing be saved anywhere and that the conversation not be recorded. No page should change and no recap or other page should be written.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/People/Tavi Brennock.md",
+    "Entities/People/Corin Haldane.md",
+    "Entities/Organizations/Harbourview Co-op.md"
+  ],
+  "recap": "forbidden",
+  "new_pages": "none"
+}

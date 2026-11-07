@@ -1,0 +1,13 @@
+{
+  "id": "c01-person",
+  "title": "A durable working preference settled for an existing person page",
+  "suite": "session-close",
+  "seed": "c01",
+  "engagement": "balanced",
+  "turns": [
+    "Hi. I've got a 1:1 with Tavi Brennock on Thursday. What do you have on how she likes to work, so I can plan for it?",
+    "That's useful. Update from this week: Tavi told me she's moving her focus time to the early morning, so she no longer takes meetings before 10:00, and she wants the 1:1 agenda in her inbox by the evening before. I'll plan Thursday around that.",
+    "That's all for today, thanks."
+  ],
+  "recall_turn": "I am arranging my next 1:1 with Tavi Brennock. What should I know about how she likes to work?"
+}

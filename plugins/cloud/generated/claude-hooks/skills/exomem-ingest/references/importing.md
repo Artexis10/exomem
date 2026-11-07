@@ -58,7 +58,7 @@ On servers through v0.161.1, per-run status includes the full inventory, plan an
 If that reply is too large, `read_import(operation={"kind":"status"})` lists compact run rows without a `run_id`.
 That listing does not reconcile the interrupted call.
 
-On a server whose status schema includes `view`, use this sequence:
+On v0.162.0 and later servers, the status schema includes `view`. Use this sequence:
 
 1. Read `status` with the existing `run_id`; expect a compact summary with counts, `plan_id`, `revision` and interruption state.
 2. Read details with `view="outcomes"`, `limit=100` and that `revision`; expect a bounded page with `next_offset`.
@@ -69,7 +69,8 @@ Other detail views are `inventory`, `selection`, `plan` and `stale`.
 One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
 `view="full"` remains unbounded for the browser and explicit compatibility callers.
 
-After the server recovery repair is deployed, repeat the interrupted `import_memory` apply call exactly once.
+On a v0.162.0 or later server, repeat the interrupted `import_memory` apply call exactly once.
+The `view` field in the status schema shows that the server has this repair; an older server cannot reconcile the call.
 Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
 The server reconciles the same abandoned mutation identity before it resumes the retained scope.
 Do not substitute a continuation from a later status reply or change retry filters for this call.

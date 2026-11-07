@@ -1014,7 +1014,7 @@ New episode-bound plans require a reader that understands their invocation marke
 Older strict readers refuse those plans before applying them; legacy unmarked plans keep their identities.
 
 ### Result shapes
-- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped}`.
+- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped, compile?}`. `compile` is `{outcome, cite, decided, open}`: the recap's ref, its Decided item count, and how many lines no cited recap holds (`unchecked` when not checked). Compile or explicitly dismiss every Decided item before citing the recap from updated compiled notes. A citation holds every line in that revision; it does not prove semantic coverage. The conditional `next_step` appears only when live policy permits capture; the block is absent when the recap decides nothing.
 - inspect: `{episode, revisions: [{revision, recovery}], latest_source_ref, coverage_current}`.
 - candidates/prepare/disposition: `{episode, input_revision, candidates: [{candidate_key, route, disposition, pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete, execution, coverage: {attempted, pending, covered_through_input_revision, next}}`.
 - resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.

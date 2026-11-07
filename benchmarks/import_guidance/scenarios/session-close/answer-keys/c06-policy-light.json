@@ -1,0 +1,11 @@
+{
+  "reference": "Same session as c01 (Tavi Brennock no longer takes meetings before 10:00 and wants the 1:1 agenda by the evening before), but the engagement level is light and the person never asked for anything to be saved. At this level the assistant should not make unrequested edits: no page should change and no recap or other page should be written. Offering to save, without writing, is fine.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/People/Tavi Brennock.md",
+    "Entities/People/Corin Haldane.md",
+    "Entities/Organizations/Harbourview Co-op.md"
+  ],
+  "recap": "forbidden",
+  "new_pages": "none"
+}

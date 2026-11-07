@@ -72,15 +72,16 @@ def test_cached_set_equals_a_fresh_selection_and_is_selected_once(
     store = _warm(vault)
     selects = _count_selects(monkeypatch)
 
+    # One selection at a snapshot fills both scopes; a request reads both.
     for scope in ("kb", "vault"):
         checkpoint = store.published_recall_checkpoint(scope)
-        selected = len(selects)
         first = store.recall_admitted_paths(scope, checkpoint)
         again = store.recall_admitted_paths(scope, checkpoint)
-        assert len(selects) - selected == 1
         assert again is first
 
         assert first == {path for path, _title in _fresh_rows(store, scope)}
+        assert store.recall_resolver_entries(scope, checkpoint) == _fresh_rows(store, scope)
+    assert len(selects) == 1
 
 
 def test_policy_change_never_serves_the_older_set(

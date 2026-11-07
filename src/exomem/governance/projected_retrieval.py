@@ -152,6 +152,9 @@ class ProjectedLexicalHit:
     search_fields: Mapping[str, str]
     snippet: str
     clip_frame_timestamp_ms: int | None = None
+    #: The part of the variant's text that matched, when a further part did; None for the
+    #: variant's own fields.
+    part: projections.ProjectionPart | None = None
 
     def __post_init__(self) -> None:
         if self.clip_frame_timestamp_ms is not None and (
@@ -167,9 +170,85 @@ class ProjectedLexicalHit:
 @dataclass(frozen=True, slots=True)
 class _SelectedDocument:
     variant: projections.ProjectionVariant
-    text: str
-    tokens: tuple[str, ...]
+    #: How often each BM25 token occurs, counted once at index build: a request scores a long
+    #: part without counting its tokens again.
+    term_counts: Mapping[str, int]
+    #: The number of BM25 tokens in the document.
+    length: int
     keyword_tokens: frozenset[str]
+    #: `text` case-folded once, for the keyword lane's substring test.
+    folded: str
+    #: The further part this document is, or None for the variant's own fields.
+    part: projections.ProjectionPart | None = None
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return (self.variant.projection_variant_id, 1 if self.part is None else self.part.number)
+
+
+def _document(
+    variant: projections.ProjectionVariant,
+    text: str,
+    part: projections.ProjectionPart | None = None,
+) -> _SelectedDocument:
+    folded = text.casefold()
+    tokens = bm25.tokenize(text)
+    return _SelectedDocument(
+        variant,
+        Counter(tokens),
+        len(tokens),
+        frozenset(folded.split()),
+        text if folded == text else folded,
+        part,
+    )
+
+
+def matched_passage(
+    variant: projections.ProjectionVariant,
+    part: projections.ProjectionPart | None,
+    query: str,
+) -> dict[str, object]:
+    """`{"matched_part", "passage"}` for a hit on `variant`, from the catalog's text alone.
+
+    A hit on a variant that holds parts names the part that matched: `part`, or part 1 when
+    the variant's own fields matched. `passage.offset` counts the Source's whole stored text,
+    so it opens a `read_memory` window at the match. The hit names its part without a passage
+    when the part holds no literal match of the query, or when no stored position maps into
+    it because a release strip changed its text. A hit on any other variant has neither.
+    """
+    if part is not None:
+        found = None if part.start is None else _passage(part, query)
+        return found or {"matched_part": part.number}
+    if not variant.parts:
+        return {}
+    head = variant.head
+    found = (
+        None
+        if head is None
+        else _passage_in(variant.search_fields["body"][head.begin : head.end], 1, 0, head.carrier_spans, query)
+    )
+    return found or {"matched_part": 1}
+
+
+def _passage(part: projections.ProjectionPart, query: str) -> dict[str, object] | None:
+    return _passage_in(part.text, part.number, part.start or 0, part.carrier_spans, query)
+
+
+def _passage_in(
+    text: str, number: int, base: int, cuts: tuple[tuple[int, int], ...], query: str
+) -> dict[str, object] | None:
+    from .. import find_parts
+
+    return find_parts.passage_in(
+        text,
+        number=number,
+        base=base,
+        chunk=None,
+        title=None,
+        # As `find` normalizes a query before it anchors a passage on it.
+        query_norm=query.lower().strip(),
+        cuts=cuts,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +411,7 @@ def _catalog_items(
             "projected retrieval namespace key is invalid"
         )
     by_identity: dict[str, projection_store.ProjectionItemVariants] = {}
+    documents = 0
     for item in items:
         if not isinstance(item, projection_store.ProjectionItemVariants):
             raise projections.ProjectionCanonicalizationError(
@@ -350,7 +430,8 @@ def _catalog_items(
                     "variant projector schema does not match retrieval namespace"
                 )
         by_identity[item.item_identity] = item
-        projections.require_supported_capacity(catalog_items=len(by_identity))
+        documents += 1 + projections.part_count(item.variants)
+        projections.require_supported_capacity(catalog_items=documents)
     return MappingProxyType(by_identity)
 
 
@@ -499,7 +580,9 @@ def _projected_hit(
     score: float,
     *,
     clip_frame_timestamp_ms: int | None = None,
+    part: projections.ProjectionPart | None = None,
 ) -> ProjectedLexicalHit:
+    # The snippet stays the head of the Source, whichever part matched.
     compact = " ".join(projection_text(variant).split())
     return ProjectedLexicalHit(
         item_identity=variant.item_identity,
@@ -509,6 +592,7 @@ def _projected_hit(
         search_fields=variant.search_fields,
         snippet=compact[:_SNIPPET_CHARS].rstrip(),
         clip_frame_timestamp_ms=clip_frame_timestamp_ms,
+        part=part,
     )
 
 
@@ -527,26 +611,23 @@ class ProjectedLexicalIndex:
         self.catalog = catalog
         self.namespace_key = catalog.namespace_key
         self._items = catalog.items
-        documents: dict[str, _SelectedDocument] = {}
-        postings: dict[str, set[str]] = {}
+        # Each variant's own fields, then each further part it holds: a part is a document of
+        # its variant, reached only when a request selects that variant.
+        documents: dict[str, tuple[_SelectedDocument, ...]] = {}
+        postings: dict[str, set[tuple[str, int]]] = {}
         for item in self._items.values():
             for variant in item.variants:
-                text = projection_text(variant)
-                tokens = tuple(bm25.tokenize(text))
-                document = _SelectedDocument(
-                    variant,
-                    text,
-                    tokens,
-                    frozenset(token for token in text.casefold().split() if token),
+                held = (
+                    _document(variant, projection_text(variant)),
+                    *(_document(variant, part.text, part) for part in variant.parts),
                 )
-                documents[variant.projection_variant_id] = document
-                for token in frozenset(tokens):
-                    postings.setdefault(token, set()).add(
-                        variant.projection_variant_id
-                    )
+                documents[variant.projection_variant_id] = held
+                for document in held:
+                    for token in document.term_counts:
+                        postings.setdefault(token, set()).add(document.key)
         self._documents = MappingProxyType(documents)
         self._postings = MappingProxyType(
-            {token: frozenset(variant_ids) for token, variant_ids in postings.items()}
+            {token: frozenset(keys) for token, keys in postings.items()}
         )
 
     def _selected_documents(
@@ -554,12 +635,13 @@ class ProjectedLexicalIndex:
         authorization: AuthorizationProjectionMap,
     ) -> tuple[_SelectedDocument, ...]:
         return tuple(
-            self._documents[variant.projection_variant_id]
+            document
             for variant in _selected_variants(
                 self.namespace_key,
                 self._items,
                 authorization,
             )
+            for document in self._documents[variant.projection_variant_id]
         )
 
     def _candidate_documents(
@@ -567,28 +649,26 @@ class ProjectedLexicalIndex:
         documents: tuple[_SelectedDocument, ...],
         query_tokens: tuple[str, ...],
     ) -> tuple[_SelectedDocument, ...]:
-        selected_ids = frozenset(
-            document.variant.projection_variant_id for document in documents
-        )
+        selected_keys = frozenset(document.key for document in documents)
         unique_query_tokens = frozenset(query_tokens)
         if not unique_query_tokens:
             return ()
-        candidate_ids: set[str] = set()
+        candidate_keys: set[tuple[str, int]] = set()
         for token in unique_query_tokens:
-            candidate_ids.update(
-                selected_ids.intersection(
+            candidate_keys.update(
+                selected_keys.intersection(
                     self._postings.get(token, frozenset())
                 )
             )
         return tuple(
             document
             for document in documents
-            if document.variant.projection_variant_id in candidate_ids
+            if document.key in candidate_keys
         )
 
     @staticmethod
     def _hit(document: _SelectedDocument, score: float) -> ProjectedLexicalHit:
-        return _projected_hit(document.variant, score)
+        return _projected_hit(document.variant, score, part=document.part)
 
     def search_bm25(
         self,
@@ -611,11 +691,9 @@ class ProjectedLexicalIndex:
         if not candidates:
             return ()
 
-        selected_ids = frozenset(
-            document.variant.projection_variant_id for document in documents
-        )
+        selected_keys = frozenset(document.key for document in documents)
         frequencies = {
-            token: len(self._postings.get(token, frozenset()) & selected_ids)
+            token: len(self._postings.get(token, frozenset()) & selected_keys)
             for token in frozenset(query_tokens)
         }
         inverse_frequencies = {
@@ -627,31 +705,37 @@ class ProjectedLexicalIndex:
             for token, document_frequency in frequencies.items()
         }
         average_length = max(
-            sum(len(document.tokens) for document in documents) / len(documents),
+            sum(document.length for document in documents) / len(documents),
             1.0,
         )
         scores: list[tuple[_SelectedDocument, float]] = []
         for document in candidates:
-            term_counts = Counter(document.tokens)
             score = 0.0
             length_normalization = 1 - _BM25_B + _BM25_B * (
-                len(document.tokens) / average_length
+                document.length / average_length
             )
             for token in query_tokens:
-                frequency = term_counts[token]
+                frequency = document.term_counts.get(token, 0)
                 score += inverse_frequencies[token] * (
                     frequency * (_BM25_K1 + 1)
                 ) / (frequency + _BM25_K1 * length_normalization)
             if score > 0:
                 scores.append((document, score))
-        scores.sort(
+        # One result per item before the cap: its best-scoring document, the lowest part on a tie.
+        best: dict[str, tuple[_SelectedDocument, float]] = {}
+        for document, score in scores:
+            prior = best.get(document.variant.item_identity)
+            if prior is None or (score, -document.key[1]) > (prior[1], -prior[0].key[1]):
+                best[document.variant.item_identity] = (document, score)
+        ranked = sorted(
+            best.values(),
             key=lambda item: (
                 -item[1],
                 _sort_key(item[0].variant.item_identity),
                 item[0].variant.projection_variant_id,
-            )
+            ),
         )
-        return tuple(self._hit(document, score) for document, score in scores[:limit])
+        return tuple(self._hit(document, score) for document, score in ranked[:limit])
 
     def search_keyword(
         self,
@@ -672,13 +756,17 @@ class ProjectedLexicalIndex:
         if not query_tokens:
             return ()
         exact_query_tokens = frozenset(query_tokens)
-        matches: list[_SelectedDocument] = []
+        # One result per item before the cap: the lowest part that matches, its own fields first.
+        first_match: dict[str, _SelectedDocument] = {}
         for document in documents:
-            folded_text = document.text.casefold()
+            identity = document.variant.item_identity
+            if identity in first_match:
+                continue
             if exact_query_tokens.issubset(document.keyword_tokens) or all(
-                token in folded_text for token in query_tokens
+                token in document.folded for token in query_tokens
             ):
-                matches.append(document)
+                first_match[identity] = document
+        matches = list(first_match.values())
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),
@@ -1041,8 +1129,14 @@ class ProjectedReranker:
         *,
         scorer: Callable[[str, list[str]], object],
         k: int,
+        matched_parts: Mapping[str, int] = MappingProxyType({}),
     ) -> tuple[ProjectedLexicalHit, ...]:
-        """Batch-score every projected candidate before applying the final cap."""
+        """Batch-score every projected candidate before applying the final cap.
+
+        `matched_parts` names, by item, the further part of its selected variant that a lexical
+        lane matched; that candidate is scored on the passage of the match in that part, not on
+        the head of the Source, which may not hold the query at all.
+        """
 
         limit = _result_limit(k)
         if not isinstance(query, str) or len(query) > 1_048_576:
@@ -1074,7 +1168,20 @@ class ProjectedReranker:
                 "rerank candidate is outside the selected projected corpus"
             )
         variants = tuple(selected_by_identity[identity] for identity in candidates)
-        passages = [projection_text(variant) for variant in variants]
+        parts: dict[str, projections.ProjectionPart] = {}
+        for identity, number in matched_parts.items():
+            held = selected_by_identity[identity].parts if identity in selected_by_identity else ()
+            if type(number) is not int or not 2 <= number <= len(held) + 1:
+                raise ProjectedRetrievalUnavailable(
+                    "rerank matched part is outside the selected projected variant"
+                )
+            parts[identity] = held[number - 2]
+        passages = [
+            projection_text(variant)
+            if variant.item_identity not in parts
+            else _part_rerank_text(parts[variant.item_identity], query)
+            for variant in variants
+        ]
         try:
             raw_scores = scorer(query, passages)
             scores = tuple(raw_scores)  # type: ignore[arg-type]
@@ -1101,9 +1208,16 @@ class ProjectedReranker:
             ranked.append((ordinal, variant, score))
         ranked.sort(key=lambda item: (-item[2], item[0]))
         return tuple(
-            _projected_hit(variant, score)
+            _projected_hit(variant, score, part=parts.get(variant.item_identity))
             for _ordinal, variant, score in ranked[:limit]
         )
+
+
+def _part_rerank_text(part: projections.ProjectionPart, query: str) -> str:
+    """The text a reranker reads for a part that matched: the passage of the match in it."""
+    found = _passage(part, query)
+    passage = found["passage"] if found is not None else None
+    return str(passage["text"]) if isinstance(passage, dict) else part.text
 
 
 __all__ = [

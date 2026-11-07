@@ -328,6 +328,13 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
             ),
             "due-state",
         ),
+        (due_state.side_path(root), "due-state"),
+        (
+            due_state.side_path(root).with_name(
+                f".{due_state.SIDE_FILENAME}.abc123_4.tmp"
+            ),
+            "due-state",
+        ),
         (due_state.emission_path(root), "due-state"),
         (
             due_state.emission_path(root).with_name(

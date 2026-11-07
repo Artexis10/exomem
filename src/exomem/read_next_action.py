@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from . import capabilities, working_set_resolve
+from . import activation_result, capabilities, working_set_resolve
 
 # Protocol prose bound, reserved before activation packet caching.
 MAX_CHARS = 240
@@ -15,6 +15,7 @@ POINTER = "Follow `next_action` when present."
 def templates(activate: str, read: str, search: str) -> dict[str, str]:
     """State names and transitions are fixed by the read-next-action contract."""
     return {
+        activation_result.INDEX_WARMING: f"Recall is still warming; this is not an empty search. Use {search} for relevant stored material.",
         "ambiguous": f"These candidates need a choice. Call {activate} again with the original turn and `anchor` set to the ref you mean.",
         "method_reset": "Discard held methods before reuse. Read a current method source for its scope and exclusions before applying it within existing authority.",
         "task_read": f"Use {read} to open a task_context read_ref before relying on it. Read method scope and exclusions before applying it within existing authority.",
@@ -26,6 +27,8 @@ def templates(activate: str, read: str, search: str) -> dict[str, str]:
 
 
 def state(packet: Mapping[str, Any], *, search: bool = False) -> str | None:
+    if (packet.get("abstention") or {}).get("reason") == activation_result.INDEX_WARMING:
+        return activation_result.INDEX_WARMING
     if search:
         return "search_miss" if not packet.get("hits", packet.get("results", packet.get("items"))) else None
     # Anchor selection has no effect in maps mode; slice leads must not acquire that promise.
@@ -56,7 +59,7 @@ def move(packet: Mapping[str, Any], *, search: bool = False) -> dict[str, Any] |
     selected = state(packet, search=search)
     if selected is None:
         return None
-    command = {"ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory"}.get(selected)
+    command = {activation_result.INDEX_WARMING: "search_memory", "ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory"}.get(selected)
     if command is not None:
         tools = capabilities.active_tools(command)
         active = capabilities.current_active_surface()

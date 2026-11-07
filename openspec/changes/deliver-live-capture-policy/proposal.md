@@ -16,6 +16,6 @@ Two further gaps showed in the same trial. Section edits refuse an absent headin
 ## Impact
 
 - Hooked and hookless clients that call `recall_context` see the live disposition once per continuity token, again after the caller drops the token (after a compaction, for example) and after a policy change. A packet that carries no token, such as the abstention under the working-set kill switch, carries the block on every request. Worst case is under 800 bytes.
-- The packaged tool-surface digest changes (a new `edit_section` field), so the ChatGPT Personal Plugin needs its ordinary post-deploy refresh. The `edit_note` ceiling in the schema budget rises 50 B for the measured 52 B; the total wire budget is unchanged.
+- The packaged tool-surface digest changes (a new `edit_section` field), so the ChatGPT Personal Plugin needs its ordinary post-deploy refresh. The `edit_note` ceiling in the schema budget rises 50 B for the measured 52 B; the total wire budget rises 50 B, to 168,050 B, because the `record_episode` close step and the new flag together pass the old budget.
 - An old installed hook with a new server ignores the field. A new hook with an old server renders nothing new. The plugin ships in the same release.
 - No vault data, registry or bootstrap bytes change.

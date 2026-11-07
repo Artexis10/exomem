@@ -178,6 +178,8 @@ _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service p
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
 _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
               'and `anchor` set to the ref you mean.',
+ 'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
+                  'relevant stored material.',
  'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
                  'and exclusions before applying it within existing authority.',
  'related': 'Related pages (not loaded). Use `read_memory` to read a relevant ref before relying '
