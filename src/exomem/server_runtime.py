@@ -984,15 +984,10 @@ def _start_media_worker(vault_root: Path) -> Any | None:
             unavailable_reason = (
                 f"{media_jobs.EXTRACTION_DISABLED_CODE}: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
             )
-            unavailable_action = (
-                "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
-                "restart the service, then retry"
-            )
+            unavailable_action = media_jobs.EXTRACTION_DISABLED_ACTION
         else:
             unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: media worker construction failed"
-            unavailable_action = (
-                "fix the media runtime configuration, restart the service, then retry"
-            )
+            unavailable_action = media_jobs.RUNTIME_UNAVAILABLE_ACTION
     if worker is not None:
         try:
             worker.start()
@@ -1004,9 +999,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
             log.warning("media runtime unavailable; core service continuing: %s", exc)
             worker = None
             unavailable_reason = f"{media_jobs.RUNTIME_UNAVAILABLE_CODE}: {type(exc).__name__}: {exc}"
-            unavailable_action = (
-                "fix the media runtime configuration, restart the service, then retry"
-            )
+            unavailable_action = media_jobs.RUNTIME_UNAVAILABLE_ACTION
     if unavailable_reason is not None and unavailable_action is not None:
         media_processing.set_media_runtime_unavailable(
             vault_root,
@@ -1057,10 +1050,15 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     if worker is None:
         return None
     try:
-        # This start has a runtime, so the work a start without one blocked is owed again. It
-        # runs after the reconcile above, which shows the sidecars it examined as pending again.
+        # This start has a runtime, so the work a start without one blocked is owed again. The
+        # reconcile above skips that work: each artifact already has a job. A blocked row cannot
+        # be claimed, so its sidecar is shown as pending first, before a child could extract it
+        # and find the sidecar rewritten under it.
         if media_jobs.job_store_path(vault_root).exists():
-            requeued = media_jobs.MediaJobStore(vault_root, create=False).requeue_runtime_blocks()
+            store = media_jobs.MediaJobStore(vault_root, create=False)
+            for blocked in store.runtime_blocked_jobs():
+                worker.present_runtime_requeue(blocked)
+            requeued = store.requeue_runtime_blocks()
             if requeued:
                 log.info("media worker: requeued %d job(s) a start without a media runtime blocked", requeued)
     except Exception as exc:  # noqa: BLE001 - media must never deny the core service

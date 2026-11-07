@@ -207,6 +207,8 @@ def matched_passage(
     variant: projections.ProjectionVariant,
     part: projections.ProjectionPart | None,
     query: str,
+    *,
+    semantic: bool = False,
 ) -> dict[str, object]:
     """`{"matched_part", "passage"}` for a hit on `variant`, from the catalog's text alone.
 
@@ -214,7 +216,10 @@ def matched_passage(
     the variant's own fields matched. `passage.offset` counts the Source's whole stored text,
     so it opens a `read_memory` window at the match. The hit names its part without a passage
     when the part holds no literal match of the query, or when no stored position maps into
-    it because a release strip changed its text. A hit on any other variant has neither.
+    it because a release strip changed its text. A hit on any other variant has neither. A hit
+    on the full-text variant has neither when its own fields hold no literal match of the query
+    and the vector lane did not rank it (a title match or a graph hop), as in direct search. A
+    `semantic` hit matched in the text with no stored chunk to anchor, so it names part 1 alone.
     """
     if part is not None:
         found = None if part.start is None else _passage(part, query)
@@ -222,12 +227,10 @@ def matched_passage(
     if not variant.parts:
         return {}
     head = variant.head
-    found = (
-        None
-        if head is None
-        else _passage_in(variant.search_fields["body"][head.begin : head.end], 1, 0, head.carrier_spans, query)
-    )
-    return found or {"matched_part": 1}
+    if head is None:
+        return {"matched_part": 1}  # no single place holds part 1, so the match cannot be anchored
+    found = _passage_in(variant.search_fields["body"][head.begin : head.end], 1, 0, head.carrier_spans, query)
+    return found or ({"matched_part": 1} if semantic else {})
 
 
 def _passage(part: projections.ProjectionPart, query: str) -> dict[str, object] | None:

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate, _without_response_id
+from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
+from test_collection_store_writer import manifest_path
 from test_context_catalogue import _built, _page, _source_schema, _write
 from test_context_views import _second_vault
 from test_governance_egress import _external, write_rule
@@ -502,3 +504,44 @@ def test_restricted_corpus_capacity_cannot_rank_a_prepared_prefix(vault: Path, m
     assert packet["abstained"] is False and "map" in packet
     assert packet["task_context"]["state"] in ("partial", "unavailable")
     assert packet["task_context"]["candidates"] == []
+
+
+def test_owner_keeps_task_discovery_on_an_enrolled_store_while_a_store_page_waits_for_its_own_decision(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The owner keeps task discovery on an enrolled store, and a store outage withholds the store's own page."""
+    from exomem import context_task, context_views
+    from exomem.collection_store import runtime
+    from exomem.governance import egress
+
+    root = service.root
+    monkeypatch.delenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", raising=False)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    # The turn slice drops a candidate it already carries; with it off, the task context shows discovery itself.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    ordinary = _page(root, "gauge-calibration", body="Bring the handheld gauge to the depot service desk for a calibration quote.\n")
+    _built(root).close()
+    lexstore.ensure_fresh(root)
+    turn = "Where is the calibration quote for the handheld gauge from the depot service desk?"
+    owner = principal.owner_principal(surface="library")
+
+    def discovered() -> tuple[str, set[str]]:
+        task = _activate(root, owner, turn=turn, max_chars=8000)["task_context"]
+        return task["state"], {item["source_ref"] for item in task["candidates"]}
+
+    def store_page_projected() -> bool:
+        # A store page reaches the raw path through `project_source`, which held methods and the terminal guard call.
+        with principal.request_scope(owner):
+            return context_task.project_source(root, manifest_path(), context_views.CallerView.current(root)) is not None
+
+    state, served = discovered()
+    assert state == "ready" and ordinary in served
+    assert store_page_projected()
+
+    with monkeypatch.context() as outage:
+        outage.setattr(runtime, "_server", lambda _root: None)
+        egress.clear_decision_memo()
+        working_set_runtime.reset_caches_for_tests(packets_only=True)
+        state, served = discovered()
+        assert state == "ready" and ordinary in served
+        assert not store_page_projected()

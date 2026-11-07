@@ -1168,7 +1168,11 @@ def _wire_hit(
         status=fields.get("status"),
         snapshot_hash=selection.content_hash,
         decision=decision,
-        **(projected_retrieval.matched_passage(variant, part, query) if variant is not None else {}),
+        **(
+            projected_retrieval.matched_passage(variant, part, query, semantic="vector" in ranks)
+            if variant is not None
+            else {}
+        ),
     )
 
 

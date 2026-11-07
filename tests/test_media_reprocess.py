@@ -496,7 +496,8 @@ def test_a_blocked_reprocess_leaves_the_completed_sidecar_alone_and_is_not_retri
         )
         (job,) = media_jobs.status(vault)["jobs"]
         assert job["state"] == media_jobs.BLOCKED and job["retryable"] is False
-        assert "reprocess" in job["next_action"]
+        # The start that follows the fix requeues the request, so the restart is the whole remedy.
+        assert job["next_action"].endswith("restart the service")
 
         # The completed transcript stays complete for reconcile, and the request is refused.
         media_processing.reconcile_media(vault, binary, explicit=False)
@@ -546,10 +547,11 @@ def test_a_reprocess_a_paused_start_blocked_runs_with_its_language_after_a_start
             started.stop()
         media_processing.set_media_runtime_available(vault)
 
-    # A retry leaves a reprocess alone, so the paused request says to reprocess, not to retry.
+    # A retry leaves a reprocess alone, and the start requeues it with its request, so the
+    # paused request says to restart and nothing more.
     assert paused["state"] == media_jobs.BLOCKED and paused["retryable"] is False
-    assert paused["next_action"].endswith("restart the service, then reprocess the file again")
-    assert "retry" not in paused["next_action"]
+    assert paused["next_action"].endswith("restart the service")
+    assert "retry" not in paused["next_action"] and "reprocess" not in paused["next_action"]
     assert resumed["state"] == media_jobs.PENDING
     _run_to_idle(vault, worker)
     assert engine.languages == [None, "et"]

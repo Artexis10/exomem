@@ -183,6 +183,38 @@ def test_upload_supported_media_routes_through_canonical_reconciliation(
     assert body["content_type"] == "audio/mp4"
 
 
+def test_a_fresh_media_upload_is_stored_pending_so_reconciliation_commits_nothing_more(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upload commits the original with its page once; reconciliation only queues the job."""
+    from exomem import media_jobs, preserve
+    from exomem.vault import parse_frontmatter
+
+    sidecar_commits: list[object] = []
+    real = preserve.commit_media_sidecar_writes
+
+    def counted(*args, **kwargs):
+        sidecar_commits.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", counted)
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.post(
+        "/upload",
+        files={"file": ("shot.png", b"\x89PNGfresh", "image/png")},
+        data={"scope": "Rental", "category": "01 - Check-in"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert sidecar_commits == []
+    assert [job["path"] for job in media_jobs.status(vault)["jobs"]] == [body["path"]]
+    frontmatter, _body, _raw = parse_frontmatter((vault / body["sidecar_path"]).read_text())
+    assert frontmatter["processing_state"] == "pending"
+
+
 def test_upload_reconciles_when_media_worker_is_unavailable(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

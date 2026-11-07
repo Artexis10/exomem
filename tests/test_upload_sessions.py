@@ -721,6 +721,41 @@ def test_a_commit_resumed_after_its_file_landed_answers_already_stored(vault, mo
     assert sorted(path.name for path in folder.iterdir()) == ["samples.json", "samples.json.md"]
 
 
+def test_a_session_commit_stores_a_fresh_media_file_pending_so_reconciliation_commits_nothing_more(
+    vault, monkeypatch
+) -> None:
+    from exomem import media_jobs, preserve
+
+    sidecar_commits: list[object] = []
+    real = preserve.commit_media_sidecar_writes
+
+    def counted(*args, **kwargs):
+        sidecar_commits.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", counted)
+    client = _client(vault, monkeypatch)
+    data = b"\x89PNGfresh"
+    session, secret = upload_sessions.create(
+        vault,
+        binding="bearer:test",
+        length=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        target={"filename": "shot.png", "scope": "Device", "category": "Uploads",
+                "description": None, "raw_protection": False, "archive": None},
+        max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    assert patch.close() == (len(data), True)
+
+    state = _settled(client, f"/upload/sessions/{session.id}", secret)
+
+    assert state["state"] == "committed", state
+    assert sidecar_commits == []
+    assert [job["path"] for job in media_jobs.status(vault)["jobs"]] == [state["receipt"]["path"]]
+
+
 @pytest.mark.parametrize(
     ("filename", "status", "code"), [("???", 400, "INVALID_PRESERVE"), ("samples.json", 409, "ARTIFACT_EXISTS")]
 )
