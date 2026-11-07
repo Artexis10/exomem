@@ -53,7 +53,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **THEN** status reports the number of queued files and the age of the oldest one
 
 ### Requirement: Outside edits return through a base-revision check
-In store mode, a file the store owns whose hash differs from the projection manifest, or a new file under the managed Knowledge Base, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
+In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
 
 #### Scenario: A clean outside edit imports
 - **WHEN** a person edits a projected page in Obsidian and no Exomem write to that page is pending
@@ -118,7 +118,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** no file-mode rebuild applies the held bytes
 
 ### Requirement: Knowledge writes share the store's availability
-In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.
+In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.
 
 #### Scenario: An unavailable store refuses knowledge writes
 - **WHEN** the store reports that it cannot accept writes
