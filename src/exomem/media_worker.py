@@ -1316,6 +1316,8 @@ class MediaWorker:
         parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
         text where it was.
         """
+        from . import media_processing
+
         fields = dict(
             engine=engine,
             speakers=speakers,
@@ -1323,6 +1325,8 @@ class MediaWorker:
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
+            # Both callers have just revalidated the original; a page stored with it records these.
+            binary_hints=media_processing.read_timestamp_hints(job.binary_path),
         )
         if not reprocessing:
             plan, write = preserve.sidecar_extraction_writes(

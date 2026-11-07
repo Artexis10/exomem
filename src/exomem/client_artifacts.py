@@ -1455,6 +1455,7 @@ def _preserve_evidence_adoption(
                                 lane="evidence", destination=destination
                             ),
                             raw_protection=raw_protection,
+                            media_pending=True,
                         )
                     payload = result.as_dict()
             if raced is not None:
@@ -1787,6 +1788,7 @@ def preserve_artifacts(
                             content_type=artifact.content_type,
                             max_bytes=budget.max_file_bytes,
                             raw_protection=raw_protection,
+                            media_pending=True,
                             **(
                                 {"text": transcription, "text_origin": "client"}
                                 if transcription
