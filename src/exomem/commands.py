@@ -11250,7 +11250,7 @@ def op_observe_transfer(
     3. File it: start on the `next` path (`_Imports/<id>`), and again with `next_after` while a
        reply has one; select, plan and apply (at `apply_stop`, stop until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
-    Adoption removes each filed artifact's staged copy; notes stay until discard.
+    Finish removes each verified file's staged copy; the rest stay until discard.
     When an export is ready, status gives a Home link and a CLI command to download it.
 
     Args:

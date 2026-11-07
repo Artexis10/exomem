@@ -876,7 +876,8 @@ def _present(root: Path, run: dict, **extra) -> dict:
     if verify:
         out["verified_unchanged"] = verify.get("verified_unchanged")
         out["verified_total"] = verify.get("verified_total")
-        out["consumed"] = verify.get("consumed", 0)
+        # `finish` removes filed text copies after `apply`, so a finished run reports the count that `finish` recorded.
+        out["consumed"] = (run.get("finish") or verify).get("consumed", 0)
     if isinstance(out.get("finish"), dict):
         out["finish"] = _presented_finish(run)
     out.update(extra)
@@ -970,17 +971,20 @@ def _next_actions(run: dict) -> list[dict]:
 
 
 def _residual_actions(residual: dict | None) -> list[dict]:
-    """Review the staged files that remain with the person, then discard; neither while later pages follow.
+    """Review the files that stay staged with the person, and discard them only after the person agrees; neither while later pages follow.
 
     A page that later pages follow leaves the review and the discard to the last page, because the folder
-    still holds files that those pages file.
+    still holds files that those pages file. A file that stays is never discarded without the person: a staged
+    copy may be the only good copy, and `finish` does not verify every file that it reports as filed.
     """
     # A run finished before paging existed has no `more_pages` key, and no later page.
     if not residual or not residual["files"] or residual.get("more_pages"):
         return []
+    # A run finished before the unfiled count existed has no summary.
+    summary = residual.get("summary") or f"{residual['files']} files stay staged."
     return [
         {"action": "review-residual", "status": "available",
-         "description": f"{residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
+         "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
                         "finish.residual.by_reason says why. Review them with the person before anything is discarded."},
         {"action": "discard", "status": "available",
          "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
@@ -1561,7 +1565,7 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
 
 
 def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
-    """The members of an import that adoption did not file, as a residual record lists them.
+    """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
     The members are the stage manifest's, plus any staged file that the manifest does not list. A member that
@@ -1579,8 +1583,7 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
     return [
         import_stage.residual_member(path, size, reason)
         for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
-        # nosemgrep: ep-word-membership -- `FILED_REASONS` holds closed result keys of `_page_classifier`.
-        if reason not in adoption_consume.FILED_REASONS and path != import_stage.SERIES_FILE
+        if not adoption_consume.is_filed(reason) and path != import_stage.SERIES_FILE
     ]
 
 
@@ -2737,24 +2740,47 @@ def _release_hold(root: Path, planned: dict) -> None:
         rename_journal.release(root, planned["artifact_path"])
 
 
+def _text_source_holds(root: Path, page_path: str, planned: dict) -> bool:
+    """Whether the Source page holds the planned text between its fences, byte for byte.
+
+    The fence body is checked and not the page, which a note's back-reference changes in its front matter.
+    A page that is missing, unreadable or not in our format does not hold it.
+    """
+    try:
+        with reserved_paths.open_generic_binary(root, page_path, physical=True) as source:
+            data = source.stream.read()
+        body = adopt_module.text_source_body(data.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return False
+    if body is None:
+        return False
+    original = body.encode("utf-8")
+    return len(original) == planned["original_bytes"] and hashlib.sha256(original).hexdigest() == planned["original_sha256"]
+
+
 def _filed_and_gone(
     root: Path, run: dict, reads: _CallReads, planned: dict
 ) -> adoption_plan.EarlierImport | None:
-    """The committed Source of an artifact whose staged copy a recorded stage lists, or None.
+    """The committed Source of an item whose staged copy a recorded stage lists, or None.
 
     The Source is the record that adoption filed the item: a copy that is gone from the stage was
     removed by this run, by another run, or by a call that stopped before it saved. The caller has
-    already seen that the copy is missing.
+    already seen that the copy is missing. A text item counts as filed only when the run recorded
+    it as filed and its Source page still holds its text between the fences: an item that still
+    owes its note is not done, and a text that no longer matches is unfiled.
     """
     stage = reads.recorded_stage(root, run)
-    if (
-        stage is None or planned["form"] != "artifact"
-        or adoption_consume.entry_of(stage, planned["original_path"]) is None
-    ):
+    if stage is None or adoption_consume.entry_of(stage, planned["original_path"]) is None:
         return None
-    return _earlier_with_same_bytes(
+    earlier = _earlier_with_same_bytes(
         root, reads.earlier_imports(root, run, planned), (run.get("collection") or {}).get("label"), planned
     )
+    if earlier is not None and planned["form"] == "text" and not (
+        ((run.get("outcomes") or {}).get(planned["original_path"]) or {}).get("status") in _APPLIED_STATUSES
+        and _text_source_holds(root, earlier.path, planned)
+    ):
+        return None
+    return earlier
 
 
 def _settle_staged(
@@ -3397,6 +3423,45 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
     }
 
 
+def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBudget) -> None:
+    """Remove the staged copy of each filed text item whose Source page still holds its text, and mark it consumed.
+
+    `apply` keeps a text item's copy, because the item may still owe its note. By `finish` an item that is
+    `applied` or `already-applied` is done. Its copy goes only after the Source page's fence body hashes to the plan
+    and the held, hash-checked removal of `adoption_consume.remove_staged` passes. A copy stays and its outcome records
+    why in `stays`: `source_differs` when the Source page does not hold the text, so the copy is the only exact one,
+    and `copy_changed` when the copy is no longer the file that the manifest and the plan describe. A copy that is
+    already gone (a `finish` stopped after its removal) is settled through its Source. The call stops starting
+    removals when its budget runs low, and the copies it did not reach stay unverified in the residual.
+    """
+    if not run.get("consume", True):
+        return
+    reads = _CallReads()
+    stage = reads.recorded_stage(root, run)
+    if stage is None:
+        return
+    outcomes = run.get("outcomes") or {}
+    for planned in (run.get("plan") or {}).get("items") or []:
+        outcome = outcomes.get(planned["original_path"])
+        if (
+            planned["form"] != "text" or outcome is None or outcome.get("consumed")
+            or outcome.get("status") not in _APPLIED_STATUSES
+        ):
+            continue
+        if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+            budget.note_truncated("finish.consume_text")
+            return
+        if os.path.lexists(root / planned["original_path"]):
+            if not _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned):
+                outcome["stays"] = "source_differs"
+            elif not adoption_consume.remove_staged(root, stage, planned):
+                outcome["stays"] = "copy_changed"
+            else:
+                outcome["consumed"] = True
+        elif _filed_and_gone(root, run, reads, planned) is not None:
+            outcome["consumed"] = True
+
+
 def finish(
     root: Path,
     *,
@@ -3414,7 +3479,9 @@ def finish(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
         recall = _recall_check(root, run)
-        coverage = _coverage(root, run, _call_budget())
+        budget = _call_budget()
+        coverage = _coverage(root, run, budget)
+        _consume_filed_text(root, run, budget)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
         stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
