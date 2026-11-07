@@ -13,13 +13,14 @@ import re
 import shutil
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from epistemic.journeys.f27_replay import PLUGIN_DIR, AgentEnvelope
 from membench.outcome.clbench import report as clbench_report
 from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, QuestionLog, run_cell
 from membench.outcome.clbench.run import UPSTREAM as CLBENCH_UPSTREAM
-from membench.outcome.faults import init_faults
+from membench.outcome.faults import LimitRejected, init_faults
 from membench.outcome.isolation import child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
 from membench.outcome.lab import judge as lab_judge
@@ -27,9 +28,10 @@ from membench.outcome.lab import run as lab_run
 from membench.outcome.lab.prepare import CASES, slug
 from membench.outcome.lab.prepare import UPSTREAM as LAB_UPSTREAM
 from membench.outcome.lab.run import FILE_ALLOWS, SHIPPED_ALLOWS, Lab
+from membench.outcome.planted import answer as planted_answer
 from membench.outcome.planted import build as planted_build
 from membench.outcome.planted import judge as planted_judge
-from membench.outcome.planted.answer import answer_actor
+from membench.outcome.planted.answer import answer_actor, answer_all
 from membench.outcome.stats import paired_interval
 from membench.outcome.workspace import head_of, pin
 
@@ -364,14 +366,22 @@ VERDICT = {
 
 def planted_cases(count: int) -> list[dict]:
     key = {"correct": "14 days", "stale": "7 days"}
-    return [{"case_id": f"c{i}", "task": "Plan.", "key": key} for i in range(count)]
+    return [
+        {"case_id": f"c{i}", "domain": "contracts", "task": "Plan.", "key": key}
+        for i in range(count)
+    ]
 
 
-def planted_answers(run: Path, case_ids: list[str], unanswered: dict[str, set[str]]) -> None:
-    """Answers for arms E and P; ``unanswered[arm]`` are the cases the arm gave no reply to."""
-    for arm in ("E", "P"):
+def planted_answers(
+    run: Path,
+    case_ids: list[str],
+    unanswered: dict[str, set[str]],
+    arms: tuple[str, ...] = ("E", "P"),
+) -> None:
+    """Answers for the ``arms``; ``unanswered[arm]`` are the cases the arm gave no reply to."""
+    for arm in arms:
         answers = run / arm / "answers"
-        answers.mkdir(parents=True)
+        answers.mkdir(parents=True, exist_ok=True)
         for case_id in case_ids:
             reply = None if case_id in unanswered.get(arm, ()) else f"Use 14 days for {case_id}."
             answers.joinpath(f"{case_id}.json").write_text(
@@ -458,3 +468,83 @@ def test_arm_e_may_differ_from_arm_p_only_by_its_own_governance_lines(tmp_path):
     write_arm(tmp_path, "E", "- id: u1\n- verdict: refuted\n\nThe rule is 14 days.\n")
     with pytest.raises(RuntimeError, match="differ beyond the builder's governance"):
         planted_build.require_identical_text(tmp_path)
+
+
+def rejecting_cli(path: Path, launches: Path) -> Path:
+    """A CLI that starts a session, then reports the subscription limit as rejected and ends in an error result."""
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "model": "m",
+        "apiKeySource": "none",
+        "mcp_servers": [{"name": "exomem", "status": "connected"}],
+    }
+    limit = {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1}}
+    error = {"type": "result", "subtype": "error", "is_error": True, "result": "limit reached"}
+    lines = "\n".join(f"echo '{json.dumps(event)}'" for event in (init, limit, error))
+    path.write_text(f"#!/bin/sh\necho launched >> {launches}\nread line\n{lines}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_a_rejected_limit_stops_the_run_and_the_decision_waits_for_room(tmp_path, monkeypatch):
+    """Quota that ran out must not score the arm that ran last as a loss, nor be retried or go on to the next case."""
+    launches = tmp_path / "launches"
+    cli = rejecting_cli(tmp_path / "claude", launches)
+    envelope = AgentEnvelope(executable=cli, version="0.0-test")
+    monkeypatch.setattr(planted_answer, "discover_agent_envelope", lambda: envelope)
+    cases = planted_cases(4)
+    case_ids = [c["case_id"] for c in cases]
+    run = tmp_path / "run"
+    (run / "E" / "built" / "vault").mkdir(parents=True)
+    (run / "E" / "built" / "exomem-state").mkdir()
+
+    with pytest.raises(LimitRejected):
+        answer_all(cases, run / "E", "m", "high")
+
+    assert not list((run / "E" / "answers").glob("*.json")), "a rejected limit is no answer"
+    assert launches.read_text().count("launched") == 1, "no retry, and no later case"
+
+    # Arm P ran before the limit ran out. Arm E has no answers, so the decision decides nothing yet.
+    planted_answers(run, case_ids, unanswered={}, arms=("P",))
+    judge_run = run / "judge-codex"
+    planted_judge.items(cases, run, judge_run, ["E", "P"])
+    shown = (judge_run / "judge" / "items.jsonl").read_text().splitlines()
+    (judge_run / "judge" / "verdicts.jsonl").write_text(
+        "".join(
+            json.dumps({"id": json.loads(line)["id"], "verdict": VERDICT}) + "\n" for line in shown
+        )
+    )
+    (judge_run / "judge" / "judge.json").write_text(json.dumps({"backend": "codex", "model": "m"}))
+    decision = planted_judge.score(judge_run, [("E", "P")], heldout=True)["decision"]
+    assert decision["status"] == "incomplete"
+    assert any("E" in reason for reason in decision["why"])
+
+
+def test_a_rerun_replays_only_the_matter_a_stop_left_unfinished(tmp_path, monkeypatch):
+    """A half-played matter replays whole from a clean folder, and a finished one is never played again."""
+    played = []
+
+    def run_arm(lab, case, prepared_task, arm, copy_to):
+        played.append((case["task_id"], arm))
+        folder = lab.run_dir / slug(case["task_id"]) / arm
+        folder.mkdir(parents=True)
+        (folder / "result.json").write_text("{}")
+
+    monkeypatch.setattr(lab_run, "run_arm", run_arm)
+    run, prepared = tmp_path / "run", tmp_path / "prepared"
+    for task in ("finished", "stopped"):
+        (prepared / "tasks" / slug(task)).mkdir(parents=True)
+        (prepared / "tasks" / slug(task) / "case.json").write_text(json.dumps({"task_id": task}))
+    for arm in ("S", "WP"):
+        (run / slug("finished") / arm).mkdir(parents=True)
+        (run / slug("finished") / arm / "result.json").write_text("{}")
+    (run / slug("stopped") / "S").mkdir(parents=True)
+    (run / slug("stopped") / "S" / "result.json").write_text("{}")
+    (run / slug("stopped") / "WP").mkdir()  # the arm the limit stopped: no result.json
+
+    for task in ("finished", "stopped"):
+        lab_run.run_task(SimpleNamespace(run_dir=run), prepared, task, ["S", "WP"])
+
+    assert played == [("stopped", "S"), ("stopped", "WP")]
+    assert (run / "unfinished" / f"{slug('stopped')}-0" / "WP").is_dir()

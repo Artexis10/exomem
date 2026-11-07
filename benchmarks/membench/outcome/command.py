@@ -10,12 +10,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import shutil
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
 from . import gate, record
-from .faults import REPLACEMENT_RUN
+from .faults import REPLACEMENT_RUN, LimitRejected, park, run_pool
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL
 from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows
 from .workspace import RUN_ROOT, require_pinned_checkout
@@ -68,6 +70,18 @@ def planted_cases(split: str, limit: int | None) -> list[dict]:
 
 def refuse(message: str) -> SystemExit:
     return SystemExit(f"refused: {message}")
+
+
+@contextmanager
+def waits_for_room() -> Iterator[None]:
+    """A rejected subscription limit ends the command with one line; the run then reads as incomplete."""
+    try:
+        yield
+    except LimitRejected as stop:
+        raise refuse(
+            f"{stop}. The run stopped at once and waits for room as an incomplete run: "
+            "run the same command again when there is room"
+        ) from stop
 
 
 def passed_gate(suite: str, split: str) -> dict | None:
@@ -180,11 +194,7 @@ def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort) -> None
         if cell.dir.exists():
             # Started and never evaluated: upstream's question sequence cannot resume, so the cell
             # replays from its first question. The old cell stays under ``unfinished/`` as evidence.
-            parked = run_dir / "unfinished"
-            parked.mkdir(exist_ok=True)
-            shutil.move(
-                cell.dir, parked / f"{cell.dir.name}-{len(list(parked.glob(cell.dir.name + '-*')))}"
-            )
+            park(run_dir, cell.dir)
         run_cell(cell)
 
     todo = []
@@ -193,9 +203,7 @@ def run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort) -> None
             print(f"{cell.dir.name}: already evaluated", flush=True)
         else:
             todo.append(cell)
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for future in [pool.submit(play, cell) for cell in todo]:
-            future.result()
+    run_pool(jobs, [partial(play, cell) for cell in todo])
 
 
 def run_lab_suite(run_dir, split, arms, jobs, limit, model, effort) -> None:
@@ -234,11 +242,7 @@ def run_planted(run_dir, split, arms, jobs, limit, model, effort) -> None:
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         list(pool.map(built, PLANTED_ARMS))
     require_identical_text(run_dir)
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for future in [
-            pool.submit(answer_all, cases, run_dir / arm, model, effort) for arm in arms
-        ]:
-            future.result()
+    run_pool(jobs, [partial(answer_all, cases, run_dir / arm, model, effort) for arm in arms])
 
 
 def run_suite(
@@ -421,17 +425,18 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    run_dir = run_suite(
-        args.suite,
-        args.run_id,
-        split=args.split,
-        arms=_csv(args.arms),
-        seeds=[int(s) for s in _csv(args.seeds) or []] or None,
-        jobs=args.jobs,
-        limit=args.limit,
-        model=args.model,
-        effort=args.effort,
-    )
+    with waits_for_room():
+        run_dir = run_suite(
+            args.suite,
+            args.run_id,
+            split=args.split,
+            arms=_csv(args.arms),
+            seeds=[int(s) for s in _csv(args.seeds) or []] or None,
+            jobs=args.jobs,
+            limit=args.limit,
+            model=args.model,
+            effort=args.effort,
+        )
     print(
         f"{args.suite} {args.split} run in {run_dir}; next: membench outcome report {args.suite} --run-id {args.run_id}"
     )
@@ -470,15 +475,16 @@ def _cmd_panel(args: argparse.Namespace) -> int:
     from .panel import run_panel
 
     spec = JudgeSpec.of(args.judge, args.judge_model, args.judge_effort, args.judge_exe)
-    written = run_panel(
-        args.run_id,
-        args.version,
-        spec,
-        jobs=args.jobs,
-        model=args.model,
-        effort=args.effort,
-        controls=args.controls,
-    )
+    with waits_for_room():
+        written = run_panel(
+            args.run_id,
+            args.version,
+            spec,
+            jobs=args.jobs,
+            model=args.model,
+            effort=args.effort,
+            controls=args.controls,
+        )
     print("\n".join(str(path) for path in written))
     return 0
 

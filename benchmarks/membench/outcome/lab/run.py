@@ -27,9 +27,8 @@ import json
 import shutil
 import traceback
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
@@ -43,6 +42,7 @@ from epistemic.journeys.f27_replay import (
 
 from .. import record
 from ..clbench.run import QuestionLog, single_turn
+from ..faults import PARKED_DIR, LimitRejected, park, run_pool
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
@@ -58,6 +58,17 @@ from ..workspace import RUN_ROOT, require_pinned_checkout, sha256_of
 from .prepare import CASES, UPSTREAM, slug
 
 SESSION_TIMEOUT_SECONDS = 1800.0
+#: What a second call under the same run id must repeat: the inputs of every matter it completes.
+RESUME_KEYS = (
+    "prepared",
+    "tasks",
+    "arms",
+    "model_requested",
+    "effort",
+    "upstream_commit",
+    "product_revision",
+    "instruction_block",
+)
 
 
 @dataclass(frozen=True)
@@ -145,6 +156,7 @@ class Lab:
             CASES.parent,
             *(p for p in runs.iterdir() if p.resolve() != self.run_dir),
             *(self.run_dir / s for s in self.task_slugs if s != task_slug),
+            self.run_dir / PARKED_DIR,
             *(self.run_dir / task_slug / a for a in ARMS if a != arm),
             own / "vault",
             own / "exomem-state",
@@ -398,6 +410,14 @@ def write_result(
 
 def run_task(lab: Lab, prepared: Path, task_id: str, arms: list[str]) -> None:
     task_slug = slug(task_id)
+    matter = lab.run_dir / task_slug
+    if all((matter / arm / "result.json").exists() for arm in arms):
+        print(f"{task_id}: already played", flush=True)
+        return
+    if matter.exists():
+        # A copying arm's folder holds its source's snapshot, so a half-played matter cannot resume arm
+        # by arm: it replays whole, and the old folder stays under ``unfinished/`` as evidence.
+        park(lab.run_dir, matter)
     prepared_task = prepared / "tasks" / task_slug
     case = json.loads((prepared_task / "case.json").read_text())
     print(f"{task_id}: arms {','.join(arms)}", flush=True)
@@ -405,6 +425,8 @@ def run_task(lab: Lab, prepared: Path, task_id: str, arms: list[str]) -> None:
         try:
             copy_to = next((c for c, source in COPIES.items() if source == arm and c in arms), None)
             run_arm(lab, case, prepared_task, arm, copy_to)
+        except LimitRejected:
+            raise  # not an arm's fault: the whole run stops, and this matter replays on the next call
         except Exception:  # noqa: BLE001 - one arm's failure must not stop the others
             error = traceback.format_exc()
             crash = f"arm crashed: {error.splitlines()[-1]}"
@@ -431,8 +453,6 @@ def run_lab(
     """Play ``arms`` over the tasks of a converted tree (``prepared`` is its run id)."""
     require_pinned_checkout("lab")
     refuse_unsafe_out_dir(run_dir)
-    if (run_dir / "manifest.json").exists():
-        raise SystemExit(f"{run_dir} was already run; choose a new --run-id")
     prepared_dir = RUN_ROOT / "runs" / prepared
     prepared_manifest = json.loads((prepared_dir / "manifest.json").read_text())
     task_ids = tasks or prepared_manifest["tasks"]
@@ -481,8 +501,16 @@ def run_lab(
         "wg_ablation": "EXOMEM_DISABLE_GRAPH_INDEX=1",
         "wg_copy_of": COPIES["WG"],
     }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        for future in [pool.submit(run_task, lab, prepared_dir, t, arms) for t in task_ids]:
-            future.result()
+    manifest_file = run_dir / "manifest.json"
+    if manifest_file.exists():
+        # A second call completes the matters that a stop left unfinished, so it must be the same run.
+        have = json.loads(manifest_file.read_text())
+        changed = [key for key in RESUME_KEYS if have.get(key) != manifest[key]]
+        if changed:
+            raise SystemExit(
+                f"{run_dir} was run with other {', '.join(changed)}; choose a new --run-id"
+            )
+    else:
+        manifest_file.write_text(json.dumps(manifest, indent=2))
+    run_pool(jobs, [partial(run_task, lab, prepared_dir, t, arms) for t in task_ids])
     return run_dir

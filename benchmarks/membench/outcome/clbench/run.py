@@ -49,10 +49,10 @@ from epistemic.journeys.f27_replay import (
     refuse_unsafe_out_dir,
 )
 
-from membench.utility.switch_eval.session import hook_push
+from membench.utility.switch_eval.session import hook_push, rejected_limit
 
 from .. import record
-from ..faults import init_faults, with_retries
+from ..faults import LimitRejected, init_faults, with_retries
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
@@ -252,6 +252,10 @@ class ClaudeSession:
         """Send one user turn and return the final reply text, or None on timeout or exit."""
         try:
             return self._exchange(text, log, timeout)
+        except LimitRejected:
+            # The run stops here, so this process must not outlive it.
+            self.close()
+            raise
         finally:
             # The pump flushes every line, so a transcript that is still empty here is lost.
             if not self._path.exists() or self._path.stat().st_size == 0:
@@ -283,6 +287,8 @@ class ClaudeSession:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if (rejected := rejected_limit(event)) is not None:
+                raise LimitRejected(rejected)
             kind = event.get("type")
             if kind == "system" and event.get("subtype") == "init":
                 # Every user turn brings an init event; each one is checked, the first is kept.

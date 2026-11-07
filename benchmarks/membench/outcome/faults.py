@@ -8,15 +8,23 @@ one voids a unit. The evidence is:
 - the CLI exited before it answered;
 - the CLI never sent an ``init`` event, or its transcript is missing or empty;
 - an ``init`` event shows a model other than the one requested (a fallback), an API key as the
-  credential source, or an Exomem server that is not ``connected``.
+  credential source, or an Exomem server that is not ``connected``;
+- the CLI reports the subscription limit as rejected (``LimitRejected``).
 
 The ``init`` event arrives on every user turn, so each one is checked, not only the first.
 A harness fault is retried with the same inputs at most ``RETRIES`` times; a retry is not a repeat.
+A rejected limit is the exception: it belongs to the account, so a retry fails the same way and the
+whole run stops at once. The unit it hit has no result, so the run reads as incomplete and decides
+nothing until the same command runs again with room.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+import shutil
+import threading
+from collections.abc import Callable, Collection, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 RETRIES = 2
 #: f35 held-out: the one run that replaces a run voided by a harness fault. A second voided run voids the decision.
@@ -25,6 +33,56 @@ REPLACEMENT_RUN = 4
 STRIKE_LIMIT = 2
 #: The credential source a subscription session reports. Any other value means the session used an API key.
 SUBSCRIPTION_KEY_SOURCE = "none"
+#: Where a run keeps the folder of a unit that started and never finished, once the unit is replayed.
+PARKED_DIR = "unfinished"
+
+
+class LimitRejected(RuntimeError):
+    """The CLI reported the subscription limit as rejected: stop the run, retry nothing.
+
+    The limit is the account's, not the unit's, so every later session fails the same way and a
+    failure scored as a loss would charge it to the arm that ran last. ``info`` is the event's
+    ``rate_limit_info``; its ``resetsAt`` says when there is room again.
+    """
+
+    def __init__(self, info: dict):
+        super().__init__(f"the subscription limit was rejected (resetsAt {info.get('resetsAt')})")
+        self.info = info
+
+
+def run_pool(jobs: int, calls: Iterable[Callable[[], object]]) -> None:
+    """Run ``calls`` on ``jobs`` threads. A rejected limit stops the run at once.
+
+    After one call raises ``LimitRejected`` no queued call starts. A call already running ends when
+    its own session meets the same rejection. The first error, in the order calls finish, is raised.
+    """
+    stopped = threading.Event()
+
+    def guarded(call: Callable[[], object]) -> None:
+        if stopped.is_set():
+            return
+        try:
+            call()
+        except LimitRejected:
+            stopped.set()
+            raise
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for future in as_completed([pool.submit(guarded, call) for call in calls]):
+            future.result()
+
+
+def park(run_dir: Path, folder: Path) -> Path:
+    """Move the folder of a unit that started and never finished to ``<run>/unfinished/<name>-<n>``.
+
+    The unit then replays from its first step in a clean folder, and the old attempt stays as evidence.
+    """
+    parked = run_dir / PARKED_DIR
+    parked.mkdir(exist_ok=True)
+    number = 0
+    while (parked / f"{folder.name}-{number}").exists():
+        number += 1
+    return Path(shutil.move(folder, parked / f"{folder.name}-{number}"))
 
 
 def init_faults(init: dict, *, model: str, exomem: bool) -> list[str]:

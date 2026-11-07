@@ -77,21 +77,33 @@ returns (a spent turn or context budget included) or a missing deliverable. An u
 case scores as `stale_trusted` and not `correct`. A LAB matter with no deliverable scores 0. A
 harness fault is the harness failing to run the product. The evidence is a CLI crash or a CLI that
 sends no `init` event before its timeout, an Exomem MCP server that is not `connected`, a lost
-transcript, a reported model other than the requested one, or a credential source other than
-`none`. Every session's `init` event is checked.
+transcript, a reported model other than the requested one, a credential source other than
+`none`, or a subscription limit that the CLI reports as rejected. Every session's `init` event is
+checked.
 
 1. The run retries a session with a harness fault, with the same inputs, at most twice. In
    CL-Bench only a question's first turn is retried, because upstream cannot rewind a question.
 2. In CL-Bench, a fault that survives voids the whole run index for every arm. The run skips the
    voided index's remaining cells.
 3. In LAB and planted, a fault that survives strikes the matter or case from every arm.
-4. A held-out report says the decision is void after a second voided CL-Bench run, or after more
+4. A rejected subscription limit belongs to the account, so it stops the whole run at once, with
+   no retry and no further cell, matter or session. The command prints one line that says the run
+   waits for room, and scores no loss. With `--jobs` above 1, a session already running ends when
+   it meets the same rejection. The unit that hit the limit has no result, so the run is
+   incomplete (rule 6).
+5. A held-out report says the decision is void after a second voided CL-Bench run, or after more
    than 2 struck units.
-5. A held-out report says the decision is incomplete, and decides nothing, while a judgement has
+6. A held-out report says the decision is incomplete, and decides nothing, while a judgement has
    failed, a unit is missing or a scheduled CL-Bench cell has not finished. It names each one.
-   Run the same command again. The judge retries failed items. A finished cell is not replayed; a
-   cell that never reached its evaluation replays from its first question, and the run keeps the
-   old one under `unfinished/`.
+   Run the same command again, with the same run id. The judge retries failed items.
+   - CL-Bench: a finished cell is not replayed. A cell that never reached its evaluation replays
+     from its first question, and the run keeps the old one under `unfinished/`. The report's
+     `runs.replayed` lists each replayed cell, how many times it replayed and its parked folders.
+   - Planted: the run answers only the cases that have no answer file.
+   - LAB: the run plays only the matters that lack a `result.json` for a requested arm. A matter
+     that stopped half way replays every arm, because a copying arm starts from its source's
+     snapshot, and the run keeps the old matter under `unfinished/`. The same run id must repeat
+     the tasks, arms, model, effort and product revision of the first call.
 
 Every report lists each arm's scheduled, valid, invalid and missing units.
 
