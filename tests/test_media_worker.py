@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
+from test_media_processing import _handle_stat
 
 from exomem import (
     asr_runtime,
@@ -192,7 +193,7 @@ def test_a_page_stored_pending_records_the_worker_verified_hints_when_completed(
         media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
     )
 
-    page, info = _parsed_frontmatter(sidecar), binary.stat()
+    page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
     assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
     assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
@@ -221,7 +222,7 @@ def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_r
 
     worker._publish_parent_result(store.pending_results()[0])
 
-    page, info = _parsed_frontmatter(sidecar), binary.stat()
+    page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
     assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (info.st_mtime_ns, info.st_ctime_ns)
     assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
@@ -258,7 +259,7 @@ def test_a_page_stored_pending_records_the_open_handle_hints_when_path_stat_disa
         media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
     )
 
-    page, handle = _parsed_frontmatter(sidecar), os.stat(binary)
+    page, handle = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "a recorded sentence" in sidecar.read_text(encoding="utf-8")
     assert (page["binary_mtime_ns"], page["binary_ctime_ns"]) == (handle.st_mtime_ns, handle.st_ctime_ns)
     assert _sidecar_commits_of_a_watcher_reconcile(vault, binary, monkeypatch) == 0
