@@ -27,8 +27,8 @@
   - Evidence: the unit audit reports the source hashes that an orphan's rows carry (`actual_source_hashes`). `tests/test_semantic_unit_reconcile.py::test_a_page_written_after_the_corpus_read_keeps_the_unit_rows_its_write_indexed` passes, and fails on the code before this task.
 - [x] 2.8 Serialize reconcile write runs with a vault-scoped run lock that no ordinary writer takes, under design D5.
   - Evidence: `reconcile._run_lock`; `tests/test_reconcile.py::test_a_second_reconcile_is_refused_while_one_runs` passes, and fails on the code before this task.
-- [ ] 2.10 Refuse a second reconcile write run at once, under design D5.
-  - Evidence: `_run_lock` takes the run lock without blocking. `tests/test_reconcile.py::test_a_second_reconcile_is_refused_while_one_runs` covers it; tick this task when CI runs it green.
+- [x] 2.10 Refuse a second reconcile write run at once, under design D5.
+  - Evidence: `_run_lock` takes the run lock without blocking. `tests/test_reconcile.py::test_a_second_reconcile_is_refused_while_one_runs` passes.
 - [x] 2.11 Rebase the lexical lineage after the rebaseline hold, under design D1.
   - Evidence: `lexstore.rebase_current_catalog_lineage` runs after the hold, as warm-up and the watcher seed call it.
 - [x] 2.12 Prove that the units repair leaves a corpus page edited after the unit audit, under design D2.
