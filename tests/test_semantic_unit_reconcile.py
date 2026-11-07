@@ -443,6 +443,51 @@ def test_reconcile_repairs_unit_drift_without_markdown_changes_and_is_idempotent
     assert repeated.semantic_unit_index_drift == []
 
 
+def test_a_page_written_after_the_corpus_read_keeps_the_unit_rows_its_write_indexed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A reconcile leaves the unit rows of a page that a write created and indexed during the run.
+
+    The run's corpus read has no such page, so its unit audit finds the page's rows with no corpus
+    parent. Those rows carry the page's bytes as they are now, so they are the write's: a run that
+    removed them as stale would undo that write and report it as drift that the run left.
+    """
+    from exomem import index_sync, maintenance_jobs
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    # Another page, read once, so the lexical sidecar exists before the run as in any used vault.
+    other = tmp_path / "Knowledge Base" / "Sources" / "other.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# Other\n\n- [config] other observation ^other\n", encoding="utf-8")
+    assert lexstore.search_semantic_units(tmp_path, "observation", k=10, scope="kb")
+    real_checkpoint = maintenance_jobs.checkpoint
+    unit_rows_after_the_units_phase: list[int] = []
+
+    def write_before_the_unit_audit(phase, *args, **kwargs):
+        if phase == "units":
+            path = _write(tmp_path, "- [config] first observation ^first\n")
+            index_sync.upsert_after_write(tmp_path, [path])
+        if phase == "lifecycle":
+            conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+            try:
+                unit_rows_after_the_units_phase.append(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?", (_REL,)
+                    ).fetchone()[0]
+                )
+            finally:
+                conn.close()
+        return real_checkpoint(phase, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "checkpoint", write_before_the_unit_audit)
+    report = reconcile.reconcile(tmp_path)
+
+    assert unit_rows_after_the_units_phase == [1]
+    assert report.semantic_unit_orphans_removed == 0
+    assert report.semantic_unit_parents_moved == [_REL]
+    assert report.semantic_unit_index_remaining == []
+
+
 def test_move_trash_and_recovery_keep_all_unit_sidecars_on_the_live_parent(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -84,6 +84,9 @@ class SemanticUnitSidecarDrift:
     reasons: tuple[str, ...]
     expected_generation: str | None = None
     actual_generations: tuple[str, ...] = ()
+    #: The parent source hashes that an orphan's rows carry. A reconcile compares them with the
+    #: parent's bytes; the report leaves them out.
+    actual_source_hashes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -912,6 +915,7 @@ def audit_semantic_unit_sidecars(
                         parent_path,
                         tuple(sorted(orphan_reasons)),
                         actual_generations=tuple(sorted(stamp[0] for stamp in actual.stamps)),
+                        actual_source_hashes=tuple(sorted(stamp[1] for stamp in actual.stamps)),
                     )
                 )
                 continue

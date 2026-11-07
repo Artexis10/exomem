@@ -32,16 +32,20 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from . import audit as audit_module
 from . import indexes, maintenance_jobs, originals, relation_review, semantic_index, semantic_writes
-from .vault import PlannedWrite, batch_atomic_write, kb_root
+from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root
 
 log = logging.getLogger(__name__)
+
+_Item = TypeVar("_Item")
+_Key = TypeVar("_Key")
 
 _LIFECYCLE_REPORT_LIMIT = 256
 
@@ -71,6 +75,14 @@ class ReconcileReport:
     semantic_missing_drift: list[str] = field(default_factory=list)
     semantic_missing_purged: list[str] = field(default_factory=list)
     semantic_suppressed_incomplete: dict[str, str] = field(default_factory=dict)
+    #: The isolation rows that a planned write's plan and its read inside the purge hold do not share,
+    #: each with `change`: "unplanned" when only the fresh read holds it, "gone" when only the plan does.
+    semantic_isolation_changed: list[dict[str, str]] = field(default_factory=list)
+    #: The unit-index parents a write left alone, because their bytes moved after the corpus read.
+    semantic_unit_parents_moved: list[str] = field(default_factory=list)
+    #: The CLIP and frame orphans that a planned write's plan and its read inside the orphans hold do
+    #: not share, each as {kind, path, change}, with `change` as in `semantic_isolation_changed`.
+    orphans_changed: list[dict[str, str]] = field(default_factory=list)
     semantic_unit_indexes_status: str = "current"
     semantic_unit_index_drift: list[dict] = field(default_factory=list)
     semantic_unit_index_remaining: list[dict] = field(default_factory=list)
@@ -160,6 +172,11 @@ class ReconcileReport:
             "graph_quarantine_id": self.graph_quarantine_id,
             "graph_rebuild_warning": self.graph_rebuild_warning,
         }
+        if not self.dry_run:
+            # Only a write reads its inputs again inside its holds, so only a write can find that one moved.
+            result["semantic_isolation_changed"] = self.semantic_isolation_changed
+            result["semantic_unit_parents_moved"] = self.semantic_unit_parents_moved
+            result["orphans_changed"] = self.orphans_changed
         if self.plan_id is not None:
             result["plan_id"] = self.plan_id
         registered = self._graph_reconcile_registered
@@ -238,6 +255,134 @@ def finalize_graph_rebuild_handoff(
     return final
 
 
+@contextmanager
+def _run_lock(vault_root: Path, *, dry_run: bool) -> Iterator[None]:
+    """Hold this vault's reconcile-run lock for one write run, or refuse the run before it reads anything.
+
+    The whole-run boundary hold used to serialize reconciles; this lock keeps that guarantee without
+    blocking writers, because no ordinary writer takes it. A second write run refuses at once with
+    `MUTATION_BUSY` and nothing written; its caller's own retry decides whether to ask again. It does
+    not wait, because the running reconcile may be a job parked at a `_phase_hold` yield, and a
+    foreground request that waited here, outside `foreground_priority.awaiting_bulk()`, would wait on
+    a parked bulk pass. It is a plain file lock, as one archive expansion per vault holds, and not a
+    mutation coordinator: a coordinator hold would make the run's foreground yields return at once.
+    A preview, and a call from outside the writer lease, take none, as `_phase_hold` does.
+    """
+    from filelock import FileLock, Timeout
+
+    from . import mutation_lock, private_state
+    from .cli_ops import OpError
+    from .writer_lease import active_mutation_request_id
+
+    if dry_run or active_mutation_request_id() is None:
+        yield
+        return
+    lock = FileLock(private_state.store(vault_root, "reconcile") / "run.lock")
+    try:
+        lock.acquire(blocking=False)
+    except Timeout:
+        raise OpError(
+            "MUTATION_BUSY",
+            "another reconcile is running for this vault",
+            "Retry after the running reconcile completes.",
+            details={
+                "status": "retryable",
+                "committed": False,
+                "retry_after_ms": mutation_lock.dynamic_retry_after_ms(None),
+            },
+        ) from None
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _phase_hold(vault_root: Path, operation: str, *, dry_run: bool) -> AbstractContextManager[Any]:
+    """Hold the mutation boundary for one phase's writes: one short hold, re-read inside, per phase.
+
+    The writer lease runs a reconcile without a whole-run hold, so a phase that writes vault-coupled
+    state takes its own hold, which waits out a busy boundary for a bounded time and checks for a stop
+    on each side (`maintenance_jobs.chunk_hold`). Under `EXOMEM_WIDE_MUTATION_BOUNDARY` the lease
+    holds the boundary for the whole run, and the hold re-enters it. A preview writes nothing, and a
+    call from outside the writer lease coordinates its own writes, so neither holds anything here.
+    """
+    from . import foreground_priority
+    from .writer_lease import active_mutation_request_id
+
+    if dry_run or active_mutation_request_id() is None:
+        return nullcontext()
+    # A writer that queued behind the last hold takes its turn before this run takes the next.
+    foreground_priority.yield_to_foreground()
+    return maintenance_jobs.chunk_hold(vault_root, operation)
+
+
+def _current_hash(vault_root: Path, rel: str) -> str | None:
+    """The content hash of a path's bytes now, as the corpus hashes a page, or None with no file there."""
+    try:
+        return content_hash((vault_root / rel).read_bytes().decode("utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def _read_hashes(vault_root: Path, paths: Iterable[str]) -> dict[str, str]:
+    """The content hash of each path that is a readable file now, for a later `_moved_since_read`."""
+    hashes: dict[str, str] = {}
+    for rel in paths:
+        try:
+            current = _current_hash(vault_root, rel)
+        except (OSError, UnicodeDecodeError):
+            continue
+        if current is not None:
+            hashes[rel] = current
+    return hashes
+
+
+def _corpus_hashes(pages: Mapping[str, Any], paths: Iterable[str]) -> dict[str, str]:
+    """The content hash that the run's corpus read for each path that was a corpus page then."""
+    return {rel: pages[rel].source_hash for rel in paths if rel in pages}
+
+
+def _moved_since_read(vault_root: Path, read: Mapping[str, str], paths: Iterable[str]) -> list[str]:
+    """The paths whose bytes are not the bytes the run read (`read` maps a path to their content hash).
+
+    A path that `read` lacks was absent, or could not be read, so it moved once a file is there. A
+    path that cannot be read now counts as moved. The write that moved a path also indexed it, so a
+    phase leaves it to that write.
+    """
+    moved: list[str] = []
+    for rel in paths:
+        try:
+            current = _current_hash(vault_root, rel)
+        except (OSError, UnicodeDecodeError):
+            moved.append(rel)
+            continue
+        if current != read.get(rel):
+            moved.append(rel)
+    return moved
+
+
+def _against_plan(
+    planned: Iterable[_Key], fresh: Iterable[_Item], key: Callable[[_Item], _Key]
+) -> tuple[list[_Item], list[_Item], list[_Key]]:
+    """Split what a planned write read inside its hold by its plan.
+
+    Returns the items that both name, the items that only the fresh read holds, and the keys that
+    only the plan holds. A planned write applies the first and reports the other two.
+    """
+    planned_keys = list(dict.fromkeys(planned))
+    planned_set = set(planned_keys)
+    items = list(fresh)
+    fresh_keys = {key(item) for item in items}
+    shared = [item for item in items if key(item) in planned_set]
+    unplanned = [item for item in items if key(item) not in planned_set]
+    return shared, unplanned, [name for name in planned_keys if name not in fresh_keys]
+
+
+def _media_present(vault_root: Path, path: Path | str) -> bool:
+    """Whether a media file is on disk or evicted to the originals store, so its derived rows keep an owner."""
+    return (vault_root / path).exists() or originals.evicted(vault_root, path)
+
+
 def _rel(path: Path, vault_root: Path) -> str:
     try:
         return path.resolve().relative_to(vault_root.resolve()).as_posix()
@@ -300,7 +445,7 @@ def _dangling_frame_dirs(vault_root: Path) -> list[tuple[Path, Path]]:
         video_path = frame_dir.with_name(
             frame_dir.name[: -len(scene_frames.FRAMES_DIR_SUFFIX)]
         )
-        if not (video_path.exists() or originals.evicted(vault_root, video_path)):
+        if not _media_present(vault_root, video_path):
             out.append((frame_dir, video_path))
     return out
 
@@ -328,10 +473,51 @@ def _isolation_plan(
         for row in census.missing_rows
         if row.component == "clip"
         and row.path is not None
-        and not ((vault_root / row.path.removesuffix(".md")).exists()
-                 or originals.evicted(vault_root, row.path.removesuffix(".md")))
+        and not _media_present(vault_root, row.path.removesuffix(".md"))
     }
     return suppressed_paths, missing_paths, missing_clip_orphans
+
+
+def _isolation_key(row: Any) -> tuple[str, ...]:
+    """What a plan names for one isolation row: its kind and path, or a corrupt row by its content."""
+    if row.path is None:
+        return (
+            "corrupt",
+            row.component,
+            row.edge_column or "",
+            hashlib.sha256(row.raw.encode("utf-8", "replace")).hexdigest(),
+            repr((row.dependency_source, row.dependency_lookup_key, row.dependency_raw_target)),
+        )
+    return ("missing" if row.missing else "suppressed", row.path)
+
+
+def _shared_isolation(
+    planned: audit_module.SemanticRecallIsolationCensus, fresh: audit_module.SemanticRecallIsolationCensus
+) -> tuple[audit_module.SemanticRecallIsolationCensus, list[dict[str, str]]]:
+    """The fresh census cut to the rows its plan names too, and each row that only one of the two holds."""
+    planned_rows = {_isolation_key(row): row for row in planned.rows}
+    shared, unplanned, gone = _against_plan(planned_rows, fresh.rows, _isolation_key)
+    changed = [{**row.as_dict(), "change": "unplanned"} for row in unplanned]
+    changed += [{**planned_rows[name].as_dict(), "change": "gone"} for name in gone]
+    return replace(fresh, rows=tuple(shared)), changed
+
+
+def _planned_orphans(
+    vault_root: Path, census: _Census, clip_orphans: list[str], frame_orphans: list[tuple[Path, Path]]
+) -> tuple[list[str], list[tuple[Path, Path]], list[dict[str, str]]]:
+    """The CLIP and frame orphans that a planned write's plan names too, and each that only one holds."""
+    clips, unplanned_clips, gone_clips = _against_plan(census.clip_orphans, clip_orphans, lambda clip: clip)
+    frames, unplanned_frames, gone_frames = _against_plan(
+        census.frame_orphans, frame_orphans, lambda frame: _rel(frame[0], vault_root)
+    )
+    changed = [{"kind": "clip", "path": clip, "change": "unplanned"} for clip in unplanned_clips]
+    changed += [{"kind": "clip", "path": clip, "change": "gone"} for clip in gone_clips]
+    changed += [
+        {"kind": "frames", "path": _rel(frame_dir, vault_root), "change": "unplanned"}
+        for frame_dir, _video in unplanned_frames
+    ]
+    changed += [{"kind": "frames", "path": rel, "change": "gone"} for rel in gone_frames]
+    return clips, frames, changed
 
 
 def _clip_orphans(vault_root: Path, missing_clip_orphans: set[str]) -> list[str]:
@@ -343,7 +529,7 @@ def _clip_orphans(vault_root: Path, missing_clip_orphans: set[str]) -> list[str]
     clip_paths, _frame_ts, _matrix = embeddings_module.get_clip_index(vault_root).all_vectors()
     return sorted(
         missing_clip_orphans
-        | {p for p in clip_paths if not ((vault_root / p).exists() or originals.evicted(vault_root, p))}
+        | {p for p in clip_paths if not _media_present(vault_root, p)}
     )
 
 
@@ -374,6 +560,9 @@ class _Census:
     posthoc_inputs: dict[str, Any]
     #: Each removal or quarantine as (what it names, its kind), for a preview job's receipt.
     planned: tuple[tuple[str, str], ...]
+    #: The CLIP keys and the vault-relative frame directories that the plan removes.
+    clip_orphans: tuple[str, ...]
+    frame_orphans: tuple[str, ...]
 
 
 def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
@@ -398,18 +587,11 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
     )
     entries: list[list[str]] = [["suppressed", path] for path in suppressed_paths]
     entries += [["missing", path] for path in missing_paths]
-    entries += [
-        [
-            "corrupt",
-            row.component,
-            row.edge_column or "",
-            hashlib.sha256(row.raw.encode("utf-8", "replace")).hexdigest(),
-            repr((row.dependency_source, row.dependency_lookup_key, row.dependency_raw_target)),
-        ]
-        for row in isolation.corrupt_rows
-    ]
-    entries += [["clip", key] for key in _clip_orphans(vault_root, missing_clip_orphans)]
-    entries += [["frames", _rel(frame_dir, vault_root)] for frame_dir, _video in _dangling_frame_dirs(vault_root)]
+    entries += [list(_isolation_key(row)) for row in isolation.corrupt_rows]
+    clip_orphans = tuple(_clip_orphans(vault_root, missing_clip_orphans))
+    frame_orphans = tuple(_rel(frame_dir, vault_root) for frame_dir, _video in _dangling_frame_dirs(vault_root))
+    entries += [["clip", key] for key in clip_orphans]
+    entries += [["frames", rel] for rel in frame_orphans]
     from . import extraction_parts
 
     entries += [["part", rel] for rel in extraction_parts.sweep(vault_root, dry_run=True).removed]
@@ -422,6 +604,8 @@ def _plan_census(vault_root: Path, rebuild_graph: bool) -> _Census:
         posthoc_inputs={"corpus": corpus, "language_registry": language, "status_basis": status_basis},
         # Every entry reads [kind, what it names, ...].
         planned=tuple((entry[1], entry[0]) for entry in entries),
+        clip_orphans=clip_orphans,
+        frame_orphans=frame_orphans,
     )
 
 
@@ -433,9 +617,22 @@ def reconcile(
     See the module docstring. Read-only when `dry_run=True`. A preview reports the `plan_id` of what
     the run would remove or quarantine. A write that names a `plan_id` is a reviewed one, run by a
     maintenance job: it reads that plan again before its first write and writes nothing if it changed.
-    A job holds the mutation boundary for the whole run, as the command does, and a stop lands
-    between phases: the phases before it keep their effect, and a repeat converges the rest.
+
+    Under the writer lease, the CLI's run and a job's alike hold the mutation boundary only in one
+    short hold per phase that writes vault-coupled state (`_phase_hold`), so other writers commit
+    between phases. Each phase reads again inside its hold what it applies, or checks that what it
+    read earlier has not moved: a page whose bytes moved belongs to the write that moved it. The
+    read-only phases (the census, the posthoc evaluation, the unit audit and the drift report) and
+    the lexical refresh, which serializes its publication itself, hold nothing. A stop lands between
+    holds: the phases before it keep their effect, and a repeat converges the rest. A write run holds
+    the vault's reconcile-run lock throughout (`_run_lock`), so two write runs never interleave.
     """
+    with _run_lock(vault_root, dry_run=dry_run):
+        return _reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id)
+
+
+def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id: str | None) -> ReconcileReport:
+    """One reconcile run, as `reconcile` describes it, under that run's reconcile-run lock."""
     report = ReconcileReport(dry_run=dry_run, graph_rebuild_requested=rebuild_graph)
     census: _Census | None = None
     if dry_run or plan_id is not None:
@@ -453,7 +650,8 @@ def reconcile(
     if not dry_run:
         from .activation_manifest import ensure_manifest
 
-        ensure_manifest(vault_root)
+        with _phase_hold(vault_root, "reconcile manifest", dry_run=dry_run):
+            ensure_manifest(vault_root)
     semantic_batch = semantic_writes.evaluate_posthoc_batch(
         vault_root,
         operation="reconcile",
@@ -473,56 +671,73 @@ def reconcile(
     from . import deferred_index, epistemic_graph, index_paths, lexstore
 
     maintenance_jobs.checkpoint("purging")
-    # A live raw Record is present, not missing.  Purge only the semantic
-    # derivatives that should never have survived a policy transition; generic
-    # delete routing would incorrectly remove its stable identity/reference rows.
-    suppression_census = census.isolation if census is not None else _isolation_census(vault_root)
-    report.semantic_suppressed_drift = suppression_census.safe_dicts()
-    report.semantic_suppressed_corrupt = suppression_census.corrupt_dicts()
-    report.semantic_suppressed_truncation = suppression_census.truncation
-    report.semantic_suppressed_incomplete = suppression_census.incomplete
-    suppressed_paths, missing_paths, missing_clip_orphans = _isolation_plan(vault_root, suppression_census)
-    report.semantic_missing_drift = missing_paths
-    repair_succeeded = not suppression_census.incomplete
-    if suppressed_paths and not dry_run:
-        from . import index_sync
-
-        if index_sync.purge_semantic_only(vault_root, suppressed_paths):
-            report.semantic_suppressed_purged = suppressed_paths
-        else:
-            repair_succeeded = False
-    if suppression_census.corrupt_rows and not dry_run:
-        report.semantic_suppressed_corrupt_purged = (
-            audit_module.purge_corrupt_semantic_recall_isolation_rows(
-                vault_root, suppression_census.corrupt_rows
-            )
+    with _phase_hold(vault_root, "reconcile purging", dry_run=dry_run):
+        # A preview reports the census it planned from. A write reads the census again inside this
+        # hold, and a planned write applies only the rows that its plan names too: a row that moved
+        # since the plan is reported, and the repair stays incomplete, so the cursors stay put.
+        suppression_census = census.isolation if dry_run else _isolation_census(vault_root)
+        purge_census, isolation_changed = (
+            _shared_isolation(census.isolation, suppression_census)
+            if census is not None and not dry_run
+            else (suppression_census, [])
         )
-        expected_components = {
-            "graph"
-            if row.component
-            in {"graph_edges", "graph_dependencies", "graph_dependency_coverage"}
-            else row.component
-            for row in suppression_census.corrupt_rows
+        report.semantic_suppressed_drift = suppression_census.safe_dicts()
+        report.semantic_suppressed_corrupt = suppression_census.corrupt_dicts()
+        report.semantic_suppressed_truncation = suppression_census.truncation
+        report.semantic_suppressed_incomplete = {
+            **suppression_census.incomplete,
+            **{item["component"]: "changed_since_plan" for item in isolation_changed},
         }
-        if not expected_components <= set(report.semantic_suppressed_corrupt_purged):
-            repair_succeeded = False
-    if missing_paths and not dry_run:
-        from . import embeddings, index_sync
+        report.semantic_isolation_changed = isolation_changed
+        suppressed_paths, missing_paths, _ = _isolation_plan(vault_root, suppression_census)
+        purge_suppressed, purge_missing, missing_clip_orphans = _isolation_plan(vault_root, purge_census)
+        report.semantic_missing_drift = missing_paths
+        repair_succeeded = not report.semantic_suppressed_incomplete
+        # A live raw Record is present, not missing.  Purge only the semantic
+        # derivatives that should never have survived a policy transition; generic
+        # delete routing would incorrectly remove its stable identity/reference rows.
+        if purge_suppressed and not dry_run:
+            from . import index_sync
 
-        # These are lexically validated, absent Markdown identities: ordinary
-        # removal routing is correct and intentionally clears stable identity
-        # sidecars too. CLIP stores the corresponding media key without `.md`.
-        missing_report = index_sync.delete_after_remove(vault_root, missing_paths)
-        embeddings.get_clip_index(vault_root).purge_markdown_paths_if_present(missing_paths)
-        report.semantic_missing_purged = missing_paths
-        repair_succeeded &= not missing_report.reconcile_required
-    if not dry_run and repair_succeeded:
-        deferred_index.set_semantic_isolation_cursors(
-            vault_root,
-            suppression_census.continuation if suppression_census.truncation else {},
-        )
+            if index_sync.purge_semantic_only(vault_root, purge_suppressed):
+                report.semantic_suppressed_purged = purge_suppressed
+            else:
+                repair_succeeded = False
+        if purge_census.corrupt_rows and not dry_run:
+            report.semantic_suppressed_corrupt_purged = (
+                audit_module.purge_corrupt_semantic_recall_isolation_rows(
+                    vault_root, purge_census.corrupt_rows
+                )
+            )
+            expected_components = {
+                "graph"
+                if row.component
+                in {"graph_edges", "graph_dependencies", "graph_dependency_coverage"}
+                else row.component
+                for row in purge_census.corrupt_rows
+            }
+            if not expected_components <= set(report.semantic_suppressed_corrupt_purged):
+                repair_succeeded = False
+        if purge_missing and not dry_run:
+            from . import embeddings, index_sync
+
+            # These are lexically validated, absent Markdown identities: ordinary
+            # removal routing is correct and intentionally clears stable identity
+            # sidecars too. CLIP stores the corresponding media key without `.md`.
+            missing_report = index_sync.delete_after_remove(vault_root, purge_missing)
+            embeddings.get_clip_index(vault_root).purge_markdown_paths_if_present(purge_missing)
+            report.semantic_missing_purged = purge_missing
+            repair_succeeded &= not missing_report.reconcile_required
+        if not dry_run and repair_succeeded:
+            deferred_index.set_semantic_isolation_cursors(
+                vault_root,
+                suppression_census.continuation if suppression_census.truncation else {},
+            )
 
     maintenance_jobs.checkpoint("units")
+    # The audit and the values it is scoped by are read with no hold. A stale scope only changes
+    # which sidecars the audit compares, and `initial_graph_drift` only decides whether the graph
+    # phase looks again: that phase reads the drift again inside its own hold before it repairs.
     include_unit_lexical = lexstore.lexical_path(vault_root).exists()
     include_unit_vectors = bool(
         not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
@@ -547,6 +762,7 @@ def reconcile(
         include_graph=include_unit_graph,
     )
     report.semantic_unit_index_drift = [item.as_dict() for item in unit_drift]
+    outside_corpus_hashes: dict[str, str] = {}
     if unit_drift:
         report.semantic_unit_indexes_status = "drifted" if dry_run else "repairing"
     if unit_drift and not dry_run:
@@ -567,14 +783,41 @@ def reconcile(
                 and item.sidecar != "cross_sidecar"
             }
         )
-        if orphans:
-            index_sync.delete_after_remove(vault_root, orphans)
-        if affected:
-            index_sync.upsert_after_write(
-                vault_root,
-                [vault_root / path for path in affected],
-                semantic_states={path: semantic_states[path] for path in affected},
+        # A parent outside the corpus was no page that the corpus read. Its bytes are recorded now, at
+        # the audit, so the hold removes its rows only while it stays as the audit found it. Rows
+        # stamped with the parent's bytes now were indexed by a write that the corpus read missed:
+        # that parent is not recorded, so it counts as moved and its rows stay with that write.
+        indexed_for: dict[str, set[str]] = {}
+        for item in unit_drift:
+            if item.parent_path not in semantic_states:
+                indexed_for.setdefault(item.parent_path, set()).update(item.actual_source_hashes)
+        outside_corpus_hashes = {
+            rel: digest
+            for rel, digest in _read_hashes(vault_root, indexed_for).items()
+            if digest not in indexed_for[rel]
+        }
+        with _phase_hold(vault_root, "reconcile units", dry_run=dry_run):
+            # A parent whose bytes moved since they were read was indexed by the write that moved it, so
+            # the run leaves it and reports it. Removing an orphan's rows would undo that write. Refreshing
+            # a corpus page would repeat it, since each sidecar re-parses a planned state whose bytes moved.
+            moved = set(
+                _moved_since_read(
+                    vault_root,
+                    {**_corpus_hashes(semantic_batch.corpus.pages, affected), **outside_corpus_hashes},
+                    [*affected, *orphans],
+                )
             )
+            affected = [path for path in affected if path not in moved]
+            orphans = [path for path in orphans if path not in moved]
+            if orphans:
+                index_sync.delete_after_remove(vault_root, orphans)
+            if affected:
+                index_sync.upsert_after_write(
+                    vault_root,
+                    [vault_root / path for path in affected],
+                    semantic_states={path: semantic_states[path] for path in affected},
+                )
+        report.semantic_unit_parents_moved = sorted(moved)
         report.semantic_unit_parents_refreshed = len(affected)
         report.semantic_unit_orphans_removed = len(orphans)
     maintenance_jobs.checkpoint("lifecycle")
@@ -603,10 +846,27 @@ def reconcile(
     ) = _bounded_lifecycle_values(
         tuple(issue.as_dict() for issue in lifecycle_batch.issues)
     )
-    if not dry_run and lifecycle_batch.cleanup_safe:
-        cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch(
-            vault_root,
-            _cleanup_eligible(lifecycle_batch),
+    eligible = _cleanup_eligible(lifecycle_batch)
+    if not dry_run and lifecycle_batch.cleanup_safe and eligible:
+        with _phase_hold(vault_root, "reconcile lifecycle", dry_run=dry_run):
+            # The inspection classified each slot against its owner's bytes in the corpus read. A
+            # slot whose owner moved since then is left for the next run to classify again. The
+            # cleanup checks the rest itself: the owners' identities, the slots and the trash.
+            owners = sorted({path for item in eligible for path in item.live_owner_paths})
+            moved = set(
+                _moved_since_read(vault_root, _corpus_hashes(semantic_batch.corpus.pages, owners), owners)
+            )
+            raced = [item for item in eligible if moved.intersection(item.live_owner_paths)]
+            cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch(
+                vault_root,
+                tuple(item for item in eligible if not moved.intersection(item.live_owner_paths)),
+            )
+        blocked = (
+            *cleanup.blocked,
+            *(
+                relation_review.LifecyclePreparedIssue("LIFECYCLE_PRIMARY_RACE", item.prepared.page_identity)
+                for item in raced
+            ),
         )
         (
             report.lifecycle_prepared_cleaned,
@@ -620,26 +880,28 @@ def reconcile(
                 "lifecycle_prepared_cleanup_blocked"
             ],
         ) = _bounded_lifecycle_values(
-            tuple(issue.as_dict() for issue in cleanup.blocked)
+            tuple(issue.as_dict() for issue in blocked)
         )
     kb = kb_root(vault_root)
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----
     maintenance_jobs.checkpoint("indexes")
-    top_index_path = kb / "index.md"
-    top_text = (
-        top_index_path.read_text(encoding="utf-8")
-        if top_index_path.exists() else None
-    )
-    sub_writes, new_top = indexes.compute_subindex_writes(
-        vault_root, top_index_text=top_text
-    )
-    writes: list[PlannedWrite] = _changed_writes(list(sub_writes))
-    if new_top is not None and top_text is not None and new_top != top_text:
-        writes.append(PlannedWrite(path=top_index_path, content=new_top))
-    report.indexes_updated = [_rel(w.path, vault_root) for w in writes]
-    if writes and not dry_run:
-        batch_atomic_write(writes, vault_root=vault_root)
+    with _phase_hold(vault_root, "reconcile indexes", dry_run=dry_run):
+        # Counted inside the hold, so the counts it writes are the vault's as it writes them.
+        top_index_path = kb / "index.md"
+        top_text = (
+            top_index_path.read_text(encoding="utf-8")
+            if top_index_path.exists() else None
+        )
+        sub_writes, new_top = indexes.compute_subindex_writes(
+            vault_root, top_index_text=top_text
+        )
+        writes: list[PlannedWrite] = _changed_writes(list(sub_writes))
+        if new_top is not None and top_text is not None and new_top != top_text:
+            writes.append(PlannedWrite(path=top_index_path, content=new_top))
+        report.indexes_updated = [_rel(w.path, vault_root) for w in writes]
+        if writes and not dry_run:
+            batch_atomic_write(writes, vault_root=vault_root)
 
     # ---- 2. Embeddings (incremental refresh of stale + never-embedded files) ----
     maintenance_jobs.checkpoint("embeddings")
@@ -647,7 +909,7 @@ def reconcile(
         report.embeddings_status = "disabled"
     else:
         drift = audit_module._check_embedding_drift(vault_root)
-        drifted_abs: list[Path] = []
+        drifted: dict[str, Path] = {}
         missing_rels: list[str] = []
         for finding in drift:
             rel = audit_module._safe_persisted_markdown_rel(str(finding.path))
@@ -655,25 +917,38 @@ def reconcile(
                 continue
             candidate = audit_module._no_follow_regular_markdown_path(vault_root, rel)
             if candidate is not None:
-                drifted_abs.append(candidate)
+                drifted[rel] = candidate
             else:
                 missing_rels.append(rel)
+        drifted_abs = list(drifted.values())
         refresh_succeeded = True
-        if not dry_run:
+        if not dry_run and (missing_rels or drifted_abs):
             from . import embeddings, index_sync, mode, semantic_drain
 
-            if missing_rels:
-                index_sync.delete_after_remove(vault_root, missing_rels)
-            if drifted_abs:
-                if mode.service_profile_enabled():
-                    semantic_drain.request(vault_root, drifted_abs, edited=False)
-                    refresh_succeeded = False
-                else:
-                    refresh_succeeded = (
-                        embeddings.upsert_after_write(vault_root, drifted_abs) is not False
-                    )
-                if refresh_succeeded:
-                    index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
+            with _phase_hold(vault_root, "reconcile embeddings", dry_run=dry_run):
+                # Found with no hold, then checked again inside it: a file that came back, or went,
+                # since the drift check belongs to the write that moved it. A refresh reads the
+                # current bytes, so a page edited since then is embedded as it is now.
+                missing_rels = [
+                    rel for rel in missing_rels if audit_module._no_follow_regular_markdown_path(vault_root, rel) is None
+                ]
+                drifted_abs = [
+                    path
+                    for rel, path in drifted.items()
+                    if audit_module._no_follow_regular_markdown_path(vault_root, rel) is not None
+                ]
+                if missing_rels:
+                    index_sync.delete_after_remove(vault_root, missing_rels)
+                if drifted_abs:
+                    if mode.service_profile_enabled():
+                        semantic_drain.request(vault_root, drifted_abs, edited=False)
+                        refresh_succeeded = False
+                    else:
+                        refresh_succeeded = (
+                            embeddings.upsert_after_write(vault_root, drifted_abs) is not False
+                        )
+                    if refresh_succeeded:
+                        index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
         report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0
         if not refresh_succeeded:
             report.embeddings_status = "deferred"
@@ -682,6 +957,7 @@ def reconcile(
 
     # ---- 2b. Lexical sidecar (count/mtime reconcile against the walk) ----
     maintenance_jobs.checkpoint("lexical")
+    # No hold: the store serializes its own publication against every writer with its own lock.
     # NOT behind the embeddings gate: the lexical index is a lean-install
     # artifact. The store's own sync check is the heal; forcing it here means
     # "reconcile" leaves the sidecar verified-fresh, not lazily healed later.
@@ -698,115 +974,119 @@ def reconcile(
         if rebuild_graph:
             report.graph_rebuild_status = "not_applicable"
     else:
-        index = epistemic_graph.EpistemicGraphIndex(vault_root)
-        reset_registered = False
-        if rebuild_graph:
-            # A process can crash after durable isolation but before the new
-            # checkpoint is written.  That leaves the live root looking
-            # legacy/current, so explicit recovery must adopt this first.
-            reset = (
-                epistemic_graph.graph_sync.recover_isolated_graph_lineage_reset(vault_root)
-                if not dry_run
-                else None
-            )
-            if reset is not None:
-                report.graph_rebuild_applicable = True
-                report.graph_rebuild_status = "quarantined"
-                report.graph_quarantine_id = reset.operation_id
-            else:
-                members = _graph_quarantine_members(vault_root)
-                if members is not None:
-                    report.graph_rebuild_applicable = bool(members)
-                    if dry_run:
-                        report.graph_rebuild_status = "would_quarantine"
+        # One hold for the whole phase: lineage isolation, checkpoint recovery and the sweeps move
+        # durable graph state, and the drift that decides a repair is read again inside it. The
+        # graph build itself runs in its registered flight, which this hold only starts.
+        with _phase_hold(vault_root, "reconcile graph", dry_run=dry_run):
+            index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            reset_registered = False
+            if rebuild_graph:
+                # A process can crash after durable isolation but before the new
+                # checkpoint is written.  That leaves the live root looking
+                # legacy/current, so explicit recovery must adopt this first.
+                reset = (
+                    epistemic_graph.graph_sync.recover_isolated_graph_lineage_reset(vault_root)
+                    if not dry_run
+                    else None
+                )
+                if reset is not None:
+                    report.graph_rebuild_applicable = True
+                    report.graph_rebuild_status = "quarantined"
+                    report.graph_quarantine_id = reset.operation_id
+                else:
+                    members = _graph_quarantine_members(vault_root)
+                    if members is not None:
+                        report.graph_rebuild_applicable = bool(members)
+                        if dry_run:
+                            report.graph_rebuild_status = "would_quarantine"
+                        else:
+                            reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+                                vault_root
+                            )
+                            if reset is not None:
+                                report.graph_rebuild_status = "quarantined"
+                                report.graph_quarantine_id = reset.operation_id
                     else:
-                        reset = epistemic_graph.graph_sync.isolate_unavailable_graph_lineage(
+                        report.graph_rebuild_status = "not_applicable"
+                if reset is not None and not dry_run:
+                    try:
+                        checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
                             vault_root
                         )
-                        if reset is not None:
-                            report.graph_rebuild_status = "quarantined"
-                            report.graph_quarantine_id = reset.operation_id
-                else:
-                    report.graph_rebuild_status = "not_applicable"
-            if reset is not None and not dry_run:
-                try:
-                    checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
-                        vault_root
-                    )
-                    dispatch = epistemic_graph._registered_or_failure(
-                        vault_root,
-                        checkpoint,
-                        index,
-                        index._canonical_mutation_coordinator(),
-                    )
-                except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
-                    report.graph_rebuild_status = "retained"
-                    report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
-                else:
-                    if _is_graph_rebuild_handoff(dispatch, checkpoint):
-                        report._graph_reconcile_registered = 0
-                        report._graph_rebuild_handoff = {
-                            "operation_id": reset.operation_id,
-                            "checkpoint": checkpoint.as_dict(),
-                            "graph_refreshed": len(initial_graph_drift),
-                        }
-                        reset_registered = True
-                    else:
-                        report.graph_rebuild_status = "retained"
-                        report.graph_rebuild_warning = dispatch.code
-        initial_epoch = epistemic_graph.graph_sync.status(vault_root)
-        needs_repair = (
-            bool(initial_graph_drift)
-            or initial_epoch["state"] != "current"
-            or not index.available()
-        )
-        if not dry_run:
-            epistemic_graph.graph_sync.sweep_abandoned_temporaries(
-                vault_root,
-                epistemic_graph.sidecar_path(vault_root),
-                live_paths=epistemic_graph.graph_sync.live_temporary_paths(),
-                state_root=index._canonical_mutation_coordinator().state_root,
-            )
-            if (
-                not reset_registered
-                and epistemic_graph.graph_sync.classify_epoch(vault_root).kind
-                == "recoverable"
-            ):
-                epistemic_graph.graph_sync.recover_checkpoint(vault_root)
-            if (
-                needs_repair
-                and not reset_registered
-                and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable"
-            ):
-                if audit_module._check_graph_drift(vault_root) or not index.available():
-                    checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
-                        vault_root
-                    )
-                    dispatch = epistemic_graph._registered_or_failure(
-                        vault_root,
-                        checkpoint,
-                        index,
-                        index._canonical_mutation_coordinator(),
-                    )
-                    from .writer_lease import active_mutation_request_id
-
-                    if active_mutation_request_id() is None:
-                        epistemic_graph.graph_sync.wait_for_registered(
+                        dispatch = epistemic_graph._registered_or_failure(
                             vault_root,
-                            state_root=index._canonical_mutation_coordinator().state_root,
+                            checkpoint,
+                            index,
+                            index._canonical_mutation_coordinator(),
                         )
-                    elif dispatch.outcome == "registered":
-                        report._graph_reconcile_registered = len(initial_graph_drift)
-        current = (
-            epistemic_graph.graph_sync.status(vault_root)["state"] == "current"
-            and index.available()
-            and not audit_module._check_graph_drift(vault_root)
-        )
-        report.graph_refreshed = len(initial_graph_drift) if current and needs_repair else 0
-        if current:
-            report.graph_status = "refreshed" if needs_repair else "current"
-        else:
-            report.graph_status = "unavailable"
+                    except Exception:  # noqa: BLE001 - canonical reset isolation remains durable
+                        report.graph_rebuild_status = "retained"
+                        report.graph_rebuild_warning = "GRAPH_REBUILD_REGISTRATION_FAILED"
+                    else:
+                        if _is_graph_rebuild_handoff(dispatch, checkpoint):
+                            report._graph_reconcile_registered = 0
+                            report._graph_rebuild_handoff = {
+                                "operation_id": reset.operation_id,
+                                "checkpoint": checkpoint.as_dict(),
+                                "graph_refreshed": len(initial_graph_drift),
+                            }
+                            reset_registered = True
+                        else:
+                            report.graph_rebuild_status = "retained"
+                            report.graph_rebuild_warning = dispatch.code
+            initial_epoch = epistemic_graph.graph_sync.status(vault_root)
+            needs_repair = (
+                bool(initial_graph_drift)
+                or initial_epoch["state"] != "current"
+                or not index.available()
+            )
+            if not dry_run:
+                epistemic_graph.graph_sync.sweep_abandoned_temporaries(
+                    vault_root,
+                    epistemic_graph.sidecar_path(vault_root),
+                    live_paths=epistemic_graph.graph_sync.live_temporary_paths(),
+                    state_root=index._canonical_mutation_coordinator().state_root,
+                )
+                if (
+                    not reset_registered
+                    and epistemic_graph.graph_sync.classify_epoch(vault_root).kind
+                    == "recoverable"
+                ):
+                    epistemic_graph.graph_sync.recover_checkpoint(vault_root)
+                if (
+                    needs_repair
+                    and not reset_registered
+                    and epistemic_graph.graph_sync.status(vault_root)["state"] != "unavailable"
+                ):
+                    if audit_module._check_graph_drift(vault_root) or not index.available():
+                        checkpoint = epistemic_graph.graph_sync.reconcile_checkpoint(
+                            vault_root
+                        )
+                        dispatch = epistemic_graph._registered_or_failure(
+                            vault_root,
+                            checkpoint,
+                            index,
+                            index._canonical_mutation_coordinator(),
+                        )
+                        from .writer_lease import active_mutation_request_id
+
+                        if active_mutation_request_id() is None:
+                            epistemic_graph.graph_sync.wait_for_registered(
+                                vault_root,
+                                state_root=index._canonical_mutation_coordinator().state_root,
+                            )
+                        elif dispatch.outcome == "registered":
+                            report._graph_reconcile_registered = len(initial_graph_drift)
+            current = (
+                epistemic_graph.graph_sync.status(vault_root)["state"] == "current"
+                and index.available()
+                and not audit_module._check_graph_drift(vault_root)
+            )
+            report.graph_refreshed = len(initial_graph_drift) if current and needs_repair else 0
+            if current:
+                report.graph_status = "refreshed" if needs_repair else "current"
+            else:
+                report.graph_status = "unavailable"
     if report._graph_reconcile_registered is not None or report._graph_rebuild_handoff is not None:
         # A registered graph flight keeps running after the job ends or stops, so the receipt says
         # the graph is not done yet, whatever `graph_status` read at this instant.
@@ -823,26 +1103,43 @@ def reconcile(
     from . import scene_frames
 
     maintenance_jobs.checkpoint("orphans")
-    clip_orphans = _clip_orphans(vault_root, missing_clip_orphans)
-    if clip_orphans and not dry_run:
-        embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
-    report.clip_orphans_removed = len(clip_orphans)
-
-    frame_orphans = _dangling_frame_dirs(vault_root)
-    if not dry_run:
-        for frame_dir, video_path in frame_orphans:
-            scene_frames.clear_scene_frames(vault_root, video_path)
-            try:
-                frame_dir.rmdir()
-            except OSError:
-                pass
-    report.frame_orphans_removed = len(frame_orphans)
-
     # Hidden part pages of long extractions: remove those left over from a longer extraction,
     # write missing ones again where the original reads cheaply, and report the rest.
     from . import extraction_parts
 
-    swept = extraction_parts.sweep(vault_root, dry_run=dry_run)
+    # Found with no hold, then checked again inside one: an orphan that has its media back now
+    # belongs to the write that restored it.
+    clip_orphans = _clip_orphans(vault_root, missing_clip_orphans)
+    frame_orphans = _dangling_frame_dirs(vault_root)
+    swept = extraction_parts.sweep(vault_root, dry_run=True)
+    # A planned write also takes the hold when every orphan that its plan names has gone, to report them.
+    planned_orphans = census is not None and bool(census.clip_orphans or census.frame_orphans)
+    if not dry_run and (clip_orphans or frame_orphans or swept.removed or swept.missing or planned_orphans):
+        with _phase_hold(vault_root, "reconcile orphans", dry_run=dry_run):
+            clip_orphans = [key for key in clip_orphans if not _media_present(vault_root, key)]
+            frame_orphans = [
+                (frame_dir, video_path)
+                for frame_dir, video_path in frame_orphans
+                if not _media_present(vault_root, video_path)
+            ]
+            if census is not None:
+                # A planned write removes only the orphans that its plan names too, and reports the rest.
+                clip_orphans, frame_orphans, report.orphans_changed = _planned_orphans(
+                    vault_root, census, clip_orphans, frame_orphans
+                )
+            if clip_orphans:
+                embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
+            for frame_dir, video_path in frame_orphans:
+                scene_frames.clear_scene_frames(vault_root, video_path)
+                try:
+                    frame_dir.rmdir()
+                except OSError:
+                    pass
+            if swept.removed or swept.missing:
+                # The sweep reads every part again under this hold before it removes or writes one.
+                swept = extraction_parts.sweep(vault_root, dry_run=False)
+    report.clip_orphans_removed = len(clip_orphans)
+    report.frame_orphans_removed = len(frame_orphans)
     report.part_orphans_removed = len(swept.removed)
     report.parts_rebuilt = len(swept.rebuilt)
     report.parts_missing = swept.missing
@@ -855,7 +1152,9 @@ def reconcile(
 
     reference_drift = memory_refs.drift(vault_root)
     if reference_drift and not dry_run:
-        memory_refs.ReferenceIndex(vault_root).rebuild_all()
+        # The rebuild reads every page again under this hold, then replaces the table.
+        with _phase_hold(vault_root, "reconcile references", dry_run=dry_run):
+            memory_refs.ReferenceIndex(vault_root).rebuild_all()
     report.references_refreshed = len(reference_drift)
     report.references_status = "refreshed" if reference_drift else "current"
 
@@ -866,6 +1165,18 @@ def reconcile(
         include_vectors=include_unit_vectors,
         include_graph=include_unit_graph,
     )
+    if not dry_run:
+        # A parent that moved since the run read it is its own write's, not drift this run left.
+        parents = sorted({item.parent_path for item in remaining_unit_drift})
+        moved_since = set(
+            _moved_since_read(
+                vault_root, {**_corpus_hashes(semantic_batch.corpus.pages, parents), **outside_corpus_hashes}, parents
+            )
+        )
+        remaining_unit_drift = tuple(
+            item for item in remaining_unit_drift if item.parent_path not in moved_since
+        )
+        report.semantic_unit_parents_moved = sorted(set(report.semantic_unit_parents_moved) | moved_since)
     report.semantic_unit_index_remaining = [
         item.as_dict() for item in remaining_unit_drift
     ]
@@ -885,11 +1196,12 @@ def reconcile(
     from . import derived_receipts, index_sync
 
     maintenance_jobs.checkpoint("derived-receipts")
-    report.derived_batch_reconcile = derived_receipts.reconcile_stranded_batches(
-        vault_root,
-        converge=index_sync.converge_paths_from_current_bytes,
-        dry_run=dry_run,
-    )
+    with _phase_hold(vault_root, "reconcile derived-receipts", dry_run=dry_run):
+        report.derived_batch_reconcile = derived_receipts.reconcile_stranded_batches(
+            vault_root,
+            converge=index_sync.converge_paths_from_current_bytes,
+            dry_run=dry_run,
+        )
 
     # ---- 4. Remaining drift report ----
     maintenance_jobs.checkpoint("drift")
@@ -916,16 +1228,23 @@ def reconcile(
         from . import freshness
         from . import vault as vault_module
 
-        freshness.rebaseline(vault_root)
+        with _phase_hold(vault_root, "reconcile rebaseline", dry_run=dry_run):
+            freshness.rebaseline(vault_root)
+            vault_module.clear_inbound_index()
+        # Outside the hold, as warm-up calls it: it serializes on the lexical publication barrier, where
+        # every catalog write commits, and stamps only a stored state equal to the live one, so it needs no
+        # boundary, and its wait for that barrier (up to 30 s) no longer blocks writers.
         lexstore.rebase_current_catalog_lineage(vault_root)
-        vault_module.clear_inbound_index()
 
     # Receipt evidence is intentionally repaired only here, after ordinary
     # derived-state reconciliation has established any critical-event target.
+    # It holds the boundary: it closes intents and tombstones from the vault as it reads it, and a
+    # governed write holds the boundary from its intent to its terminal.
     from .governance import receipts
 
     maintenance_jobs.checkpoint("receipts")
-    report.receipt_reconcile = receipts.reconcile(vault_root, dry_run=dry_run)
+    with _phase_hold(vault_root, "reconcile receipts", dry_run=dry_run):
+        report.receipt_reconcile = receipts.reconcile(vault_root, dry_run=dry_run)
 
     # A job's receipt reads the counts of what this run did; the full report stays the dispatcher's result.
     maintenance_jobs.note(summary=_job_summary(report))
@@ -934,7 +1253,7 @@ def reconcile(
 
 def _job_summary(report: ReconcileReport) -> dict[str, Any]:
     """The counts of one run, for a job's receipt."""
-    return {
+    summary = {
         "plan_id": report.plan_id,
         "indexes_updated": len(report.indexes_updated),
         "embeddings_refreshed": report.embeddings_refreshed,
@@ -953,3 +1272,9 @@ def _job_summary(report: ReconcileReport) -> dict[str, Any]:
         "lifecycle_prepared_cleaned": len(report.lifecycle_prepared_cleaned),
         "remaining_drift": len(report.remaining_drift),
     }
+    if not report.dry_run:
+        # As in `as_dict`: only a write reads its inputs again inside its holds.
+        summary["semantic_isolation_changed"] = len(report.semantic_isolation_changed)
+        summary["semantic_unit_parents_moved"] = len(report.semantic_unit_parents_moved)
+        summary["orphans_changed"] = len(report.orphans_changed)
+    return summary

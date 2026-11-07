@@ -6150,6 +6150,11 @@ class LeaseManager:
                 )
             return graph_sync.committed_graph_failure(checkpoint)
 
+        # The command name and mode are closed protocol literals: the CLI's and the tool's reconcile.
+        runs_reconcile = command.name == "reconcile" or (
+            command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
+        )
+
         def joins_unbounded_graph(result: Any) -> bool:
             """Whether this command's terminal *is* the derived graph state.
 
@@ -6160,11 +6165,7 @@ class LeaseManager:
             command that joins unbounded is exactly the one whose terminal
             cannot be made durable until that join has finalized its handoff.
             """
-            return (
-                command.name == "reconcile"
-                or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
-                or _carries_graph_rebuild_handoff(result)
-            )
+            return runs_reconcile or _carries_graph_rebuild_handoff(result)
 
         def wait_for_graph_sync(result: Any) -> Any:
             """Join derived graph work only after the canonical guard released."""
@@ -6736,21 +6737,25 @@ class LeaseManager:
         from . import maintenance_jobs
 
         # A maintenance job's start only claims a row and launches a thread, and its
-        # cancel only flags one; neither touches the vault. A chunked job's own dispatch
-        # (`plan_id` and `dry_run=False`) holds the boundary per chunk in its leaf, so
-        # a job can start while another writer holds the boundary. A whole-run job's
-        # dispatch keeps the wide boundary (`maintenance_jobs.WHOLE_RUN_MODES`).
-        # `EXOMEM_WIDE_MUTATION_BOUNDARY` widens a job start like every other narrow row.
-        # It never widens a cancel: that must stay able to stop a job that holds the
-        # wide boundary, so it needs no switch to be safe.
+        # cancel only flags one; neither touches the vault. A job's own dispatch
+        # (`plan_id` and `dry_run=False`) holds the boundary in short holds in its leaf
+        # (`maintenance_jobs.chunk_hold`), so a job can start while another writer holds
+        # the boundary. `EXOMEM_WIDE_MUTATION_BOUNDARY` widens a job start and dispatch like
+        # every other narrow row. It never widens a cancel: that must stay able to stop a
+        # job that holds the wide boundary, so it needs no switch to be safe.
         narrow_maintenance_job_cancel = (
             command.name == "maintain_memory" and kwargs.get("mode") == maintenance_jobs.MODE_CANCEL
         )
         narrow_maintenance_job = (
             command.name == "maintain_memory"
-            and maintenance_jobs.narrows_boundary(kwargs, getattr(capabilities_module.current_active_surface(), "surface", None))
+            and maintenance_jobs.is_job_write(kwargs)
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # A reconcile, from the CLI or as a job, holds the boundary itself in one short hold
+        # per phase that writes vault-coupled state, and re-reads that phase's inputs inside
+        # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
+        # hold, so other writers commit between phases. The graph join after it holds none.
+        narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         # A curation proposal prepares read-only, then seals; `seal_proposal` takes
         # the mutation boundary itself and re-checks every binding under it, so
         # preparation can run without the lock. Apply, resume and compensation
@@ -6777,6 +6782,7 @@ class LeaseManager:
             or narrow_tag_variant_commit
             or narrow_maintenance_job_cancel
             or narrow_maintenance_job
+            or narrow_reconcile
             or narrow_curation_proposal
             or narrow_episode_record
             # Issuance writes no vault-owned file: upload and download mint a token over a private
@@ -6851,8 +6857,8 @@ class LeaseManager:
                             mutation_subject,
                             request_id=request_id,
                             operation=command.name,
-                            # A whole-run job's dispatch: a blocked writer learns that a job holds the boundary.
-                            holder_kind="maintenance-job" if maintenance_jobs.current_run_id() else "command",
+                            # A job's dispatch under the wide switch: a blocked writer learns that a job holds it.
+                            holder_kind=maintenance_jobs.holder_kind(),
                             session_open_admission=session_open_admission,
                         )
                     )
