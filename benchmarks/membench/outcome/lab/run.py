@@ -47,6 +47,7 @@ from ..clbench.run import ClaudeSession, QuestionLog
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
+    PLUGIN_READ_ALLOW,
     REPO_ROOT,
     SHIPPED_PROMINENCE,
     claude_env,
@@ -89,7 +90,7 @@ FILE_ALLOWS = ("Read(./**)", "Write(./**)", "Edit(./**)")
 EXOMEM_READ_ALLOWS = tuple(
     f"mcp__exomem__{tool}" for tool in ("recall_context", "search_memory", "read_memory")
 )
-SHIPPED_ALLOWS = ("Skill", "mcp__exomem")
+SHIPPED_ALLOWS = ("Skill", "mcp__exomem", PLUGIN_READ_ALLOW)
 
 TASK_PROMPT = (
     "{instructions}\n\n"

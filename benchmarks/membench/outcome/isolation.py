@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from collection_ingest.mcp_session import isolated_env
-from epistemic.journeys.f27_replay import custom_instructions_block, environment_floor
+from epistemic.journeys.f27_replay import PLUGIN_DIR, custom_instructions_block, environment_floor
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -25,6 +25,10 @@ ACTOR_EFFORT = "high"
 #: The prominence the plugin and its docs ship as the default. The documented block for it is
 #: appended to the system prompt of an arm that plays Exomem as its users get it.
 SHIPPED_PROMINENCE = "balanced"
+
+#: A skill reads its own ``references/`` files, so the plugin directory is readable and nothing
+#: else outside the workspace is. A protected-path disallow still wins over this allow.
+PLUGIN_READ_ALLOW = f"Read(/{PLUGIN_DIR}/**)"
 
 #: Non-EXOMEM keys the server itself needs from the pins.
 _SERVER_KEYS = frozenset(

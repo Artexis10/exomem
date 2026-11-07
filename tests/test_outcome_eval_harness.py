@@ -11,12 +11,15 @@ import re
 from pathlib import Path
 
 import pytest
-from epistemic.journeys.f27_replay import AgentEnvelope
+from epistemic.journeys.f27_replay import PLUGIN_DIR, AgentEnvelope
 from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, run_cell
+from membench.outcome.clbench.run import UPSTREAM as CLBENCH_UPSTREAM
 from membench.outcome.isolation import child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
 from membench.outcome.lab import judge as lab_judge
-from membench.outcome.lab.prepare import slug
+from membench.outcome.lab import run as lab_run
+from membench.outcome.lab.prepare import CASES, slug
+from membench.outcome.lab.prepare import UPSTREAM as LAB_UPSTREAM
 from membench.outcome.lab.run import FILE_ALLOWS, SHIPPED_ALLOWS, Lab
 from membench.outcome.planted import judge as planted_judge
 from membench.outcome.planted.answer import answer_actor
@@ -65,20 +68,27 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
         server = json.loads(actor.mcp_config.read_text())["mcpServers"]["exomem"]["env"]
         surfaces[f"clbench {arm}"] = (
             arm_dir,
-            [actor.env],
+            [actor.session_env(0), actor.session_env(1)],
             [server],
             actor.argv(),
             actor.mcp_config,
         )
     # LAB's shipped arm: the compile and the task session each start the plugin's hooks.
-    lab_dir = tmp_path / "lab-run"
+    monkeypatch.setattr(lab_run, "RUN_ROOT", tmp_path)
+    lab_dir = tmp_path / "runs" / "lab-run"
+    lab_dir.mkdir(parents=True)
     lab = Lab(lab_dir, ["matter"], "model-under-test", "high", envelope=ENVELOPE)
     wp_dir = lab_dir / "matter" / "WP"
     surfaces["lab WP"] = (
         lab_dir,
         [lab.env_for(wp_dir, session, shipped=True) for session in ("compile", "task")],
         [mcp_server(wp_dir)["env"]],
-        lab.argv(wp_dir / "mcp.json", [*FILE_ALLOWS, *SHIPPED_ALLOWS], [], shipped=True),
+        lab.argv(
+            wp_dir / "mcp.json",
+            [*FILE_ALLOWS, *SHIPPED_ALLOWS],
+            lab.protected("matter", "WP"),
+            shipped=True,
+        ),
         None,
     )
     answer_dir = tmp_path / "planted-E"
@@ -114,12 +124,30 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
     for name in ("clbench P", "clbench EH", "lab WP"):
         root, envs, _servers, argv, _config = surfaces[name]
         assert "--plugin-dir" in argv, f"{name} would not load the plugin"
-        assert all(Path(env["EXOMEM_HOOK_HOME"]).is_relative_to(root) for env in envs), name
+        homes = [Path(env["EXOMEM_HOOK_HOME"]) for env in envs]
+        assert all(home.is_relative_to(root) for home in homes), name
+        # Each question or session is a separate user session: no shared cooldown stamps.
+        assert len(set(homes)) == len(homes), f"{name} shares one hook home"
     for name in ("clbench P", "lab WP"):
         root, _envs, _servers, argv, _config = surfaces[name]
         block = Path(argv[argv.index("--append-system-prompt-file") + 1])
         assert block.is_relative_to(root), f"{name} reads its instruction block from outside"
     assert "--plugin-dir" not in surfaces["clbench E"][3], "the E ablation would load the plugin"
+    # A skill reads its own references/ files, so the plugin directory is readable. That is the
+    # only read outside the workspace, and the protected paths stay disallowed.
+    protected = {
+        "clbench P": [CLBENCH_UPSTREAM],
+        "clbench EH": [CLBENCH_UPSTREAM],
+        "lab WP": [LAB_UPSTREAM, CASES.parent],
+    }
+    for name, paths in protected.items():
+        argv = surfaces[name][3]
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        disallowed = argv[argv.index("--disallowedTools") + 1].split(",")
+        reads = [rule for rule in allowed if rule.startswith("Read(")]
+        assert reads == ["Read(./**)", f"Read(/{PLUGIN_DIR}/**)"], f"{name} reads {reads}"
+        for path in paths:
+            assert f"Read(/{path}/**)" in disallowed, f"{name} may read {path}"
 
 
 def test_judge_input_never_names_the_arm(tmp_path, monkeypatch):

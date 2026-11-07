@@ -32,7 +32,10 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
 
 The plugin arms (`P`, `EH`, `WP`, `WG`) run the plugin's hooks with no service credential. The
 hooks keep their state inside the arm directory. The report records the characters the hooks
-injected, and any tool the CLI refused for want of permission.
+injected, and any tool the CLI refused for want of permission. Each CL-Bench question and each
+LAB session starts with a fresh hook home, so a hook's cooldown from an earlier question cannot
+silence its nudge. A plugin arm may read the plugin directory, so a skill can read its own
+reference files, and nothing else outside its workspace.
 
 ## Where data and evidence live
 

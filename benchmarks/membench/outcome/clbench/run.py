@@ -59,6 +59,7 @@ from .. import record
 from ..isolation import (
     ACTOR_EFFORT,
     ACTOR_MODEL,
+    PLUGIN_READ_ALLOW,
     REPO_ROOT,
     SHIPPED_PROMINENCE,
     claude_env,
@@ -333,6 +334,8 @@ class ClaudeActor:
         self.block_record = lay_instruction_block(self.block) if spec.shipped else None
         # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's memory.
         allowed = ["Read(./**)", "Write(./**)", "Edit(./**)"]
+        if spec.plugin:
+            allowed.append(PLUGIN_READ_ALLOW)
         if spec.shipped:
             allowed.append("Skill")
         if spec.exomem:
@@ -347,10 +350,19 @@ class ClaudeActor:
             configure_ref="membench.outcome.clbench",
         )
         self.env, self.removed_env = claude_env()
-        if spec.plugin:
-            # The hooks are child processes of the CLI: their state and every Exomem path stay in the arm.
-            self.env.update(hook_env(arm_dir))
         self._reset_work()
+
+    def session_env(self, index: int) -> dict[str, str]:
+        """The environment of question ``index``'s session.
+
+        The hooks are child processes of the CLI: their state and every Exomem path stay in the
+        arm. Each question stands for a separate user session spread over time, and the hook's
+        cooldowns are wall-clock values tuned for interactive use, so each question gets a fresh
+        hook home and the cooldown stamps of the one before cannot silence its nudge.
+        """
+        if not self.spec.plugin:
+            return self.env
+        return {**self.env, **hook_env(self.arm_dir, f"q{index:03d}")}
 
     def _reset_work(self) -> None:
         if self.work.exists():
@@ -397,7 +409,7 @@ class ClaudeActor:
             self._reset_work()
         transcript = self.arm_dir / "transcripts" / f"q{log.index:03d}-{log.question_id}.jsonl"
         transcript.parent.mkdir(exist_ok=True)
-        session = ClaudeSession(self.argv(), self.env, self.work, transcript)
+        session = ClaudeSession(self.argv(), self.session_env(log.index), self.work, transcript)
         start = time.monotonic()
         try:
             while True:
@@ -534,6 +546,7 @@ def run_cell(cell: CellSpec) -> Path:
                     "plugin_dir": str(PLUGIN_DIR),
                     "activation": "shipped default: no EXOMEM_RETRIEVE_INJECT override",
                     "hook_home": str(arm_dir / "hook-home"),
+                    "hook_home_scope": "a fresh directory per question, named q<NNN>",
                 }
                 if actor.spec.plugin
                 else None,
