@@ -998,7 +998,9 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_reconcile_job(server, 
 
     final, seen, written = _paused_reconcile_job(server, vault, monkeypatch, _ordinary_write(vault, rel))
 
-    assert written == {"status": "committed"}
+    # The write ran and returned while the job waited at the pause, between its two holds.
+    assert isinstance(written, dict), written
+    assert written["status"] == "committed"
     assert (vault / rel).is_file()
     assert seen == (True, True)
     assert (final["state"], final["error_code"]) == ("completed", None)

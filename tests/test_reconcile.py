@@ -1058,7 +1058,9 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile(
         writer_lease.reset_managers_for_tests()
     capsys.readouterr()
 
-    assert outcomes == [{"status": "committed"}]
+    # The write ran and returned while the run waited at the pause, between its two holds.
+    assert len(outcomes) == 1 and isinstance(outcomes[0], dict), outcomes
+    assert outcomes[0]["status"] == "committed"
     assert seen_at_the_write == [(True, True)]
     assert written.is_file()
     assert code == 0

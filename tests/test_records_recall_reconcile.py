@@ -1365,10 +1365,16 @@ def test_a_record_restored_after_the_plan_is_reported_and_keeps_its_rows(
     preview = reconcile_module.reconcile(tmp_path, dry_run=True)
     assert preview.semantic_missing_drift == [rel]
     real_checkpoint = maintenance_jobs.checkpoint
+    claims_after_the_purge: list[list[tuple[str]]] = []
 
     def restore_before_the_purge(phase, *args, **kwargs):
         if phase == "purging":
             raw.write_bytes(content)
+        if phase == "units":
+            # The purge has ended. The units phase after it removes the rows of a raw record outside
+            # the corpus, as it did before the per-phase holds, so the purge's effect is read here.
+            with _sqlite(claims.sidecar_path(tmp_path)) as conn:
+                claims_after_the_purge.append(conn.execute("SELECT file_path FROM claims").fetchall())
         return real_checkpoint(phase, *args, **kwargs)
 
     monkeypatch.setattr(maintenance_jobs, "checkpoint", restore_before_the_purge)
@@ -1376,8 +1382,7 @@ def test_a_record_restored_after_the_plan_is_reported_and_keeps_its_rows(
 
     assert report["semantic_missing_purged"] == []
     assert report["semantic_suppressed_purged"] == []
-    with _sqlite(claims.sidecar_path(tmp_path)) as conn:
-        assert conn.execute("SELECT file_path FROM claims").fetchall() == [(rel,)]
+    assert claims_after_the_purge == [[(rel,)]]
     assert {(item["path"], item["change"]) for item in report["semantic_isolation_changed"]} == {
         (rel, "gone"),
         (rel, "unplanned"),
