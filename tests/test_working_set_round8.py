@@ -13,6 +13,7 @@ from test_working_set_conversation_carry import cvault as cvault
 from test_working_set_egress import _release
 
 from exomem import (
+    capture_carrier,
     commands,
     working_set,
     working_set_anaphora,
@@ -336,7 +337,9 @@ def _assert_ledger(packet: dict) -> None:
     )
     assert subject <= packet["budget"]["limit_chars"] // 3
     action = len((packet.get("next_action") or {}).get("say", ""))
-    assert packet["budget"]["used_chars"] == recent + subject + action
+    # The capture-policy block, served on a request that holds no token, is counted inside the limit.
+    policy_block = capture_carrier.size(packet["capture_policy"]) if "capture_policy" in packet else 0
+    assert packet["budget"]["used_chars"] == recent + subject + action + policy_block
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
 

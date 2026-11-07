@@ -1551,6 +1551,48 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     assert len(f"Add a qualifying typed relation. {remediation}".encode()) <= 224
 
 
+def test_the_entity_observation_remediation_names_the_edit_tool_the_client_lists(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import Client
+
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    entity = "Knowledge Base/Entities/Harbour Co-op.md"
+    (vault / entity).parent.mkdir(parents=True, exist_ok=True)
+    (vault / entity).write_text(
+        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000083\nupdated: 2026-07-15\n---\n\n"
+        "# Harbour Co-op\n\nA member-owned supplier.\n",
+        encoding="utf-8",
+    )
+    server = server_module.build_server(require_auth=False)
+
+    async def run():
+        async with Client(server) as client:
+            listed = {tool.name for tool in await client.list_tools()}
+            refused = await client.call_tool(
+                "change_observations",
+                {"operation": {"kind": "add", "path": entity, "category": "rule", "content": "Opens at nine."}},
+                raise_on_error=False,
+            )
+            return listed, refused.structured_content
+
+    try:
+        listed, refused = asyncio.run(run())
+    finally:
+        writer_lease.reset_managers_for_tests()
+
+    text = f"{refused['error']['message']} {refused['error']['remediation']}"
+    assert "edit_note" in listed and "edit_memory" not in listed
+    assert "edit_note(" in text
+    assert "edit_memory" not in text
+
+
 def test_bound_mcp_tool_does_not_flatten_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

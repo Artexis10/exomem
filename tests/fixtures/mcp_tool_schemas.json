@@ -3958,6 +3958,10 @@
                   ],
                   "type": "string"
                 },
+                "create_missing": {
+                  "default": false,
+                  "type": "boolean"
+                },
                 "tags": {
                   "items": {
                     "type": "string"

@@ -625,6 +625,14 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
     assert "records only" in " ".join(blocks["scaffold"].lower().split())
 
 
+@pytest.mark.parametrize("disposition", ("advisory", "silent"))
+def test_the_activation_capture_policy_carries_the_baseline_doctrine(disposition: str) -> None:
+    say = " ".join(prominence.capture_policy_text(disposition).lower().split())
+
+    for marker in _BASELINE_MARKERS:
+        assert marker in say, marker
+
+
 def test_executed_method_cases_remain_a_separate_predicate() -> None:
     skill = (
         ROOT / "src" / "exomem" / "_scaffold" / "_Schema" / "references" / "engagement.md"

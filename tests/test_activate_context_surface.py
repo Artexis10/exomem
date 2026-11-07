@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands, server, working_set_index, working_set_runtime
+from exomem import capture_carrier, commands, server, working_set_index, working_set_runtime
 from exomem.__main__ import main as cli_main
 from exomem.governance.principal import library_scope
 
@@ -220,7 +220,8 @@ def test_kill_switch_abstains_with_reason_disabled(
     assert packet["abstained"] is True
     assert packet["abstention"] == {"reason": "disabled"}
     assert packet["units"] == []
-    assert packet["budget"]["used_chars"] == 0
+    # The retrieval is off; the live capture policy still travels, and it is all the packet spends.
+    assert packet["budget"]["used_chars"] == capture_carrier.size(packet["capture_policy"])
 
 
 # --------------------------------------------------------------------------- #

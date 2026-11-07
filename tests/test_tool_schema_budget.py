@@ -55,7 +55,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # read_review add 196 B. record_episode measures 5,493 B and its ceiling rounds to 5,500 B;
 # with main's edit_note change, the complete local wire measures 167,985 B, so the budget
 # stays at 168,000 B. The next description change needs a budget increase.
-TOTAL_BUDGET = 168_000
+# The `create_missing` flag on edit_section adds 52 B: edit_note measures 7,262 B and its ceiling rounds
+# to 7,300 B. With both changes the complete local wire measures 168,037 B, so the budget rises 50 B.
+TOTAL_BUDGET = 168_050
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -80,7 +82,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "connect_memory": 4500,
     "coordination_status": 500,
     "create_note": 5700,
-    "edit_note": 7250,
+    "edit_note": 7300,
     "episode_memory": 4200,
     "govern_memory": 3100,
     "grant_session_access": 2050,

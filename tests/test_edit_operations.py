@@ -57,6 +57,7 @@ HASH = "a" * 64  # payload-shape tests write nothing, so any well-formed digest 
                 "heading": "Claim",
                 "new_string": "After",
                 "section_position": "append",
+                "create_missing": False,
                 "validate_only": False,
             },
         ),

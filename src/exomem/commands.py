@@ -55,6 +55,7 @@ from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
+from . import capture_carrier as capture_carrier_module
 from . import capabilities as capabilities_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
@@ -4599,6 +4600,7 @@ def op_edit(
     replace_all: bool = False,
     heading: str | None = None,
     section_position: str = "append",
+    create_missing: bool = False,
     edits: list[multi_edit_module.EditItem] | None = None,
     row_key: str | None = None,
     take: str | None = None,
@@ -4692,6 +4694,8 @@ def op_edit(
             Raises HEADING_NOT_FOUND if absent.
         section_position: With `heading`, where to put `new_string`:
             "append" (default), "prepend", or "replace" the section body.
+        create_missing: With `heading`, add the section at the end of the page
+            when it is absent, instead of refusing HEADING_NOT_FOUND.
         edits: Batch-surgical mode — list of {old_string, new_string,
             replace_all?} applied sequentially in one atomic commit.
         row_key: Take-row mode — natural leading text of the row to fill
@@ -4829,6 +4833,7 @@ def op_edit(
                 replace_all=replace_all,
                 heading=heading,
                 section_position=section_position,
+                create_missing_section=create_missing,
                 expected_hash=expected_hash,
                 validate_only=validate_only,
                 semantic_transition_token=transition_token,
@@ -6896,6 +6901,11 @@ def op_activate_context(
                                     seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
                                 )
                             )
+                        # Owed before the body runs, so its characters come out of the map's budget
+                        # and a full map cannot starve it.
+                        capture_policy = capture_carrier_module.current(
+                            continuity, room=requested_chars - read_next_action.MAX_CHARS
+                        )
                         packet = _op_activate_context_body(
                             vault_root,
                             turn,
@@ -6911,11 +6921,14 @@ def op_activate_context(
                             observation_timings=observation_timings,
                             trigger=trigger,
                             intent_resolution=intent_resolution,
+                            reserved_chars=capture_policy.reserve if capture_policy else 0,
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
                             packet["budget"]["limit_chars"] = requested_chars
                         read_next_action.attach(packet)
+                        # Outside the packet cache, like `continuity`: the live disposition is read per request.
+                        capture_carrier_module.for_packet(packet, capture_policy)
                         # After the guard and outside the packet cache, like `continuity`:
                         # at a caller's session start, at most one upkeep item, and only in
                         # the process whose background worker proposed it. Never raises.
@@ -6933,6 +6946,8 @@ def op_activate_context(
                         # digest change and counted inside the packet's own `limit_chars`.
                         vocabulary_delta_module.for_packet(vault_root, packet, session=session)
                     _carry_thread_through_abstention(packet, continuity)
+                    # Last among the paths that set the token: the token names the policy its holder holds.
+                    capture_carrier_module.stamp(packet, capture_policy)
                     _withhold_vault_generation(vault_root, packet)
                     if intent_resolution is not None:
                         packet["trigger"] = trigger
@@ -7330,15 +7345,19 @@ def _op_activate_context_body(
     observation_timings: find_types.FindTimings | None = None,
     trigger: str = "user_turn",
     intent_resolution: dict[str, Any] | None = None,
+    reserved_chars: int = 0,
 ) -> dict:
     """`op_activate_context`'s implementation, called with a budget already
     bound (either the caller's MCP budget, or the door budget the public
     wrapper just bound). Kept separate so the wrapper's `try/finally` never
-    has to wrap this function's many early returns."""
+    has to wrap this function's many early returns.
+
+    `reserved_chars` is room the wrapper spends after this returns, beyond the
+    next-action move: it comes out of the packet's own budget."""
     timings = observation_timings or (find_types.FindTimings() if include_timings else None)
     from . import read_next_action
 
-    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS
+    budget = working_set_module.clamp_budget(max_chars) - read_next_action.MAX_CHARS - reserved_chars
     turn = str(turn or "")
     anchor = str(anchor or "").strip() or None
 
@@ -7655,6 +7674,7 @@ def _op_activate_context_body(
                     known_generation=(held_map or {}).get("map_generation"),
                     task_context=task_context,
                     packet_limit=working_set_module.clamp_budget(max_chars),
+                    spent_after=reserved_chars,
                 )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
@@ -10857,8 +10877,8 @@ def op_connect_memory(
             """`edit_note` for the relation queue: identical to op_edit_memory,
             but creates the canonical `## Relations` section when a note has none
             (create_note() doesn't emit one), so accepting the first relation into a
-            note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
-            only — it is not exposed on the edit_note MCP tool."""
+            note doesn't fail HEADING_NOT_FOUND. The queue always opts in; an
+            `edit_section` caller opts in with the operation's own flag."""
             try:
                 result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
