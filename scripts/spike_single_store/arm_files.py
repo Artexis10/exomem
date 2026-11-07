@@ -285,9 +285,16 @@ def _minus_baseline(run_root: Path, lex: dict, graph: list) -> tuple[dict, list]
 
 
 def graph_drift(vault: Path) -> list:
-    from exomem import epistemic_graph
+    """Graph drift over pages the graph indexes; Records item views are not among them."""
+    from exomem import epistemic_graph, recall_policy
 
-    return list(epistemic_graph.graph_drift(vault) or [])
+    out = []
+    for item in epistemic_graph.graph_drift(vault) or []:
+        path = item.get("path") if isinstance(item, dict) else None
+        if path and not recall_policy.is_recall_candidate(vault, vault / path):
+            continue
+        out.append(item)
+    return out
 
 
 def torn_pages(vault: Path, paths: list[str]) -> list[str]:
@@ -331,6 +338,15 @@ def check(args) -> None:
         time.sleep(10)
     report["after"] = report["recovery"][-1]
     report["after_paths"] = {"lex": lex, "graph": [str(g)[:200] for g in graph[:20]]}
+    if report["after"]["lex_missing"] + report["after"]["lex_stale"] + report["after"]["lex_orphaned"]:
+        # Today's catalogue also repairs on a reader's first search; measure that
+        # separately, so "needs repair" means still wrong after a read too.
+        from exomem import lexstore
+
+        lexstore.search_bm25(vault, "observations", 1, scope="kb", repair=True)
+        lex, graph = _minus_baseline(args.run_root, lexical_drift(vault), graph_drift(vault))
+        report["after_first_read"] = _summary(lex, graph)
+        report["after_first_read_paths"] = {"lex": lex}
     args.out.write_text(json.dumps(report, indent=1, default=str))
     print(json.dumps({"before": report["before"], "after": report["after"],
                       "torn": len(report["torn"])}), flush=True)

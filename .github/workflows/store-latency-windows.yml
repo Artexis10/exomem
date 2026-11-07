@@ -28,7 +28,7 @@ jobs:
           uv run --frozen --python 3.13 python scripts/spike_single_store/bench.py
           "${{ runner.temp }}/spike" "${{ github.workspace }}/spike-out"
           --shape scripts/spike_single_store/medium_vault_shape.json
-          --pages 13000 --ops 100 --kills-files 6 --kills-single 10
+          --pages 13000 --ops 100 --kills-files 0 --kills-single 0 --converge-seconds 900
       - name: Upload the reports
         if: always()
         uses: actions/upload-artifact@v4

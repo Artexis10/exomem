@@ -53,6 +53,7 @@ def main() -> None:
     ap.add_argument("--kills-single", type=int, default=10)
     ap.add_argument("--kill-delay-single", type=float, default=3.0)
     ap.add_argument("--kill-delay-files", type=float, default=60.0)
+    ap.add_argument("--converge-seconds", type=float, default=0.0)
     ap.add_argument("--reuse-base", action="store_true",
                     help="the run root already holds a warm base (vault copy plus sidecars)")
     ap.add_argument("--stream", type=Path, help="an existing op stream instead of a new one")
@@ -84,6 +85,11 @@ def main() -> None:
     spike_env.restore(root)
     step(log, "arm_files", "arm_files", "run", str(root), str(out / "stream.jsonl"),
          str(out / "arm-a"), "--rate-per-min", "0", run_root=root)
+    if args.converge_seconds:
+        # Let today's runtime finish its own catch-up before the row diff, so
+        # the diff compares converged indexes, not a lagging snapshot.
+        step(log, "converge_files", "arm_files", "check", str(root), str(out / "arm-a" / "converge.json"),
+             "--recover-seconds", str(args.converge_seconds), run_root=root)
     spike_env.snapshot(root, "final-a")
     spike_env.restore(root)
     step(log, "migrate", "arm_single", "migrate", str(root), run_root=root)

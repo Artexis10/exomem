@@ -141,9 +141,16 @@ def main() -> None:
         if not trials:
             continue
         if arm == "files":
-            dirty = [t for t in trials if sum(v for k, v in t["summary"]["before"].items()) > 0]
-            unhealed = [t for t in trials if sum(v for k, v in t["summary"]["after"].items()
-                                                 if k != "t_s") > 0]
+            def drift(t, when):
+                # Early trials counted Records item views, which the graph never
+                # indexes, as graph drift; score graph drift from listed paths.
+                check = json.loads((out / "kill-files" / f"check-{t['trial']:03d}.json").read_text())
+                lex = sum(len(v) for v in check[f"{when}_paths"]["lex"].values()) if f"{when}_paths" in check else 0
+                graph = [g for g in check.get(f"{when}_paths", {}).get("graph", [])
+                         if "Knowledge Base/Records/" not in g]
+                return lex + len(graph)
+            dirty = [t for t in trials if drift(t, "before") > 0]
+            unhealed = [t for t in trials if drift(t, "after") > 0]
             torn = sum(t["summary"].get("torn", 0) for t in trials)
         else:
             dirty = [t for t in trials if t["summary"]["before_pending"] > 0

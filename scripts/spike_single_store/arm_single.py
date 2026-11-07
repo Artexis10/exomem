@@ -112,6 +112,8 @@ def run_cmd(args) -> None:
             fh.write(json.dumps(item) + "\n")
     print(json.dumps({"event": "done", "wall_s": round(wall, 2),
                       "projector_busy_s": round(busy["ms"] / 1000, 3),
+                      "projector_errors": len(store.projector_errors),
+                      "first_projector_error": (store.projector_errors or [None])[0],
                       "projected": len(proj_rows)}), flush=True)
     os._exit(0)
 

@@ -321,7 +321,11 @@ class Store:
                 # A projection marked done must survive power loss, or a torn
                 # file would later read as an outside edit.
                 os.fsync(fh.fileno())
-            os.replace(tmp, dest)
+            # Exomem's own writer waits out a transient Windows sharing refusal
+            # (an antivirus or indexer holding the target); projection must too.
+            from exomem import vault as vault_module
+
+            vault_module.replace_tolerating_transient_sharing(lambda: os.replace(tmp, dest))
             st = dest.stat()
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("INSERT OR REPLACE INTO store_manifest VALUES (?,?,?,?,?)",
@@ -336,9 +340,18 @@ class Store:
         stop = threading.Event()
         conn = connect(self.db)
 
+        self.projector_errors: list[str] = []
+
         def loop():
             while not stop.is_set():
-                if self.project_once(conn, on_item=on_item) == 0:
+                try:
+                    done = self.project_once(conn, on_item=on_item)
+                except Exception as exc:  # noqa: BLE001 - recorded; the queue retries it
+                    if conn.in_transaction:
+                        conn.rollback()
+                    self.projector_errors.append(f"{type(exc).__name__}: {exc}"[:300])
+                    done = 0
+                if done == 0:
                     time.sleep(idle_s)
 
         thread = threading.Thread(target=loop, name="store-projector", daemon=True)
