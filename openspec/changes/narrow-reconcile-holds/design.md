@@ -86,6 +86,9 @@ read before the hold has not moved:
   leaves it and reports it (`semantic_unit_parents_moved`), and the lifecycle
   cleanup reports it as `LIFECYCLE_PRIMARY_RACE`. A parent outside the corpus
   that did not move loses its unit rows, as before this change.
+- A parent outside the corpus whose unit rows carry the hash of its bytes at
+  the unit audit was indexed for those bytes by a write that the corpus read
+  missed. The units repair leaves it and reports it as moved.
 - The indexes are counted inside their hold. The embeddings refresh and the
   orphans repair check each found file again inside their hold.
 
@@ -137,9 +140,10 @@ return at once.
   re-reads inside each hold.
 - More holds cost more total wall time. → The reconcile pays it, not
   foreground writers. The profile records the before and after.
-- A page created outside the corpus after the corpus read, and unchanged from
-  the unit audit to the units hold, loses its unit rows. → Its next write or the
-  next reconcile indexes it again.
+- A file that comes back outside the corpus after the corpus read, over unit
+  rows of older bytes, loses its derived rows in the units repair, as before
+  this change. A restore copied in from a backup does this. → Its next write
+  or the next reconcile indexes it again.
 - A hold that waits out its busy budget fails the run with `MUTATION_BUSY`. The
   phases before it keep their effect. The CLI does not run it again, because one
   attempt outlasts the CLI's wait budget. → Run the reconcile again.
