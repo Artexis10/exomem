@@ -1242,7 +1242,10 @@ def _retry_media_local(
         with boundary:
             offloads = media_store.retry_offload(vault, binary)
         result = replace(result, requeued=result.requeued + offloads)
-    if result.state == "completed" or result.job_id is None:
+    # A completed transcript carries no job id, yet reconcile only retired the OCR stage: a CLIP or
+    # re-embed stage that a pause blocked is still owed, so the retry reaches the ledger for it too.
+    owes_stage = result.state == "completed" and media_jobs.job_store_path(vault).exists()
+    if result.job_id is None and not owes_stage:
         return result
     if _runtime_unavailable(vault) is not None:
         return result
@@ -1253,13 +1256,15 @@ def _retry_media_local(
         requeued = store.retry(binary_path=binary, include_failed=True)
         if requeued == 0:
             return result
-        durable_job = store.get(result.job_id)
+        durable_job = (
+            store.get(result.job_id) if result.job_id is not None else store.get_by_binary(binary)
+        )
         state = durable_job.state if durable_job is not None else media_jobs.PENDING
     return ReconcileResult(
         result.media_type,
         state,
         result.sidecar_path,
-        result.job_id,
+        durable_job.id if durable_job is not None else result.job_id,
         requeued=requeued + offloads,
     )
 

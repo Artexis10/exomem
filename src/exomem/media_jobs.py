@@ -117,6 +117,11 @@ _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 _SELF_RETURNING_SQL = ",".join(f"'{reason}'" for reason in sorted({*_WAITING_REASONS, OVER_BUDGET}))
 OVER_BUDGET_ERROR = "ExceedsProcessingBudget: the file exceeds this deployment's processing budget"
 OVER_BUDGET_ACTION = "none: the file exceeds this deployment's processing budget"
+#: The error codes a service start without a media runtime blocks queued work with
+#: (`server_runtime._start_media_worker`). They judge that start, not the file, so the
+#: next start with a runtime requeues the work (`MediaJobStore.requeue_runtime_blocks`).
+EXTRACTION_DISABLED_CODE = "MediaExtractionDisabled"
+RUNTIME_UNAVAILABLE_CODE = "MediaRuntimeUnavailable"
 WAIT_ACTION = "wait for media processing"
 #: Both ways out of a multilingual request that the configured speech engine cannot run.
 MULTILINGUAL_UNSUPPORTED_ACTION = (
@@ -2395,10 +2400,11 @@ class MediaJobStore:
         try:
             # Waiting and over-budget rows return by themselves, when memory, the
             # cell's limit, the engine's budget, the job timeout or the engine switch
-            # changes; a retry would only repeat their verdict.
+            # changes; a retry would only repeat their verdict. A reprocess row is
+            # left to a new request, as `retryable_jobs` leaves it.
             candidates = conn.execute(
                 f"SELECT id, state, last_error FROM jobs WHERE state IN ({placeholders})"
-                f"{target_clause} AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
+                f"{target_clause} AND reprocess = 0 AND NOT (state = 'blocked' AND coalesce(blocked_reason, '') "
                 f"IN ({_SELF_RETURNING_SQL})) AND NOT EXISTS (SELECT 1 FROM media_job_results "
                 "WHERE media_job_results.job_id = jobs.id)",
                 params,
@@ -2425,6 +2431,29 @@ class MediaJobStore:
                         (now, job_id, state, error),
                     ).rowcount
             return int(changed)
+        finally:
+            conn.close()
+
+    def requeue_runtime_blocks(self) -> int:
+        """Return to pending the work that a service start without a media runtime blocked.
+
+        That start blocks queued rows only because nothing could run them, so a start with a
+        runtime undoes the block. A reprocess row keeps its request: the block deferred it.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                return int(
+                    conn.execute(
+                        "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
+                        "WHERE state = 'blocked' "
+                        # The error code is the part of `last_error` before its first colon.
+                        "AND substr(last_error, 1, instr(last_error, ':') - 1) IN (?, ?) "
+                        "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                        "WHERE media_job_results.job_id = jobs.id)",
+                        (time.time(), EXTRACTION_DISABLED_CODE, RUNTIME_UNAVAILABLE_CODE),
+                    ).rowcount
+                )
         finally:
             conn.close()
 
@@ -3118,12 +3147,12 @@ def _status_job(row: Any) -> dict[str, Any]:
     }
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
-    if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
+    if state == BLOCKED and error and error.startswith(f"{EXTRACTION_DISABLED_CODE}:"):
         actions[BLOCKED] = (
             "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
             "restart the service, then retry"
         )
-    if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
+    if state == BLOCKED and error and error.startswith(f"{RUNTIME_UNAVAILABLE_CODE}:"):
         actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
     if state == BLOCKED and error and error.startswith("AMBIGUOUS_SIDECAR_BOUNDARY:"):
         actions[BLOCKED] = "review the sidecar's preserved-notes boundary, then retry"
