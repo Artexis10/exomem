@@ -1331,6 +1331,9 @@ def _activation_packet(
         # Task invalidation keeps its fixed share even when no complete slice line fits.
         reserve = (int((available_chars + spent_after) * TURN_SLICE_SHARE) if task_context is not None
                    else (0 if turn_leads is None else _slice_reserve(available_chars + spent_after)))
+        # The slice never takes more than the map can give up, so `spent_after` cannot push the body
+        # past its own budget and crowd out the caller's block.
+        reserve = min(reserve, max(0, available_chars - len(description) - 1))
         map_chars = available_chars - reserve - len(description) - 1
         compiled = None
         if view is None:
