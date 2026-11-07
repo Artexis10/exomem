@@ -380,17 +380,24 @@ class _DirectTransport:
 
     def call(self, name: str, arguments: dict[str, Any]) -> tuple[float, dict[str, Any]]:
         command = next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
+        read_only = commands.invocation_is_read_only(command, arguments)
+
+        def invoke() -> Any:
+            return self.manager.invoke(
+                command, (self.vault_root,), arguments,
+                read_only=read_only,
+                mutation_request_id=str(uuid.uuid4()),
+                implicit_idempotency_scope="session:live-write-acceptance",
+            )
+
         token = str(uuid.uuid4())
         context = call_spans.MCP_CALL_TOKEN.set(token)
         cpu_started = time.thread_time()
         started = time.perf_counter()
         try:
-            result = self.manager.invoke(
-                command, (self.vault_root,), arguments,
-                read_only=commands.invocation_is_read_only(command, arguments),
-                mutation_request_id=str(uuid.uuid4()),
-                implicit_idempotency_scope="session:live-write-acceptance",
-            )
+            # As the server does, a store collection's request runs on the vault's store thread.
+            server = store_runtime.route(name, self.vault_root, arguments)
+            result = invoke() if server is None else server.call(invoke, read_only=read_only)
             elapsed = (time.perf_counter() - started) * 1_000.0
         finally:
             self.thread_cpu_ms = (time.thread_time() - cpu_started) * 1_000.0
@@ -471,6 +478,9 @@ def _prepare_collections(client: Any) -> tuple[dict[str, Any], str]:
             for field in ("title", "kind", "status", "lifecycle", "priority", "commitment", "horizon", "health", "area", "parent")
         }},
     })
+    if isinstance(manifest.get("storage"), dict):
+        # Planning create keeps file storage until Planning gains summary mode; a Records example may be sqlite.
+        manifest["storage"] = {**manifest["storage"], "strategy": "markdown-items"}
     planning_path = "Knowledge Base/Planning/Acceptance/_collection.md"
     client.call("plan_memory", {
         "action": "create", "manifest_path": planning_path,

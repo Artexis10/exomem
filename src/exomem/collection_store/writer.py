@@ -42,6 +42,7 @@ from ..governance.principal import effective_principal
 from ..planning_values import PlanningValues
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
+    authority,
     chain,
     connection,
     derived_rows,
@@ -2179,7 +2180,7 @@ class CollectionWriter:
                     "type_version": declared.version,
                     "manifest_path": manifest.path,
                     "source_path": manifest.storage.source,
-                    "layout": manifest.storage.strategy,
+                    "layout": authority.store_layout(manifest.storage.strategy),
                     "audit_head": txn["event_hash"],
                     "txn_id": txn["txn_id"],
                     "view_mode": manifest.view_mode,

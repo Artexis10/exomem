@@ -46,6 +46,11 @@ def summary_text(text=None):
     return (text or manifest_text()).replace("lifecycle: active\n", "lifecycle: active\nview_mode: summary\n")
 
 
+def sqlite_text(text=None):
+    """The summary collection that a store create makes: the store holds its rows, not Markdown files."""
+    return summary_text(text).replace("strategy: markdown-items\n", "strategy: sqlite\n")
+
+
 def create(store, *, summary=True):
     text = summary_text() if summary else manifest_text()
     receipt = store.create_collection(manifest_path(), text, why="create", scaffold=False)

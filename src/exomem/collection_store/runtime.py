@@ -852,8 +852,7 @@ def route_with_proof(command, vault_root, arguments):
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
-    from ..cli_ops import OpError
-    from .preview import UNSERVED, bound_writer
+    from .preview import bound_writer
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
@@ -876,10 +875,7 @@ def route_with_proof(command, vault_root, arguments):
         connection.load_store_libraries()
     if summary:
         if proof.marker is None:
-            from . import admission, capability
-
-            capability.require_records_summary(root)
-            raise admission.enrollment_required()
+            refuse_unserved_create(root, None)
     elif progress_review or selector is None and (
         arguments.get("action") == "inspect"
         or (command == "record_memory" and arguments.get("action") == "describe")
@@ -893,10 +889,26 @@ def route_with_proof(command, vault_root, arguments):
     if server is None and not summary:
         return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
-        raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
-        )
+        refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
+
+
+def refuse_unserved_create(root, marker):
+    """Refuse a NEW summary collection's create that no serving store thread runs.
+
+    A vault without a store needs the owner's offline enrolment; a vault with one needs
+    the service that serves it.
+    """
+    from ..cli_ops import OpError
+    from . import admission, capability
+    from .preview import UNSERVED
+
+    if marker is None:
+        capability.require_records_summary(root)
+        raise admission.enrollment_required()
+    raise OpError(
+        "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
+    )
 
 
 def _curation_route(command, root, arguments):

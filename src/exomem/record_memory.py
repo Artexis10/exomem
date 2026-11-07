@@ -220,7 +220,9 @@ def record_memory(
                 "QUERY_UNAVAILABLE", "a v1 query runs only on a store-routed Records collection"
             )
         if action == "describe":
-            return parse_manifest_contract()
+            from .collection_store import ownership
+
+            return parse_manifest_contract(store_vault=not ownership.file_only(vault_root))
         if action == "validate":
             assert manifest_text is not None
             if collection is not None:
@@ -248,6 +250,12 @@ def record_memory(
                 root, root / manifest_path, manifest_text.encode("utf-8")
             )
             record_governance.require_records_profile(manifest)
+            records.require_create_storage(root, manifest)
+            if manifest.storage.strategy == structured_collections.SQLITE_STORAGE:
+                from .collection_store import ownership, runtime
+
+                # The serving store thread creates a sqlite collection; reaching the files means none did.
+                runtime.refuse_unserved_create(root, ownership.current(root).marker)
             return records.create_collection(
                 vault_root,
                 manifest_path,
@@ -407,14 +415,18 @@ def record_memory(
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
 
 
-def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
-    """Project the parser-owned collection contract without vault content."""
+def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = False) -> dict[str, Any]:
+    """Project the parser-owned collection contract without vault content.
+
+    A bound store (``store_mode``) or a vault with an enrolled store (``store_vault``) creates
+    only sqlite collections, so its examples declare sqlite.
+    """
     from .collection_store.connection import UNSUPPORTED_WRITERS
     from .structured_collections import manifest_authoring_contract
 
     # A served vault answers describe in file mode too, so both modes carry the store's writer rule.
     return {
-        **manifest_authoring_contract(),
+        **manifest_authoring_contract(store=store_mode or store_vault),
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
         "writer_lease": UNSUPPORTED_WRITERS,
     }

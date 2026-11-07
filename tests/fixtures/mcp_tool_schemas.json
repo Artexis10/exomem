@@ -3008,7 +3008,8 @@
                 "kind": {
                   "const": "collections-store",
                   "type": "string"
-                }
+                },
+                "cursor": {}
               },
               "required": [
                 "kind"
@@ -3143,10 +3144,7 @@
                   "type": "string"
                 },
                 "run_id": {},
-                "cursor": {
-                  "type": "string",
-                  "description": "A next_cursor of a maintenance-job receipt."
-                }
+                "cursor": {}
               },
               "required": [
                 "kind"
@@ -3456,6 +3454,10 @@
               "minimum": 0,
               "type": "integer",
               "default": 5
+            },
+            "cursor": {
+              "type": "string",
+              "description": "The next_cursor of the previous page."
             },
             "rebuild_embeddings": {
               "description": "fix only.",

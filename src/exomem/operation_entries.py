@@ -796,8 +796,8 @@ def _maintenance_rows():
     from .curation import CURATION_ACTIONS, READ_ONLY_ACTIONS
 
     rows = [_row("audit", "check_memory", ("categories", "detail", "legacy_sample_limit")),
-            # The store preflight is read-only and checks the whole vault, so it takes no fields.
-            _row("collections-store", "check_memory", ())]
+            # The store preflight is read-only and checks the whole vault; cursor pages its inventory.
+            _row("collections-store", "check_memory", ("cursor",))]
     for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
                                                 ("backfill-ids", "dry_run", True, ()),
                                                 ("reconcile", "dry_run", False, ("rebuild_graph",))):

@@ -225,13 +225,12 @@ def test_mixed_marker_does_not_bind_a_store_or_route_ordinary_create_to_it(mixed
     assert collections.load_manifest(mixed.root, manifest_path().replace("Work", "Legacy")).collection_id == KEY
     new_path = manifest_path().replace("Work", "New")
     new_id = "33333333-3333-4333-8333-333333333333"
-    with preview_store(mixed.root, mixed.handle):
-        result = record_memory(mixed.root, "create", manifest_path=new_path,
-                               manifest_text=manifest_text().replace(CID, new_id),
-                               why="file collection", scaffold=False)
-    assert result["outcome"] == "committed"
+    # A new collection keeps its rows in sqlite, so a Markdown-items create is refused, not routed to the store.
+    with preview_store(mixed.root, mixed.handle), pytest.raises(OpError, match="SQLITE_STORAGE_REQUIRED"):
+        record_memory(mixed.root, "create", manifest_path=new_path, manifest_text=manifest_text().replace(CID, new_id),
+                      why="file collection", scaffold=False)
     assert mixed.connection.execute("SELECT collection_id FROM collections").fetchall() == [(CID,)]
-    assert collections.load_manifest(mixed.root, new_path).collection_id == new_id
+    assert not (mixed.root / new_path).exists()
 
 
 def test_bound_canonical_rows_override_a_conflicting_file_collection(mixed):

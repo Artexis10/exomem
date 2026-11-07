@@ -648,7 +648,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         )
         if (
             type(strategy) is not str
-            or strategy not in {"markdown-log", "markdown-items", "dataset"}
+            or strategy not in collections.SUPPORTED_STORAGE
             or source is None
             or format_version != 1
         ):

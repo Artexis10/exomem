@@ -131,7 +131,8 @@ def _declarations(root, sid, rows, generation, planning_values):
     # Ownership is caller-independent; vocabulary admission can itself require this unfinished proof.
     for cid, path, source, layout, text, _digest in rows:
         manifest = collections.parse_manifest_bytes(root, path, text.encode(), planning_values=planning_values)
-        if (manifest.collection_id, manifest.storage.source, manifest.storage.strategy) != (cid, source, layout):
+        if (manifest.collection_id, manifest.storage.source,
+                authority.store_layout(manifest.storage.strategy)) != (cid, source, layout):
             raise unavailable()
         entries.append(authority.marker_entry(cid, path, sid, manifest.semantic_profile, source, layout))
         # Row saves advance the manifest's audit head without changing namespace ownership.

@@ -11432,7 +11432,7 @@ def op_maintain_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
-        cursor: A next_cursor of a maintenance-job receipt.
+        cursor: The next_cursor of the previous page.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -11444,8 +11444,10 @@ def op_maintain_memory(
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
         raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
-    if cursor is not None and (mode != "maintenance-job" or run_id is None):
-        raise ValueError("INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id")
+    if cursor is not None and mode != "collections-store" and (mode != "maintenance-job" or run_id is None):
+        raise ValueError(
+            "INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id or to collections-store"
+        )
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -11691,12 +11693,12 @@ def op_maintain_memory(
             or why is not None
         ):
             raise ValueError(
-                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight and takes no "
-                "arguments; migrating a vault is the declared offline upgrade step"
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight and takes only "
+                "an inventory cursor; migrating a vault is the declared offline upgrade step"
             )
         from .collection_store import preflight as store_preflight
 
-        return store_preflight.preflight(vault_root)
+        return store_preflight.preflight(vault_root, cursor)
     def store_preview_arguments_invalid() -> bool:
         # The preview-first store modes take no audit arguments; an apply needs true, plan_id and why.
         return (

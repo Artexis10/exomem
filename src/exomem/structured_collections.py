@@ -35,7 +35,13 @@ RECORDS_READER_VERSION = 2
 RECORD_REF_PREFIX = "exomem://record/"
 PLAN_REF_PREFIX = "exomem://plan/"
 _SUPPORTED_PROFILES = frozenset({"records", "planning"})
-_SUPPORTED_STORAGE = frozenset({"markdown-log", "markdown-items", "dataset"})
+#: The collection store holds the rows; storage.source names the folder of its bounded summary pages.
+SQLITE_STORAGE = "sqlite"
+# The manifest schema fixes this closed set; each value names an adapter or the store, not a vocabulary.
+# A vault with a collection store creates only sqlite collections; one without keeps file storage until it has one.
+SUPPORTED_STORAGE = frozenset({"markdown-log", "markdown-items", "dataset", SQLITE_STORAGE})
+#: The strategies whose rows Exomem writes as Markdown files; a vault with a collection store creates none of them.
+MARKDOWN_ROW_STORAGE = frozenset({"markdown-items", "markdown-log"})
 _SUPPORTED_FIELD_TYPES = frozenset(
     {
         "string",
@@ -139,11 +145,29 @@ class CollectionError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
-def manifest_authoring_contract() -> dict[str, Any]:
-    """Return the deterministic agent-facing contract for collection manifests."""
+def sqlite_store_required() -> CollectionError:
+    """The refusal for a sqlite manifest that no collection store holds: no file reader stands in for it."""
+    return CollectionError(
+        "COLLECTION_STORE_REQUIRED",
+        "this sqlite collection's rows live only in a collection store, and this vault's store does not hold it",
+    )
+
+
+_FILE_STORAGE_CREATE = (
+    "a vault without a collection store creates Records collections with this strategy; "
+    "a vault with one refuses it, and its existing collections stay readable"
+)
+
+
+def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
+    """Return the deterministic agent-facing contract for collection manifests.
+
+    ``store`` is True for a vault with a collection store: its examples declare sqlite, the
+    only strategy such a vault creates.
+    """
     field_types = sorted(_SUPPORTED_FIELD_TYPES)
     profiles = sorted(_SUPPORTED_PROFILES)
-    storage_strategies = sorted(_SUPPORTED_STORAGE)
+    storage_strategies = sorted(SUPPORTED_STORAGE)
     view_operators = sorted(_SAVED_VIEW_QUERY_OPS)
     aggregate_forms = [
         "count",
@@ -276,14 +300,25 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "records_paths": "manifest and canonical source must stay under Knowledge Base/Records",
         },
         "storage_strategies": {
+            SQLITE_STORAGE: {
+                "canonical_source": "the vault's collection store; no Markdown file per item",
+                "source": "folder of the collection's bounded summary pages",
+                "view_mode": "summary",
+                "required_storage_fields": ["strategy", "source", "format_version"],
+                "create": "a vault with a collection store creates Records collections with this strategy",
+                "append": True,
+                "update": True,
+            },
             "markdown-items": {
                 "canonical_source": "directory containing one Markdown file per item",
                 "required_storage_fields": ["strategy", "source", "format_version"],
+                "create": _FILE_STORAGE_CREATE,
                 "append": True,
                 "update": True,
             },
             "markdown-log": {
                 "canonical_source": "one chronological Markdown log",
+                "create": _FILE_STORAGE_CREATE,
                 "required_descriptor_fields": ["section", "item_heading", "insertion"],
                 "insertion_values": ["newest-first", "oldest-first"],
                 "child_rows": {
@@ -397,12 +432,19 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "limit": {"minimum": 1, "maximum": 1_000},
         },
         "json_schema": manifest_schema,
-        "examples": _manifest_authoring_examples(),
+        "examples": _manifest_authoring_examples(store=store),
     }
 
 
-def _manifest_authoring_examples() -> dict[str, dict[str, Any]]:
-    minimal_text = """---
+def _manifest_authoring_examples(*, store: bool = False) -> dict[str, dict[str, Any]]:
+    """The worked manifests; ``store`` gives the sqlite form that a vault with a collection store creates."""
+    strategy = SQLITE_STORAGE if store else "markdown-items"
+    per_row = (
+        "The store holds one row per observed event and publishes a bounded summary page."
+        if store
+        else "One ordinary Markdown file per observed event."
+    )
+    minimal_text = f"""---
 type: collection
 exomem_id: 15dd81cd-9ae2-488c-bd9e-14771d86343e
 title: Observed events
@@ -411,7 +453,7 @@ collection_version: 1
 schema_version: 1
 lifecycle: active
 storage:
-  strategy: markdown-items
+  strategy: {strategy}
   source: Events
   format_version: 1
 item_schema:
@@ -427,9 +469,9 @@ item_schema:
       type: link
 ---
 
-One ordinary Markdown file per observed event.
+{per_row}
 """
-    laboratory_text = """---
+    laboratory_text = f"""---
 type: collection
 exomem_id: 372ff95a-36f0-4859-9e11-9e487dd94f4b
 title: Laboratory panels
@@ -438,7 +480,7 @@ collection_version: 1
 schema_version: 1
 lifecycle: active
 storage:
-  strategy: markdown-items
+  strategy: {strategy}
   source: Panels
   format_version: 1
 item_schema:
@@ -519,7 +561,7 @@ record_presentation:
 
 The frontmatter is canonical; the managed Markdown block is a readable projection.
 """
-    state_ledger_text = """---
+    state_ledger_text = f"""---
 type: collection
 exomem_id: a865a192-7c7a-4b7f-9b5d-03c807b205e2
 title: Observed state ledger
@@ -528,7 +570,7 @@ collection_version: 1
 schema_version: 1
 lifecycle: active
 storage:
-  strategy: markdown-items
+  strategy: {strategy}
   source: States
   format_version: 1
 item_schema:
@@ -557,7 +599,7 @@ item_schema:
 
 One item records the state observed for one identity on one effective date.
 """
-    return {
+    examples = {
         "minimal": {
             "manifest_path": f"{vault.kb_dirname()}/Records/Examples/Events/_collection.md",
             "manifest_text": minimal_text,
@@ -647,6 +689,10 @@ One item records the state observed for one identity on one effective date.
             ),
         },
     }
+    if store:
+        # record_presentation renders one item file per row, and a sqlite collection has none.
+        del examples["readable_nested_records"]
+    return examples
 
 
 def _claims_json_schema() -> dict[str, Any]:
@@ -1856,7 +1902,9 @@ def _manifest_from_frontmatter(
     links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
-    view_mode = _parse_view_mode(frontmatter.get("view_mode", "items"), profile, storage,
+    # A sqlite collection has no item files, so summary is its only view mode and its default.
+    default_view_mode = "summary" if storage.strategy == SQLITE_STORAGE else "items"
+    view_mode = _parse_view_mode(frontmatter.get("view_mode", default_view_mode), profile, storage,
                                  presentation or item_filename or item_presentation, links)
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
     return CollectionManifest(
@@ -1916,10 +1964,16 @@ def _parse_view_mode(
             {"field": "view_mode", "received": value, "allowed": ["items", "summary"],
              "example": "view_mode: summary"},
         )
-    if value == "summary" and (profile != "records" or storage.strategy != "markdown-items" or per_item_recipe):
+    if value == "items" and storage.strategy == SQLITE_STORAGE:
+        raise CollectionError(
+            "UNSUPPORTED_VIEW_MODE", "a sqlite collection has no item files, so its view mode is summary",
+            {"field": "view_mode", "received": value, "allowed": ["summary"], "example": "view_mode: summary"},
+        )
+    if value == "summary" and (profile != "records" or storage.strategy not in ("markdown-items", SQLITE_STORAGE)
+                               or per_item_recipe):
         raise CollectionError(
             "UNSUPPORTED_VIEW_MODE",
-            "summary view mode needs a Records markdown-items collection without per-item presentation",
+            "summary view mode needs a Records sqlite or markdown-items collection without per-item presentation",
             {"field": "view_mode", "received": value},
         )
     joined = next((index for index, plan in enumerate(links.plans) if plan.join), None)
@@ -2482,14 +2536,14 @@ def _manifest_stable_hash(text: str) -> str:
 def _parse_storage(root: Path, manifest_rel: str, value: object) -> StorageSpec:
     storage = _mapping(value, "storage")
     strategy = _nonempty_string(storage.get("strategy"), "storage.strategy")
-    if strategy not in _SUPPORTED_STORAGE:
+    if strategy not in SUPPORTED_STORAGE:
         raise CollectionError(
             "UNSUPPORTED_STORAGE_STRATEGY",
             "storage strategy is not supported",
             {
                 "field": "storage.strategy",
                 "received": strategy,
-                "allowed": sorted(_SUPPORTED_STORAGE),
+                "allowed": sorted(SUPPORTED_STORAGE),
                 "example": "strategy: markdown-items",
             },
         )

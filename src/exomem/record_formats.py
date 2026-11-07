@@ -137,6 +137,8 @@ class AdapterSnapshot:
     path_guards: tuple[vault.PathGuard, ...] = ()
     directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
     source_bytes: tuple[tuple[str, bytes], ...] = ()
+    # Item files that carry the vault's note identity outside the item schema (counted, never imported).
+    note_identity_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +436,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
         directory_guards_list: list[vault.DirectoryCensusGuard] = [root_guard]
         path_guards: list[vault.PathGuard] = []
         source_bytes: list[tuple[str, bytes]] = []
+        stamped: list[str] = []
         pending = [root_guard]
         candidates = 0
         public_candidates = 0
@@ -523,6 +526,13 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
             compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
+            # A record item is a vault note, so ID backfill may stamp the note's own identity on it.
+            # That key belongs to the vault, not to the item schema, unless the schema declares it.
+            note_identity = (
+                {memory_refs.ID_FIELD}
+                if memory_refs.ID_FIELD not in self.manifest.schema.fields
+                else set()
+            )
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
@@ -533,8 +543,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     profile.item_id_property,
                     "schema_version",
                     *compatibility_envelope,
+                    *note_identity,
                 }
             }
+            if note_identity & frontmatter.keys():
+                stamped.append(rel)
             self._validate_values(values)
             identity = collections.ItemIdentity(collection_id, item_id)
             values = self._project_values(values)
@@ -583,6 +596,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             path_guards=tuple(path_guards),
             directory_guards=directory_guards,
             source_bytes=tuple(source_bytes),
+            note_identity_paths=tuple(stamped),
         )
 
 
@@ -677,14 +691,17 @@ def load_adapter(
         return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path, project_values)
     if manifest.storage.strategy == "dataset":
         return DatasetAdapter(Path(vault_root), manifest, authorize_path, project_values)
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        # A routed store collection refuses before this point.
+        raise collections.sqlite_store_required()
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
 def validate_storage_contract(manifest: collections.CollectionManifest) -> None:
     """Validate strategy-specific descriptor grammar without opening canonical data."""
     descriptor = manifest.storage.descriptor
-    if manifest.storage.strategy == "markdown-items":
-        return
+    if manifest.storage.strategy in ("markdown-items", collections.SQLITE_STORAGE):
+        return  # Neither declares a descriptor grammar.
     if manifest.storage.strategy == "dataset":
         record_path = descriptor.get("record_path")
         if record_path is not None and (not isinstance(record_path, str) or not record_path):

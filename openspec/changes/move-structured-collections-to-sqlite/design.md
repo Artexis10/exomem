@@ -1503,6 +1503,8 @@ The owner decided that no structured collection keeps per-item Markdown files. T
 
 Manifests declare `storage.strategy: sqlite`. A manifest that still declares `markdown-items` names an unconverted collection.
 
+**Create follows the vault until P6.** A vault with an enrolled store creates only `sqlite` collections, through every create path. A vault without one keeps file-canonical create until the cutover or P6.1 moves it. In P6, a fresh vault enrolls its store at init, so file-canonical create can be deleted.
+
 **Conversion keeps every row and every decision.** Converting a populated store collection rewrites no row. One store transaction writes a new manifest version and retires the item projection state. Each row keeps its former view path as a retired alias, so references to old item paths still resolve to the row.
 
 A summary row's governance subject is the collection path (§7). The conversion therefore refuses a collection when that change would alter any row's disclosure decision for any standing audience, and it names the scope. The owner adjusts the scope first; the conversion never widens or narrows access as a side effect.
@@ -1515,7 +1517,7 @@ A summary row's governance subject is the collection path (§7). The conversion 
 3. convert every store collection;
 4. check parity against the backup.
 
-The first conversion records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, rollback restores the backup snapshot and the archive under the previous release.
+The first `sqlite` create or the first conversion, whichever comes first, records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state as an unknown descriptor instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, rollback restores the backup snapshot and the archive under the previous release.
 
 **Relation to the canonical vault store.** `make-vault-store-canonical` keeps this per-vault database as the store that survives, with its collection tables unchanged. This cutover adds no second transaction owner and no Markdown dependency for collections, so a later store-mode switch for knowledge pages needs nothing from it.
 

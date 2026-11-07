@@ -928,7 +928,9 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                         elif data is not None and (data == target or path == planned["manifest_path"]
                                                    and data == checkpointed):
                             views.append((_sha(data), path))
-                    audit_history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
+                    audit_history = records._audit_events(
+                        root, semantic_profile=manifest.semantic_profile, collection_id=cid,
+                        transition_ids=(transition,))
                     if planned["checkpoint"] and audit_history.parsed and any(
                             event["transition_id"] == transition for event in audit_history.events):
                         # The log holds this checkpoint, so the legacy chain ends there. A checkpoint cut

@@ -465,21 +465,27 @@ Collections created after GA stayed file-canonical: store creation admits only s
 
 Order: C0 to C4 ship in one release. C5 runs on the production vault only at the operator's GO. P6 runs after C5 is verified, because a deletion must not ship before every supported vault has left the deleted paths.
 
-- [ ] C0.1 Red first: one inventory names every collection that the store and the manifest census find. For each it reports identity, type, layout, view mode, store or file authority, row count, item-view count, audit status, held count and the blocking reason. Discovery reads the store and the manifests and has no list of known collections. It extends `check_memory collections-store` and changes no write.
-- [ ] C1.1 Red first: a file-canonical collection whose history exceeds the live audit read cap reads its complete history through a bounded streaming read, and reports `history_incomplete` only for a real gap. The legacy importer uses the same read.
-- [ ] C1.2 The legacy importer and the cutover preflight set the reserved note identity (`exomem_id`) aside, like the reader fix in #2510. The preflight reports each stamped item, so the production repair in C5 removes the stamps before the first write.
-- [ ] C2.1 Red first: `create` for Records, Planning and declared types writes a store collection in summary mode with `storage.strategy: sqlite`. No step creates an `Items` directory or a file-canonical collection. The same applies to scaffolds, curation and package templates. A manifest that declares `markdown-items` stays readable as an unconverted collection.
-- [ ] C2.2 Summary mode serves every profile. Planning gets bounded summary pages per saved view, and its hierarchy and links use indexed store queries, not a load of every row. Per-item filename and presentation recipes stop applying.
+- [x] C0.1 Red first: one inventory names every collection that the store and the manifest census find. For each it reports identity, type, layout, view mode, store or file authority, row count, item-view count, audit status, held count and the blocking reason. Discovery reads the store and the manifests and has no list of known collections. It extends `check_memory collections-store` and changes no write.
+  Evidence: `collection_store/inventory.py` adds the paged `inventory` key; `test_collection_store_inventory.py` covers store items, summary, derived and stamped file collections.
+- [x] C1.1 Red first: a file-canonical collection whose history exceeds the live audit read cap reads its complete history through a bounded streaming read, and reports `history_incomplete` only for a real gap. The legacy importer uses the same read.
+  Evidence: `records._select_audit_history` serves the live read and the legacy spool; `test_a_complete_history_past_the_old_total_and_event_caps_reads_complete_in_bounded_memory`.
+- [x] C1.2 The legacy importer and the cutover preflight set the reserved note identity (`exomem_id`) aside, like the reader fix in #2510. The preflight reports each stamped item, so the production repair in C5 removes the stamps before the first write.
+  Evidence: #2510's reader rule, with `stamped_items` per collection; `test_an_item_stamped_with_its_note_identity_stays_importable_and_is_counted`.
+- [x] C2.1 Red first: on a vault with an enrolled store, `create` for Records and declared types writes a store collection in summary mode with `storage.strategy: sqlite`; a vault without one keeps file-canonical create until the cutover or P6.1 moves it. On a vault with a store, no step creates an `Items` directory or a file-canonical collection. The same applies to scaffolds, curation and package templates. A manifest that declares `markdown-items` stays readable as an unconverted collection.
+  Evidence: `records.require_create_storage` gates Records create and validate on the store's enrolment check, and `describe` teaches `sqlite` examples on a vault with a store (`test_collection_store_sqlite_only.py`). Declared types have no create before P4.2. Planning create follows in C2.2.
+- [ ] C2.2 Summary mode serves every profile. Planning gets bounded summary pages per saved view, and its hierarchy and links use indexed store queries, not a load of every row. Per-item filename and presentation recipes stop applying. On a vault with an enrolled store, Planning create then makes `sqlite` collections, the Planning part of C2.1.
 - [ ] C2.3 Red first: an in-place conversion from items mode to summary mode for a populated store collection.
   - It refuses while publication, edit-back or a held view correction is outstanding.
   - It refuses when the collection-level policy path would change the disclosure decision of any row for any standing audience, and names the scope.
   - One store transaction writes the new manifest version (`sqlite`, summary), retires the item projection state and keeps each row's former view path as a retired alias.
   - Afterwards it moves the collection's item files into a checksummed archive outside the active vault tree, verifies the archive, and only then removes the files.
   - A re-run resumes from its receipt and changes nothing that is already done.
+  - The first conversion records `collections-sqlite-only-v1` before it commits, when the state does not hold it yet (C2.7).
 - [ ] C2.4 Old item paths keep resolving. Page reads, directory listings, `read_memory` and wikilinks resolve a retired item path through its alias to the stored row, read-only, and nothing recreates the file.
 - [ ] C2.5 Readers report store provenance. `inspect`, `query` and receipts derive versions and the container token from the store generation. `expected_container_hash` keeps its public meaning as the collection guard.
 - [ ] C2.6 The watcher and edit-back stop treating item paths as views. A file that appears under a retired item path is held as `VIEW_UNBOUND` and is never applied silently.
-- [ ] C2.7 The first conversion records the state compatibility descriptor `collections-sqlite-only-v1`. A release that lacks it refuses the state and names the release to run, instead of rendering item views again.
+- [x] C2.7 The first `sqlite` create records the state compatibility descriptor `collections-sqlite-only-v1`, and the first conversion records it too (C2.3). A release that lacks it refuses the state as an unknown descriptor, instead of rendering item views again.
+  Evidence: the admission create records the floor before its marker routes the collection; `test_the_first_sqlite_create_records_the_floor_that_an_older_release_refuses`.
 - [ ] C3.1 Red first: `exomem collections cutover` and its maintenance preview and apply, bound to a `plan_id`.
   - Preflight takes and verifies a backup snapshot, runs the C0 inventory and lists blockers.
   - It migrates each file-canonical collection through the existing migration.
@@ -495,7 +501,7 @@ Order: C0 to C4 ship in one release. C5 runs on the production vault only at the
 
 P6 runs after C5.2. Besides `design.md` §13, it deletes the item-view projection, item edit-back, filename recipes and file-canonical creation.
 
-- [ ] P6.1 Confirm that no supported vault remains in file mode: every migrated vault is store-canonical, and the doctor probe reports any file-mode vault with the migration remediation.
+- [ ] P6.1 Confirm that no supported vault remains in file mode: every migrated vault is store-canonical, and the doctor probe reports any file-mode vault with the migration remediation. A fresh vault enrolls its store at init, so file-canonical create can be deleted.
 - [ ] P6.2 Delete every item in `design.md` §13: file mode and its adapters as canonical readers, the #1457 stat-generation cache for collections, and the hard-coded profiles and branches. Measure and report the deleted line count. `legacy.py` and the reverse exporter stay until the owner retires the exporter in a later change.
 - [ ] P6.3 Rewrite the tests that pinned file-canonical behaviour (audit markers, manifest heads, `log.md` events, container inventory hashing, rebaseline of out-of-band edits) to the store contract. No test is skipped or deleted without its replacement.
 - [ ] P6.4 **Phase gate.** Common gates, the full Records, Planning and types test modules green in store mode, the P1a.15 and P2.8 performance gates re-run, and `openspec validate --all --strict`.

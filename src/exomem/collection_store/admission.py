@@ -18,7 +18,7 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from .. import capabilities, held_fs, state_migration, state_paths, vault, writer_lease
+from .. import held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
@@ -191,7 +191,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
         capability.require_records_summary(session.root)
-        require_summary_manifest(session.root, manifest_path, manifest_text)
+        require_new_store_manifest(session.root, manifest_path, manifest_text)
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
@@ -773,7 +773,7 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     """
     require_owner(vault_root, "create")
     capability.require_records_summary(vault_root)  # before any lease, fence or operator credential
-    require_summary_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
+    require_new_store_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
         session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
         fence_client=fence_client))
@@ -854,11 +854,27 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
         session, manager, fence_client, plan_id=plan_id, why=why), drain_views=not abandon)
 
 
-def require_summary_manifest(root, manifest_path, manifest_text):
-    """Refuse a production store create whose manifest is not a summary collection (S1).
+def require_new_store_manifest(root, manifest_path, manifest_text):
+    """Refuse a production store create unless its manifest is a sqlite summary collection.
 
-    Items mode stays in files under this slice. A manifest that does not parse passes
-    on, so the create's own validation names what is wrong with it.
+    A manifest that does not parse passes on, so the create's own validation names what is
+    wrong with it.
+    """
+    from .. import records
+
+    try:
+        manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode())
+    except ValueError:  # CollectionError included
+        return
+    records.require_store_storage(manifest)
+    require_summary_manifest(root, manifest_path, manifest_text)
+
+
+def require_summary_manifest(root, manifest_path, manifest_text):
+    """Refuse a production store create or revise whose manifest is not a summary collection (S1).
+
+    A manifest that does not parse passes on, so the create's own validation names what is
+    wrong with it.
     """
     from .summary import SUMMARY
 
@@ -869,10 +885,8 @@ def require_summary_manifest(root, manifest_path, manifest_text):
     if manifest.view_mode != SUMMARY:
         raise CollectionStoreError(
             "COLLECTION_STORE_SUMMARY_REQUIRED",
-            "the collection store creates only summary collections: add \"view_mode: summary\" to the "
-            "manifest, or create an items-mode collection with "
-            f"{capabilities.active_call_text('record_memory', {'action': 'create'})}, "
-            "which keeps it in files")
+            "the collection store keeps only summary collections: keep \"view_mode: summary\" in the "
+            "manifest, or declare \"storage.strategy: sqlite\", whose view mode is summary")
 
 
 ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest-file FILE --why REASON, "
@@ -1280,6 +1294,10 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         state_migration.record_collection_store_compatibility(
             session.root, authority_check=lambda: session.require(token),
         )
+        if _creates_sqlite(writer, intent):
+            # Before the marker routes the collection, so no release that lacks the floor serves it.
+            state_migration.record_collections_sqlite_only(
+                session.root, authority_check=lambda: session.require(token))
         try:
             _require_create_file_ownership(writer, intent)
         except CollectionStoreError as error:
@@ -1318,6 +1336,18 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
             with manager._report_lock:
                 runtime._admitted_token = None
             raise
+
+
+def _creates_sqlite(writer, intent):
+    """Whether a pending create's committed manifest declares the sqlite strategy."""
+    if intent["kind"] != authority.CREATE:
+        return False
+    path, text = writer.connection.execute(
+        "SELECT c.manifest_path,m.manifest_text FROM collections c JOIN collection_manifests m "
+        "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
+        (intent["collection_id"],)).fetchone()
+    manifest = collections.parse_manifest_bytes(writer.root, path, text.encode())
+    return manifest.storage.strategy == collections.SQLITE_STORAGE
 
 
 def _publication_authority(session, token):

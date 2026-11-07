@@ -57,7 +57,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # stays at 168,000 B. The next description change needs a budget increase.
 # The `create_missing` flag on edit_section adds 52 B: edit_note measures 7,262 B and its ceiling rounds
 # to 7,300 B. With both changes the complete local wire measures 168,037 B, so the budget rises 50 B.
-TOTAL_BUDGET = 168_050
+# The `cursor` on the collections-store kind of check_memory pages its collection inventory and adds 18 B:
+# check_memory measures 6,844 B and the complete local wire 168,055 B, so the budget rises 50 B.
+TOTAL_BUDGET = 168_100
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
