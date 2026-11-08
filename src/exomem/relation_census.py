@@ -1500,7 +1500,7 @@ def _check_row(
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
         record("same_page_epistemic", same_page)
-    if row.relation == "contradicts" and not same_page:
+    if "opposes" in row.behaviours and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
 
 

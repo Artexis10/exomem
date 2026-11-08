@@ -1275,13 +1275,10 @@ def test_the_census_builds_a_chain_from_an_extension_of_supersedes(tmp_path: Pat
     assert _check(census, "contradicts_within_chain") == (1, 1)  # FLIPS 4
 
 
-def test_the_census_does_not_check_an_extension_of_contradicts_inside_a_chain(
+def test_the_census_checks_an_extension_of_contradicts_inside_a_chain(
     tmp_path: Path,
 ) -> None:
-    """FLIPS 5: the chain check reads the key `contradicts`, so `x.disputes` is not checked.
-
-    After intended change 5 this is `(1, 1)`.
-    """
+    """FLIPS 5: the chain check reads the `opposes` behaviour, so `x.disputes` is checked."""
     census = _census(
         tmp_path,
         {
@@ -1290,7 +1287,7 @@ def test_the_census_does_not_check_an_extension_of_contradicts_inside_a_chain(
         },
     )
 
-    assert _check(census, "contradicts_within_chain") == (0, 0)  # FLIPS 5
+    assert _check(census, "contradicts_within_chain") == (1, 1)  # FLIPS 5
 
 
 def test_the_census_flags_evidence_that_points_at_a_page_that_is_no_evidence(
