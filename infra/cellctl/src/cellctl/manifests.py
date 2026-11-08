@@ -30,6 +30,17 @@ from .backup_source import (
     media_manifest_command,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
+from .export_layout import (
+    ARCHIVE_BOUND,
+    PACK,
+    PAUSE,
+    UPLOAD,
+    VERIFY,
+    job_name,
+    staging_bound_gib,
+    staging_claim_name,
+    verification_secret_name,
+)
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
@@ -459,8 +470,6 @@ def _memory(mib: int) -> str:
 
 
 def render_resource_quota(spec: CellManifestSpec) -> dict:
-    from .exports import staging_bound_gib
-
     r = spec.resources
     # add-cloud-media-store D8: an export's staging claim, and its upload and
     # pack Jobs, which run beside the serving pod after the pause.
@@ -1589,8 +1598,6 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
 
 def render_export_verification_secret(spec: CellManifestSpec, item, url: str) -> dict:
     """Keep the short-lived content-read capability out of routine-readable workload metadata."""
-    from .exports import verification_secret_name
-
     return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
             "metadata": {"name": verification_secret_name(item.export_id), "namespace": spec.namespace,
                          "labels": _labels(spec)}, "data": {"get-url": _b64(url)}}
@@ -1598,8 +1605,6 @@ def render_export_verification_secret(spec: CellManifestSpec, item, url: str) ->
 
 def render_export_staging_claim(spec: CellManifestSpec, item, *, size_gib: int, storage_class: str) -> dict:
     """add-cloud-media-store D8: the export's own claim, on the cell's class, which deletes its volumes."""
-    from .exports import staging_claim_name
-
     return {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
@@ -1628,17 +1633,6 @@ def render_export_job(spec: CellManifestSpec, item, step: str, *, deadline_secon
     - The upload mounts only staging and no media key, and sends the parts.
     - The verification sees only its signed object version, never a cell volume or a cell key Secret.
     """
-    from .exports import (
-        ARCHIVE_BOUND,
-        PACK,
-        PAUSE,
-        UPLOAD,
-        VERIFY,
-        job_name,
-        staging_claim_name,
-        verification_secret_name,
-    )
-
     staging = staging_claim_name(item.export_id)
     command = ["exomem", "cell-export", "--export-id", item.export_id]
     log_env = {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}

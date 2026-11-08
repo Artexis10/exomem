@@ -16,9 +16,9 @@ from kubernetes.client.exceptions import ApiException
 
 from cellctl import db, reconcile
 from cellctl.capacity import GIB
+from cellctl.export_layout import MAX_PART_BYTES, job_name, staging_claim_name
 from cellctl.exports import (
     ARCHIVE_BOUND,
-    MAX_PART_BYTES,
     PACK,
     PAUSE,
     UPLOAD,
@@ -29,9 +29,7 @@ from cellctl.exports import (
     decide_export,
     etag_digest,
     export_size,
-    job_name,
     pause_window,
-    staging_claim_name,
 )
 from cellctl.manifests import JOB_EGRESS_POLICY, CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
@@ -377,8 +375,9 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         packed = await harness.pack(CELL, export_id, archive)
         staging = harness.created(export_id, "staging")
         assert staging["spec"]["storageClassName"] == STORAGE_CLASS
-        # A cell never measured stages its whole 10 GiB, plus 10% and the pack's two-part spool.
-        assert staging["spec"]["resources"]["requests"]["storage"] == "13Gi"
+        # A cell never measured stages its whole 10 GiB, plus 10% and the pack's two-part spool,
+        # in the 95% of the claim that ext4 leaves to a user that is not root: 13 GiB / 0.95.
+        assert staging["spec"]["resources"]["requests"]["storage"] == "14Gi"
         # The hold ended at the pause report, before the upload started.
         assert (await harness.cell(CELL)).hold_kind is None
         statefulset_replicas = [event[2] for event in harness.cluster.events if event[0] == "apply_statefulset"]
@@ -662,7 +661,7 @@ async def test_verification_get_capability_stays_in_its_secret_and_failure_remov
     import base64
     import json
 
-    from cellctl.exports import verification_secret_name
+    from cellctl.export_layout import verification_secret_name
 
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)

@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 from kubernetes.client.rest import ApiException
 
-from cellctl.exports import PACK, PAUSE, job_name, legacy_job_name
+from cellctl.export_layout import PACK, PAUSE, job_name, legacy_job_name
 from cellctl.k8s_client import CELL_LABEL, ClusterClient
 from cellctl.manifests import (
     HOLD_ANNOTATION,

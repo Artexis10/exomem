@@ -2436,6 +2436,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
     endpoint = "http://10.43.0.30:8769"
     documents = _render_platform("templates/cellctl.yaml", settings=(
         "--set", "mediaEdge.enabled=true",
+        "--set-string", f"artifactBroker.image={image}",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",

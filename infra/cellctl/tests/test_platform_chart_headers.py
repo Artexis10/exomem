@@ -371,7 +371,7 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
     import re
     import uuid
 
-    from cellctl.exports import PACK, UPLOAD, job_name, staging_claim_name
+    from cellctl.export_layout import PACK, UPLOAD, job_name, staging_claim_name
     from cellctl.manifests import (
         CELL_HEALTH_PORT,
         CELL_PORT,

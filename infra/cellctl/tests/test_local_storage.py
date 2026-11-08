@@ -469,10 +469,10 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 
     # Serving 125m/512Mi requests and a 2-CPU limit, plus 100m/256Mi and 1 CPU for each of three
     # Jobs: the backup, and an export's upload and pack. The claims are the cell, its clone and
-    # the export's 13 GiB staging claim.
+    # the export's 14 GiB staging claim.
     assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
                                        "requests.memory", "limits.cpu")} == {
-        "persistentvolumeclaims": "3", "requests.storage": "33Gi", "requests.cpu": "425m",
+        "persistentvolumeclaims": "3", "requests.storage": "34Gi", "requests.cpu": "425m",
         "requests.memory": "1280Mi", "limits.cpu": "5",
     }
 
@@ -1499,8 +1499,8 @@ async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a
         await run(5)
 
         assert applied("PersistentVolumeClaim", "cell-data")["spec"]["resources"]["requests"]["storage"] == "14Gi"
-        # The grown claim, its clone and an export's staging claim of 14 GiB + 10% + 2 GiB.
-        assert applied("ResourceQuota", "cell-quota")["spec"]["hard"]["requests.storage"] == "46Gi"
+        # The grown claim, its clone and an export's staging claim of 14 GiB + 10% + 2 GiB over 95%.
+        assert applied("ResourceQuota", "cell-quota")["spec"]["hard"]["requests.storage"] == "47Gi"
         statefulset = applied("StatefulSet", "cell")
         assert HOLD_ANNOTATION not in statefulset["metadata"]["annotations"]
         assert statefulset["spec"]["template"] == template

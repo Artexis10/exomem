@@ -63,14 +63,15 @@ def test_namespace_carries_restricted_pod_security_labels() -> None:
 
 # A local cell's hourly backup runs beside its runtime too, with its own clone claim.
 @pytest.mark.parametrize(("local", "claims", "pods", "storage"), [
-    (False, "2", "4", "23Gi"),
-    (True, "3", "5", "33Gi"),
+    (False, "2", "4", "24Gi"),
+    (True, "3", "5", "34Gi"),
 ])
 def test_the_quota_admits_an_export_beside_the_serving_runtime_and_bounds_storage(local, claims, pods, storage):
     """Defect: the quota refuses the export's staging claim or its upload and pack pods, so every
     export fails after its pause, or the cell's namespace may claim unbounded storage."""
     quota = _find(render_cell_manifests(_spec(storage_gib=10, local_volume=local)), "ResourceQuota")["spec"]["hard"]
-    # The 10 GiB cell, a local cell's 10 GiB clone, and a staging claim of 10 GiB + 10% + the 2 GiB spool.
+    # The 10 GiB cell, a local cell's 10 GiB clone, and a staging claim of 10 GiB + 10% + the 2 GiB spool
+    # over the 95% that ext4 leaves to the Jobs: 14 GiB.
     assert (quota["persistentvolumeclaims"], quota["pods"], quota["requests.storage"]) == (claims, pods, storage)
 
 

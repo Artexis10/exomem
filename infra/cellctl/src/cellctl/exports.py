@@ -27,6 +27,15 @@ from botocore.exceptions import ClientError
 
 from .capacity import GIB
 from .decide import DEFAULT_RECONCILE_CONFIG, ReconcileConfig, usage_updates
+from .export_layout import (
+    ARCHIVE_BOUND,
+    MAX_PARTS,
+    PACK,
+    PAUSE,
+    SIZE_MARGIN_PERCENT,
+    UPLOAD,
+    VERIFY,
+)
 from .imports import PART_BYTES, open_uploads, remove_object
 from .state import CellRow, ClusterObservation, Decision
 
@@ -45,9 +54,6 @@ JOB_FAILURE_CODES = frozenset({
     EXPORT_FAILED, EXPORT_TOO_LARGE, EXPORT_UPLOAD_FAILED, SOURCE_CHANGED_DURING_EXPORT, CASE_COLLISION,
     EXPORT_MEDIA_UNREACHABLE,
 })
-# The cell command's own phases (`exomem cell-export --phase`), and the step
-# that verifies the completed version. Each names one Job of the export.
-PAUSE, PACK, UPLOAD, VERIFY = "pause", "pack", "upload", "verify"
 # The step the row records once the pause reported: the upload and the pack run without a hold.
 TRANSFER = "transfer"
 # The diagnostics a failed export records in its packing report, cellctl's own
@@ -55,19 +61,6 @@ TRANSFER = "transfer"
 STAGING_NOT_RUNNING = "staging_not_running"
 PAUSE_BELOW_COPY_FLOOR = "pause_below_copy_floor"
 TRANSFER_DEADLINE = "transfer_deadline"
-# C6: the part URLs cover the planned archive plus 2% for what the plan cannot count.
-SIZE_MARGIN_PERCENT = 102
-# One presigned URL is one Job argument; this keeps a Job object far inside the
-# API server's request size limit. A larger archive gets larger parts instead.
-MAX_PARTS = 1000
-# D8: the pack holds at most two parts on staging, so a part stays at most 1 GiB,
-# and the archive bound is MAX_PARTS of them, near 1 TiB.
-MAX_PART_BYTES = GIB
-ARCHIVE_BOUND = MAX_PARTS * MAX_PART_BYTES * 100 // SIZE_MARGIN_PERCENT
-# D8: staging holds the copied members (at most the cell's used bytes plus 10%
-# for filesystem overhead) and the pack's two-part spool.
-STAGING_MARGIN_PERCENT = 110
-STAGING_SPOOL_BYTES = 2 * MAX_PART_BYTES
 _MIB = 1024 * 1024
 # C6: CELLCTL_EXPORT_DEADLINE_MINUTES is the deadline for each started 10 GiB of
 # the planned archive, the size of a default cell, so a larger archive gets the
@@ -126,23 +119,6 @@ class ExportJob:
     @property
     def present(self) -> bool:
         return self.exists or self.active or self.pods_present
-
-
-def job_name(export_id: str, step: str) -> str:
-    return f"export-{uuid.UUID(export_id).hex}-{step}"
-
-
-# The single Job an export ran before the three steps. cellctl still removes it.
-def legacy_job_name(export_id: str) -> str:
-    return f"export-{uuid.UUID(export_id).hex}"
-
-
-def staging_claim_name(export_id: str) -> str:
-    return f"export-staging-{uuid.UUID(export_id).hex}"
-
-
-def verification_secret_name(export_id: str) -> str:
-    return job_name(export_id, VERIFY) + "-get"
 
 
 def export_state(item: ExportRow) -> dict:
@@ -242,22 +218,6 @@ def pause_window(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFI
     the pause copies at the floor rate."""
 
     return 2 * config.export_pause_start + pause_copy_time(row, config)
-
-
-def staging_gib(used_bytes: int | None, storage_gib: int) -> int:
-    """D8: the staging claim holds the copied members and the spool, in whole
-    GiB. It never exceeds staging_bound_gib, which the cell quota admits."""
-
-    bound = staging_bound_gib(storage_gib)
-    if used_bytes is None:
-        return bound
-    return min(bound, -(-(used_bytes * STAGING_MARGIN_PERCENT // 100 + STAGING_SPOOL_BYTES) // GIB))
-
-
-def staging_bound_gib(storage_gib: int) -> int:
-    """The largest staging claim of a cell of this size: a full volume plus the spool."""
-
-    return -(-(storage_gib * GIB * STAGING_MARGIN_PERCENT // 100 + STAGING_SPOOL_BYTES) // GIB)
 
 
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,

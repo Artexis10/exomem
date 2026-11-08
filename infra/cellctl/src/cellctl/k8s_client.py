@@ -264,7 +264,7 @@ class ClusterClient:
 
     def delete_export_staging(self, namespace: str, export_id: str) -> None:
         """add-cloud-media-store D8: the export's staging claim, whose class deletes its volume with it."""
-        from .exports import staging_claim_name
+        from .export_layout import staging_claim_name
 
         try:
             self._core.delete_namespaced_persistent_volume_claim(staging_claim_name(export_id), namespace)
@@ -379,7 +379,8 @@ class ClusterClient:
     def observe_export_job(self, namespace: str, export_id: str, *, step: str):
         """C6: one step Job of the export, its pods, its termination report, and
         when it was created and its container first ran (add-cloud-media-store D8)."""
-        from .exports import PAUSE, ExportJob, job_name, legacy_job_name
+        from .export_layout import PAUSE, job_name, legacy_job_name
+        from .exports import ExportJob
 
         name = job_name(export_id, step)
         job = self._get_job(namespace, name)
