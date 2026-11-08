@@ -168,6 +168,8 @@ def test_generic_scaffold_and_workflow_skills_teach_relation_governance() -> Non
     assert "resolve-relation" in combined
     assert "propose-relation" in combined
     assert "save-relations" in combined
-    assert "relates_to" in combined
+    assert "plain link" in combined
+    assert "last resort" in combined
+    assert "relates_to" not in combined
     assert "no edge" in combined.lower()
     assert "hash" in combined.lower()

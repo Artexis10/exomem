@@ -453,10 +453,6 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
         )
         if reason in {"authored_edge", "placeholder_target"} or enriched is None:
             continue
-        # A pair that a specific relation fits stays in the queue: the agent chooses its relation,
-        # and this route could only accept the generic one.
-        if enriched.get("options"):
-            continue
         evidence = [
             {
                 "path": target_rel,
@@ -495,6 +491,29 @@ def _link_proposals(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _link_route(rel_path: str, enriched: dict[str, Any]) -> dict[str, Any]:
+    """The accept call for one link proposal.
+
+    A candidate that observes only structure names no relation, so the call needs the agent's
+    choice: `choose` holds the ranked specific relations and the plain link, and the agent
+    puts one of them in `requested_relation`.
+    """
+    args = {
+        "operation": "accept-relation",
+        "ref": enriched["ref"],
+        "path": rel_path,
+        "expected_fingerprint": enriched["fingerprint"],
+    }
+    route: dict[str, Any] = {"tool": "connect_memory", "args": args}
+    if enriched.get("plain_link"):
+        args["requested_relation"] = "<a key from `choose.options`, or `choose.plain_link`>"
+        route["choose"] = {
+            "options": enriched.get("options") or [],
+            "plain_link": enriched["plain_link"],
+        }
+    return route
+
+
 def _link_kwargs(
     ctx: Context, rel_path: str, review_id: str, proposal: dict[str, Any]
 ) -> dict[str, Any]:
@@ -519,15 +538,7 @@ def _link_kwargs(
         "subject_ref": proposal["refs"][0],
         "proposal_key": review_id,
         "evidence": [subject_evidence, *proposal["evidence"]],
-        "route": {
-            "tool": "connect_memory",
-            "args": {
-                "operation": "accept-relation",
-                "ref": enriched["ref"],
-                "path": rel_path,
-                "expected_fingerprint": enriched["fingerprint"],
-            },
-        },
+        "route": _link_route(rel_path, enriched),
         "reason_code": str(candidate.get("method") or ""),
         "signal_version": proposal["signal_version"],
         "measures": {

@@ -25,8 +25,7 @@ The deferred entity barrier and paired behaviour measurement retain their existi
 - Add an `undeclared_referents` block to every durable write's receipt: up to 3 names that the write newly links and that have no entity, each with the `create-entity` route. It ships only if the arm with it beats the arm without it, or the agent acts on its names.
 - Use the shipped `create-entity` `relations=[{kind,target}]` items and ordinary `## Relations` bullets for typed edges.
   Add registry `generic` and `endpoints` data, kinship and affiliation relations, and an internal curation removal step.
-  Refuse new generic edges that touch an entity only when visible endpoints have fitting specific options; one reasoned retry keeps a generic edge.
-  Offer non-blocking replacement options for note-to-note generic edges.
+  `refuse-generic-relation-authoring` now owns the generic-edge barrier, the replacement options and the census cohort: it refuses every added generic edge with a ranked menu and keeps no reasoned retry.
 - Gate a `referents` declaration argument on `remember` and `observe_memory`: it is built only when the shipped arm misses the pass line, and it ships only if its arm beats the shipped arm.
 - Add a `recent_promotions` due-state category that surfaces each promotion once in the next interactive session, and one revert call per promotion, keyed by its entry.
 - Show relations by label, for example `has_pet (a kind of owns)`, through one formatter.
@@ -43,10 +42,9 @@ The deferred entity barrier and paired behaviour measurement retain their existi
 
 - `delegation-envelope`: the ceiling requirement adds the owner's promotions to `proactive_capture`, and a scoped edge removal and the promotion revert to `restructure_execution`.
 - `write-time-identity-candidates`: detection, not the server, never creates an entity; writes carry `undeclared_referents`.
-- `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker.
-- `semantic-write-contract`: registry-marked generic relations remain connectivity, never typed-specific qualification; authored all-generic relations receive bounded advisory feedback.
+- `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker. The new-edge census cohort moved to `refuse-generic-relation-authoring`.
+- `semantic-write-contract`: registry-marked generic relations remain connectivity, never typed-specific qualification. The all-generic advisory requirement is already canonical and is modified by `refuse-generic-relation-authoring`.
 - `adoption-compile-planning`: source descriptions, capture guidance, proposals and compact write feedback distinguish citation linkage from unassessed semantic compilation.
-- `relation-vocabulary-evolution`: a generic edge between entities offers fitting predicates that replace it in place.
 - `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors.
 
 ## Impact

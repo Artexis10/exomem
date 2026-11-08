@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Exomem media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: 03ed5fc95d395a73b2ec7b66cad9627bc482811267bbebaa7afa2289d9939e9e
+  skill_contract: 9a058584c6d94d4053b7a850ae5e340ca6be6fcb8715ac81f631fac0fd96384c
   version: "0.1.0"
 ---
 
@@ -76,12 +76,12 @@ When the languages of a recording are unknown at ingest, ask the user once: "One
 Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Without either, a reprocess reuses the language or mode already pinned on the sidecar, and detects one language when none is pinned. The old extraction stays on a linked prior page.
 
 ## Relation governance
-Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
-joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
-them), or choose no edge. Durable recurring
-meaning is proposal-first through `propose-relation` and hash-guarded
-`save-relations`; corrections use a new canonical key and deprecate the old one.
+Resolve typed meaning with `resolve-relation` before authoring, and name a specific
+truthful relation on every edge. When none fits, propose a new relation type: durable
+recurring meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`. A plain link is the last resort. A write that adds the generic
+relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations and the
+exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 Return matching artifacts, what was inspected, citations, and any compiled conclusion path.

@@ -375,12 +375,12 @@ def test_an_untruthful_supersession_link_fails(built, tmp_path: Path, monkeypatc
     assert failed == {"synthesis/linked-to-the-antecedents", "synthesis/no-untruthful-link"}
 
 
-def test_generic_links_alone_are_not_truthful_typed_links(
+def test_plain_links_alone_are_not_truthful_typed_links(
     built, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, world = _copy(built, tmp_path, monkeypatch)
     before = read_state(root)
-    _thesis(root, world, relation="relates_to")
+    _thesis(root, world, relation="links_to")
 
     assert _check("synthesis", root, world, before).failed() == ("synthesis/linked-to-the-antecedents",)
 

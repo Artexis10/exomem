@@ -160,7 +160,7 @@ def test_renamed_product_commands_forward_explicit_slugs(
             "## Observations\n\n"
             "- [operating constraint] Keep retries bounded #reliability\n\n"
             "## Relations\n"
-            "- relates_to [[Knowledge Base/Notes/Insights/"
+            "- supports [[Knowledge Base/Notes/Insights/"
             "progressive-disclosure-without-mode-fragmentation]]\n"
         ),
         title="睡眠",

@@ -331,7 +331,7 @@ def _base_note(vault, slug: str) -> str:
                 "## Observations\n\n"
                 "- [constraint] Keep relation review explicit. ^baseline\n\n"
                 "## Relations\n"
-                f"- relates_to [[{_TARGET}]]\n"
+                f"- supports [[{_TARGET}]]\n"
             ),
         },
     )
@@ -353,7 +353,7 @@ def test_real_remember_public_terminal_projects_committed_unknown_relation(
                 "## Observations\n\n"
                 "- [constraint] Keep relation review explicit.\n\n"
                 "## Relations\n"
-                f"- relates_to [[{_TARGET}]]\n"
+                f"- supports [[{_TARGET}]]\n"
                 f"- applies_to [[{_TARGET}]]\n"
             ),
         },
@@ -379,7 +379,7 @@ def test_advisory_can_read_point_recurrence_from_one_current_graph_snapshot(
                 "## Observations\n\n"
                 "- [constraint] Keep recurrence evidence current.\n\n"
                 "## Relations\n"
-                f"- relates_to [[{_TARGET}]]\n"
+                f"- supports [[{_TARGET}]]\n"
                 f"- applies_to [[{_TARGET}]]\n"
             ),
         },
@@ -488,7 +488,7 @@ def test_real_observe_public_terminal_projects_committed_unknown_relation(vault)
             "id": "public-terminal",
             "relations": [
                 {"kind": "applies_to", "target": _TARGET},
-                {"kind": "relates_to", "target": _TARGET},
+                {"kind": "supports", "target": _TARGET},
             ],
         },
     )
@@ -508,9 +508,9 @@ def test_real_edit_public_terminal_projects_committed_unknown_relation(vault) ->
             "why": "add a reviewed raw relation observation",
             "operation": {
                 "kind": "replace_string",
-                "old_string": f"- relates_to [[{_TARGET}]]",
+                "old_string": f"- supports [[{_TARGET}]]",
                 "new_string": (
-                    f"- relates_to [[{_TARGET}]]\n"
+                    f"- supports [[{_TARGET}]]\n"
                     f"- applies_to [[{_TARGET}]]"
                 ),
             },
@@ -537,7 +537,7 @@ def test_real_replace_public_terminal_projects_committed_unknown_relation(vault)
                 "## Observations\n\n"
                 "- [decision] Preserve an unknown authored label.\n\n"
                 "## Relations\n"
-                f"- relates_to [[{_TARGET}]]\n"
+                f"- supports [[{_TARGET}]]\n"
                 f"- applies_to [[{_TARGET}]]\n"
             ),
         },

@@ -15,7 +15,6 @@ import dreamer_fixture as fx
 import pytest
 
 from exomem import (
-    commands,
     corpus_aware,
     dreamer,
     dreamer_families,
@@ -23,6 +22,7 @@ from exomem import (
     epistemic_graph,
     freshness,
     relation_queue,
+    relation_registry,
 )
 
 LATER = time.time() + 3 * 3600
@@ -97,6 +97,10 @@ def test_shared_source_pair_becomes_a_relation_ref_with_source_path(tmp_path: Pa
     assert route["args"]["ref"] == forward["ref"]
     assert route["args"]["path"] == fx.CAVITATION
     assert route["args"]["expected_fingerprint"] == forward["fingerprint"]
+    # The pair names no relation, so the call needs the agent's choice from the ranked menu or the plain link.
+    assert "requested_relation" in route["args"]
+    assert route["choose"]["options"]
+    assert route["choose"]["plain_link"] == relation_registry.link_relation_key()
     evidence = {item["path"]: item for item in forward["evidence"]}
     assert set(evidence) == {fx.CAVITATION, fx.INLET, fx.SOURCE_ONE}
     assert all(item["sig"] for item in evidence.values())
@@ -369,11 +373,11 @@ def _party(title: str, entity_type: str) -> str:
     )
 
 
-def test_a_pair_a_specific_relation_fits_is_left_in_the_queue_for_the_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_pair_a_specific_relation_fits_is_offered_with_that_relation_in_its_choice(
+    tmp_path: Path,
 ) -> None:
-    """The link route could only accept the generic relation, so the dreamer proposes no link for a
-    person and an organization that share a source; the relation queue still offers the pair."""
+    """The pair of a person and an organization that share a source is proposed like any other,
+    and the relation that fits both is in the choice its route carries."""
     vault = fx.build(tmp_path)
     person = f"{fx.KB}/Notes/Entities/ada-marsh.md"
     organization = f"{fx.KB}/Notes/Entities/birch-works.md"
@@ -383,19 +387,8 @@ def test_a_pair_a_specific_relation_fits_is_left_in_the_queue_for_the_agent(
 
     _quiet(vault)
 
-    open_links = _rows(vault)
-    assert _pair(open_links, person, organization) is None
-    assert _pair(open_links, organization, person) is None
-    # Pages with no fitting relation are still proposed, so the dreamer did run over this vault.
-    assert _pair(open_links, fx.CAVITATION, fx.INLET) is not None
+    pair = _pair(_rows(vault), person, organization)
+    assert pair is not None
+    assert "member_of" in [option["key"] for option in pair["route"]["choose"]["options"]]
+    assert "requested_relation" in pair["route"]["args"]
     assert {rel: (vault / rel).read_bytes() for rel in (person, organization)} == before
-    fx.warm_identity(vault, monkeypatch)
-    queue = commands.op_review_memory(vault, mode="relation-queue")
-    [item] = [
-        item
-        for group in queue["groups"]
-        for item in group["items"]
-        if (item["from"], item["to"], item["method"]) == (person, organization, "shared_sources")
-    ]
-    assert "member_of" in [option["key"] for option in item["options"]]
-    assert item["bullet"] is None
