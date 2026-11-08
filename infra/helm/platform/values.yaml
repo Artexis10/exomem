@@ -331,6 +331,10 @@ mediaEdge:
   endpoint: ""
   cellIds: []
   allCells: false
+  # collect-released-media: the cells whose backups hide the media they released. Add the test cell only
+  # after the bucket rule and the watcher's media key exist (runbook: Turn on collection). Taking a cell off
+  # stops its collection; the edge turns off only once this list is empty.
+  collectCells: []
   credentialEpochs: {}
   # D12: a 5 GiB original plus its age overhead (about 1.25 MiB).
   maxObjectBytes: 5370806272

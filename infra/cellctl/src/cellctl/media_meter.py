@@ -4,6 +4,10 @@ cellctl lists `cells/<cell>/` with its list-only key and sums what the provider 
 ciphertext bytes on disk for the operator, not the owner's allowance: the cell meters that from its own
 sidecars, and nothing here changes it. A listing that fails is unknown, never zero, because a zero would
 read as an empty prefix to the alert that watches for abuse.
+
+collect-released-media D4: the figure also lists the hidden names, since every owner deletion now ends
+in a hide, and counts the names with more than one upload version, whose older version the lifecycle
+rule would delete.
 """
 
 from __future__ import annotations
@@ -25,39 +29,52 @@ class PhysicalFigure:
     """What one listing of a cell's prefix showed.
 
     `bytes` sums the content lengths of upload versions. `unfinished` counts large files that were
-    started and never finished. `hides` counts hide markers: the edge sends no hide request, so any one
-    means the edge key or another key hid a name. A field is None when the listing could not show it.
+    started and never finished. `hidden` holds the names under a hide marker, in name order: a hold
+    hides each name that its cell released. `repeated` counts the names with more than one upload
+    version. A field is None when the listing could not show it.
     """
 
     bytes: int | None
     unfinished: int | None
-    hides: int | None
+    hidden: tuple[str, ...] | None
+    repeated: int | None
 
 
-UNKNOWN = PhysicalFigure(bytes=None, unfinished=None, hides=None)
+UNKNOWN = PhysicalFigure(bytes=None, unfinished=None, hidden=None, repeated=None)
 
 
 def meter_prefix(listing: ObjectStorage, cell_id: str) -> PhysicalFigure:
     """The figure for `cell_id`, or UNKNOWN when any page fails. It sums while it pages, so a prefix of
-    millions of versions holds one page in memory, not the listing. The figure is all or nothing: the
+    millions of versions holds one page and its hidden names in memory, not the listing. The figure is all or nothing: the
     listing raises on a malformed or missing page, and a partial sum would understate the bucket."""
-    total, sized, unfinished, hides = 0, True, 0, 0
+    total, sized, unfinished, hidden = 0, True, 0, set()
+    # The provider lists in name order, so a name's versions are adjacent and one name's count is enough.
+    repeated, ordered, name, uploads = 0, True, None, 0
     try:
         for version in listing.iter_object_versions(cell_object_prefix(cell_id)):
+            if version.key != name:
+                # A listing out of name order could split a name's versions and hide a repeat, so the
+                # count becomes unknown rather than low.
+                ordered = ordered and (name is None or version.key > name)
+                name, uploads = version.key, 0
             if version.action == UPLOAD:
                 # An upload without a reported size makes the sum unknown; 0 would understate the bucket.
                 sized = sized and version.size is not None
                 total += version.size or 0
+                uploads += 1
+                if uploads == 2:
+                    repeated += 1
             elif version.action == START:
                 unfinished += 1
             elif version.action == HIDE:
-                hides += 1
+                hidden.add(version.key)
     except Exception as error:  # noqa: BLE001 - a failed page makes the whole figure unknown
         # The type only: a provider message could carry an identifier.
         logger.error("cellctl: the media listing of cell %s failed (%s); its physical figure is unknown",
                      cell_id, type(error).__name__)
         return UNKNOWN
-    return PhysicalFigure(bytes=total if sized else None, unfinished=unfinished, hides=hides)
+    return PhysicalFigure(bytes=total if sized else None, unfinished=unfinished,
+                          hidden=tuple(sorted(hidden)), repeated=repeated if ordered else None)
 
 
 def over_allowance(figure: PhysicalFigure, allowance_bytes: int | None, headroom: float | None) -> bool | None:

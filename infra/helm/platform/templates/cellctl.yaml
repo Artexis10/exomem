@@ -334,6 +334,8 @@ spec:
               value: {{ .Values.mediaEdge.bucket | quote }}
             - name: CELLCTL_MEDIA_EDGE_CELL_IDS
               value: {{ .Values.mediaEdge.cellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS
+              value: {{ .Values.mediaEdge.collectCells | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS
               value: {{ .Values.mediaEdge.credentialEpochs | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_STORE_POLICY
@@ -978,7 +980,13 @@ spec:
           variables.np.podSelector.matchExpressions[0].key == 'exomem.io/cell-job' &&
           variables.np.podSelector.matchExpressions[0].operator == 'Exists' &&
           (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
+          {{- if .Values.mediaEdge.enabled }}
+          {{- /* collect-released-media D3: a collecting cell's Jobs may also reach the edge port; the edge's own ingress admits only backup Jobs. */}}
+          (size(variables.np.egress) == 2 || (size(variables.np.egress) == 3 &&
+            {{ include "exomem.cellctl.egressRule" (dict "index" 2 "namespace" .Values.cellctl.namespace "pod" "exomem-media-edge" "port" 8769) }})) &&
+          {{- else }}
           size(variables.np.egress) == 2 &&
+          {{- end }}
           size(variables.np.egress[0].to) == 1 &&
           has(variables.np.egress[0].to[0].ipBlock) &&
           !has(variables.np.egress[0].to[0].namespaceSelector) &&
@@ -998,7 +1006,7 @@ spec:
           !has(variables.np.egress[1].to[0].podSelector.matchExpressions) &&
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
-      message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns.
+      message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
     {{- if $relocation }}
     # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
     # cell volume's reclaim policy to Retain before relocation deletes its

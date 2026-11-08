@@ -9,6 +9,10 @@ only after every request accepted under an earlier one has settled.
 Provider writes are recorded in a durable intent before they are sent. An
 intent that stays uncertain keeps its generation open, so a missing HEAD or a
 restart can never turn an unknown write into an acknowledged drain.
+
+A collector credential, which only the backup Job holds, may call one operation:
+`condemn`, which hides a name of its own cell (collect-released-media D3). Every
+other operation takes a runtime credential.
 """
 
 from __future__ import annotations
@@ -44,6 +48,8 @@ from .media_edge_b2 import (
 from .media_edge_protocol import (
     ADMIT_ACTION,
     AUDIENCE,
+    COLLECTOR_AUDIENCE,
+    CONDEMN_ACTION,
     EDGE_PORT,
     GENERATION_PATH,
     MAX_CREDENTIAL_CHARS,
@@ -53,6 +59,9 @@ from .media_edge_protocol import (
     SHA256_HEADER,
     SIZE_HEADER,
     STATUS_ABSENT,
+    STATUS_CONDEMNED,
+    STATUS_CURRENT,
+    STATUS_HEADER,
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
     object_key,
@@ -136,7 +145,9 @@ class Intent:
     cell: str
     key: str
     generation: int
-    kind: str  # "small": one upload, found again by nonce; "large": parts, found again by file ID
+    # "small": one upload, found again by nonce; "large": parts, found again by file ID;
+    # "hide": a condemn, settled once the name is hidden. `file_id` then names the condemned version.
+    kind: str
     size: int
     sha256: str
     nonce: str | None = None
@@ -163,17 +174,22 @@ class ClientGone(Exception):
     pass
 
 
-def parse_active_set(raw: bytes) -> tuple[int, dict[str, int]]:
+def _credential_map(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(cell, str) and _CELL_ID.fullmatch(cell) and type(version) is int for cell, version in value.items())
+
+
+def parse_active_set(raw: bytes) -> tuple[int, dict[str, int], dict[str, int]]:
+    """The generation, the runtime credentials and the collector credentials, by cell and version.
+
+    A set without `collectors` admits no collector, so an older publisher can only stop collection.
+    """
     value = json.loads(raw)
-    generation, cells = value["generation"], value["cells"]
-    if (
-        type(generation) is not int
-        or generation < 0
-        or not isinstance(cells, dict)
-        or any(not _CELL_ID.fullmatch(cell) or type(version) is not int for cell, version in cells.items())
-    ):
+    generation, cells, collectors = value["generation"], value["cells"], value.get("collectors", {})
+    if (type(generation) is not int or generation < 0 or not _credential_map(cells)
+            or not _credential_map(collectors)):
         raise ValueError("malformed active set")
-    return generation, cells
+    return generation, cells, collectors
 
 
 def _sha1(data: bytes) -> str:
@@ -259,6 +275,7 @@ class MediaEdge:
         self.public_key = key
         self.loaded: int | None = None
         self.cells: dict[str, int] = {}
+        self.collectors: dict[str, int] = {}
         self._raw: bytes | None = None
         # The digest of the bytes that produced `loaded`, not of the file as last read: a rejected
         # file must not make the edge claim a set it did not load.
@@ -299,15 +316,16 @@ class MediaEdge:
             return
         self._raw = raw
         try:
-            generation, cells = parse_active_set(raw)
+            generation, cells, collectors = parse_active_set(raw)
         except (ValueError, KeyError, TypeError):
             log.error("the active set file is malformed; the loaded set stays in force")
             return
         # A set that goes back, or changes in place, could re-admit a revoked cell.
-        if self.loaded is not None and (generation < self.loaded or (generation == self.loaded and cells != self.cells)):
+        if self.loaded is not None and (generation < self.loaded or (
+                generation == self.loaded and (cells, collectors) != (self.cells, self.collectors))):
             log.error("the active set file does not advance the generation; the loaded set stays in force")
             return
-        self.loaded, self.cells = generation, cells
+        self.loaded, self.cells, self.collectors = generation, cells, collectors
         self.loaded_sha256 = hashlib.sha256(raw).hexdigest()
 
     def settled(self) -> int | None:
@@ -326,8 +344,8 @@ class MediaEdge:
             if not self.inflight[generation]:
                 del self.inflight[generation]
 
-    def authenticate(self, headers: Mapping[str, str]) -> tuple[str, int]:
-        """Check the credential against the loaded set. No await: admission is atomic."""
+    def authenticate(self, headers: Mapping[str, str], audience: str = AUDIENCE) -> tuple[str, int]:
+        """Check the credential against the loaded set for one audience. No await: admission is atomic."""
         self.refresh()
         if self.loaded is None:
             raise Reply(503, _UNAVAILABLE)
@@ -335,18 +353,19 @@ class MediaEdge:
         if not authorization.startswith("Bearer ") or len(authorization) > MAX_CREDENTIAL_CHARS:
             raise Reply(401, "MEDIA_EDGE_REFUSED")
         try:
-            claims = jwt.decode(authorization[7:], self.public_key, algorithms=["EdDSA"], audience=AUDIENCE,
+            claims = jwt.decode(authorization[7:], self.public_key, algorithms=["EdDSA"], audience=audience,
                                 options={"require": sorted(_CLAIMS)})
         except (jwt.PyJWTError, ValueError, TypeError) as error:
             raise Reply(401, "MEDIA_EDGE_REFUSED") from error
         cell, version = claims["sub"], claims["ver"]
+        admitted = self.collectors if audience == COLLECTOR_AUDIENCE else self.cells
         if (
             type(claims["v"]) is not int
             or claims["v"] != 1
             or type(claims["issued_ms"]) is not int
             or type(version) is not int
             or not isinstance(cell, str)
-            or self.cells.get(cell) != version
+            or admitted.get(cell) != version
         ):
             raise Reply(401, "MEDIA_EDGE_REFUSED")
         return cell, self.loaded
@@ -377,6 +396,11 @@ class MediaEdge:
     async def _resolve(self, intent: Intent) -> Outcome:
         """Ask the provider what became of a write. Anything short of an answer is unknown."""
         try:
+            if intent.kind == "hide":
+                # The name's writes and hides are serial, so a hidden name means that this hide landed.
+                if await self.provider.head_name(intent.key) is None:
+                    return Outcome(True, intent.file_id)
+                return Outcome(False)  # a name that still shows does not prove that the hide will never land
             if intent.kind == "small":
                 # Writes to one name are serial, so the newest version is this write's or none of them.
                 head = await self.provider.head_name(intent.key)
@@ -527,6 +551,30 @@ class MediaEdge:
 
         return await self._dispatch(intent, finish)
 
+    async def _condemn(self, cell: str, generation: int, key: str) -> bool:
+        """Hide the name while a HEAD by name still shows it. A repeated condemn hides nothing."""
+        self._check_free(key)
+        self._writing.add(key)
+        try:
+            head = await self.provider.head_name(key)
+            if head is None:
+                return False
+            intent = Intent(uuid.uuid4().hex, cell, key, generation, "hide", head.size,
+                            head.info.get(_SHA256_INFO, ""), file_id=head.file_id)
+            await self._persist(intent)
+
+            async def hide() -> str:
+                await self.provider.hide_file(key)
+                return head.file_id
+
+            await self._dispatch(intent, hide)
+            # The burst triage matches each hide marker to one such line: a marker without one
+            # came by another route.
+            log.info("condemn hid %s for cell %s", key, cell)
+            return True
+        finally:
+            self._writing.discard(key)
+
     # Reads
 
     async def _head(self, key: str, version: str, response: _Response) -> None:
@@ -536,7 +584,10 @@ class MediaEdge:
         sha256 = info.info.get(_SHA256_INFO, "")
         if not is_sha256(sha256):
             raise Reply(503, _UNAVAILABLE)
-        await response.empty(200, [(SIZE_HEADER, str(info.size)), (SHA256_HEADER, sha256)])
+        # A hide or a newer version makes this version non-current, and the bucket rule deletes a non-current one.
+        current = await self.provider.head_name(key)
+        status = STATUS_CURRENT if current is not None and current.file_id == version else STATUS_CONDEMNED
+        await response.empty(200, [(SIZE_HEADER, str(info.size)), (SHA256_HEADER, sha256), (STATUS_HEADER, status)])
 
     async def _read(self, key: str, version: str, headers: Mapping[str, str], receive, response: _Response) -> None:
         byte_range = headers.get("range")
@@ -570,13 +621,18 @@ class MediaEdge:
     async def _object(self, scope, receive, response: _Response, headers: Mapping[str, str]) -> None:
         name, _, action = scope["path"][len(OBJECTS_PATH):].partition("/")
         method = scope["method"]
-        if not is_sha256(name) or action not in {"", ADMIT_ACTION}:
+        if not is_sha256(name) or action not in {"", ADMIT_ACTION, CONDEMN_ACTION}:
             raise Reply(404, "MEDIA_EDGE_NOT_FOUND")
-        if (action, method) not in {(ADMIT_ACTION, "POST"), ("", "PUT"), ("", "GET"), ("", "HEAD")}:
+        if (action, method) not in {(ADMIT_ACTION, "POST"), (CONDEMN_ACTION, "POST"), ("", "PUT"), ("", "GET"),
+                                    ("", "HEAD")}:
             raise Reply(405, "MEDIA_EDGE_METHOD")
-        cell, generation = self.authenticate(headers)
+        # Each audience admits its own operations only: a runtime credential never condemns.
+        cell, generation = self.authenticate(headers, COLLECTOR_AUDIENCE if action == CONDEMN_ACTION else AUDIENCE)
         key = object_key(cell, name)
         with self._accepted(generation):
+            if action == CONDEMN_ACTION:
+                await response.json(200, {"hidden": await self._condemn(cell, generation, key)})
+                return
             if method in {"GET", "HEAD"}:
                 version = parse_qs(scope["query_string"].decode("latin-1")).get("version", [""])[0]
                 if not version:

@@ -190,12 +190,14 @@ def test_the_edge_settings_load_from_the_chart_environment_and_default_to_none(m
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES", "1073741824")
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_BUCKET", BUCKET)
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CELL_IDS", json.dumps([CANARY]))
+    monkeypatch.setenv("CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS", json.dumps([CANARY]))
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", json.dumps({CANARY: 3}))
     monkeypatch.setenv("CELLCTL_MEDIA_PHYSICAL_HEADROOM", "1.5")
 
     config = main.build_media_edge_config()
 
     assert config.selects(CANARY) and not config.selects(OTHER) and config.epoch(CANARY) == 3
+    assert config.collects(CANARY) and not config.collects(OTHER)
     assert config.max_object_bytes == 1 << 30 and config.bucket == BUCKET and config.physical_headroom == 1.5
     monkeypatch.setenv("CELLCTL_MEDIA_EDGE_ALL_CELLS", '"yes"')
     with pytest.raises(ValueError, match="all-cells switch"):
@@ -570,9 +572,10 @@ async def test_a_selected_cell_waits_when_the_active_set_cannot_be_published(cel
 
 
 def _turn_off(fleet: Fleet) -> None:
-    """The operator takes the canary off the edge's selection; the edge itself stays on."""
+    """The operator takes the canary off the edge's selection; the edge and its collect list stay on."""
     fleet.config = dataclasses.replace(fleet.config, media_edge=_edge(
-        cell_ids=(), signing_key=fleet.config.media_edge.signing_key))
+        cell_ids=(), signing_key=fleet.config.media_edge.signing_key,
+        collect_cell_ids=fleet.config.media_edge.collect_cell_ids))
 
 
 def _report(fleet: Fleet, cell_id: str = CANARY, **census: object) -> None:

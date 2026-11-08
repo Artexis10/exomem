@@ -6,6 +6,10 @@ CI job runs it. It lists every application key and bucket of each pinned account
 with a list-only key, and reports to a Substrate receiver that no in-cluster
 component can reach.
 
+An account may also pin a media watch (`collect-released-media` D4). With a second
+list-only key, limited to the media bucket, the watcher counts the hide markers of
+the pinned window and alerts when they exceed the pinned budget.
+
 The pinned set is data, held in the `KEY_WATCHER_PINNED_SET` secret: this public
 repository holds no key ID, bucket name or account ID. Output is value-free. It
 prints account labels, reason tokens and counts only, because CI logs are public.
@@ -45,6 +49,9 @@ HEARTBEAT_ALERT = "KEY_WATCHER_RUN"
 TIMEOUT_SECONDS = 10
 KEY_PAGE_SIZE = 1000
 MAX_PAGES = 100
+FILE_PAGE_SIZE = 10000
+# A listing that needs more pages than this is a failure, never a partial count: 2.5 million versions.
+MAX_FILE_PAGES = 250
 
 # The reason tokens are this script's own alert protocol with the receiver: a closed
 # set the script owns, not data that a customer or the vault defines.
@@ -68,6 +75,12 @@ ALERT_TOKENS = (
 )
 _KEY_TOKENS = (UNKNOWN_KEY, PER_CELL_KEY_SHAPE, DUPLICATE_PREFIX_KEY, PINNED_KEY_MISSING)
 _BUCKET_TOKENS = (BUCKET_MISSING, BUCKET_SETTING_DRIFT)
+# Only an account that pins a media watch sends these.
+MEDIA_HIDE_BURST = "MEDIA_HIDE_BURST"
+MEDIA_LISTING_FAILURE = "MEDIA_LISTING_FAILURE"
+MEDIA_TOKENS = (MEDIA_HIDE_BURST, MEDIA_LISTING_FAILURE)
+# B2's documented file-version action for a hide marker, a protocol token.
+HIDE_ACTION = "hide"
 
 # A cell prefix is `cells/<cell id>/`. The cell id is the 16-character base32 body of
 # cellctl's namespace rule `exo-cell-[a-z2-7]{16}`. That protocol fixes the shape, so a
@@ -114,6 +127,15 @@ class PerCell:
 
 
 @dataclass(frozen=True)
+class MediaWatch:
+    bucket_id: str
+    key_id_env: str
+    key_env: str
+    hide_budget: int
+    window_hours: int
+
+
+@dataclass(frozen=True)
 class Account:
     label: str
     key_id_env: str
@@ -121,6 +143,7 @@ class Account:
     pinned_key_ids: frozenset[str]
     per_cell: PerCell | None
     buckets: Mapping[str, Mapping[str, Any]]
+    media: MediaWatch | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +206,9 @@ def parse_pinned_set(raw: str) -> list[Account]:
     for index, raw_account in enumerate(document["accounts"]):
         path = f"accounts[{index}]"
         fields = {"label", "key_id_env", "key_env", "pinned_key_ids", "per_cell", "buckets"}
+        # The media watch is optional, so a pinned set written before it still parses.
+        if isinstance(raw_account, dict) and "media" in raw_account:
+            fields.add("media")
         item = _exact_object(raw_account, fields, path)
         label = item["label"]
         if not isinstance(label, str) or not _ACCOUNT_LABEL.fullmatch(label):
@@ -211,6 +237,7 @@ def parse_pinned_set(raw: str) -> list[Account]:
         }
         if per_cell is not None and per_cell.bucket_id not in buckets:
             raise ConfigError(f"{path}.per_cell.bucket_id: not one of the pinned buckets")
+        media = _parse_media(item["media"], buckets, f"{path}.media") if "media" in item else None
         accounts.append(
             Account(
                 label=label,
@@ -221,9 +248,26 @@ def parse_pinned_set(raw: str) -> list[Account]:
                 ),
                 per_cell=per_cell,
                 buckets=buckets,
+                media=media,
             )
         )
     return accounts
+
+
+def _parse_media(value: Any, buckets: Mapping[str, Any], path: str) -> MediaWatch:
+    fields = {"bucket_id", "key_id_env", "key_env", "hide_budget", "window_hours"}
+    item = _exact_object(value, fields, path)
+    if not isinstance(item["bucket_id"], str) or item["bucket_id"] not in buckets:
+        raise ConfigError(f"{path}.bucket_id: not one of the pinned buckets")
+    for name in ("key_id_env", "key_env"):
+        if not isinstance(item[name], str) or not _ENV_NAME.fullmatch(item[name]):
+            raise ConfigError(f"{path}.{name}: invalid environment name")
+    if type(item["hide_budget"]) is not int or item["hide_budget"] < 0:
+        raise ConfigError(f"{path}.hide_budget: expected a whole number, zero or more")
+    if type(item["window_hours"]) is not int or item["window_hours"] < 1:
+        raise ConfigError(f"{path}.window_hours: expected a whole number of hours, one or more")
+    return MediaWatch(item["bucket_id"], item["key_id_env"], item["key_env"], item["hide_budget"],
+                      item["window_hours"])
 
 
 def receiver_capability(url: str) -> str:
@@ -337,6 +381,36 @@ def list_keys(opener: Opener, session: Session) -> list[dict[str, Any]]:
         if not isinstance(cursor, str) or not cursor:
             raise ApiError("unexpected key cursor")
     raise ApiError("key listing did not end")
+
+
+def count_hides_since(opener: Opener, session: Session, bucket_id: str, since_ms: int) -> int:
+    """The hide markers in the bucket whose upload time is `since_ms` or later, over every page.
+
+    The time decides only what this watcher counts; no clock decides a hide.
+    """
+    hides = 0
+    body: dict[str, Any] = {"bucketId": bucket_id, "maxFileCount": FILE_PAGE_SIZE}
+    for _ in range(MAX_FILE_PAGES):
+        page = _api_post(opener, session, "b2_list_file_versions", body)
+        entries = page.get("files")
+        if not isinstance(entries, list):
+            raise ApiError("unexpected file page")
+        for entry in entries:
+            if not (
+                isinstance(entry, dict)
+                and isinstance(entry.get("action"), str)
+                and type(entry.get("uploadTimestamp")) is int
+            ):
+                raise ApiError("unexpected file entry")
+            if entry["action"] == HIDE_ACTION and entry["uploadTimestamp"] >= since_ms:
+                hides += 1
+        next_name, next_id = page.get("nextFileName"), page.get("nextFileId")
+        if next_name is None and next_id is None:
+            return hides
+        if not (isinstance(next_name, str) and next_name and isinstance(next_id, str) and next_id):
+            raise ApiError("unexpected file cursor")
+        body = {**body, "startFileName": next_name, "startFileId": next_id}
+    raise ApiError("file listing did not end")
 
 
 def list_buckets(opener: Opener, session: Session) -> list[dict[str, Any]]:
@@ -500,6 +574,26 @@ def check_account(account: Account, environ: Mapping[str, str], opener: Opener) 
     return states
 
 
+def check_media(
+    media: MediaWatch, environ: Mapping[str, str], opener: Opener, now: datetime
+) -> tuple[dict[str, bool], int | None]:
+    """The media tokens whose check ran, and the hide count of the window, None when unknown.
+
+    A blind watch sends no burst state: "inactive" would clear a live burst alert.
+    """
+    key_id = environ.get(media.key_id_env, "")
+    key = environ.get(media.key_env, "")
+    since_ms = int(now.timestamp() * 1000) - media.window_hours * 3_600_000
+    try:
+        if not key_id or not key:
+            raise ApiError("credential missing")
+        session = authorize(opener, key_id, key)
+        hides = count_hides_since(opener, session, media.bucket_id, since_ms)
+    except ApiError:
+        return {MEDIA_LISTING_FAILURE: True}, None
+    return {MEDIA_LISTING_FAILURE: False, MEDIA_HIDE_BURST: hides > media.hide_budget}, hides
+
+
 # --- Receiver delivery ----------------------------------------------------------
 
 
@@ -568,20 +662,34 @@ def run(
     utc = now.astimezone(UTC)
     day, hour = utc.strftime("%Y-%m-%d"), utc.strftime("%Y-%m-%dT%H")
     # Evaluate every account before any delivery: the heartbeat then proves that all of them ran.
-    results = [(account.label, check_account(account, environ, opener)) for account in accounts]
+    results = []
+    for account in accounts:
+        states = check_account(account, environ, opener)
+        hides = None
+        if account.media is not None:
+            media_states, hides = check_media(account.media, environ, opener, utc)
+            states |= media_states
+        results.append((account, states, hides))
 
     active_total = 0
     deliveries: list[tuple[str, bool, str]] = []
-    for label, states in results:
-        active_tokens = [token for token in ALERT_TOKENS if states.get(token)]
+    for account, states, hides in results:
+        label = account.label
+        active_tokens = [token for token in (*ALERT_TOKENS, *MEDIA_TOKENS) if states.get(token)]
         active_total += len(active_tokens)
         print(
             f"account {label}: {len(active_tokens)} active ({', '.join(active_tokens) or 'none'})",
             file=out,
         )
+        if account.media is not None:
+            # The count and nothing else: the budget and the window stay in the pinned set.
+            print(
+                f"account {label}: {'unknown' if hides is None else hides} media hides in the window",
+                file=out,
+            )
         deliveries += [
             (f"{label}:{token}", states[token], hour if states[token] else day)
-            for token in ALERT_TOKENS
+            for token in (*ALERT_TOKENS, *MEDIA_TOKENS)
             if token in states
         ]
 

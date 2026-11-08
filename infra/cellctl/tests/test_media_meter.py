@@ -1,7 +1,8 @@
-"""add-cloud-media-store D10: the operator's physical meter of a cell's prefix in the media bucket."""
+"""add-cloud-media-store D10 and collect-released-media D4: the operator's physical meter of a cell's prefix."""
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
@@ -18,19 +19,19 @@ from .test_media_edge import CANARY, NOW, OTHER, _alerting, _delete, _fleet
 staging = test_reconcile.staging
 
 PREFIX = cell_object_prefix(CANARY)
-HIDE_ALERT, OVER_ALERT, UNKNOWN_ALERT = alerts.media_alerts(CANARY)
+OVER_ALERT, UNKNOWN_ALERT = alerts.media_alerts(CANARY)
 MINUTE = timedelta(minutes=1)
 
 
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
-    """The media alerts delivered, as (name, active)."""
+    """The media alerts delivered, as (name, active). Every alert whose name starts with "media-" counts, so a
+    per-cell alert on hides would show here."""
 
     delivered: list[tuple[str, bool]] = []
 
     def deliver(url: str, *, alert: str, active: bool, observed_at: object) -> None:
-        if alert.startswith((alerts.MEDIA_HIDE_ALERT, alerts.MEDIA_OVER_ALLOWANCE_ALERT,
-                             alerts.MEDIA_METER_UNKNOWN_ALERT)):
+        if alert.startswith("media-"):
             delivered.append((alert, active))
 
     monkeypatch.setattr(alerts, "deliver", deliver)
@@ -45,6 +46,14 @@ def _listing(*versions: tuple[int | None, str]) -> FakeB2:
     return listing
 
 
+def _named(*versions: tuple[str, int | None, str]) -> FakeB2:
+    """The cell's prefix as the provider lists it, in name order: each version as (name, size, action)."""
+    listing = FakeB2()
+    for name, size, action in versions:
+        listing.seed_object(f"{PREFIX}{name}", size=size, action=action)
+    return listing
+
+
 async def _new_backup(fleet: test_media_edge.Fleet, cell_id: str, at: object) -> None:
     """A backup finishes, so the next pass lists the cell's prefix again."""
     await fleet.connection.execute("UPDATE exomem_cloud_cells SET last_backup_at=$2 WHERE cell_id=$1", cell_id, at)
@@ -53,11 +62,31 @@ async def _new_backup(fleet: test_media_edge.Fleet, cell_id: str, at: object) ->
 # -- the figure --
 
 
-def test_the_figure_sums_upload_bytes_and_counts_unfinished_files_and_hide_entries_apart() -> None:
+def test_the_figure_sums_upload_bytes_and_counts_unfinished_files_and_lists_hidden_names_apart() -> None:
     figure = media_meter.meter_prefix(
-        _listing((40, "upload"), (2, "upload"), (None, "hide"), (None, "start"), (None, "start")), CANARY)
+        _named(("a", 40, "upload"), ("b", 2, "upload"), ("b", None, "hide"), ("c", None, "start"),
+               ("d", None, "start")), CANARY)
 
-    assert figure == PhysicalFigure(bytes=42, unfinished=2, hides=1)
+    assert figure == PhysicalFigure(bytes=42, unfinished=2, hidden=(f"{PREFIX}b",), repeated=0)
+
+
+@pytest.mark.parametrize(("versions", "repeated"), [
+    pytest.param([("a", 1, "upload"), ("b", 1, "upload"), ("b", None, "hide")], 0, id="every name has one upload"),
+    pytest.param([("a", 1, "upload"), ("a", 1, "upload"), ("b", 1, "upload")], 1, id="one name has two"),
+    pytest.param([("a", 1, "upload"), ("a", 1, "upload"), ("a", 1, "upload"), ("b", 1, "upload"),
+                  ("b", 1, "upload"), ("c", None, "start"), ("c", 1, "upload")], 2, id="several names have more"),
+])
+def test_the_figure_counts_each_name_with_more_than_one_upload_version_once(versions, repeated) -> None:
+    """The lifecycle rule deletes a repeated name's older version, which a sidecar may still pin; the operator
+    re-offloads those originals before the rule applies, so the count must not miss one or count one twice."""
+    assert media_meter.meter_prefix(_named(*versions), CANARY).repeated == repeated
+
+
+def test_a_listing_out_of_name_order_makes_the_repeated_count_unknown_not_low() -> None:
+    """A name's versions split across the listing would each look single, and a low count would pass the gate."""
+    figure = media_meter.meter_prefix(_named(("b", 1, "upload"), ("a", 1, "upload")), CANARY)
+
+    assert figure.repeated is None and figure.bytes == 2
 
 
 def test_a_failed_page_gives_an_unknown_figure_never_a_partial_sum() -> None:
@@ -66,7 +95,7 @@ def test_a_failed_page_gives_an_unknown_figure_never_a_partial_sum() -> None:
 
     figure = media_meter.meter_prefix(listing, CANARY)
 
-    assert figure is media_meter.UNKNOWN and figure.bytes is None and figure.hides is None
+    assert figure is media_meter.UNKNOWN and figure.bytes is None and figure.repeated is None
 
 
 def test_an_upload_without_a_reported_size_makes_the_byte_sum_unknown_not_smaller() -> None:
@@ -78,18 +107,37 @@ def test_an_upload_without_a_reported_size_makes_the_byte_sum_unknown_not_smalle
 # -- the pass --
 
 
-async def test_a_hide_entry_alerts_at_once_and_resolves_when_a_later_listing_shows_none(cell_db, sent) -> None:
+async def test_the_log_lists_hidden_names_and_counts_repeated_ones_and_a_hide_raises_no_alert(
+        cell_db, sent, caplog) -> None:
+    """Every owner deletion now ends in a hide: an alert on each would page the operator for normal work."""
     fleet = await _fleet(cell_db, CANARY)
     _alerting(fleet)
     try:
-        fleet.media_listing = _listing((40, "upload"), (None, "hide"))
-        await fleet.run(NOW)
-        assert sent == [(HIDE_ALERT, True)]
+        fleet.media_listing = _named(("kept", 40, "upload"), ("kept", 40, "upload"), ("released", 2, "upload"),
+                                     ("released", None, "hide"))
+        with caplog.at_level(logging.INFO, logger="cellctl"):
+            await fleet.run(NOW)
+        report = next(record.getMessage() for record in caplog.records if "hidden name(s)" in record.getMessage())
 
-        fleet.media_listing = _listing((40, "upload"))
-        await _new_backup(fleet, CANARY, NOW + MINUTE)
-        await fleet.run(NOW + 2 * MINUTE)
-        assert sent == [(HIDE_ALERT, True), (HIDE_ALERT, False)]
+        assert sent == []
+        assert f"cell {CANARY} holds 82 media byte(s)" in report
+        assert "1 name(s) with more than one upload version" in report
+        assert report.endswith(f"1 hidden name(s) in the bucket: {PREFIX}released")
+    finally:
+        await fleet.close()
+
+
+async def test_the_log_counts_every_hidden_name_but_names_only_a_few(cell_db, caplog) -> None:
+    """Every owner deletion adds a hidden name, so a line that named them all would grow with each one."""
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        fleet.media_listing = _named(*[(f"released{index}", None, "hide") for index in range(7)])
+        with caplog.at_level(logging.INFO, logger="cellctl"):
+            await fleet.run(NOW)
+        report = next(record.getMessage() for record in caplog.records if "hidden name(s)" in record.getMessage())
+
+        shown = ", ".join(f"{PREFIX}released{index}" for index in range(5))
+        assert report.endswith(f"7 hidden name(s) in the bucket: {shown} and 2 more")
     finally:
         await fleet.close()
 
@@ -112,24 +160,24 @@ async def test_a_prefix_past_the_allowance_times_the_headroom_alerts(cell_db, se
 
 
 async def test_a_failed_listing_resolves_nothing_and_is_tried_again_after_five_minutes(cell_db, sent) -> None:
-    fleet = await _fleet(cell_db, CANARY)
+    fleet = await _fleet(cell_db, CANARY, store_policy={"allowance_bytes": 100}, physical_headroom=1.5)
     _alerting(fleet)
     try:
-        listing = fleet.media_listing = _listing((None, "hide"))
+        listing = fleet.media_listing = _listing((151, "upload"))
         await fleet.run(NOW)
         listing.fail_listing_with = RuntimeError("the provider is away")
         await _new_backup(fleet, CANARY, NOW + MINUTE)
         await fleet.run(NOW + MINUTE)
         await fleet.run(NOW + 2 * MINUTE)
 
-        # An unknown listing is not a clean one: the alert stays, and the second pass does not list again.
+        # An unknown listing is not within the allowance: the alert stays, and the second pass does not list again.
         assert (sent, len(listing.listed), fleet.memory.media_physical[CANARY]) == (
-            [(HIDE_ALERT, True)], 2, media_meter.UNKNOWN)
+            [(OVER_ALERT, True)], 2, media_meter.UNKNOWN)
 
         listing.fail_listing_with = None
         listing._objects.clear()
         await fleet.run(NOW + 7 * MINUTE)
-        assert sent == [(HIDE_ALERT, True), (HIDE_ALERT, False)]
+        assert sent == [(OVER_ALERT, True), (OVER_ALERT, False)]
     finally:
         await fleet.close()
 
@@ -200,18 +248,18 @@ async def test_a_cell_is_listed_once_per_backup_and_only_by_its_own_prefix(cell_
         await fleet.close()
 
 
-async def test_a_deleted_cell_leaves_the_meter_but_its_hide_alert_stays(cell_db, sent, staging) -> None:
-    # Deletion is no evidence that the hide entry is gone; only a listing that shows none would be.
-    fleet = await _fleet(cell_db, CANARY)
+async def test_a_deleted_cell_leaves_the_meter_and_its_allowance_alert_resolves(cell_db, sent, staging) -> None:
+    # A deleted cell is listed no more, so no later listing could resolve its alert.
+    fleet = await _fleet(cell_db, CANARY, store_policy={"allowance_bytes": 100}, physical_headroom=1.5)
     _alerting(fleet)
     try:
-        listing = fleet.media_listing = _listing((None, "hide"))
+        listing = fleet.media_listing = _listing((151, "upload"))
         await fleet.run(NOW)
-        assert sent == [(HIDE_ALERT, True)]
+        assert sent == [(OVER_ALERT, True)]
 
         await _delete(fleet, CANARY, NOW + MINUTE)
 
-        assert sent == [(HIDE_ALERT, True)]
+        assert sent == [(OVER_ALERT, True), (OVER_ALERT, False)]
         assert CANARY not in fleet.memory.media_physical and len(listing.listed) == 1
     finally:
         await fleet.close()
