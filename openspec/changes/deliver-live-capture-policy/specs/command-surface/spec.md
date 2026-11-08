@@ -37,3 +37,55 @@ The public `edit_memory` command SHALL remain one tool and SHALL advertise a req
 - **WHEN** a caller sends an `edit_section` variant with `create_missing` set to true and a `heading` that is empty or spans more than one line
 - **THEN** the call fails with `INVALID_EDIT` before mutation
 - **AND** the page is unchanged
+
+### Requirement: Governed server-side relation acceptance
+
+`connect_memory(operation="accept-relation")` SHALL accept exactly one selected
+queue item through the existing governed edit path, with its ref, fingerprint,
+source hint, current content hash, and non-empty audit reason. The operation
+SHALL append one canonical relation bullet under `## Relations` only after
+revalidation. Hash or fingerprint drift MUST refuse without writing. A committed
+response SHALL preserve explicit pending graph synchronization rather than
+claiming the derived edge is already current.
+
+When the item offers specific relations the caller SHALL name one as
+`requested_relation`. A relation among the options the server computes for that
+item at accept time SHALL need no vocabulary binding; any other selected
+relation SHALL need the exact binding of a recorded vocabulary decision. A call
+that names such a relation without the binding SHALL refuse with
+`VOCABULARY_APPLICATION_INVALID`, name the offered relations and write nothing.
+A supplied binding SHALL be validated exactly as before. The caller MAY take the
+ref, fingerprint and source content hash from the queue item or from the
+`review` of a `suggest_relations` candidate.
+
+#### Scenario: Accept writes one canonical bullet
+- **WHEN** the selected candidate's source hint, ref, fingerprint, and page hash
+  are current and the caller supplies an audit reason
+- **THEN** exactly one canonical relation bullet is committed by the governed
+  writer with its normal receipt and recovery semantics
+
+#### Scenario: Drift refuses the write
+- **WHEN** the source hash or candidate fingerprint no longer matches
+- **THEN** the operation writes nothing and returns refresh-required guidance
+
+#### Scenario: Accepted item leaves the queue
+- **WHEN** an accepted relation is present in the newly current graph snapshot
+- **THEN** the queue excludes that already-authored edge
+
+#### Scenario: An offered relation is accepted in one call
+- **WHEN** a caller takes `review.ref`, `review.fingerprint` and
+  `review.source_content_hash` from a `suggest_relations` candidate that offers
+  specific relations, and accepts it with `requested_relation` set to one of
+  the offered options, a non-empty reason and no vocabulary binding
+- **THEN** the governed writer commits exactly one canonical bullet of that
+  relation under `## Relations`
+- **AND** the queue no longer lists the item
+
+#### Scenario: A relation the item does not offer is refused
+- **WHEN** a caller accepts with `requested_relation` set to an active relation
+  that is not among the options the server computes at accept time, and
+  supplies no vocabulary binding
+- **THEN** the call refuses with `VOCABULARY_APPLICATION_INVALID` before any
+  write, and names the offered relations
+- **AND** the remediation names the vocabulary decision that would admit the
+  relation, or dismissing the candidate

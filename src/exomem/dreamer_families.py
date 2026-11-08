@@ -2265,7 +2265,7 @@ def _twin_id(row: dict[str, Any]) -> str | None:
     subject, target = str(row.get("subject_path") or ""), str(measures.get("to") or "")
     if not subject or not target:
         return None
-    return relation_queue._candidate_identity(
+    return relation_queue.candidate_identity(
         {
             "from": target,
             "to": subject,

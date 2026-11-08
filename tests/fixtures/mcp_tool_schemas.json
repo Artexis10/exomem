@@ -5793,11 +5793,26 @@
                     "type": "string"
                   },
                   "type": "array",
-                  "description": "Up to 6 images to compare."
+                  "description": "Images to show, in order."
                 },
                 "max_side": {
-                  "type": "integer",
-                  "description": "Longest side px, 256-2048."
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "const": "original",
+                      "type": "string"
+                    }
+                  ],
+                  "description": "Long side px or \"original\"."
+                },
+                "region": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array",
+                  "description": "Crop [x, y, w, h] as fractions, for detail."
                 }
               },
               "required": [

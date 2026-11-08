@@ -851,7 +851,12 @@ are review-only and never write to the vault.
 3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
    response-only, and soft-fail with warnings when optional extras are absent.
 4. Persist accepted relations through the normal Markdown write path (`note` or
-   `edit`); do not treat suggestions as an automatic write.
+   `edit`); do not treat suggestions as an automatic write. A candidate that the
+   relation queue holds open carries `review` (`ref`, `fingerprint`,
+   `source_content_hash`): pass those to
+   `change_connections(operation={'kind': 'accept-relation'})` as `ref`,
+   `expected_fingerprint` and `expected_hash`, with a `why`. When the candidate has
+   `options`, set `requested_relation` to one option's `key`.
 
 ### Writes performed
 None.
