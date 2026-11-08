@@ -1,0 +1,30 @@
+## Why
+
+An agent can find a preserved photo's Source page but cannot look at the photo. `read_media` shows video frames only, and the other routes to an original fail in practice:
+
+- The generic memory reader answers a JPEG with `UNREADABLE`, as a text reader should.
+- `transfer_artifact` offers an `exomem://original/...` MCP resource, which most clients do not read, and it marked that resource as the preferred delivery.
+- Its HTTPS link carries the whole signed grant, about 2,000 characters. An agent that copies the link corrupts it, and the download then answers `ORIGINAL_UNAVAILABLE`.
+
+The result is that preserved photos are discoverable as metadata but unusable for analysis, which breaks the promise that preserved information stays usable by agents.
+
+## What Changes
+
+- `read_media` gains `kind: "image"`. It returns one to six stored images as MCP image content, upright and downscaled (longest side 1568 px by default, 256 to 2048), with each image's file name, capture time from EXIF, and original and shown pixel sizes. It reads each original through the same custody and full-disclosure release checks as an original download. The stored original never changes.
+- A format the server cannot decode, such as a camera raw file, gets a refusal that names the download route.
+- The process that serves `/download` keeps each HTTPS grant in memory under a random 128-bit id, so the link reads `.../download?grant=<22 characters>`. The grant still decides every download. An unknown or expired id answers `DOWNLOAD_LINK_EXPIRED` and tells the person to ask for a fresh link. A process that does not serve `/download` keeps minting the full grant.
+- `transfer_artifact` prefers the HTTPS link when one exists, because any client can hand a person a link while few clients read MCP resources.
+
+Out of scope: decoding camera raw formats such as DNG (tracked separately), and the ChatGPT connector refresh that exposes the new kind there, which the owner performs after release.
+
+## Capabilities
+
+### New Capabilities
+
+- `preserved-image-access`: agents see stored images as image content, and people get short download links for originals.
+
+## Impact
+
+- Code: `src/exomem/image_view.py`, `src/exomem/download_links.py`, `src/exomem/commands.py`, `src/exomem/operation_entries.py`, `src/exomem/artifact_recovery.py`, `src/exomem/server_transfer.py`, `src/exomem/image_codecs.py`.
+- Tool surface: `read_media` adds the `image` kind (+334 B of schema); the ChatGPT connector needs a refresh to see it.
+- Undo: revert the release. Old long links keep working because a full grant still resolves.

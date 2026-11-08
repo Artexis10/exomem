@@ -1355,10 +1355,11 @@ def validate_windows_idempotency_runtime_paths(
                 except FileNotFoundError:
                     break
                 except OSError as error:
-                    # Win32 ERROR_ACCESS_DENIED (5) also means SQLite's sidecar is delete-pending.
+                    # SQLite deleting its sidecar is transient: Win32 ERROR_SHARING_VIOLATION (32) while
+                    # DeleteFile holds its DELETE handle, then ERROR_ACCESS_DENIED (5) while delete-pending.
                     # Retry only the open; genuine denial costs at most this shared short wait.
                     remaining = deadline - time.monotonic()
-                    if error.errno != 5 or remaining <= 0:
+                    if error.errno not in (5, 32) or remaining <= 0:
                         raise
                     time.sleep(min(_WINDOWS_SQLITE_PATH_RETRY_POLL_SECONDS, remaining))
                     continue

@@ -546,6 +546,18 @@ it with the current path on the reference corpus.
   selected hydration. Task 6.6 must preserve those mechanisms rather than add
   another cache for the same work.
 
+  Admitted unit statistics rebuild incrementally (#2523). Any catalogue
+  write changed the statistics key, so the next request interpreted every
+  admitted parent again: 4.6 s on a 62,000-unit vault. Catalogue triggers
+  now advance a per-parent revision on every unit, unit-text, page and
+  structure change. The statistics keep one base per scope that holds the
+  contributions of public-instance parents only, and interpret only parents
+  whose revision changed. Private-instance parents are interpreted per
+  operation and never retained. Each caller's document frequencies,
+  representatives and duplicate winners are aggregated over its own admitted
+  set. This extends the existing admitted statistics. It adds no other cache
+  for the same work.
+
   A hosted reference diagnostic window on 2026-10-25 recorded 3,250 exact
   bridge snapshot reads and 3,524,084 filesystem name comparisons
   ([run 40232728916](https://github.com/Artexis10/exomem/actions/runs/40232728916)).

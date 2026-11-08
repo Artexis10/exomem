@@ -812,9 +812,12 @@ class MediaJobStore:
                              "budget_offset INTEGER NOT NULL, renewed_at REAL NOT NULL)")
                 # The latest owner census that offload read, for the window status (D12); one row, rebuildable.
                 # NULL used_bytes is a census that could not count: the status must not show an older figure instead.
+                # `blockers` (a JSON list of [path, reason]) names the first notes that stopped it, and no count of them.
                 conn.execute("CREATE TABLE IF NOT EXISTS media_owner_census ("
                              "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-                             "used_bytes INTEGER, observed_at TEXT NOT NULL)")
+                             "used_bytes INTEGER, observed_at TEXT NOT NULL, "
+                             "blockers TEXT)")
+                self._migrate_census_blockers(conn)
                 # The last complete census of a draining cell's evicted originals, and whether that census found
                 # none (D12): one row. The evicted, bytes and captured_at columns are NULL until a census completes.
                 # `attempt_failed` marks a latest attempt that could not count, and `blocked_by` (a JSON list of
@@ -903,6 +906,13 @@ class MediaJobStore:
             conn.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
                          "SELECT binary_rel, sha256, code, ciphertext_size, created_at FROM media_offload_refusals_old")
             conn.execute("DROP TABLE media_offload_refusals_old")
+
+    @staticmethod
+    def _migrate_census_blockers(conn: sqlite3.Connection) -> None:
+        """Add the column that names the notes behind an unknown census to a ledger that has the older table."""
+        census = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_owner_census)").fetchall()}
+        if "blockers" not in census:
+            conn.execute("ALTER TABLE media_owner_census ADD COLUMN blockers TEXT")
 
     @staticmethod
     def _migrate_eviction_columns(conn: sqlite3.Connection) -> None:

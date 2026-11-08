@@ -5714,7 +5714,7 @@
     }
   },
   "read_media": {
-    "description": "Read native video frames or inspect media processing status. Select one operation.kind.",
+    "description": "Show stored images or video frames to the model, or inspect media processing status. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5753,7 +5753,7 @@
                   "type": "string"
                 },
                 "path": {
-                  "description": "Video path.",
+                  "description": "Image or video path.",
                   "type": "string"
                 },
                 "max_frames": {
@@ -5772,6 +5772,34 @@
               "required": [
                 "kind",
                 "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "image",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Image or video path."
+                },
+                "paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "description": "Up to 6 images to compare."
+                },
+                "max_side": {
+                  "type": "integer",
+                  "description": "Longest side px, 256-2048."
+                }
+              },
+              "required": [
+                "kind"
               ],
               "additionalProperties": false
             }

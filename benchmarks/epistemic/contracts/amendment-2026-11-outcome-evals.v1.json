@@ -1,0 +1,27 @@
+{
+  "acknowledged_on": "2026-11-08",
+  "affected_sections": [
+    "\u00a71 Scenario families",
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-11-07",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "47a984918e82b73c6fd85d0d893f4a9ac0b29b73e5206eea50db1e7c8212373e",
+  "effective_policy": "Applies after founder acknowledgment, which also confirms the -0.05 loss bounds for f35 P - F and f36 WP - S. Until then f35, f36 and f37 cannot support comparative runs, scores or claims, and every earlier run of these suites is instrument evidence. Every result is an internal diagnostic, never a published suite result. A harness fault is retried, struck or voids the run under the entry's rules and is never scored.",
+  "fixture_sha256": {
+    "cases/lab/heldout.json": "9694f756698a1d5ace7b6a2c897e4e82e52e6b6b95b4d113562fe89cc66f700a",
+    "cases/planted/distractors.jsonl": "676e42e574ce9255a665a584cf878a86ed1f60be13f1daf75ebc0c7920523af4",
+    "cases/planted/heldout.jsonl": "14d523aee34072df570c64caaec8e59dd4b03c4a74c086688a01e6dad477edfa",
+    "upstream/clbench/data/database_exploration/products.db": "edf8ee80ff125de0bfd6c37a1d185efa9e3037ce28eb1bd1d32ae0829bd264a6",
+    "upstream/clbench/data/database_exploration/products_drifted.db": "a53d523f70604be0e4328f3722417895250ac35e1127cc504b609576aee70fad",
+    "upstream/clbench/data/database_exploration/questions.json": "f98e515c14b74f4d30c29401fb79cca9ceeb15fe9ee2432b10265a4a649d1771",
+    "upstream/clbench/data/database_exploration/questions_post_drift.json": "c05aa6a33def3878e6b655a1cba6454e55e1a9c16ded8c1fe53b7811986a45de"
+  },
+  "parent_contract_sha256": "e3a119c85569765a624404e458c889deb825c46820acce1bf7da2ce9f8678d5e",
+  "ratifier": "Hugo Ander Kivi",
+  "rationale": "Register three outcome families on the owner's 2026-11-07 request that public outcome benchmarks become first-class: f35 clbench_outcome_over_sessions (CL-Bench database_exploration, pinned upstream; arms no memory, plain folder and Exomem as shipped, the Claude Code plugin with skills, hooks and the documented balanced custom instructions, with bare-MCP and hook-only Exomem as ablations), f36 multidoc_synthesis_outcome (Harvey LAB, 20 held-out matters; arms file search and Exomem as shipped, with bare read tools and graph-off as ablations) and f37 planted_governance_ablation (32 independently authored planted stale or wrong notes, governed against plain vaults with identical page bodies). Freezes the held-out inputs by SHA-256, relative to the outcome run root and held in evaluator custody outside the repository. States the arms, sampling units, measures, blind cross-family judging, the bootstrap and Newcombe method-10 intervals, the decision rules, fault handling and the run holds. No assertion, operation kind, catastrophic assertion or budget constant changes.",
+  "repository_revision": "69599c346c631a0722c56b1634eb862329a9f09b",
+  "schema_version": 1,
+  "sequence": 9
+}

@@ -106,8 +106,6 @@ import shlex
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
@@ -921,17 +919,6 @@ def _write_episode_state(path: Path, state: dict) -> None:
 _EPISODE_DOOR_TIMEOUT_SECONDS = 2.0
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _open_no_redirect(req: urllib.request.Request, timeout: float):
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect()
-    ).open(req, timeout=timeout)
-
-
 def _rest_host() -> str:
     """Mirror of the retrieve hook's `_rest_host` — this standalone script
     cannot import it."""
@@ -1034,12 +1021,11 @@ def _episode_door(action: str, key: str) -> dict | None:
         if port is None:
             return None
         body = json.dumps({"action": action, "episode": key}).encode("utf-8")
-        req = lane.request(f"http://{_rest_host()}:{port}/api/episode_memory", body)
         try:
-            with _open_no_redirect(req, timeout=timeout) as resp:
-                if resp.getcode() != 200:
-                    return None
-                payload = json.loads(resp.read().decode("utf-8"))
+            status, raw = lane.post(f"http://{_rest_host()}:{port}/api/episode_memory", body, timeout)
+            if status != 200:
+                return None
+            payload = json.loads(raw.decode("utf-8"))
         except Exception:  # noqa: BLE001 — hook must never break a stop hook
             return None
         if not isinstance(payload, dict) or payload.get("success") is not True:
