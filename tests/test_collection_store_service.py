@@ -2120,54 +2120,86 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
 
 
 
+@pytest.mark.parametrize("starved", [True, False], ids=["starved-tick-beside-the-holder", "tick-beside-any-reader"])
 def test_a_boundary_holder_s_store_reads_are_not_queued_behind_maintenance_waiting_on_its_boundary(
-        service, monkeypatch):
-    """A starved maintenance tick waits while another thread holds the vault boundary.
+        service, monkeypatch, starved):
+    """Maintenance on the store thread stops waiting for the vault boundary once a store read waits on it.
 
-    Maintenance proves collection ownership under that boundary. Started during a command's hold,
-    it waited there while the command's own store reads queued behind it, so each read sat out a
-    full boundary wait and was refused: a two-second hold became a 45-second one on the live
-    service. Once the hold ends, the deferred tick runs.
+    A views tick takes the boundary for each write. A tick already running when a command took the
+    boundary waited there, while the command's own store reads queued behind the tick: each waited
+    on the other until the boundary timeout refused the read. A two-second hold became a 45-second
+    one on the live service, and the tick a write wakes ran into it on loaded CI runners. A starved
+    tick stops waiting only beside the holder's own read; a tick that has not starved, beside any
+    read. Either way the tick publishes once the hold ends.
     """
+    from exomem import request_budget
+
     server = runtime._SERVERS[service.root]
-    ticked, finished, real_tick = [], [], server._views_tick
-
-    def maintenance():
-        ticked.append(time.monotonic())
-        # The ownership proof every views pass takes; like `authority.admitted_collections`,
-        # a refused proof admits nothing and the tick stays due.
-        try:
-            with service.manager.consistency_guard(service.root, operation="test ownership proof",
-                                                   holder_kind="collection-read"):
-                pass
-        except OpError:
-            pass
-        try:
-            return real_tick()
-        finally:
-            finished.append(time.monotonic())
-
-    monkeypatch.setattr(server, "_views_tick", maintenance)
     boundary_wait = service.manager._mutation_timeout_seconds
+    if not starved:
+        # Neither starvation bound is reached during the test.
+        monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 60.0)
+        monkeypatch.setattr(runtime, "VIEWS_POLL_DEFER_SECONDS", 60.0)
     _until(lambda: not service.manager._store_handoff)
-    # The fixture's append woke a views pass. The store thread runs one tick at a time, so once
-    # this patched tick has run to its end, no tick that started before the hold is in flight.
-    server._ticks["views"] = time.monotonic() - 60
-    _until(lambda: finished)
-    refusals = []
-    with service.manager.consistency_guard(service.root, operation="test command hold"):
-        server._ticks["views"] = time.monotonic() - 60  # long starved
-        started = time.monotonic()
+    before = int(store_meta(service.root)[schema.META_COMMIT_SEQ])
+    at_write, holding, release = threading.Event(), threading.Event(), threading.Event()
+    real_write = server._write
+
+    def write(method, *args, **kwargs):
+        # The first views write after the append below stops here, just before its boundary wait,
+        # until the boundary is held: the tick is in flight when the hold begins.
+        if not at_write.is_set() and int(store_meta(service.root)[schema.META_COMMIT_SEQ]) > before:
+            at_write.set()
+            holding.wait(10)
+        return real_write(method, *args, **kwargs)
+
+    def reads():
+        refusals = []
         for _ in range(4):
+            token = request_budget.set_current(request_budget.RequestBudget(
+                seconds=request_budget.DELIVERY_RESERVE_SECONDS + 2.0, entry=time.monotonic()))
             try:
                 server.call(lambda: None, read_only=True)
             except OpError as error:
                 refusals.append(error.code)
-        elapsed = time.monotonic() - started
-        released = time.monotonic()
+            finally:
+                request_budget.reset_current(token)
+        return refusals
+
+    def other_holder():
+        with service.manager.consistency_guard(service.root, operation="test other holder"):
+            holding.set()
+            release.wait(10)
+
+    monkeypatch.setattr(server, "_write", write)
+    if starved:
+        server._ticks["views"] = time.monotonic() - 60
+    call(service.root, "record_memory", action="append", collection=CID, item={"title": "During hold"},
+         item_key=LATER, why="wakes the views tick")
+    try:
+        assert at_write.wait(10), "the views tick never reached its write"
+        if starved:
+            with service.manager.consistency_guard(service.root, operation="test command hold"):
+                holding.set()
+                started = time.monotonic()
+                refusals = reads()
+                elapsed = time.monotonic() - started
+        else:
+            holder = threading.Thread(target=other_holder)
+            holder.start()
+            assert holding.wait(5)
+            started = time.monotonic()
+            refusals = reads()
+            elapsed = time.monotonic() - started
+            release.set()
+            holder.join(10)
+    finally:
+        holding.set()
+        release.set()
     assert refusals == []
-    assert elapsed < boundary_wait  # unfixed, the second read alone waited out one boundary wait
-    _until(lambda: any(at >= released for at in ticked))
+    assert elapsed < boundary_wait  # unfixed, the first read waited out its whole budget behind the tick
+    page = service.root / manifest_path().replace("_collection.md", "Items/_summary.md")
+    _until(lambda: "2 committed rows" in page.read_text())
 
 
 @contextmanager
