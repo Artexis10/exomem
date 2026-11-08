@@ -96,6 +96,8 @@ UNIT_LANE_LIMIT = 200
 GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
+#: Outbound links one task candidate lists. A packet-shape bound like `MAX_ITEMS_PER_ROLE`: the rest are counted.
+TASK_LINKS_PER_CANDIDATE = 5
 
 #: Entries the working-continuity block may carry, and the characters they may
 #: spend. Both are hard: the block leads every packet, including an abstained
@@ -1400,7 +1402,6 @@ def task_candidates(
         collection_claims,
         context_task,
         context_views,
-        epistemic_graph,
         find_types,
         lexstore,
         record_governance,
@@ -1523,32 +1524,6 @@ def task_candidates(
     if restricted:
         # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
         missing.append({"role": "task_context", "reason": "lane_failed"})
-    if found and not restricted:
-        nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
-        try:
-            for path in list(found)[:MAX_ITEMS_PER_ROLE]:
-                if budget_exhausted("working_set.task_context_graph"):
-                    missing.append({"role": "task_context", "reason": "budget"})
-                    break
-                with find_types.timing_span(timings, "working_set.task_context_graph"):
-                    graph = epistemic_graph.graph_context(
-                        vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
-                        traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
-                    )
-                if not graph.get("available", True):
-                    missing.append({"role": "task_context", "reason": "lane_failed"})
-                    break
-                for node in graph.get("nodes", ()):
-                    add(str(node.get("path") or ""), "graph")
-                nodes_left -= len(graph.get("nodes", ()))
-                edges_left -= len(graph.get("edges", ()))
-                if graph.get("truncation"):
-                    missing.append({"role": "task_context", "reason": "lane_truncated"})
-                if nodes_left <= 0 or edges_left <= 0:
-                    break
-        except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
-            log.debug("task-context graph unavailable", exc_info=True)
-            missing.append({"role": "task_context", "reason": "lane_failed"})
     # The method-unit search is the costliest lane, so it runs last and only while the request can afford it.
     method_seconds: float | None = None
     for origin, query_text in method_queries:
@@ -1580,7 +1555,68 @@ def task_candidates(
         ordered = list(found.values()) if restricted else [
             found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
         ]
-    return ordered[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    ordered = ordered[:limit]
+    if ordered and not restricted:
+        # Links are read for the candidates that will be served, so the agent sees what each lead points at
+        # and chooses what to follow; no neighbour page becomes a candidate by itself.
+        if budget_exhausted("working_set.task_context_links"):
+            missing.append({"role": "task_context", "reason": "budget"})
+        else:
+            try:
+                with find_types.timing_span(timings, "working_set.task_context_links"):
+                    links = _task_links(vault_root, ordered, by_path=by_path, visible=caller.visible)
+            except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+                log.debug("task-context links unavailable", exc_info=True)
+                links = None
+            if links is None:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+            else:
+                for candidate in ordered:
+                    listed, omitted = links.get(candidate["source_ref"], ((), 0))
+                    if listed:
+                        candidate["links"] = list(listed)
+                    if omitted:
+                        candidate["links_omitted"] = omitted
+    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+
+
+def _task_links(
+    vault_root: Path, candidates: Sequence[Mapping[str, Any]], *, by_path: Mapping[str, Any],
+    visible: Callable[[str], bool] | None,
+) -> dict[str, tuple[list[dict[str, str]], int]] | None:
+    """Each candidate page's outbound links, typed relations first: `{page: (listed links, omitted count)}`.
+
+    One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
+    relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
+    pages this caller may see, so a target outside it is never named; `visible` is also passed to the
+    owner API, which re-resolves each link in the caller's view. Typed relations rank by the registry's
+    declared `family` (the rule `find_candidates` uses for graph hits), never by relation name; within a
+    rank the owner API's order stands. Returns None while the graph cannot answer.
+    """
+    from . import epistemic_graph
+
+    # A request never stacks the O(corpus) cold proof of an inherited sidecar (#1454), as in the find graph lane.
+    index = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT)
+    if not index.available():
+        return None
+    ranked: dict[str, dict[str, tuple[int, int, str]]] = {}
+    for position, neighbor in enumerate(index.neighbors_for([c["source_ref"] for c in candidates], keep=visible)):
+        if neighbor.direction != "outbound" or neighbor.other_rel not in by_path:
+            continue
+        tier = 0 if (neighbor.relation_type and neighbor.family and neighbor.family != "link") else 1
+        relation = neighbor.relation_type or neighbor.relation_label or ""
+        # One line per target: when a typed relation and a plain link reach the same page, the typed one names it.
+        best = ranked.setdefault(neighbor.seed_rel, {})
+        if neighbor.other_rel not in best or (tier, position) < best[neighbor.other_rel][:2]:
+            best[neighbor.other_rel] = (tier, position, relation)
+    result: dict[str, tuple[list[dict[str, str]], int]] = {}
+    for seed, targets in ranked.items():
+        ordered = sorted(targets.items(), key=lambda pair: pair[1][:2])
+        result[seed] = ([
+            {"relation": relation, "target_ref": by_path[target].ref or target, "title": by_path[target].title}
+            for target, (_tier, _position, relation) in ordered[:TASK_LINKS_PER_CANDIDATE]
+        ], max(0, len(ordered) - TASK_LINKS_PER_CANDIDATE))
+    return result
 
 
 def _conclusion_pages(
