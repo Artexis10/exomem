@@ -441,7 +441,7 @@ class GraphNeighbor:
 
     @property
     def typed(self) -> bool:
-        """A registered relation outside the plain-link family; ranks before plain links wherever both appear."""
+        """A registered relation outside the plain-link family; it ranks before plain links."""
         return bool(self.relation_type and self.family and self.family != "link")
 
 
