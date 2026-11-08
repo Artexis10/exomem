@@ -63,8 +63,8 @@ def _phase(log: Path, *args: str) -> dict:
 
 def test_an_export_carries_every_member_and_each_evicted_original_byte_identical(
         cell: Cell, storage: dict, tmp_path: Path, tmp_path_factory, monkeypatch):  # noqa: F811
-    """Defect: the archive omits an evicted original, live or in Trash, drops an unreadable companion without
-    saying so, or carries what the runtime wrote after the pause."""
+    """Defect: the archive omits an evicted original, live or in Trash, or a note whose companion header cannot be
+    read, or carries what the runtime wrote after the pause."""
     vault = cell.vault
     cached = cell.original("cached.txt", b"cached bytes")
     _offload(vault, cached)
@@ -91,7 +91,7 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
               "--staging", str(staging)]
     paused = _phase(tmp_path / "pause.json", "--phase", "pause", "--media-mode", "served", *common)
     assert "error" not in paused, paused
-    assert (paused["evicted"], paused["evicted_bytes"], paused["unreadable_companions"]) == (2, 28, 1), paused
+    assert (paused["evicted"], paused["evicted_bytes"]) == (2, 28), paused
 
     # The hold ends with the pause: the runtime serves, and what it writes now is not the export's.
     note.write_text("written while the pack runs")
@@ -107,7 +107,7 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
                       *(argument for url in urls for argument in ("--part-url", url)))
     pack.join()
     assert "error" not in packed and "error" not in uploaded, (packed, uploaded)
-    assert (packed["evicted"], packed["unreadable_companions"]) == (2, 1)
+    assert packed["evicted"] == 2
 
     parts = [storage["parts"][f"/cells/{CELL}/exports/archive.zip?partNumber={number}"]
              for number in range(1, uploaded["parts"] + 1)]
@@ -170,6 +170,28 @@ def test_a_member_that_the_pack_cannot_reproduce_fails_the_export(vault: Path, s
     assert not (spool / cloud_export_steps.END_NAME).exists()
     with pytest.raises(cloud_export.ExportRefused, match="^EXPORT_FAILED$"):
         cloud_export_steps.upload(staging, ["https://storage.invalid/part-1"], sleep=pytest.fail)
+
+
+def test_an_evicted_original_behind_a_companion_that_cannot_be_read_is_archived(vault: Path, selected_store,  # noqa: F811
+                                                                               tmp_path_factory):
+    """Defect: a damaged companion hides an evicted original from the walk, and the export drops it without a trace."""
+    path, _reference, data = _evicted(vault, "evicted", 300)
+    companion = originals.sidecar_path(path)
+    damaged = companion.read_text().replace("evidence_file:", "evidence_file: [", 1)
+    assert damaged != companion.read_text()
+    companion.write_text(damaged)
+    staging = tmp_path_factory.mktemp("staging")
+    export_id = str(uuid.uuid4())
+    with _owner():
+        paused = cloud_export_steps.pause(vault, staging, export_id=export_id, cell_id=CELL, media_mode="served",
+                                          max_bytes=PLENTY)
+        cloud_export_steps.pack(vault, staging, export_id=export_id, cell_id=CELL, part_bytes=64 * 1024**2,
+                                max_parts=10, max_bytes=PLENTY)
+    assert paused.evicted == 1
+    archive = staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME / "part-00001"
+    with zipfile.ZipFile(archive) as written:
+        assert written.read(path.relative_to(vault).as_posix()) == data
+        assert written.read(companion.relative_to(vault).as_posix()) == damaged.encode()
 
 
 @pytest.mark.parametrize("tamper", ["absolute", "link"])

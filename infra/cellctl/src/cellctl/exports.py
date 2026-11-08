@@ -158,7 +158,7 @@ def accepted_report(report: dict) -> dict | None:
 def accepted_pause_report(report: dict) -> dict | None:
     """The pause's numbers-only plan report, or None when any count is missing or malformed."""
 
-    keys = ("members", "member_bytes", "evicted", "evicted_bytes", "unreadable_companions")
+    keys = ("members", "member_bytes", "evicted", "evicted_bytes")
     counts = {key: _count(report.get(key), minimum=0) for key in keys}
     planned = _count(report.get("planned_bytes"), minimum=1)
     if report.get("phase") != PAUSE or planned is None or planned > ARCHIVE_BOUND or None in counts.values():

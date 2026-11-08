@@ -136,34 +136,37 @@ class PauseResult:
     evicted: int
     evicted_bytes: int
     planned_bytes: int
-    unreadable_companions: int
 
     def report(self) -> dict:
         return {"phase": PAUSE, "members": self.members, "member_bytes": self.member_bytes, "evicted": self.evicted,
-                "evicted_bytes": self.evicted_bytes, "planned_bytes": self.planned_bytes,
-                "unreadable_companions": self.unreadable_companions}
+                "evicted_bytes": self.evicted_bytes, "planned_bytes": self.planned_bytes}
 
 
-def _evicted(vault: Path, media_mode: str | None) -> tuple[list[dict], int]:
-    """The evicted originals with their references, and the count of companions that could not be read."""
+def _evicted(vault: Path, media_mode: str | None) -> list[dict]:
+    """The evicted originals with their references."""
     binding = originals.binding_for(vault)
     if binding is None:
         if media_mode is not None:
             # Without the store identity an evicted original reads as deleted, and the archive would omit it.
             raise vault_portability.PortabilityError("MEDIA_STORE_UNBOUND", "a media mode is set but no store binds")
-        return [], 0
+        return []
     from . import media_store
     from .writer_lease import get_manager
 
-    unreadable: list[str] = []
     found: list[dict] = []
     with get_manager().consistency_guard(vault, operation="cell_export_pause", holder_kind="background"):
-        for path, binary, reference in media_store.evicted_members(
-                vault, binding, lambda companion, _error: unreadable.append(companion)):
-            found.append({"path": path, "size": binary.size, "sha256": binary.sha256, "reference": reference.fields()})
+        try:
+            for path, binary, reference in media_store.evicted_members(vault, binding):
+                found.append({"path": path, "size": binary.size, "sha256": binary.sha256,
+                              "reference": reference.fields()})
+        except media_store.MediaStoreError as error:
+            # Without its version the original would be missing from the archive.
+            if error.code == "MEDIA_LEDGER_UNRESOLVED":
+                raise ExportRefused(EXPORT_MEDIA_UNREACHABLE) from error
+            raise
     if found and media_mode == MEDIA_RETAINED:
         raise ExportRefused(EXPORT_MEDIA_UNREACHABLE)
-    return found, len(unreadable)
+    return found
 
 
 def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mode: str | None,
@@ -174,7 +177,7 @@ def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mod
     if staging.resolve().is_relative_to(vault.parent.resolve()) or os.path.lexists(export_dir):
         raise ExportRefused(EXPORT_FAILED)
     armed_requirement = vault_portability.prepare_quiesced_export(vault)
-    evicted, unreadable = _evicted(vault, media_mode)
+    evicted = _evicted(vault, media_mode)
     listed = list(vault_portability.iter_archive_members(vault))
     stored = [(entry["path"], entry["size"]) for entry in evicted]
     # Refused on the listed sizes before any copy, so an export too large to upload costs the hold nothing.
@@ -194,12 +197,11 @@ def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mod
         raise ExportRefused(EXPORT_TOO_LARGE)
     _write_json(export_dir / PLAN_NAME, {
         "v": PLAN_VERSION, "export_id": export_id, "cell_id": cell_id, "armed_requirement": armed_requirement,
-        "members": members, "evicted": evicted, "unreadable_companions": unreadable,
+        "members": members, "evicted": evicted,
     })
     # The pack reads staging from another pod, possibly after the claim moved to another node.
     os.sync()
-    return PauseResult(len(members), member_bytes, len(evicted), sum(entry["size"] for entry in evicted), planned,
-                       unreadable)
+    return PauseResult(len(members), member_bytes, len(evicted), sum(entry["size"] for entry in evicted), planned)
 
 
 class _PrefixSink:
@@ -370,7 +372,7 @@ def pack(vault: Path, staging: Path, *, export_id: str, cell_id: str, part_bytes
         code = error.code if isinstance(error, ExportRefused) else EXPORT_FAILED
         _write_json(spool / FAILED_NAME, {"error": code})
         raise
-    return {"phase": PACK, **end, "evicted": len(stored), "unreadable_companions": plan["unreadable_companions"]}
+    return {"phase": PACK, **end, "evicted": len(stored)}
 
 
 def _staged_source(members: Path, path: object) -> Path:

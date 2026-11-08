@@ -53,7 +53,7 @@ EXPORT_ID = "00000000-0000-4000-8000-000000000001"
 MIB = 1024 * 1024
 # The pause's numbers-only plan, with the statvfs measurement every cell Job reports.
 PAUSE_REPORT = {"phase": "pause", "members": 3, "member_bytes": 4096, "evicted": 1, "evicted_bytes": 1024,
-                "unreadable_companions": 0, "planned_bytes": 8192, "used": 3 * 1024 * 1024, "total": 10 * 1024 ** 3}
+                "planned_bytes": 8192, "used": 3 * 1024 * 1024, "total": 10 * 1024 ** 3}
 # Shared with the cell command's own test (tests/test_cloud_export.py).
 DIGEST_VECTOR = "91124627b9b8d6bffcbbfb35d09b5fb3cea67f87e4e84d341fac87ba0d0586da"
 
