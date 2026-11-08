@@ -73,6 +73,8 @@ def test_an_agent_files_a_multi_page_stage_to_done_by_repeating_one_call(vault):
     assert done["progress"]["filed"] == FILES and done["progress"]["failed"] == 0
     assert len(_sources(vault)) - len(before) == FILES
     assert not any(key in reply for reply in replies for key in ("plan_id", "next_after", "plan", "outcomes"))
+    # A call that only finishes a page saved no file, so no reply may open with "Saved".
+    assert not any(reply.get("user_summary", "").startswith("Saved") for reply in replies)
     assert len(_runs(vault)) == 3
 
 
