@@ -204,19 +204,24 @@ Agent behavior:
 
 ### Adopt a generated artifact
 
-A generated draft is ephemeral. When the user selects, approves, sends, or
-publishes one offered output, the exact selected handle becomes eligible for
-preservation; the event is adoption evidence, not write consent. Under balanced
-or maximal prominence, agent-initiated preservation uses `proactive_capture`.
-An explicit save request remains an ordinary requested action.
+Keep every generated file you hand the user. At hand-over, preserve that
+file's exact bytes once. Under balanced or maximal prominence this uses
+`proactive_capture`; do not wait for the user to say they chose it. Drafts,
+previews and variants you never hand over stay ephemeral. The rule covers files
+you generate and give the user: downloads, attachments and sandbox outputs. It
+does not cover files you write or edit in the user's own workspace or
+repository, which already persist there. An explicit save request remains an
+ordinary requested action.
 
 Choose Source or Evidence from purpose before transport: reasoning material is
-a Source, while an approved deliverable or proof-bearing final is Evidence.
-MIME never chooses. Pass the closed `adoption` envelope to `capture_source` or
-`preserve_artifacts` and preserve only `selected_file_id`; generated draft
-siblings create no canonical artifact. When no usable handle exists, report a
-non-committing `handoff_required` or `handoff_prepared` state. Do not substitute
-base64, a textual reconstruction, or a claim that the bytes were saved.
+a Source, while a deliverable or proof-bearing final is Evidence. MIME never
+chooses. Pass the closed `adoption` envelope to `capture_source` or
+`preserve_artifacts`. Use one `key` per hand-over, such as the file name plus a
+version, and name the handed-over handle in `selected_file_id`. A revision you
+hand over later is kept beside the first, and identical bytes return
+`already_stored`. When no usable handle exists, report a non-committing
+`handoff_required` or `handoff_prepared` state. Do not substitute base64, a
+textual reconstruction, or a claim that the bytes were saved.
 
 A later send or publication is a separate delivery fact. Append it through
 `record_memory(..., delivery={...})` only after a committed local Evidence
@@ -482,9 +487,23 @@ bootstrap(profile="compact")
 ## Hosted chat clients
 
 Hosted clients usually cannot use local filesystem hooks or load the repo's
-Claude Code skill. Connect Exomem through whatever remote MCP/connector support
-the client offers, then add the instruction block above as account-level or
-project-level custom instructions.
+Claude Code skill. To set one up:
+
+1. Connect Exomem through the remote MCP or connector support the client offers.
+2. Paste the learning instruction below into the account-level or project-level custom instructions.
+3. If the client has no loaded Exomem skill, add the instruction block above after it.
+
+```text
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+```
+
+The agent then recalls what Exomem holds before a task and saves what it learns.
+The learning instruction is your own request, so it goes where the client reads
+your instructions. With the instruction block it is longer than a 1,500-character
+field, so where the client caps a field, give each text its own field. `exomem
+setup` offers the same text for Claude Code (`CLAUDE.md`) and Codex
+(`AGENTS.md`). Leave it out at the `light` and `off` prominence levels: they save
+only when you ask.
 
 For ChatGPT Personal Plugins, follow the exact OAuth-only settings and
 tool-surface refresh gate in [remote-quickstart.md](remote-quickstart.md#chatgpt-personal-plugin-oauth-only).

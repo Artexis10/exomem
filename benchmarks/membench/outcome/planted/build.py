@@ -22,6 +22,7 @@ a key. ``membench outcome run planted`` drives it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -58,6 +59,12 @@ def _find(data, key: str):
         if found is not None:
             return found
     return None
+
+
+def neutral_unit_id(case_id: str, role: str) -> str:
+    """A claim unit id that names no role: an id ending in "stale" told the answering agent
+    which note to distrust, so it reached both arms and helped the one without governance."""
+    return f"{case_id}-{hashlib.sha256(f'{case_id}:{role}'.encode()).hexdigest()[:6]}"
 
 
 def claim_page(context: str, claim: str, unit_id: str) -> str:
@@ -130,7 +137,7 @@ class Builder:
                 f"{cid}: a superseded_rule correction must be a note, not a source; "
                 "supersede_note cannot make a source the replacement"
             )
-        stale_unit = f"{cid}-stale"
+        stale_unit = neutral_unit_id(cid, "stale")
         stale_path = await self.note(
             stale["title"],
             claim_page(stale["context"], stale["claim"], stale_unit),
@@ -138,7 +145,7 @@ class Builder:
             f"{cid}:stale",
         )
         corr_body = claim_page(
-            f"{corr['source_label']}. {corr['context']}", corr["claim"], f"{cid}-correction"
+            f"{corr['source_label']}. {corr['context']}", corr["claim"], neutral_unit_id(cid, "correction")
         )
         governance = GOVERNANCE[kind]
         if corr["form"] == "source":

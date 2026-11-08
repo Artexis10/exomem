@@ -268,7 +268,7 @@ def test_a_carrying_block_names_the_relation_adoption_and_delivery_routes(dispos
     say = prominence.capture_policy(disposition, "confirm-shortcut")["say"]
 
     assert "relation queue" in say
-    assert "Keep the exact bytes of the one the user selects or sends" in say
+    assert "Keep the exact bytes of every generated file you hand the user" in say
     assert "search for the artifact's Evidence receipt" in say
     assert "delivery Record" in say
 

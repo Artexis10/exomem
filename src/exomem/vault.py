@@ -235,6 +235,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
 #: stays under `Knowledge Base/_Schema/`. It belongs to the user, it is small, and
 #: it is not markdown, so it is not what pollutes a note index.
 SHIPPED_SCHEMA_DIRNAME = ".exomem"
+#: The per-vault overlay under the Knowledge Base: YAML registries, contracts and private skills.
+#: Store mode owns it as pages (`vault_store.ownership`).
+SCHEMA_OVERLAY_DIRNAME = "_Schema"
 _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 
@@ -5319,6 +5322,13 @@ def batch_atomic_write(
     """
     from . import working_set_heat
 
+    if vault_root is not None:
+        from .vault_store import availability
+
+        # A store-mode vault keeps its pages in the store, so Markdown written here would go stale.
+        refusal = availability.write_refusal(Path(vault_root))
+        if refusal is not None:
+            raise refusal
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(

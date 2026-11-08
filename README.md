@@ -123,7 +123,10 @@ with a fuller managed service.
 One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
 preflight, registers the server with every client it detects (Claude Code and
-Codex), and installs the skills into each.
+Codex), and installs the skills into each. Last, it offers Exomem's learning
+instruction for each client's `CLAUDE.md` or `AGENTS.md`, and writes it only if
+you agree. The instruction asks the agent to recall Exomem before a task and
+save what it learns.
 
 If cwd `.env` or the process contains `EXOMEM_BASE_URL`, setup registers its
 canonical `/mcp` endpoint with Claude Code and Codex so they share the existing
@@ -143,7 +146,8 @@ existing files stay untouched unless you explicitly copy or compile selected mat
 [QUICKSTART.md § Already have a vault full of notes?](QUICKSTART.md#already-have-a-vault-full-of-notes)
 for the full contract, including daily-notes vaults. Re-running `setup` is
 safe; completed steps report `[skipped]`. Non-interactive:
-`exomem setup --yes --vault "/path" --lean`.
+`exomem setup --yes --vault "/path" --lean` (add `--learning-instruction` to
+place the learning instruction as well).
 
 The individual steps (`exomem init` / `doctor` / `install-skill` /
 `install-hook`, plus `claude mcp add`) still exist as the manual path — see

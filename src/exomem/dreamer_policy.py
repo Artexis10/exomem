@@ -6,17 +6,18 @@ WHEN it may work and HOW MUCH, and nothing else: `decide` maps one snapshot of
 cheap probes to a `Decision`, with no I/O, no clock of its own and no state.
 
 The rule. Upkeep is the least important work in the service, so a live
-foreground request, graph convergence and a derived-index backlog always
-outrank it, and nothing online ever waits for it. A tick may not start while a
-request is live, whatever the compute mode: quiet mode keeps the GPU and model
-preload off, and leaves this deterministic CPU work running. Two preferences,
-a service idle for `IDLE_SECONDS` and a vault settled for `settle_seconds`,
-choose a good moment to start. On a vault that is never idle they may hold a
-tick at most `MAX_DEFER_SECONDS` since the last completed tick, so upkeep
-cannot go stale without bound. A tick that starts under a busy vault stays
-safe because it yields per page: it stops before the next page on the first
-foreground request or vault change. The worker reports the blocking signal and
-`waiting_since`, so a hold is visible rather than silent.
+foreground request and graph convergence always outrank it, and nothing online
+ever waits for it. A tick may not start while a request is live, whatever the
+compute mode: quiet mode keeps the GPU and model preload off, and leaves this
+deterministic CPU work running. Three preferences, a service idle for
+`IDLE_SECONDS`, a vault settled for `settle_seconds` and an empty derived-index
+backlog, choose a good moment to start. On a vault that is never idle, or whose
+backlog drains slowly, they may hold a tick at most `MAX_DEFER_SECONDS` since
+the last completed tick, so upkeep cannot go stale without bound. A tick that
+starts under a busy vault stays safe because it yields per page: it stops before
+the next page on the first foreground request or vault change. The worker
+reports the blocking signal and `waiting_since`, so a hold is visible rather
+than silent.
 
 The sensor child has its own gate (`sensor_gate`): the operator's posture
 only. It runs in its own process at the lowest priority, with its own CPU and
@@ -40,10 +41,11 @@ DEFAULT_SETTING = "off"
 #: competing with a person mid-conversation.
 IDLE_SECONDS = 60.0
 
-#: The longest the idle and settle preferences may hold a tick, counted from the
-#: last tick that did upkeep or found none (the worker's start before the first). Prevents upkeep
-#: from going stale without bound on a vault that is never idle; a live request
-#: and every hard gate still hold it, and the tick yields to a request per page.
+#: The longest the idle, settle and index-backlog preferences may hold a tick,
+#: counted from the last tick that did upkeep or found none (the worker's start
+#: before the first). Prevents upkeep from going stale without bound on a vault
+#: that is never idle or whose deferred queue drains slowly; a live request and
+#: every hard gate still hold it, and the tick yields to a request per page.
 MAX_DEFER_SECONDS = 60.0
 
 #: The floor of the quiet window after any vault change. The window is the
@@ -195,8 +197,9 @@ def decide(signals: TickSignals) -> Decision:
 
     Checked in a fixed order so the reported reason is stable: operator
     posture first, then host posture, then the foreground, then the vault and
-    the graph, then the dreamer's own budgets. Only the idle and settle
-    preferences yield to `MAX_DEFER_SECONDS`; every other gate stays hard.
+    the graph, then the dreamer's own budgets. Only the idle, settle and
+    index-backlog preferences yield to `MAX_DEFER_SECONDS`; every other gate
+    stays hard.
     """
     posture = _posture_hold(signals)
     if posture is not None:
@@ -218,8 +221,10 @@ def decide(signals: TickSignals) -> Decision:
             return _wait("settling", min(settle - signals.vault_quiet_seconds, left))
     if signals.graph_debt:
         return _wait("graph_debt")
-    if signals.full_upsert_backlog > 0:
-        return _wait("index_backlog")
+    # A backlog means derived indexes lag. The tick reads the freshness delta and
+    # a served proposal is revalidated, so lag may delay a tick but not starve it.
+    if signals.full_upsert_backlog > 0 and left > 0.0:
+        return _wait("index_backlog", left)
     if signals.hour_cpu_used >= HOURLY_CPU_SECONDS:
         return _wait("budget_exhausted")
     backoff = backoff_seconds(signals.consecutive_failures)

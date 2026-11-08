@@ -13,9 +13,13 @@ archive="age-${version}-linux-amd64.tar.gz"
 target="${RUNNER_TEMP:?}/age"
 
 mkdir -p "${target}"
-# Five attempts of at most 30 s with curl's backoff end within three minutes.
+# GitHub answered release downloads with HTTP 504 for at least 38 s on
+# 2026-11-08, and curl's own backoff spent four retries in about 15 s. A fixed
+# 20 s delay spreads seven attempts over two minutes. No retry starts after
+# 150 s, so the step ends inside its five-minute limit.
 curl --fail --silent --show-error --location \
-  --retry 4 --retry-all-errors --connect-timeout 10 --max-time 30 \
+  --retry 6 --retry-delay 20 --retry-max-time 150 --retry-all-errors \
+  --connect-timeout 10 --max-time 30 \
   --output "${target}/${archive}" \
   "https://github.com/FiloSottile/age/releases/download/${version}/${archive}"
 echo "${sha256}  ${target}/${archive}" | sha256sum --check --strict --quiet -

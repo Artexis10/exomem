@@ -337,6 +337,13 @@ mediaEdge:
   storePolicy:
     allowance_bytes: 100000000000
   bucket: ""
+  # cellctl's physical meter (D10) lists the bucket with its own list-only key, which needs the bucket ID
+  # (the `cloud_media_bucket_id` output) beside the name above. That Secret holds keyId and applicationKey.
+  bucketId: ""
+  listSecretName: exomem-cloud-media-list
+  # The meter alerts above allowance_bytes times this factor. It leaves room for versions that stay until
+  # the follow-on change destroys them; it is an operator's starting figure, raised or lowered from readings.
+  physicalHeadroom: 2
   b2SecretName: exomem-media-edge-b2
   signingKeySecretName: exomem-media-edge-signing-key
   signingKeySecretKey: signing-key

@@ -9,7 +9,7 @@ Records and Planning are structured collections: typed rows, natural keys, prove
 
 Measured on `main` (PR #1457), one guarded Records append costs a 12.2 s round trip at 1,000 items and grows linearly with the collection. A 24-row import took about 21 minutes. The proposed bulk upsert (PR #1452) then ran into the audit protocol itself: a batch cannot be one transition, because the file protocol is strictly one event per item and its chain depth is capped.
 
-The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, Evidence, Episodes). **Structured collections move to SQLite as their single source of truth**: Records and Planning, which share the collection mechanics, plus their audit logs. The concepts and data model do not change: Records versus Planning versus Notes, typed collections, natural keys, provenance, audit, supersession and governance all stay. Only the storage engine changes. Postgres is out, because a server per machine or cell is not justified. SQLite is embedded and per vault.
+The owner has decided: **knowledge stays Markdown** (Notes, Entities, Sources, Evidence, Episodes) in file mode; `make-vault-store-canonical` adds an opt-in store mode that keeps pages in the store. **Structured collections move to SQLite as their single source of truth**: Records and Planning, which share the collection mechanics, plus their audit logs. The concepts and data model do not change: Records versus Planning versus Notes, typed collections, natural keys, provenance, audit, supersession and governance all stay. Only the storage engine changes. Postgres is out, because a server per machine or cell is not justified. SQLite is embedded and per vault.
 
 ## What Changes
 

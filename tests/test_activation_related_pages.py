@@ -163,6 +163,9 @@ def test_a_recurring_subject_is_listed_as_related_and_nothing_is_served(
         }
     ]
     assert packet["generation"]["related_evidence"] == "ready"
+    # A listed page is not loaded, so the agent must be told to read it before relying on it.
+    assert packet["next_action"]["state"] == "related"
+    assert packet["next_action"]["tool"] == "read_memory"
     assert "Brine ledger" not in str(packet["recent_context"])
 
 

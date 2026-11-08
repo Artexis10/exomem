@@ -399,6 +399,10 @@ def replace_live(session, leaf, check, *, subdirectory=None, expected_identity=N
     ``leaf`` lies in the state directory, or in its private ``subdirectory`` on the same
     volume. A live store it replaces is kept as the newest superseded store.
     """
+    from ..vault_store import availability
+
+    # Each caller's own guard refuses early; this one holds for any caller, because a store-mode live store holds the pages.
+    availability.refuse_page_loss(session.root, "replacing the live collection store")
     fs = session.state_fs
     check()
     with fs.parent(session.path.parent.name, access="mutate").require() as directory:

@@ -436,6 +436,8 @@ def test_restricted_graph_omission_keeps_visible_recall_without_origin_leaks(vau
     task = packet["task_context"]
     assert path in str(task)
     assert neighbour not in {item["source_ref"] for item in task["candidates"]}
+    # The links lane is the omitted one: a restricted lead names no link target, withheld or not.
+    assert all("links" not in item for item in task["candidates"])
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
 

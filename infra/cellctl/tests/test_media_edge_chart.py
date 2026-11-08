@@ -37,6 +37,7 @@ EDGE = (
     "--set", "mediaEdge.enabled=true",
     "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
     "--set-string", "mediaEdge.bucket=media-bucket",
+    "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
     "--set-json", f'mediaEdge.cellIds=["{CANARY}"]',
 )
 NAMESPACE = "exomem-cloud"
@@ -201,9 +202,21 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
 
     assert env["CELLCTL_MEDIA_EDGE_URL"] == "http://10.43.0.30:8769"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS"]) == {CANARY: 2}
+    # cellctl confirms a revocation only for the bucket the edge writes to, so one value feeds both.
+    edge = _find(documents, "Deployment", "exomem-media-edge")["spec"]["template"]["spec"]["containers"][0]
+    assert env["CELLCTL_MEDIA_EDGE_BUCKET"] == {e["name"]: e.get("value") for e in edge["env"]}["EXOMEM_MEDIA_EDGE_BUCKET"]
     default_policy = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())["mediaEdge"]["storePolicy"]
     assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {
         **default_policy, "evict_after_days": 30, "max_temporary_bytes": 5637144576, "max_hydrations": 1}
+    # The physical meter lists with its own list-only key, never the edge's: the Secret is the list key's.
+    # It is optional, so a release that reaches the cluster before that Secret still starts cellctl.
+    secret_refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in cellctl["env"] if "valueFrom" in e}
+    assert env["CELLCTL_MEDIA_BUCKET_ID"] == "4a48fe8875c6214145260818"
+    assert env["CELLCTL_MEDIA_PHYSICAL_HEADROOM"] == "2"
+    assert secret_refs["CELLCTL_MEDIA_LIST_KEY_ID"] == {
+        "name": "exomem-cloud-media-list", "key": "keyId", "optional": True}
+    assert secret_refs["CELLCTL_MEDIA_LIST_APPLICATION_KEY"] == {
+        "name": "exomem-cloud-media-list", "key": "applicationKey", "optional": True}
     assert role["metadata"]["namespace"] == NAMESPACE
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["exomem-media-edge-active-set"],
@@ -234,6 +247,8 @@ def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl
         ("--set-string", "mediaEdge.endpoint=http://10.43.0.30:8768"),
         ("--set-string", "mediaEdge.endpoint=http://203.0.113.9:8769"),
         ("--set-string", "mediaEdge.bucket="),
+        ("--set-string", "mediaEdge.bucketId="),
+        ("--set-json", "mediaEdge.physicalHeadroom=0.5"),
         ("--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem:latest"),
         ("--set-json", 'cells.jobEgressExcept=["10.0.0.0/8"]'),
         ("--set-json", 'mediaEdge.cellIds=["short"]'),

@@ -536,7 +536,7 @@ def gather_signals(vault_root: Path, clock: Clock | None = None) -> policy.TickS
 
     try:
         backlog = int(index_sync.deferred_work_status(vault_root)["full_upserts"]["count"])
-    except Exception:  # noqa: BLE001 - an unreadable backlog holds optional work
+    except Exception:  # noqa: BLE001 - an unreadable backlog only delays a tick
         backlog = 1
     pressure: bool | None = None
     if auto_quiet.enabled():

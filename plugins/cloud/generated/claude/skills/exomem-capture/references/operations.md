@@ -594,29 +594,27 @@ cannot be undone.
 
 ### Generated artifact adoption
 
-A generated draft is not durable merely because it exists. Keep drafts,
-rejected variants, and revised-away siblings ephemeral. Once the user selects,
-approves, sends, or publishes one offered output, the exact selected handle is
-eligible for preservation under the existing `proactive_capture` authority; an
-explicit request to save is a requested action. Selection is adoption evidence,
-not write confirmation.
+When to adopt is the rule in [engagement](engagement.md): every generated file
+you hand the user, not a file you write in the user's own workspace. This
+section is the envelope.
 
 Choose the lane by role before transport. Material retained for later reasoning
-is a Source; an approved deliverable or proof-bearing output is Evidence. MIME
-never chooses. With a direct handle, pass the closed envelope on the normal
-command:
+is a Source; a deliverable or proof-bearing output is Evidence. MIME never
+chooses. With a direct handle, pass the closed envelope on the normal command:
 
 ```text
 capture_source(..., files=[...],
-  adoption={"key": "...", "trigger": "selected", "selected_file_id": "..."})
+  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
 preserve_artifacts(..., files=[...],
-  adoption={"key": "...", "trigger": "approved", "selected_file_id": "..."})
+  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
 ```
 
-Only `selected_file_id` may become canonical; unselected siblings must report
-`unselected` and create no artifact. Without a usable direct handle, use the
-ordinary upload handoff and report `handoff_required` or `handoff_prepared` as
-non-committing. A token, description, or reconstructed text is not a saved
+`key` is one per hand-over, such as the file name plus a version.
+`selected_file_id` names the handle you hand over; any other supplied handle
+reports `unselected` and creates no artifact. Identical bytes already stored
+report `already_stored` and write nothing. Without a usable direct handle, use
+the ordinary upload handoff and report `handoff_required` or `handoff_prepared`
+as non-committing. A token, description, or reconstructed text is not a saved
 artifact.
 
 Delivery is ordered after local Evidence adoption. If one existing compatible
@@ -853,7 +851,12 @@ are review-only and never write to the vault.
 3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
    response-only, and soft-fail with warnings when optional extras are absent.
 4. Persist accepted relations through the normal Markdown write path (`note` or
-   `edit`); do not treat suggestions as an automatic write.
+   `edit`); do not treat suggestions as an automatic write. A candidate that the
+   relation queue holds open carries `review` (`ref`, `fingerprint`,
+   `source_content_hash`): pass those to
+   `change_connections(operation={'kind': 'accept-relation'})` as `ref`,
+   `expected_fingerprint` and `expected_hash`, with a `why`. When the candidate has
+   `options`, set `requested_relation` to one option's `key`.
 
 ### Writes performed
 None.

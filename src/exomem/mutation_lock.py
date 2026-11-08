@@ -2124,6 +2124,61 @@ def _waiting(state: _LocalLockState) -> Iterator[None]:
             state.waiters -= 1
 
 
+class WaitEnded(BaseException):
+    """A boundary wait that its thread's `ending_waits` scope ended before the boundary came free.
+
+    It is no refusal: nothing logs, counts or journals it, and the waiter holds nothing. It is a
+    BaseException, like `foreground_priority.BulkCancelled`, so that a handler that reads any
+    `Exception` as a busy boundary or a failed step cannot take it for one.
+    """
+
+
+#: This thread's reason to stop waiting for a boundary (`ending_waits`), or None to wait it out.
+_ENDING_WAITS: ContextVar[Callable[[int | None], bool] | None] = ContextVar(
+    "exomem_mutation_lock_ending_waits", default=None
+)
+
+
+@contextmanager
+def ending_waits(when: Callable[[int | None], bool]) -> Iterator[None]:
+    """End this thread's in-process boundary waits with `WaitEnded` once ``when(holder)`` is true.
+
+    ``holder`` is the thread that holds the awaited boundary, or None between two holders. This is
+    for a thread whose own work a holder may wait on. The collection store thread waits for the
+    vault boundary inside maintenance while the holder's store read waits for that thread, and
+    otherwise only the timeout ends either wait. ``when`` runs once per poll interval of the wait,
+    so it must be cheap and must never wait for a boundary. Only a wait to enter a first boundary
+    ends early: a thread that already holds one is inside work that must finish or roll back, such
+    as a nested identity gate or a rollback's own cleanup. A wait with no timeout (a probe), a
+    borrower's wait and a wait for a holder in another process (the OS lock) do not end early.
+    """
+    token = _ENDING_WAITS.set(when)
+    try:
+        yield
+    finally:
+        _ENDING_WAITS.reset(token)
+
+
+def _acquire_guard(state: _LocalLockState, deadline: float) -> bool:
+    """Wait for the local guard until ``deadline``, as one of its waiters; whether it was taken.
+
+    Inside `ending_waits`, a thread that holds no boundary yet waits one poll interval at a time
+    and raises `WaitEnded` when its scope asks.
+    """
+    when = _ENDING_WAITS.get()
+    with _waiting(state):
+        remaining = max(0.0, deadline - time.monotonic())
+        if when is None or remaining <= 0.0 or current_thread_holds_boundary():
+            return state.guard.acquire(timeout=remaining)
+        while not state.guard.acquire(timeout=min(remaining, _DEFAULT_POLL_INTERVAL_SECONDS)):
+            if when(state.owner_thread):
+                raise WaitEnded()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return False
+        return True
+
+
 def _enter_or_borrow(state: _LocalLockState, deadline: float) -> bool | None:
     """Wait for the local guard or for a lent boundary, whichever comes first.
 
@@ -2585,9 +2640,7 @@ class VaultMutationCoordinator:
                 return
             entered = borrowed is not None
         else:
-            remaining = max(0.0, deadline - time.monotonic())
-            with _waiting(state):
-                entered = state.guard.acquire(timeout=remaining)
+            entered = _acquire_guard(state, deadline)
         if not entered:
             raise _Contended() if probe else self._refused(wait_start)
         released_work: tuple[Callable[[], None], ...] = ()

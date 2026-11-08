@@ -19,10 +19,19 @@ supervisor.
 the serving store thread turning an owner's edit of a view into a governed update or a
 held correction, and publishing pending views without a summary release. The P2.8 gate
 added it to ``RELEASED``; the per-vault rollback narrows it too.
+
+``vault-store-v1`` fences store mode: a vault whose pages, lexical rows and graph rows live in
+the collection store (OpenSpec make-vault-store-canonical). It stays outside ``RELEASED``, and
+``vault_store_enabled()`` is the one place that answers it. Unlike ``collections-migrate-v1`` it
+is not in ``offline_migrations()``: the managed migrator never switches a vault; only the
+owner's explicit ``store-mode`` command will. The same id is the state compatibility id
+that a store-mode vault records; every build supports that id, so a build that keeps the
+capability off can still roll such a vault back.
 """
 
 from __future__ import annotations
 
+from .. import state_migration
 from .. import structured_collections as collections
 from . import connection
 
@@ -31,9 +40,10 @@ UNAVAILABLE = "RECORDS_SUMMARY_UNAVAILABLE"
 COLLECTIONS_MIGRATE_V1 = "collections-migrate-v1"
 MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 COLLECTION_VIEWS_V1 = "collection-views-v1"
+VAULT_STORE_V1 = state_migration.VAULT_STORE_COMPATIBILITY_ID
 
 #: The release capabilities this release enables: S1.8 added RECORDS_SUMMARY_V1, P2.8
-#: COLLECTION_VIEWS_V1 and the P3.6 GA gate COLLECTIONS_MIGRATE_V1.
+#: COLLECTION_VIEWS_V1 and the P3.6 GA gate COLLECTIONS_MIGRATE_V1. VAULT_STORE_V1 stays out.
 RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1, COLLECTIONS_MIGRATE_V1})
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
@@ -127,6 +137,16 @@ def require_records_summary_route(vault_root, writer, action, values, *, prove=N
         open_ = summary_route_open(vault_root, manifest)
     if not open_:
         require_records_summary(vault_root)
+
+
+def vault_store_enabled() -> bool:
+    """Whether this release lets a vault enter store mode; the one place that answers it.
+
+    It prevents an unreleased store mode from taking a vault's pages out of Markdown. Firing
+    wrongly costs nothing: it is a release constant, the same on every host, and file mode
+    keeps working. It gates entering store mode only; a vault already in it can still roll back.
+    """
+    return VAULT_STORE_V1 in RELEASED
 
 
 def collections_migrate_enabled() -> bool:

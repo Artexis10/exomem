@@ -4,6 +4,7 @@
 - [x] 1.2 Refuse undecodable formats, oversized images and Cloud cells with an error that names the download route
 - [x] 1.3 Test that an agent receives an upright, downscaled photo and that the stored original is unchanged
 - [x] 1.4 Decode only the registry's image formats, outside the shared recovery slots, one image at a time
+- [x] 1.5 Let the caller choose the size up to the original and a crop region; take defaults and the inline and per-call limits from settings, with no image count or size ceiling in code
 
 ## 2. Short download links
 
