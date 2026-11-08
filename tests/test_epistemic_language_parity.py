@@ -1650,12 +1650,12 @@ def test_an_edge_into_a_unit_surfaces_its_source_when_its_relation_corrects(
         assert relation not in corrections  # CORE
 
 
-def test_a_grandfathered_extension_corrects_by_its_saved_family(tmp_path: Path) -> None:
-    """FLIPS 9: `x.leans_on` is saved in family `support`, so it corrects today.
+def test_a_grandfathered_extension_corrects_by_its_parent(tmp_path: Path) -> None:
+    """FLIPS 9: `x.leans_on` is saved in family `support`; its parent is `relates_to`.
 
-    After intended change 9 it follows its parent `relates_to` and is absent.
+    It used to correct by its saved family. It now follows its parent and is absent.
     """
-    assert "x.leans_on" in _corrections(tmp_path / "vault")  # FLIPS 9
+    assert "x.leans_on" not in _corrections(tmp_path / "vault")  # FLIPS 9
 
 
 def _pins_its_target(root: Path, relation: str) -> bool:
@@ -1715,15 +1715,14 @@ def test_an_episode_correction_pins_the_exact_target_of_a_corrective_relation_on
     assert _pins_its_target(tmp_path / "vault", relation) is pins
 
 
-def test_an_episode_correction_pins_the_target_of_a_grandfathered_extension(
+def test_an_episode_correction_does_not_pin_the_target_of_a_grandfathered_extension(
     tmp_path: Path,
 ) -> None:
-    """FLIPS 9: `x.leans_on` is a corrective family by its saved family today.
+    """FLIPS 9: `x.leans_on` was a corrective family by its saved family.
 
-    After intended change 9 it follows its parent `relates_to` and pins nothing,
-    so this returns False.
+    It now follows its parent `relates_to` and pins nothing.
     """
-    assert _pins_its_target(tmp_path / "vault", "x.leans_on") is True  # FLIPS 9
+    assert _pins_its_target(tmp_path / "vault", "x.leans_on") is False  # FLIPS 9
 
 
 def test_a_possessive_turn_carries_only_claims_that_name_the_subject_by_about_entity(
