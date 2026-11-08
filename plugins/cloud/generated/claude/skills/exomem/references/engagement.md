@@ -323,13 +323,13 @@ reasons, and `restore` takes a `version`, a `why` and the current
 
 ## Generated artifact adoption
 
-Generated drafts stay ephemeral. Generation, preview, filename, MIME type,
-apparent quality, and abandoned or revised-away variants do not make durable
-work. When the user selects, approves, sends, or publishes one offered output,
-that exact offered artifact becomes adoption-eligible; the event is evidence of
-adoption, not write consent. Agent-initiated adoption therefore follows
-`proactive_capture`, while an explicit request to save is an ordinary requested
-action. Preserve only the selected handle's exact bytes and write no siblings.
+Keep every generated file you hand the user. When you give the user a file to
+download or use (a ZIP, PDF, preset, image, spreadsheet or any other output),
+preserve that file's exact bytes as you hand it over, once, under
+`proactive_capture`; do not wait for the user to say they chose it. A later
+revision you hand over is kept too; an identical file is not stored twice.
+Drafts, previews and variants you never hand over stay ephemeral. An explicit
+request to save is an ordinary requested action.
 
 Choose the semantic lane before transport: reasoning material is a Source;
 an approved deliverable or proof-bearing output is Evidence. MIME never chooses.

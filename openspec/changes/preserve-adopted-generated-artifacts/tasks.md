@@ -26,6 +26,7 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gat
 
 Hosted candidate tasks 4.1–4.3 and 4.5 are superseded, not current release obligations.
 
+- [x] 4.5 Make hand-over the adoption trigger: keep every generated file the agent hands the user, not only one the user selects (activation capture policy, tool field descriptions, skill guidance, spec)
 - [ ] 4.4 Supply clean supported-client traces for direct adoption, sibling no-write, honest no-handle handoff, and receipt-linked delivery.
 
 ## 5. Mutants and verification

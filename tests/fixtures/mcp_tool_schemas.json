@@ -472,7 +472,7 @@
             "selected_file_id"
           ],
           "type": "object",
-          "description": "Select one handle; not write consent."
+          "description": "The handle handed to the user; proactive_capture applies."
         },
         "raw_protection": {
           "default": false,
@@ -4962,7 +4962,7 @@
             "selected_file_id"
           ],
           "type": "object",
-          "description": "Selected handle: eligibility, not write consent; proactive_capture applies."
+          "description": "The handle handed to the user; proactive_capture applies."
         },
         "transcriptions": {
           "default": [],

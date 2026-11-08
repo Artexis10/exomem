@@ -152,10 +152,10 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         lambda core: "check the relation queue: a confirmed match goes to link_acceptance"
         in core["engagement"]["contract"]["capture"],
     ),
-    # Selected draft: the agent read "not write consent" as a ban and kept nothing.
-    "keep-the-selected-draft-under-proactive-capture": (
+    # Handed-over file: the agent waited for a selection it never noticed and kept nothing.
+    "keep-every-handed-over-file-under-proactive-capture": (
         CARRYING,
-        lambda core: "Keep the exact bytes of the one the user selects or sends"
+        lambda core: "Keep the exact bytes of every generated file you hand the user"
         in core["engagement"]["contract"]["capture"],
     ),
     # Reported delivery: the agent never searched for the Evidence receipt.

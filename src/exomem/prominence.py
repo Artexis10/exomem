@@ -216,11 +216,12 @@ _BASELINE_CAPTURE = (
     "trivia, and tentative claims stay quiet."
 )
 
-#: What a selected or sent draft is worth as a save, positive rule first. The activation block
-#: carries it with the baseline doctrine; the prohibition and the rest stay in bootstrap.
+#: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
+#: trigger: waiting for the agent to notice a selection lost files the user went on to use. The
+#: activation block carries it with the baseline doctrine; the rest stays in bootstrap.
 _ADOPTION_TRIGGER = (
-    "Generated drafts stay ephemeral. Keep the exact bytes of the one the user selects or "
-    "sends, once, under proactive_capture: Source/Evidence by role, never MIME."
+    "Keep the exact bytes of every generated file you hand the user, at hand-over, under "
+    "proactive_capture: Source/Evidence by role, never MIME. Drafts not handed over stay ephemeral."
 )
 
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
@@ -234,7 +235,7 @@ _DELIVERY_CAPTURE = (
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
-    + " Selection is not write consent. No handle: non-committing handoff. "
+    + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
     + " Missing collection: structural_suggestions."
 )

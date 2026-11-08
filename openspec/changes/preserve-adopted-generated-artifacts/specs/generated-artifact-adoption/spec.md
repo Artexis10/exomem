@@ -1,19 +1,19 @@
 ## ADDED Requirements
 
-### Requirement: Explicit adoption gate keeps drafts ephemeral
-The active agent SHALL keep generated candidates ephemeral unless the user explicitly selects or approves one offered artifact. Generation completion, preview, revision, rejection, filename, MIME type, apparent quality, anticipated delivery, and abandonment SHALL NOT constitute adoption. A definite sent or published report about one uniquely identified offered artifact SHALL require local exact-byte adoption before any delivery observation is recorded. These facts establish eligibility, not write confirmation; agent-initiated adoption and delivery SHALL still obey the `proactive_capture` disposition.
+### Requirement: Handing a generated file to the user adopts it
+The active agent SHALL adopt each generated file at the moment it hands that file to the user to download or use, without waiting for the user to select, approve or report using it. Generated candidates the agent never hands over (drafts, previews and unoffered variants) SHALL stay ephemeral; filename, MIME type and apparent quality SHALL NOT decide adoption. A definite sent or published report about one uniquely identified offered artifact SHALL require local exact-byte adoption before any delivery observation is recorded. These facts establish eligibility, not write confirmation; agent-initiated adoption and delivery SHALL still obey the `proactive_capture` disposition.
 
-#### Scenario: Unadopted variants cause no writes
-- **WHEN** several variants are generated and none is selected, approved, sent, or published
-- **THEN** the agent invokes no Source, Evidence, Record, or adoption-receipt write for those variants
+#### Scenario: A file handed over is kept without being asked
+- **WHEN** the agent gives the user a generated ZIP to download and the user says nothing about choosing it
+- **THEN** the agent preserves that ZIP's exact bytes as it hands it over, under `proactive_capture`
 
-#### Scenario: Only the selected variant is eligible
-- **WHEN** the user selects variant B from offered variants A, B, and C
-- **THEN** only B is eligible for canonical preservation and A and C remain absent
+#### Scenario: Drafts never handed over cause no writes
+- **WHEN** the agent generates several intermediate files and hands only the final one to the user
+- **THEN** it invokes no Source, Evidence, Record or adoption-receipt write for the files it never handed over
 
-#### Scenario: Rejected variant stays absent
-- **WHEN** the user rejects B and later selects C
-- **THEN** B remains absent even if it was rendered or downloaded locally
+#### Scenario: A later revision is kept beside the first
+- **WHEN** the agent hands over a file and later hands over a revised version
+- **THEN** both exact files are preserved, and handing over identical bytes again stores nothing new
 
 #### Scenario: Delivery report preserves before recording
 - **WHEN** the user reports that one uniquely identified offered artifact was sent but no local adoption receipt exists
