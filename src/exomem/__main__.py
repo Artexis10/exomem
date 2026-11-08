@@ -1536,6 +1536,7 @@ def _mode_main(argv: list[str]) -> int:
             print(f"  preload_models:          {policy['preload_models']}")
             print(f"  preload_cpu_caches:      {policy['preload_cpu_caches']}")
             print(f"  retain_cpu_caches:       {policy['retain_cpu_caches']}")
+            print(f"  idle_cpu_cache_release:  {policy['idle_cpu_cache_release']}")
             print(f"  defer_expensive_indexes: {policy['defer_expensive_indexes']}")
             print(f"  release_when_idle:       {policy['release_when_idle']}")
             print(f"  reap_models_when_idle:   {policy['reap_models_when_idle']}")

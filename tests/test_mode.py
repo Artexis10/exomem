@@ -226,6 +226,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": False,
                 "retain_cpu_caches": False,
+                "idle_cpu_cache_release": "after_idle",
                 "defer_expensive_indexes": True,
                 "watcher_policy": {
                     "debounce_seconds": 2.0,
@@ -243,6 +244,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": False,
                 "retain_cpu_caches": False,
+                "idle_cpu_cache_release": "under_memory_pressure",
                 "defer_expensive_indexes": False,
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
@@ -260,6 +262,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": True,
                 "retain_cpu_caches": True,
+                "idle_cpu_cache_release": "never",
                 "defer_expensive_indexes": False,
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
@@ -357,6 +360,7 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
         "preload_models": False,
         "preload_cpu_caches": False,
         "retain_cpu_caches": False,
+        "idle_cpu_cache_release": "after_idle",
         "defer_expensive_indexes": True,
         "watcher_policy": {
             "debounce_seconds": 2.0,

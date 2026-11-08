@@ -229,6 +229,15 @@ def release_idle_cpu_caches_only_under_pressure() -> bool:
     return not service_profile_enabled() and resolve_mode() == "normal"
 
 
+def idle_cpu_cache_release() -> str:
+    """When the reaper releases an idle CPU cache: `never`, `under_memory_pressure` or `after_idle`."""
+    if retain_cpu_caches():
+        return "never"
+    if release_idle_cpu_caches_only_under_pressure():
+        return "under_memory_pressure"
+    return "after_idle"
+
+
 def defer_expensive_indexes() -> bool:
     """Whether semantic/visual indexing should be queued or capped."""
     return not service_profile_enabled() and resolve_mode() == "quiet"
@@ -322,6 +331,7 @@ def resolved() -> dict:
         "preload_models": preload_models(),
         "preload_cpu_caches": preload_cpu_caches(),
         "retain_cpu_caches": retain_cpu_caches(),
+        "idle_cpu_cache_release": idle_cpu_cache_release(),
         "defer_expensive_indexes": defer_expensive_indexes(),
         "watcher_policy": watcher_policy().as_dict(),
         "release_when_idle": release_when_idle(),
