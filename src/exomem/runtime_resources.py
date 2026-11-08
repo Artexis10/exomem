@@ -37,6 +37,8 @@ _NATIVE_ENV = {
 _background_priority_applied: bool | None = None
 _MEMINFO = Path("/proc/meminfo")
 _PROC_STATUS = Path("/proc/self/status")
+_PROC_CGROUP = Path("/proc/self/cgroup")
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
 _MODEL_WORK: ContextVar[tuple[str, threading.Event | None]] = ContextVar(
     "exomem_model_work", default=("foreground", None)
 )
@@ -675,6 +677,55 @@ def available_memory() -> int | None:
         return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     except (AttributeError, ValueError, OSError):
         return None
+
+
+def cgroup_memory_headroom() -> int | None:
+    """Bytes this process's cgroup may still grow before its nearest limit, or None.
+
+    The limit is the smaller of `memory.high` (throttle) and `memory.max` (hard cap). Use is
+    the working set: `memory.current` less `inactive_file`, the cache the kernel reclaims
+    before it throttles. None where the host has no cgroup v2 hierarchy or the cgroup sets
+    no limit.
+    """
+    try:
+        line = next(
+            entry for entry in _PROC_CGROUP.read_text(encoding="ascii").splitlines()
+            if entry.startswith("0::")
+        )
+        group = _CGROUP_ROOT / line[3:].lstrip("/")
+        limits = []
+        for name in ("memory.high", "memory.max"):
+            try:
+                value = (group / name).read_text(encoding="ascii").strip()
+            except OSError:
+                continue
+            if value != "max":
+                limits.append(int(value))
+        if not limits:
+            return None
+        used = int((group / "memory.current").read_text(encoding="ascii").strip())
+        try:
+            for stat in (group / "memory.stat").read_text(encoding="ascii").splitlines():
+                key, _, amount = stat.partition(" ")
+                if key == "inactive_file":
+                    used -= int(amount)
+                    break
+        except OSError:
+            pass
+        return min(limits) - used
+    except (OSError, StopIteration, ValueError):
+        return None
+
+
+def memory_short(floor_bytes: int) -> bool | None:
+    """Whether the host or this process's cgroup has less than `floor_bytes` to give.
+
+    None when neither reports, so a caller chooses its own default.
+    """
+    readings = [value for value in (available_memory(), cgroup_memory_headroom()) if value is not None]
+    if not readings:
+        return None
+    return min(readings) < floor_bytes
 
 
 def peak_rss_bytes() -> int | None:

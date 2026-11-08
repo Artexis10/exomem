@@ -272,7 +272,8 @@ def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
     )
     monkeypatch.setattr(accel, "gpu_mem", lambda: None)
 
-    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    # Quiet releases idle caches outright; normal waits for memory pressure (test_model_reaper.py).
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
     slots = [s for s in model_reaper.default_slots() if s.name.endswith("cache") or s.name.endswith("caches") or s.name == "index-matrices"]
     reaped = model_reaper._reap_once(slots, now=time.monotonic() + 2.0, threshold=1.0)
     assert reaped == ["index-matrices", "bm25-cache", "find-ram-caches"]
