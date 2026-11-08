@@ -8,9 +8,11 @@ sessions long counts once. Fewer than two paired units give no interval and a ve
 from __future__ import annotations
 
 import statistics
-from collections.abc import Iterable
+from collections import defaultdict
+from collections.abc import Hashable, Iterable, Sequence
 
-from recall_parity.scoring import percentile_bootstrap_ci
+import numpy as np
+from recall_parity.scoring import DEFAULT_RESAMPLES, percentile_bootstrap_ci
 
 #: An interval over one unit is a point, not an interval.
 MIN_UNITS = 2
@@ -20,11 +22,44 @@ MIN_UNITS = 2
 NOT_WORSE_BOUND = -0.05
 
 
-def paired_interval(diffs: list[float], *, seed: int, unit: str, digits: int = 4) -> dict:
+def stratified_bootstrap_ci(
+    values: Sequence[float],
+    strata: Sequence[Hashable],
+    *,
+    seed: int,
+    resamples: int = DEFAULT_RESAMPLES,
+    confidence: float = 0.95,
+) -> tuple[float, float]:
+    """Percentile interval of the mean, resampling values with replacement inside each stratum.
+
+    Every stratum keeps its own size in every draw, so a stratum never loses its share of the mean.
+    """
+    groups: dict[Hashable, list[float]] = defaultdict(list)
+    for value, stratum in zip(values, strata, strict=True):
+        groups[stratum].append(value)
+    rng = np.random.default_rng(seed)
+    total = np.zeros(resamples)
+    for stratum in sorted(groups, key=str):
+        data = np.asarray(groups[stratum], dtype=float)
+        total += data[rng.integers(0, data.size, size=(resamples, data.size))].sum(axis=1)
+    tail = (1 - confidence) / 2 * 100
+    low, high = np.percentile(total / len(values), [tail, 100 - tail])
+    return float(low), float(high)
+
+
+def paired_interval(
+    diffs: list[float],
+    *,
+    seed: int,
+    unit: str,
+    digits: int = 4,
+    strata: Sequence[Hashable] | None = None,
+) -> dict:
     """Mean difference, its 95% percentile bootstrap interval and a verdict.
 
     The verdict is ``better`` or ``worse`` when the interval excludes 0, ``no change`` when it
     contains 0, and ``insufficient`` below ``MIN_UNITS`` paired units, which is never ``better``.
+    ``strata`` (one label per difference) resamples inside each label, as f38 does per project.
     """
     entry: dict = {f"paired_{unit}s": len(diffs)}
     if len(diffs) < MIN_UNITS:
@@ -34,7 +69,10 @@ def paired_interval(diffs: list[float], *, seed: int, unit: str, digits: int = 4
             "ci95": None,
             "verdict": f"insufficient: {len(diffs)} paired {unit}(s), at least {MIN_UNITS} needed",
         }
-    low, high = percentile_bootstrap_ci(diffs, seed=seed)
+    if strata is None:
+        low, high = percentile_bootstrap_ci(diffs, seed=seed)
+    else:
+        low, high = stratified_bootstrap_ci(diffs, strata, seed=seed)
     return {
         **entry,
         "mean_difference": round(statistics.mean(diffs), digits),
