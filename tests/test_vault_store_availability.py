@@ -135,7 +135,7 @@ def test_a_write_to_a_diverged_store_mode_vault_refuses_with_the_stores_code_and
 
 
 def test_a_page_write_off_the_store_thread_refuses_and_changes_no_markdown(store_mode_vault):
-    """Defect: a page write from a thread that does not own the store lands in Markdown it ignores."""
+    """Defect: a page write off the store thread lands in Markdown that the store ignores."""
     before = _vault_bytes(store_mode_vault)
     with pytest.raises(OpError) as refused:
         commands.op_remember(store_mode_vault, title="Pump note", status="draft",

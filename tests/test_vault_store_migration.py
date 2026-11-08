@@ -363,7 +363,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
 
 
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):
-    """An exported audit trail that drops the source of a move, so the history cannot say where a page came from."""
+    """An export that drops the source of a move cannot say where a page came from."""
     assert migrate_apply(vault) == 0
     moved = "Knowledge Base/Notes/Moved.md"
     (vault / ALPHA).rename(vault / moved)
@@ -378,9 +378,8 @@ def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp
     audit = [
         json.loads(line) for line in (tmp_path / "export/audit.jsonl").read_text().splitlines()
     ]
-    assert [(entry["path"], entry["from_path"]) for entry in audit if entry["operation"] == "move"] == [
-        (moved, ALPHA)
-    ]
+    trail = {(entry["path"], entry["from_path"]) for entry in audit if entry["operation"] == "move"}
+    assert trail == {(ALPHA, None), (moved, ALPHA)}
 
 
 def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_exported(
