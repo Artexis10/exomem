@@ -1529,11 +1529,19 @@ def task_candidates(
     method_seconds: float | None = None
     for origin, query_text in method_queries:
         # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
-        if budget_exhausted("working_set.task_context_methods", reserve=method_seconds):
+        # The leads already found must still be projected, so the search may spend only what that leaves.
+        reserve = request_budget.TASK_PROJECTION_RESERVE_SECONDS + (
+            method_seconds if method_seconds is not None else request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        )
+        if budget_exhausted("working_set.task_context_methods", reserve=reserve):
             missing.append({"role": "task_context", "reason": "budget"})
             break
         started = time.monotonic()
-        with find_types.timing_span(timings, "working_set.task_context_methods"):
+        with (
+            find_types.timing_span(timings, "working_set.task_context_methods"),
+            request_budget.leaving(request_budget.TASK_PROJECTION_RESERVE_SECONDS),
+            lexstore.stopping_at_budget(),
+        ):
             methods = lexstore.get_store(vault_root).search_semantic_units_result(
                 [], limit + 1, categories, (), "kb", fresh,
                 allowed_parent_paths=allowed,
@@ -1545,6 +1553,9 @@ def task_candidates(
                 recall_checkpoint=checkpoint, allow_delta=False,
             )
         method_seconds = time.monotonic() - started
+        if methods.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
         else:

@@ -547,3 +547,40 @@ def test_owner_keeps_task_discovery_on_an_enrolled_store_while_a_store_page_wait
         state, served = discovered()
         assert state == "ready" and ordinary in served
         assert not store_page_projected()
+
+
+def test_a_slow_method_search_leaves_time_to_serve_the_leads_already_found(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold method search once ran to the request deadline, so no found lead was projected and task context was dropped."""
+    import time
+
+    from exomem import request_budget
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    # The turn slice drops a lead it already carries; with it off, the task context shows discovery itself.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    lead = _page(vault, "alignment-visit", body="Inspect the optical alignment before the workshop.\n")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    searched = []
+
+    def runs_to_its_deadline(self, *args, **kwargs):
+        searched.append(True)
+        # Stands in for a cold catalogue query that only the request budget stops.
+        while request_budget.current().remaining() > 0:
+            time.sleep(0.05)
+        return lexstore.CatalogQueryResult(None, lexstore.CatalogReadiness(lexstore.DEADLINE_STATUS, False, "sqlite"))
+
+    monkeypatch.setattr(type(lexstore.get_store(vault)), "search_semantic_units_result", runs_to_its_deadline)
+    budget = request_budget.RequestBudget(seconds=request_budget.TASK_PROJECTION_RESERVE_SECONDS + 3.0)
+    token = request_budget.set_current(budget)
+    try:
+        packet = _activate(vault, turn="Inspect the optical alignment before the workshop", max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+    task = packet["task_context"]
+    assert searched
+    assert lead in {item["source_ref"] for item in task["candidates"]}
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
