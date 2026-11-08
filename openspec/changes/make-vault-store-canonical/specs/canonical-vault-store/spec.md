@@ -143,7 +143,7 @@ For files the store owns, the requirements that keep derived sidecars in step wi
 - **AND** the note is not imported into the store
 
 ### Requirement: Store-mode names read the store
-In store mode, the check that makes a new page name unique, as the vault layout defines it, SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
+In store mode, the collision check for a new page name SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
 
 #### Scenario: Two quick creates that differ only in case
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page

@@ -216,7 +216,7 @@ D12 is a separate package, task group 9. It builds on the stage 1 write path and
 - `nested`: the managed root is one folder inside a larger vault. This is today's layout. It stays for vaults that also hold content Exomem does not manage, and for every existing vault until its relayout.
 - `root`: the managed root is the vault root. New vaults and new Cloud cells start here.
 
-**Managed root.** The managed root is the folder that holds `_Schema/`, the marker that `_is_vault` already checks. Exomem resolves it once, when it resolves the vault. `EXOMEM_KB_DIRNAME` stays as a test override. Code reaches the managed root only through two helpers: one joins a managed-relative path, the other splits a vault path into its managed-relative rest. About 130 sites that build or compare the wrapper as a string move to these helpers. Path joins through `kb_root` need no change. Where D1 to D11 say "the Knowledge Base", they mean the managed root.
+**Managed root.** The managed root is the folder that holds `_Schema/`, the marker that `_is_vault` already checks. Exomem resolves it once, when it resolves the vault. `EXOMEM_KB_DIRNAME` stays as a test override. Code reaches the managed root only through two helpers: one joins a managed-relative path, the other splits a vault path into its managed-relative rest. About 130 sites that build or compare the wrapper as a string move to these helpers. Path joins through `kb_root` need no change. Where D1 to D11 say "the Knowledge Base", they mean the managed root. In `root`, a path that names `Knowledge Base/Notes/<Area>/<rest>` for a compiled area means `<Area>/<rest>`, because the `Notes/` level drops. If both the vault root and a wrapper folder hold `_Schema/`, resolution refuses with an error that names both folders.
 
 **Areas.** In `root`, the vault root holds the areas:
 - one folder per compiled note type and per home, with no `Notes/` level and no wrapper folder, so a compiled note sits at `Insights/Some Title.md`;
@@ -224,17 +224,18 @@ D12 is a separate package, task group 9. It builds on the stage 1 write path and
 - `index.md` and `log.md`.
 
 The machinery folders (`_Schema`, `_trash`, `_archive`, `_attachments`, `_compiled`) keep their names. They are a closed product set that the reserved-path registry already holds. Registries name every area; code never spells one:
-- A compiled type's `folder` is its area name. The `Notes/` parent exists only in `nested`.
+- A compiled type's `folder` is its area name. The `Notes/` parent exists only in `nested`. A `folder` value that starts with `Notes/` reads as the `nested` parent plus the area name, so an existing overlay stays valid. The relayout rewrites such overlay values to the bare area name in its one store change.
 - The note types with role `source`, `evidence` and `entity` get a `folder` attribute. The attribute changes no entry's meaning.
 - `Records` and `Planning` come from the collection profiles.
 
-**Flat inside.** In `root`, the typed writer applies no partition (project, domain or medium) and no second taxonomy level. A group folder stays only where a contract needs it:
-- `Sources/<Kind>/`: recap detection is a path test that must not read the page.
-- `Entities/<Type>/`: the entity-type registry declares this folder.
-- `Records/<collection>/` and `Planning/<collection>/`: the collection contract fixes these folders.
-- `Evidence/<scope>/<category>/`: Evidence keeps original filenames, and 70 to 82 of 3,114 names collide when flattened.
+**Flat inside.** In `root`, the typed writer applies no partition (project, domain or medium) and no second taxonomy level. A group folder stays only where a contract needs it, and the group follows a closed role value or a collection profile, not an area name:
+- Role `source` groups by kind (`Sources/<Kind>/`). Recap detection is a path test that must not read the page.
+- Role `entity` groups by entity type (`Entities/<Type>/`). The entity-type registry declares this folder.
+- A collection groups by its collection (`Records/<collection>/`, `Planning/<collection>/`). The collection contract fixes these folders.
+- Role `evidence` groups by scope and then category (`Evidence/<scope>/<category>/`). Evidence keeps original filenames, and 70 to 82 of 3,114 names collide when flattened.
+- Every other role, including `compiled`, has no group folder.
 
-A page path then holds an area, at most one group folder and the name: `Area/Group/Name.md`. Evidence is the one exception, because it keeps both its scope and its category folder.
+A page path then holds an area, at most one group folder and the name: `Area/Group/Name.md`. Evidence is the one exception, because it keeps both its scope and its category folder. A source's domain stays in its metadata, so a reclassification that changes only the domain moves no file in a `root` vault.
 
 *Alternative rejected:* one folder for every note, with the type held in frontmatter. Three boundaries are path-based today: the compiled-type write gate, the append-only trees and the collection folders. Each would need a new rule.
 
@@ -245,11 +246,13 @@ A page path then holds an area, at most one group folder and the name: `Area/Gro
 
 Types with `stem: dated` or `stem: started` keep their date prefix. Evidence keeps original filenames. Records and Planning keep their filename recipes.
 
-**Uniqueness.** A new readable name is unique among the Markdown pages that Exomem owns, across the whole vault, compared under `vault_name_key` (NFC, then casefold). Uniqueness is vault-wide rather than per folder, so `[[Name]]` names one page in Exomem's stem lookup and in Obsidian's basename lookup. On a collision the writer appends ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix counts toward the 200-byte cap, so the writer shortens the title part first. The relayout resolves collisions in ascending order of the pages' current paths, so a second plan run gives the same names. In store mode the check reads the store, never the projection. In the copy, 1,505 pages need a suffix within their current folder and 1,651 need one across the whole vault.
+**Uniqueness.** A new name derived under `title` style in a `root` vault is unique among the Markdown pages that Exomem owns, across the whole vault, compared under `vault_name_key` (NFC, then casefold). Uniqueness is vault-wide rather than per folder, so `[[Name]]` names one page in Exomem's stem lookup and in Obsidian's basename lookup. On a collision the writer appends ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix counts toward the 200-byte cap, so the writer shortens the title part first. In store mode the check reads the store, never the projection. A slug name, and a `title` name in a `nested` vault, keep the `-2` collision contract of `add-readable-note-filenames`.
 
-**Links.** Writers emit the shortest link that resolves to exactly one page for both Exomem and Obsidian: `[[Name]]` when no other file Obsidian sees has that name, otherwise `[[Area/Name]]`. Graph rows keep the resolved vault path, so derived rows keep their meaning. A link repoint changes only the link's target text, and the link still resolves to the same page. In store mode, append-only pages in `Sources/` and `Evidence/` accept link repoints and nothing else, each recorded with its own audit reason. Every other byte of those pages stays unchanged. File mode keeps today's refusal.
+A name that is not derived never changes: an Evidence original, a Records or Planning recipe name and a name the caller pinned keep their names and never take a suffix. A derived name yields to them whatever the path order. The relayout resolves collisions among derived names in ascending order of the pages' current paths, so a second plan run gives the same names. In the copy, 1,505 pages need a suffix within their current folder and 1,651 need one across the whole vault.
 
-**Retitle.** In store mode, when a page's title changes and its name was derived from the old title, the same governed write renames the page. One transaction moves the rows, repoints the inbound links that use the old name, re-derives those pages and records the old path as an alias. A name the caller pinned (one that differs from the derived name) does not change. File mode adds no rename on retitle, so a file-mode vault keeps its names after a retitle.
+**Links.** Writers emit the shortest trailing path of the target, cut at a folder boundary, that resolves to exactly one file for both Exomem and Obsidian. That path is `[[Name]]` when no other file Obsidian sees has that name. A grouped page needs a real path suffix. When `Scan` is not unique, a page at `Evidence/alpha/receipts/Scan.md` gets `[[receipts/Scan]]` if that is unique, then `[[alpha/receipts/Scan]]`. It never gets `[[Evidence/Scan]]`, which is a suffix of no page. Exomem's resolver matches full paths, managed-root-relative paths, stems and titles today, so task 9.5 adds trailing-path matching. Graph rows keep the resolved vault path, so derived rows keep their meaning. A link repoint changes only the link's target text, and the link still resolves to the same page. In store mode, append-only pages in `Sources/` and `Evidence/` accept link repoints and nothing else, each recorded with its own audit reason. Every other byte of those pages stays unchanged. File mode keeps today's refusal.
+
+**Retitle.** In store mode, when a governed write changes a page's title and its name was derived from the old title, the same write renames the page. A name is derived from the old title when it equals what the naming rule produces for that title, including its suffix or truncation. One transaction moves the rows, repoints the inbound links that use the old name, re-derives those pages and records the old path as an alias. A name that is not derived from the old title, such as one the caller pinned, does not change. An outside-edit import that changes a title never renames the file. File mode adds no rename on retitle, so a file-mode vault keeps its names after a retitle.
 
 **Identity.** `store_pages.path` stays the key. Every derived table is keyed by path and reused unchanged (D1, D2). A page-id key would still rekey the derived rows on every move, and it would break the whole-table equivalence proof. The move-safe identity already exists:
 - `exomem_id`, present on 91% of Markdown files in the copy, with no duplicates;
@@ -259,11 +262,18 @@ A path alias table maps each old path to the current path. Every move updates it
 
 **Relayout.** `exomem store-mode relayout` moves a store-mode vault from `nested` to `root`:
 1. `--plan` computes every move, name, suffix, truncation and link repoint from the registries and the current pages. It reports counts and writes nothing.
-2. `--apply` runs with the service stopped. It commits the plan as one store change: page moves, repointed pages, aliases and the layout record.
+2. `--apply` runs with the service stopped. It commits the plan as one store change: page moves, repointed pages, aliases, the layout record and the rewrite of overlay `folder` values that start with `Notes/`.
 3. The projector writes the files.
 4. `--verify` runs the proof below.
 
-Preconditions: store mode is active, no items are held, the projection queue is empty, a store backup exists, and free disk space is at least the size of the store. The managed upgrade migrator never runs a relayout.
+Preconditions: store mode is active, the service is stopped, no items are held, the projection queue is empty, a store backup exists, and free disk space is at least the size of the store. Each failed precondition refuses `--apply` and names itself. The managed upgrade migrator never runs a relayout.
+
+Placement rules for pages that D12 does not place by area or group:
+- A page in an exempt or unregistered folder keeps its path relative to the managed root, so only the wrapper segment drops.
+- A partition folder below the group level flattens into the group folder, or into the area when the area has no group folder.
+- A name that is not derived keeps its name. The relayout tests derivedness against the style that the vault used before it, then gives each derived name its `title` form.
+- Markdown at the vault root outside the old wrapper becomes owned when the managed root becomes the vault root, and keeps its path. `--plan` lists each such file.
+- `--apply` refuses and names any page that the plan cannot map to exactly one new path.
 
 **Cost of a move.** In file mode, a move renames one file, rewrites each linking page with its own guard and fan-out, and refuses when an append-only page links the target. A file-mode relayout of 14k pages is not practical. In store mode the relayout is one transaction that re-derives about 8k pages. That is close to a cold build: 82 s for the lexical index plus 50 s for the graph on the spike's copy. Projection follows. A single retitle re-derives the moved page and its linking pages in one transaction.
 
@@ -294,8 +304,8 @@ Proof for `--verify`:
 - Every link occurrence resolves to the same page before and after, and every rewritten link passes Obsidian's basename-or-path rule.
 - Page bytes equal the old bytes with the planned link edits applied, and binaries keep their hashes.
 - A fresh derivation equals the stored rows. Graph edges are equal once paths are mapped to ids.
-- The recall canary is compared case by case with 95% intervals. Exact equality is not the claim, because link text and filename-derived titles change search tokens.
-- The rollback drill passes on the relaid-out vault.
+
+The rehearsal (task 9.11) adds two checks that `--verify` does not run. It compares the recall canary case by case with 95% intervals, and exact equality is not the claim, because link text and filename-derived titles change search tokens. It also runs the rollback drill on the relaid-out vault.
 
 **Risks.**
 - **Test corpus.** 10,465 wrapper literals in 895 test files stay on `nested`, so `root` needs its own test lane at the boundaries: ownership, resolver, recall scopes, write gate, governance, migrate and relayout.
