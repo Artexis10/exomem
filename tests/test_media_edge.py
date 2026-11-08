@@ -254,7 +254,8 @@ def test_each_hide_logs_its_name_and_cell_once_for_the_burst_triage(
     caplog.set_level("INFO", logger="exomem.media_edge")
     harness.condemn(name_of(data))
     harness.condemn(name_of(data))
-    lines = [record.getMessage() for record in caplog.records if name_of(data) in record.getMessage()]
+    lines = [record.getMessage() for record in caplog.records
+             if record.name == "exomem.media_edge" and name_of(data) in record.getMessage()]
     assert len(lines) == 1 and CELL_A in lines[0]
 
 
