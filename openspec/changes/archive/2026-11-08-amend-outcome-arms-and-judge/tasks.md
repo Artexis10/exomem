@@ -5,4 +5,4 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Review, merge, and record the owner's acknowledgment of sequence 10.
+- [x] 2.1 Review, merge, and record the owner's acknowledgment of sequence 10.
