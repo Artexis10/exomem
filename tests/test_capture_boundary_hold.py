@@ -260,12 +260,12 @@ def test_a_directory_named_like_a_page_is_counted_and_descended_as_rglob_did(
     assert indexes._count_sources(sources) == {"Articles": 2}
 
 
-def test_a_batch_workspace_in_sources_is_not_a_source_type_even_when_it_vanishes(
+def test_write_temporaries_in_sources_are_not_counted_even_when_they_vanish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Another write's batch workspace under Sources is removed when that write finishes.
-    An edit that counted Sources in that window failed with FileNotFoundError and
-    returned 500 (observed live 2026-11-08)."""
+    """A write in flight leaves a batch workspace and a publish temp under Sources and
+    removes both when it finishes. An edit that counted Sources in that window failed
+    with FileNotFoundError and returned 500 (observed live 2026-11-08)."""
     from exomem import indexes
 
     sources = tmp_path / "Sources"
@@ -273,17 +273,34 @@ def test_a_batch_workspace_in_sources_is_not_a_source_type_even_when_it_vanishes
     (sources / "Articles" / "a.md").write_text("x", encoding="utf-8")
     workspace = sources / ".exomem-batch-0123456789abcdef0123456789abcdef"
     workspace.mkdir()
-    (workspace / "staged.md").write_text("x", encoding="utf-8")
+    (workspace / "stage-1.tmp").write_text("x", encoding="utf-8")
+    publish_temp = sources / ".exomem-held-publish-0123456789abcdef0123456789abcdef"
+    publish_temp.write_text("x", encoding="utf-8")
 
     assert indexes._count_sources(sources) == {"Articles": 1}
 
-    # The workspace is listed, then removed before the count reaches it.
+    # Both are listed, then removed before the count reaches them.
     listed = list(sources.iterdir())
-    (workspace / "staged.md").unlink()
+    (workspace / "stage-1.tmp").unlink()
     workspace.rmdir()
+    publish_temp.unlink()
     real_iterdir = Path.iterdir
     monkeypatch.setattr(
         Path, "iterdir", lambda self: iter(listed) if self == sources else real_iterdir(self)
     )
 
     assert indexes._count_sources(sources) == {"Articles": 1}
+
+
+def test_a_batch_workspace_in_notes_is_not_a_note_type(tmp_path: Path) -> None:
+    """Publishing `Notes/index.md` stages a batch workspace directly under Notes."""
+    from exomem import indexes
+
+    notes = tmp_path / "Notes"
+    (notes / "Insights").mkdir(parents=True)
+    (notes / "Insights" / "a.md").write_text("x", encoding="utf-8")
+    workspace = notes / ".exomem-batch-0123456789abcdef0123456789abcdef"
+    workspace.mkdir()
+    (workspace / "stage-1.tmp").write_text("x", encoding="utf-8")
+
+    assert indexes._count_notes_by_subfolder(notes) == {"Insights": {"": 1}}
