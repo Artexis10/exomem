@@ -15,7 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from . import activation, find_corpus, lifecycle_statuses, note_types, request_budget
+from . import (
+    activation,
+    find_corpus,
+    lifecycle_statuses,
+    note_types,
+    relation_registry,
+    request_budget,
+)
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
 
@@ -69,7 +76,14 @@ def _raw_links(unit: Any) -> list[str]:
     )
 
 
+def _replaces(registry: relation_registry.RelationRegistry, kind: str) -> bool:
+    """True when the page's registry reads the relation as one that replaces its target."""
+    canonical = registry.resolve(kind, origin="semantic_relation").canonical
+    return "replaces" in registry.behaviours_of(canonical or "")
+
+
 def describe(root: Path, state: Any) -> dict[str, Any]:
+    registry = relation_registry.load_for_page(root, state.path, state.frontmatter)
     units = state.document.units
     complete = len(units) <= sensor.MAX_UNITS and all(
         len(u.content) + len(u.context or "") <= sensor.MAX_UNIT_CHARS for u in units
@@ -109,7 +123,7 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
                             "occurrence",
                         )
                     },
-                    "supersedes": [r.target for r in unit.relations if r.kind == "supersedes"],
+                    "supersedes": [r.target for r in unit.relations if _replaces(registry, r.kind)],
                 }
             )
     return {

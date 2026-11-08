@@ -69,8 +69,7 @@ def relation_targets(relations: Sequence[Mapping[str, Any]] | None, *,
     registry = registry or relation_registry.core_registry()
     for relation in relations or ():
         definition = registry.resolve(str(relation.get("kind") or "")).definition
-        # `supersession` is a closed family implemented by the relation schema.
-        if definition is not None and definition.family == "supersession":
+        if definition is not None and "replaces" in registry.behaviours_of(definition.key):
             target = str(relation.get("target") or "").strip()
             if target:
                 out.append(target)

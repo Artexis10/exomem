@@ -343,6 +343,12 @@ def _link_key(raw: str) -> str:
     return key
 
 
+def _replaces(view: Any, edge: dict[str, Any]) -> bool:
+    """True when the authoring page's registry reads the edge as one that replaces its target."""
+    registry = view.registry_for(str(edge.get("source_path") or ""))
+    return "replaces" in registry.behaviours_of(str(edge.get("relation_type") or ""))
+
+
 def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts | None:
     """What the projection needs from one page, from the graph alone. None when absent.
 
@@ -389,7 +395,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts
         other = str(other)
         if edge is not None and other and other != rel_path:
             neighbours.add(other)
-            if edge.get("relation_type") == "supersedes":
+            if _replaces(view, edge):
                 supersession.add(other)
     file_key = graph.execute(
         "SELECT node_key FROM graph_nodes WHERE path=? AND kind='file'", (rel_path,)
@@ -403,7 +409,7 @@ def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts
             other = str((edge or {}).get("source_path") or "")
             if edge is not None and other and other != rel_path:
                 neighbours.add(other)
-                if edge.get("relation_type") == "supersedes":
+                if _replaces(view, edge):
                     supersession.add(other)
     link_keys = {
         _link_key(raw)

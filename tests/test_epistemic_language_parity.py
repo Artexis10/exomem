@@ -1127,13 +1127,12 @@ def test_currency_follows_a_unit_row_that_supersedes_by_family(fixture_vault: Pa
     assert targets == ("[[#supersedes]]", "[[#x-retires]]")  # CORE
 
 
-def test_role_review_collects_the_target_of_a_core_supersession_only(
+def test_role_review_collects_the_target_of_a_supersession_and_its_extension(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 4: the collector reads the key `supersedes`, so `x.retires` is not collected.
+    """FLIPS 4: the collector read the key `supersedes`, so `x.retires` was not collected.
 
-    After intended change 4 the extension is collected through its parent and
-    `n2` lists `[[#u2]]`.
+    The extension is now collected through its parent and `n2` lists `[[#u2]]`.
     """
     rel = f"{KB}/rs-page.md"
     state = semantic_contract.build_page_state(
@@ -1144,7 +1143,7 @@ def test_role_review_collects_the_target_of_a_core_supersession_only(
 
     superseding = {row["unit"]["anchor"]: row["supersedes"] for row in described["units"]}
     assert superseding["n1"] == ["[[#u1]]"]  # CORE
-    assert superseding["n2"] == []  # FLIPS 4
+    assert superseding["n2"] == ["[[#u2]]"]  # FLIPS 4
     assert superseding["n3"] == []  # CORE
 
 
@@ -1167,19 +1166,22 @@ def test_the_sensed_model_records_a_core_supersession_in_both_directions(
 ) -> None:
     index = build_graph(fixture_vault)
 
-    assert _superseded_by(index, "rv-new") == ["rv-old-a"]  # CORE
+    # `rv-old-b` states `x.retires`; FLIPS 4 owns it, so the core pair is read without it.
+    assert [page for page in _superseded_by(index, "rv-new") if page != "rv-old-b"] == [
+        "rv-old-a"
+    ]  # CORE
     assert _superseded_by(index, "rv-old-a") == ["rv-new"]  # CORE
     assert _superseded_by(index, "sup-old") == ["sup-new"]  # CORE
 
 
-def test_the_sensed_model_does_not_record_an_extension_of_supersedes(
+def test_the_sensed_model_records_an_extension_of_supersedes(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 4: the page fact reads the key `supersedes`, so `x.retires` joins no pair."""
+    """FLIPS 4: the page fact read the key `supersedes`, so `x.retires` joined no pair."""
     index = build_graph(fixture_vault)
 
-    assert "rv-old-b" not in _superseded_by(index, "rv-new")  # FLIPS 4
-    assert _superseded_by(index, "rv-old-b") == []  # FLIPS 4
+    assert "rv-old-b" in _superseded_by(index, "rv-new")  # FLIPS 4
+    assert _superseded_by(index, "rv-old-b") == ["rv-new"]  # FLIPS 4
 
 
 # ---------------------------------------------------------------------------
