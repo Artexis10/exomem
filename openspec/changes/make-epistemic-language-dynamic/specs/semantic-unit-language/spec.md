@@ -19,7 +19,7 @@ A unit SHALL accept a governed `mood` whose value is a key in the mood registry 
 - **THEN** context presents both with their moods, and neither replaces the other
 
 ### Requirement: Degree of belief is sourced
-A unit SHALL accept a governed `belief` whose value is either a key in the belief-level registry (default entries speculative, plausible, likely, near-certain) or a probability between 0 and 1. A probability SHALL be valid only when the same unit carries a governed `holder` and a governed `basis`. A probability without both SHALL produce a deterministic source-addressed error that names the missing field. A unit with `belief`, `check_by` and a later verdict SHALL be available to calibration scoring.
+A unit SHALL accept a governed `belief` whose value is either a key in the belief-level registry (default entries speculative, plausible, likely, near-certain) or a probability between 0 and 1. A probability SHALL be valid only when the same unit carries a governed `holder` and a governed `basis`. A probability without both SHALL produce a deterministic source-addressed error that names the missing field. A unit with `belief`, `check_by` and a later verdict SHALL be available to calibration scoring. A belief SHALL belong to its holder: Exomem SHALL accept any basis text, SHALL NOT rewrite, normalize or override a holder's stated belief, and SHALL keep the beliefs of several holders about the same claim side by side. A belief that Exomem derives from evidence SHALL be labelled as derived and SHALL NOT replace a holder's belief.
 
 #### Scenario: A sourced forecast is accepted
 - **WHEN** a prediction unit carries `- belief: 0.7`, `- holder: Platform team` and `- basis: last six release cycles`
@@ -28,6 +28,10 @@ A unit SHALL accept a governed `belief` whose value is either a key in the belie
 #### Scenario: An unsourced number is refused
 - **WHEN** a claim unit carries `- belief: 0.85` and no holder or basis
 - **THEN** the document reports an error that names `holder` and `basis`
+
+#### Scenario: Two holders keep their own beliefs
+- **WHEN** one unit records the platform team's belief `likely` and another records the finance lead's belief `speculative` about the same claim
+- **THEN** context presents both beliefs with their holders, and neither replaces the other
 
 #### Scenario: A level needs no source
 - **WHEN** a claim unit carries `- belief: likely`

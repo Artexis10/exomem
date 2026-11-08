@@ -43,14 +43,16 @@ On 2026-11-08 the owner asked for this language to be dynamic and first-class. E
 - **Degree of belief becomes first-class.** The owner chose this shape on 2026-11-08:
   - belief levels (speculative, plausible, likely, near-certain) are registry data that any claim may carry;
   - a numeric probability is allowed only with a holder and a basis, mainly on predictions and hypotheses, so it can be scored for calibration;
-  - the commitment changes from "never a number" to "never an unsourced number".
+  - the commitment changes from "never a number" to "never an unsourced number";
+  - a belief belongs to its holder: Exomem records it as stated, accepts any basis and never overrides it. A belief Exomem derives from evidence is labelled as derived.
 - **New first-class meanings,** each as registry defaults:
   - a statement's mood (is, should, must, may);
   - the holder of a claim (whose viewpoint, as an entity);
   - event order (`precedes` and `follows`, with the order-in-time behaviour);
   - definitions (`defines` and `is_a`);
   - quantities (value, unit, uncertainty as governed unit metadata);
-  - procedures (a procedure kind, aligned with the approved-procedures change).
+  - procedures (a procedure kind, aligned with the approved-procedures change);
+  - the mode of an inference (deduction, induction, abduction, analogy, statistical inference, testimony), as registry data on inference units.
 - **Multilingual labels:** every registry entry carries labels per language over one key and one meaning.
 - **Teaching surfaces:** bootstrap and the skill teach the language from the registry, never from a code list.
 

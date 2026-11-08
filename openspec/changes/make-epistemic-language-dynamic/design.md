@@ -66,6 +66,8 @@ The owner chose this shape on 2026-11-08:
 - Belief levels are registry words that any claim may carry: speculative, plausible, likely and near-certain by default.
 - A numeric probability is governed unit metadata (`belief: 0.7`). It is valid only beside a `holder` (whose belief) and a `basis` (the evidence or the method).
 - Predictions with a probability and a `check_by` can be scored for calibration when their verdict arrives.
+- Exomem does not arbitrate belief. A belief belongs to its holder. The basis can be anything the holder gives, including intuition. Several holders' beliefs about one claim sit side by side. Any belief Exomem computes from evidence is a separate value, labelled as derived.
+- **Dimensions do drive code, but generically.** Retrieval can filter by dimension, context can group by dimension, and reviews and reports can queue by dimension. Each of those operations works for any dimension key. No code names a particular dimension.
 - The commitment "a judgment MUST NOT be recorded as a number" becomes "a judgment MUST NOT be recorded as a number without a holder and a basis".
 
 The rejected alternatives were levels only, which keeps the old rule but gives up calibration, and free numbers on any claim, which is the most exposed to unsupported precision.
