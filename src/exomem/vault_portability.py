@@ -371,11 +371,8 @@ class PortabilityLimits:
     """Resource bounds enforced before and while reading an archive."""
 
     max_files: int = 100_000
-    # The largest archive that a Cloud export can upload: 1000 parts of at most 1 GiB (cellctl's part
-    # plan). The verifier and the restore must accept every archive that the export produces, and an
-    # evicted recording above 2 GiB is one member of it.
-    max_total_bytes: int = 1000 * 1024 * 1024 * 1024
-    max_file_bytes: int = 1000 * 1024 * 1024 * 1024
+    max_total_bytes: int = 10 * 1024 * 1024 * 1024
+    max_file_bytes: int = 2 * 1024 * 1024 * 1024
     max_manifest_bytes: int = 16 * 1024 * 1024
     max_path_bytes: int = 4096
     max_compression_ratio: int = 1_000

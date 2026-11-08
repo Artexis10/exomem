@@ -363,6 +363,8 @@ def pack(vault: Path, staging: Path, *, export_id: str, cell_id: str, part_bytes
             background_writers_stopped=True, reads_allowed=True,
         )
         sink = SpoolSink(spool, part_bytes, max_parts, sleep=sleep)
+        # cellctl passes the planned bound, at most 1000 parts of 1 GiB. It replaces the library's
+        # conservative defaults, because an evicted recording above 2 GiB is one member of the archive.
         vault_portability.stream_planned_archive(
             sink, staged, stored, context=context, armed_requirement=plan["armed_requirement"],
             limits=vault_portability.PortabilityLimits(max_total_bytes=max_bytes, max_file_bytes=max_bytes))

@@ -165,6 +165,8 @@ def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_
     # Each verification owns and closes its HTTP session.
     fs = HTTPFileSystem(encoded=True, skip_instance_cache=True, client_kwargs={"trust_env": True})
     try:
+        # cellctl passes the planned bound, at most 1000 parts of 1 GiB. The verifier must accept every
+        # archive that the pack wrote, and an evicted recording above 2 GiB is one member of it.
         with fs.open(url, "rb", size=archive_bytes, block_size=1024 * 1024,
                      cache_type="blockcache", cache_options={"maxblocks": 2}) as stream:
             verified = vault_portability.verify_export_stream(stream, archive_bytes, expected_cell_id=cell_id,
