@@ -4571,10 +4571,22 @@ def _check_unfinished_experiments(
 
 # ---------------- check: prediction_window ----------------
 
-# Authoring one of these on the unit is the signal that SOMEBODY ENGAGED with the
-# prediction. Deliberately not a judgment of which way it went — concluding is
+# Authoring a relation with the `bears_on` behaviour on the unit is the signal that SOMEBODY
+# ENGAGED with the prediction. Deliberately not a judgment of which way it went — concluding is
 # `verdict`'s job; this queue only measures whether anyone looked.
-_PREDICTION_RESOLVING_RELATIONS = frozenset({"supports", "contradicts", "resolves", "evidenced_by"})
+def _bears_on_unit(
+    relations: relation_registry.RelationRegistry, unit: semantic_units.SemanticUnit
+) -> bool:
+    """True when the unit itself authors a relation that bears on it, whatever its extension."""
+    return any(
+        "bears_on"
+        in relations.behaviours_of(
+            relations.resolve(relation.kind, origin="semantic_relation").canonical or ""
+        )
+        for relation in unit.relations
+    )
+
+
 # The prefilter that decides whether a page is worth parsing. It MUST NOT be
 # narrower than `semantic_blocks.normalize_label`, which lowercases a metadata
 # key and collapses `[\s-]+` to `_` — so `- Check By:`, `- check by:` and
@@ -4607,8 +4619,8 @@ def _check_prediction_window(
     without the author having to remember to go looking for it.
 
     "Nothing recorded" is deliberately UNIT-LOCAL: no `verdict` on the unit, and
-    no outbound relation authored ON THE UNIT ITSELF resolving to one of
-    `_PREDICTION_RESOLVING_RELATIONS`. A relation elsewhere on the parent page
+    no outbound relation authored ON THE UNIT ITSELF with the `bears_on` behaviour
+    (`_bears_on_unit`). A relation elsewhere on the parent page
     does not clear it, and neither does an inbound edge from another note.
 
     That is forced, not lazy. `epistemic_graph` still strips the `#fragment` off a
@@ -4669,11 +4681,7 @@ def _check_prediction_window(
                 continue
             if unit.verdict:
                 continue
-            if any(
-                relations.resolve(relation.kind, origin="semantic_relation").canonical
-                in _PREDICTION_RESOLVING_RELATIONS
-                for relation in unit.relations
-            ):
+            if _bears_on_unit(relations, unit):
                 continue
 
             overdue_days = (today - due).days
@@ -6018,12 +6026,11 @@ QUESTION_AGING_DAYS = 30
 #: the check alias-proof.
 _QUESTION_CATEGORY = "question"
 
-#: Authoring one of these on the unit is the signal that SOMEBODY ANSWERED the
-#: question. Deliberately the same set `_check_prediction_window` clears on, so
-#: one resolution rule governs every unit-scoped due-state category instead of
-#: two that drift apart. A question and a prediction are the same shape of open
-#: loop; only the threshold that opens them differs.
-_QUESTION_ANSWERING_RELATIONS = _PREDICTION_RESOLVING_RELATIONS
+# Authoring a `bears_on` relation on the unit is the signal that SOMEBODY ANSWERED the question.
+# Deliberately the rule `_check_prediction_window` clears on (`_bears_on_unit`), so one
+# resolution rule governs every unit-scoped due-state category instead of two that drift apart.
+# A question and a prediction are the same shape of open loop; only the threshold that opens
+# them differs.
 
 #: Cheap prefilter, deliberately looser than the exact heading — a page that has
 #: never authored a question cannot match, so a vault that does not use the
@@ -6106,11 +6113,7 @@ def _check_question_aging(
                 continue
             if unit.verdict:
                 continue
-            if any(
-                relations.resolve(relation.kind, origin="semantic_relation").canonical
-                in _QUESTION_ANSWERING_RELATIONS
-                for relation in unit.relations
-            ):
+            if _bears_on_unit(relations, unit):
                 continue
 
             fingerprint = unit.fingerprint or ""

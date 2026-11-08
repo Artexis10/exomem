@@ -846,18 +846,17 @@ def test_a_core_relation_that_bears_on_a_prediction_clears_it(fixture_vault: Pat
         assert relation in still_open  # CORE
 
 
-def test_an_extension_of_a_clearing_relation_does_not_clear_a_prediction(
+def test_an_extension_of_a_clearing_relation_clears_a_prediction(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 1: the set holds core keys, so an extension of `supports` is not in it.
+    """FLIPS 1: the set used to hold core keys, so an extension of `supports` was not in it.
 
-    After intended change 1 each of these clears the prediction through its
-    parent and leaves the list.
+    Each of these now clears the prediction through its parent.
     """
     still_open = _still_open(fixture_vault, "prediction_window")
 
     for relation in ("x.backs", "x.closes", "x.disputes"):
-        assert relation in still_open  # FLIPS 1
+        assert relation not in still_open  # FLIPS 1
 
 
 def test_a_core_relation_that_bears_on_a_question_clears_it(fixture_vault: Path) -> None:
@@ -869,14 +868,14 @@ def test_a_core_relation_that_bears_on_a_question_clears_it(fixture_vault: Path)
         assert relation in still_open  # CORE
 
 
-def test_an_extension_of_a_clearing_relation_does_not_answer_a_question(
+def test_an_extension_of_a_clearing_relation_answers_a_question(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 1: the question check shares the prediction check's key set."""
+    """FLIPS 1: the question check shares the prediction check's rule."""
     still_open = _still_open(fixture_vault, "question_aging")
 
     for relation in ("x.backs", "x.closes", "x.disputes"):
-        assert relation in still_open  # FLIPS 1
+        assert relation not in still_open  # FLIPS 1
 
 
 # ---------------------------------------------------------------------------
