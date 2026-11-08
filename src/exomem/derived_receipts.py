@@ -1725,6 +1725,45 @@ def _publication_split(
     return owned, frozenset(retired | handed_on)
 
 
+def converge_paths(vault_root: Path, receipt: Any) -> tuple[DerivedBatchPath, ...]:
+    """The paths a proven batch still converges itself.
+
+    A path whose bytes moved on since this batch is skipped only when a newer
+    proven batch carries it: that batch's own components converge its current
+    bytes. Every other path stays this batch's, including one moved by an edit
+    no receipt covers.
+    """
+    paths = tuple(receipt.paths)
+    if not deferred_index.store_path(vault_root).exists():
+        return paths
+    states = [_canonical_path_state(vault_root, path) for path in paths]
+    if all(state == "after" for state in states):
+        return paths
+    connection = _connect_receipt_read(vault_root)
+    try:
+        row = connection.execute(
+            "SELECT rowid FROM derived_batches WHERE batch_id = ?", (receipt.batch_id,)
+        ).fetchone()
+        if row is None:
+            return paths
+        sequence = int(row[0])
+        return tuple(
+            path
+            for path, state in zip(paths, states, strict=True)
+            if not (
+                (state == "other" and _newer_custody_covers_path(connection, sequence, path.rel_path))
+                or (
+                    state == "before"
+                    and _newer_custody_wrote_bytes(
+                        connection, sequence, path.rel_path, path.before_hash
+                    )
+                )
+            )
+        )
+    finally:
+        connection.close()
+
+
 def pending_visibility_complete(vault_root: Path, receipt: DerivedBatchReceipt) -> bool:
     """Whether durable custody has no unpublished rows; this is not byte proof."""
     connection = _connect_receipt_read(vault_root)
