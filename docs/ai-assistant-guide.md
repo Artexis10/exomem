@@ -482,9 +482,23 @@ bootstrap(profile="compact")
 ## Hosted chat clients
 
 Hosted clients usually cannot use local filesystem hooks or load the repo's
-Claude Code skill. Connect Exomem through whatever remote MCP/connector support
-the client offers, then add the instruction block above as account-level or
-project-level custom instructions.
+Claude Code skill. To set one up:
+
+1. Connect Exomem through the remote MCP or connector support the client offers.
+2. Paste the learning instruction below into the account-level or project-level custom instructions.
+3. If the client has no loaded Exomem skill, add the instruction block above after it.
+
+```text
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+```
+
+The agent then recalls what Exomem holds before a task and saves what it learns.
+The learning instruction is your own request, so it goes where the client reads
+your instructions. With the instruction block it is longer than a 1,500-character
+field, so where the client caps a field, give each text its own field. `exomem
+setup` offers the same text for Claude Code (`CLAUDE.md`) and Codex
+(`AGENTS.md`). Leave it out at the `light` and `off` prominence levels: they save
+only when you ask.
 
 For ChatGPT Personal Plugins, follow the exact OAuth-only settings and
 tool-surface refresh gate in [remote-quickstart.md](remote-quickstart.md#chatgpt-personal-plugin-oauth-only).
