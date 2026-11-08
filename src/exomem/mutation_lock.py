@@ -2146,7 +2146,9 @@ def ending_waits(when: Callable[[int | None], bool]) -> Iterator[None]:
     for a thread whose own work a holder may wait on. The collection store thread waits for the
     vault boundary inside maintenance while the holder's store read waits for that thread, and
     otherwise only the timeout ends either wait. ``when`` runs once per poll interval of the wait,
-    so it must be cheap and must never wait for a boundary. A wait with no timeout (a probe), a
+    so it must be cheap and must never wait for a boundary. Only a wait to enter a first boundary
+    ends early: a thread that already holds one is inside work that must finish or roll back, such
+    as a nested identity gate or a rollback's own cleanup. A wait with no timeout (a probe), a
     borrower's wait and a wait for a holder in another process (the OS lock) do not end early.
     """
     token = _ENDING_WAITS.set(when)
@@ -2159,13 +2161,13 @@ def ending_waits(when: Callable[[int | None], bool]) -> Iterator[None]:
 def _acquire_guard(state: _LocalLockState, deadline: float) -> bool:
     """Wait for the local guard until ``deadline``, as one of its waiters; whether it was taken.
 
-    Inside `ending_waits`, the wait runs one poll interval at a time and raises `WaitEnded` when
-    its scope asks.
+    Inside `ending_waits`, a thread that holds no boundary yet waits one poll interval at a time
+    and raises `WaitEnded` when its scope asks.
     """
     when = _ENDING_WAITS.get()
     with _waiting(state):
         remaining = max(0.0, deadline - time.monotonic())
-        if when is None or remaining <= 0.0:
+        if when is None or remaining <= 0.0 or current_thread_holds_boundary():
             return state.guard.acquire(timeout=remaining)
         while not state.guard.acquire(timeout=min(remaining, _DEFAULT_POLL_INTERVAL_SECONDS)):
             if when(state.owner_thread):
