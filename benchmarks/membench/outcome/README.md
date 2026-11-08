@@ -93,6 +93,10 @@ reads `incomplete: judge agreement X`. No other judge breaks that tie. The harne
 cross-check of the judge, and the report says so. Before it judges, the report refuses a case file
 whose digest differs from the digest that the run recorded.
 
+The judge reads each token that names a memory store (`memory/...` or the product name) as `[store]`, so it
+cannot read the arm from those names. Case text may not contain one; the case check refuses it. A run judged
+before this masking holds unmasked items: move its judge folder aside and run `report` again to re-judge it.
+
 The score of a probe for an arm is the mean of `correct` over the project's counted windows. A
 project counts its first two valid windows. The pairs `P-F`, `P-N` and `P-E` use change probes
 only; `P-E` shows what the plugin, skills and instruction add to the MCP server alone. Each reports the mean difference and a 95% percentile bootstrap interval over probes,
