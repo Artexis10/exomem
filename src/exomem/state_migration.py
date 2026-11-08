@@ -296,7 +296,10 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - _store_owned_ids()
+        # As at startup, any optional format this release can use is ready, an armed connector boundary's
+        # included. An unknown ID partitions as physical, so the descriptor-set comparison refuses it.
+        _require_supported_compatibility(optional)
+        if (physical != set(_descriptor_ids())
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
