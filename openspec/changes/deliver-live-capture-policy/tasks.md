@@ -43,3 +43,12 @@
 - [x] 10.3 Add the three `CORE_RULES` entries and the carrier tests; watch each fail on 49e03a6b2. Recover the 250 compact-core bytes from the compact profile and measure every level and surface cell.
 - [x] 10.4 Pass `vault_root` to `stage_artifact` in both adoption paths, so a held upload (`exomem-held:`) is redeemed, and put a refused adoption's hold back for a retry. Before this, `preserve_artifacts` with an `adoption` envelope on a held handle failed with `HELD_UPLOAD_UNAVAILABLE` (round-3 case A1). This fix rides in the same batch.
 - [ ] 10.5 Run the repair round on the merged candidate: B8, A1, A4, B7 and A2. When all pass, run the full 13-case acceptance.
+
+## 11. Offered-relation acceptance
+
+- [x] 11.1 Make `relation_queue.candidate_identity` public; add `relation_queue.open_reviews` over the same classification that `accept` runs; attach `review` to the open candidates in `suggest_relations`, with a warning when the queue cannot confirm.
+- [x] 11.2 Move the binding check into `relation_queue.accept`: an unbound `requested_relation` must be among `RelationFit.options` at accept time; a supplied binding is validated as before. Rewrite the two remediations and the `INVALID_ACCEPT` message, and the `op_suggest_relations` docstring.
+- [x] 11.3 Reword the shared capture doctrine to "a match the user confirms goes to link_acceptance instead" (+8 bytes); remeasure every bootstrap cell and the block worst case.
+- [x] 11.4 Add the tests: an offered relation accepted from its suggestion in one call, a relation not offered refused, a dismissed candidate carrying no `review`, and a failed queue lookup naming a warning. Watch each fail on 574876469 and on a mutation of its guard.
+- [x] 11.6 Correct the review of PR 2536: compute the source page's registry and parsed relations once per call in `open_reviews`; tell an agent to accept a candidate with no options as is; keep the lookup warning free of the error message; rewrite the scaffold teaching of the offered route and regenerate the skill copies. A candidate that the queue's derivation does not return is not a failed lookup: the suggestion generators propose pairs that the queue leaves out as authored, so the warning stays for a reference lookup that fails.
+- [ ] 11.5 Run B8, then B7q (the restraint case), on the merged candidate; when both pass, continue with 10.5.

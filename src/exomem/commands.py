@@ -3716,8 +3716,10 @@ def op_suggest_relations(
     Uses deterministic signals from wikilinks, frontmatter sources, shared
     sources/entities, supersession, and optional embedding proximity when
     available. Model-backed suggestions are default-off and soft-fail as
-    warnings; accepted relations still require an explicit `note` or `edit`
-    write. This operation never mutates Markdown or the graph sidecar.
+    warnings. For an existing page, a candidate that the relation queue holds
+    open carries `review` (`ref`, `fingerprint`, `source_content_hash`), the
+    fields that `accept-relation` takes; a failed lookup adds a warning. This
+    operation never mutates Markdown or the graph sidecar.
 
     Args:
         path: Existing page to inspect. Mutually exclusive with draft-only use.
@@ -10965,12 +10967,6 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
-        if requested_relation is not None and (
-            vocabulary_ref is None or vocabulary_fingerprint is None
-        ):
-            raise ValueError(
-                "VOCABULARY_APPLICATION_INVALID: selected relation requires its exact review binding"
-            )
 
         def _accept_relations_edit(vault_root: Path, **kw: Any) -> dict:
             """`edit_note` for the relation queue: identical to op_edit_memory,
@@ -10995,6 +10991,7 @@ def op_connect_memory(
             expected_fingerprint=expected_fingerprint,
             source_path=path,
             requested_relation=requested_relation,
+            bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
         )
     if operation == "suggest-relations":
