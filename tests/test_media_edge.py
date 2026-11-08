@@ -273,6 +273,9 @@ def test_a_rejected_set_file_does_not_change_the_reported_digest(harness: Harnes
 
 
 def test_a_lost_reply_to_the_start_of_a_large_file_leaves_no_intent_and_no_version(tmp_path: Path):
+    # Guards design D6's premise, which the code already met: recovery state added before the start call
+    # could never be resolved without a file ID, so it would hold the generation open and no revocation
+    # would ever be confirmed.
     harness = Harness(tmp_path, max_object_bytes=10_000, part_bytes=1000)
     harness.fake.lose("b2_start_large_file", "reply")
     assert harness.put(b"z" * 2500).status_code == 503
@@ -289,6 +292,8 @@ def test_a_lost_reply_to_the_start_of_a_large_file_leaves_no_intent_and_no_versi
 
 
 def test_a_large_upload_whose_intent_was_not_persisted_is_never_finished(tmp_path: Path, monkeypatch):
+    # Guards design D6's premise, which the code already met: a finish sent without a persisted intent, by
+    # a best-effort persist or one moved after the finish, could land after the edge reported its drain.
     harness = Harness(tmp_path, max_object_bytes=10_000, part_bytes=1000)
 
     async def disk_full(intent):
