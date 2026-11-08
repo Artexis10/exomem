@@ -126,6 +126,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "governance-schema",
         "relations",
         "collections",
+        "store-mode",
         "import",
     }
 )
@@ -300,6 +301,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _relations_main(raw[1:])
     if raw and raw[0] == "collections":
         return _collections_main(raw[1:])
+    if raw and raw[0] == "store-mode":
+        return _store_mode_main(raw[1:])
     if raw and raw[0] == "import":
         from .local_import import main as local_import_main
         return local_import_main(raw[1:])
@@ -2522,6 +2525,96 @@ def _collections_main(argv: list[str]) -> int:
     except (CollectionError, CollectionStoreError, OpError, OSError) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)
         print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _store_mode_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem store-mode",
+        description=(
+            "Owner operations that move this vault's pages, lexical rows and graph rows into the "
+            "collection store and back. Behind the vault-store-v1 release gate; vault files are "
+            "never rewritten by a migration."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    status = subcommands.add_parser("status", help="report the mode and, in store mode, the store's counts")
+    migrate = subcommands.add_parser(
+        "migrate",
+        help="stage the store from the files, prove it equals what the files derive, then install it; "
+        "run apply with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    migrate_step = migrate.add_mutually_exclusive_group(required=True)
+    migrate_step.add_argument("--dry-run", action="store_true", help="run the read-only preflight; writes nothing")
+    migrate_step.add_argument("--apply", action="store_true", help="migrate")
+    migrate.add_argument("--why", help="reason recorded in the audit trail (required with --apply)")
+    rollback = subcommands.add_parser(
+        "rollback",
+        help="return this vault to file mode, exporting the audit trail first; run apply with the "
+        "service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    rollback_step = rollback.add_mutually_exclusive_group(required=True)
+    rollback_step.add_argument("--dry-run", action="store_true", help="report what a rollback would find; writes nothing")
+    rollback_step.add_argument("--apply", action="store_true", help="roll back")
+    rollback.add_argument("--export-to", type=Path, help="new or empty directory outside the vault (required with --apply)")
+    rollback.add_argument("--why", help="reason recorded in the audit trail (required with --apply)")
+    rollback.add_argument(
+        "--export-held", action="store_true",
+        help="keep each unimported edit in the export, then restore the store's version of its file",
+    )
+    for command in (status, migrate, rollback):
+        command.add_argument(
+            "--vault",
+            default=os.environ.get("EXOMEM_VAULT_PATH"),
+            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        )
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("store-mode: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
+        return 2
+    applying = getattr(args, "apply", False)
+    if applying and not (args.why or "").strip():
+        print(f"store-mode {args.command}: --apply needs a non-blank --why", file=sys.stderr)
+        return 2
+    if args.command == "rollback" and applying and args.export_to is None:
+        print("store-mode rollback: --apply needs --export-to", file=sys.stderr)
+        return 2
+
+    from . import state_migration
+    from .cli_ops import OpError
+    from .collection_store.connection import CollectionStoreError
+    from .governance.principal import library_scope
+    from .vault_store import migrate as store_migrate
+    from .vault_store import mode as store_mode
+    from .vault_store import rollback as store_rollback
+
+    root = Path(args.vault)
+    try:
+        with library_scope():
+            if args.command == "status":
+                result = store_mode.status(root)
+            elif args.command == "migrate":
+                result = store_migrate.apply_route(root, why=args.why) if applying else store_migrate.dry_run(root)
+            elif applying:
+                result = store_rollback.apply_route(
+                    root, export_to=args.export_to, why=args.why, export_held=args.export_held
+                )
+            else:
+                result = store_rollback.dry_run(root)
+        print(json.dumps(result, sort_keys=True))
+    except (
+        CollectionStoreError,
+        OpError,
+        OSError,
+        state_migration.StateMigrationManifestError,
+        state_migration.StateMigrationOfflineRequired,
+    ) as error:
+        code, message = getattr(error, "code", type(error).__name__), str(error)
+        print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
+        details = getattr(error, "details", None)
+        if details:
+            print(json.dumps(details, sort_keys=True, default=str), file=sys.stderr)
         return 1
     return 0
 

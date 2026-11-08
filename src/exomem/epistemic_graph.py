@@ -2206,6 +2206,23 @@ def _dependency_proof_triggers() -> list[tuple[str, str]]:
     return triggers
 
 
+#: The tables that hold the sidecar's own history (checkpoints, a generation counter) and no fact
+#: derived from the files, so a comparison with a fresh derivation leaves them out.
+# nosemgrep: ep-word-set -- The one table that the graph DDL fixes as build stamps.
+BUILD_STAMP_TABLES = ("graph_meta",)
+
+
+def create_row_schema(conn: sqlite3.Connection, *, publication: bool) -> None:
+    """Create the graph's row tables, ``graph_meta``, indexes and dependency-proof triggers.
+
+    This is the graph's own DDL for a database that is not its sidecar: store mode copies the graph
+    into the collection store through it (OpenSpec make-vault-store-canonical). ``publication`` also
+    installs the capture tables and triggers that publish a sidecar to independent readers
+    (``graph_publication``); a store that nothing publishes passes False. It owns no transaction.
+    """
+    EpistemicGraphIndex._create_graph_schema(conn, publication=publication)
+
+
 def _dependency_changed_keys(
     rels: set[str], *resolvers: vault_module.WikilinkResolver
 ) -> set[str]:
@@ -2234,6 +2251,17 @@ def _resolver_topology_fingerprint(
     ]
     payload = json.dumps(topology, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def derive_row_tables(vault_root: Path, conn: sqlite3.Connection) -> int:
+    """Fill the graph row tables on ``conn`` from the vault's Markdown files, as a cold rebuild.
+
+    ``conn`` already holds the schema that ``create_row_schema`` made. Store mode compares what this
+    derives with the rows it copied in. It owns no transaction and writes no availability marker.
+    Returns the number of pages it indexed.
+    """
+    resolver = find_module.recall_resolver_snapshot(vault_root)
+    return EpistemicGraphIndex(vault_root)._derive_pages(conn, resolver)
 
 
 class EpistemicGraphIndex:
@@ -2403,7 +2431,7 @@ class EpistemicGraphIndex:
         # transaction would fail at once on the read-to-write upgrade instead.
         conn.execute("BEGIN IMMEDIATE")
         try:
-            self._create_graph_schema(conn)
+            create_row_schema(conn, publication=True)
         except BaseException:
             conn.rollback()
             raise
@@ -2413,7 +2441,8 @@ class EpistemicGraphIndex:
         conn.commit()
         return conn
 
-    def _create_graph_schema(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _create_graph_schema(conn: sqlite3.Connection, *, publication: bool) -> None:
         edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         required_edge_columns = {
             "dst_page_key",
@@ -2581,7 +2610,8 @@ class EpistemicGraphIndex:
         ).fetchall():
             if "dependency_proof" in name and name not in current:
                 conn.execute(f'DROP TRIGGER "{name}"')
-        graph_publication.install(conn)
+        if publication:
+            graph_publication.install(conn)
 
     def _connect_existing(
         self,
@@ -5577,25 +5607,32 @@ class EpistemicGraphIndex:
             # Commit the availability-marker withdrawal before rebuilding rows.
             # Readers must fail closed for the whole pass, while the row work
             # itself can share one transaction instead of fsyncing per file.
-            indexed = 0
-            kb = self.vault_root / kb_dirname()
-            type_basis = _producer_type_basis(self.vault_root)
             with conn, self._keeping_dependency_proof(conn, None):
-                if kb.is_dir():
-                    for md in find_module._walk_md(kb):
-                        # The pass writes only its private sidecar, so a
-                        # pause here holds no reader; it holds only the
-                        # rebuild-owner claim a joining writer already waits on.
-                        foreground_priority.yield_to_foreground()
-                        if self._index_path(
-                            conn, md, resolver=resolver, commit=False, type_basis=type_basis
-                        ):
-                            indexed += 1
+                indexed = self._derive_pages(conn, resolver)
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
             return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
         finally:
             conn.close()
+
+    def _derive_pages(
+        self, conn: sqlite3.Connection, resolver: vault_module.WikilinkResolver
+    ) -> int:
+        """Index every Knowledge Base page into ``conn`` without committing; return the count."""
+        indexed = 0
+        kb = self.vault_root / kb_dirname()
+        type_basis = _producer_type_basis(self.vault_root)
+        if kb.is_dir():
+            for md in find_module._walk_md(kb):
+                # The pass writes only its private sidecar, so a
+                # pause here holds no reader; it holds only the
+                # rebuild-owner claim a joining writer already waits on.
+                foreground_priority.yield_to_foreground()
+                if self._index_path(
+                    conn, md, resolver=resolver, commit=False, type_basis=type_basis
+                ):
+                    indexed += 1
+        return indexed
 
     def _mark_unavailable(self) -> None:
         """Withdraw the availability claim; leave the sidecar's identity intact.
