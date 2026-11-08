@@ -33,7 +33,7 @@ from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, get_args
 
@@ -4368,6 +4368,16 @@ def op_propose_compilation(
         raise ValueError(f"{e.code}: {e.reason}") from e
 
 
+def _retired_item(vault_root: Path, path: str) -> dict | None:
+    """The stored row behind a retired item path of a converted collection, or None."""
+    from .collection_store import aliases
+
+    for spelling in get_page_module.spellings(path):
+        if (row := aliases.read(vault_root, spelling)) is not None:
+            return row
+    return None
+
+
 def op_get(
     vault_root: Path,
     path: str,
@@ -4456,6 +4466,8 @@ def op_get(
         with call_spans_module.span("read.prepare"):
             prepared = get_page_module.prepare_page_read(vault_root, path=path)
     except get_page_module.GetError as e:
+        if e.code == "NOT_FOUND" and (row := _retired_item(vault_root, path)) is not None:
+            return row
         raise ValueError(f"{e.code}: {e.reason}") from e
     _refuse_policy_tree_read(
         prepared.resolved_relative,
@@ -6063,6 +6075,12 @@ def _list_directory_payload(
             exclude=is_governance_path,
         )
     except list_directory_module.ListDirectoryError as e:
+        if e.code == "NOT_FOUND" and cursor is None and (row := _retired_item(vault_root, listing)) is not None:
+            entry = {"name": PurePosixPath(row["path"]).name, "type": "store_row", "path": row["path"],
+                     "size_bytes": None, "updated": None, "frontmatter_type": None,
+                     "collection_id": row["collection_id"], "source": row["source"], "read_only": True}
+            page = {"outcome": row["outcome"], "path": row["path"], "entries": [entry]}
+            return page if limit is None else {**page, "truncated": False, "next_cursor": None}
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
     if limit is not None:

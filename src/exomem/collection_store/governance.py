@@ -153,6 +153,48 @@ def content_available(path, identity, access_rules, access_blocked, tombstones):
             and not access._matches(access_rules["excluded"], access._kb_relative(path)))
 
 
+def write_withheld(access_rules, path):
+    """The write floor: a read-only access rule or an append-only top folder refuses a change at ``path``."""
+    relative = access._kb_relative(path)
+    return (access._matches(access_rules["readonly"], relative)
+            or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY})
+
+
+def policy_path_changes(operation, cid, path) -> tuple[str, ...]:
+    """What moving every row of ``cid`` to the policy path ``path`` would change, by name; empty when nothing.
+
+    A row's decision reads its policy path only through the content floor (access exclusions and
+    tombstones), the write floor and its scope membership. The type's default audience, the standing
+    rules and grants and ``decide`` read none of it, so equal inputs give an equal decision for every
+    audience and purpose. Each input that differs is named. A changed membership counts even when no
+    standing rule names the scope, because an authorization session admits rows by scope.
+    """
+    if operation.failed or operation.policy.blocked or operation.access_blocked:
+        raise collections.CollectionError(
+            "COLLECTION_CONVERSION_DISCLOSURE_UNKNOWN",
+            "the governance policy cannot be read, so the rows' disclosure cannot be compared")
+    rules, compiled = operation.access, operation.policy
+
+    def inputs(basis, policy_path):
+        return (content_available(policy_path, basis.identity, rules, False, operation.tombstones),
+                write_withheld(rules, policy_path),
+                membership.evaluate_metadata(replace(basis.subject, path=policy_path), compiled))
+
+    changes = set()
+    for subject in iter_subjects(operation.conn, cid, operation.logical_vault_id, include_held=False):
+        current = subject.basis.subject.path
+        if subject.row_id is None or current == path:
+            continue
+        (shown, withheld, scopes), (shown_after, withheld_after, scopes_after) = (
+            inputs(subject.basis, current), inputs(subject.basis, path))
+        changes.update(f"scope {scope}" for scope in scopes ^ scopes_after)
+        if shown != shown_after:
+            changes.add(f"the access exclusion or tombstone that covers {current}")
+        if withheld != withheld_after:
+            changes.add(f"the read-only access rule that covers {current}")
+    return tuple(sorted(changes))
+
+
 def subject_policy(basis, scope_ids, effective):
     """Apply the registry's default audience before using the shared decision kernel."""
     if basis.default_audience == "owner":
@@ -1100,11 +1142,8 @@ class OperationAuthorization:
             return Decision(0)
         if not content_available(path, basis.identity, self.access, self.access_blocked, self.tombstones):
             return Decision(0)
-        if self.mutation:
-            relative = access._kb_relative(path)
-            if (access._matches(self.access["readonly"], relative)
-                    or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY}):
-                return Decision(0)
+        if self.mutation and write_withheld(self.access, path):
+            return Decision(0)
         scope_ids = self.cache.scopes(subject, self.policy)
         ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
                                                    mutation=self.mutation, path=path)

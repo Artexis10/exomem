@@ -250,12 +250,7 @@ def record_memory(
                 root, root / manifest_path, manifest_text.encode("utf-8")
             )
             record_governance.require_records_profile(manifest)
-            records.require_create_storage(root, manifest)
-            if manifest.storage.strategy == structured_collections.SQLITE_STORAGE:
-                from .collection_store import ownership, runtime
-
-                # The serving store thread creates a sqlite collection; reaching the files means none did.
-                runtime.refuse_unserved_create(root, ownership.current(root).marker)
+            records.require_file_create(root, manifest)
             return records.create_collection(
                 vault_root,
                 manifest_path,

@@ -166,6 +166,7 @@ class _ProducerSession:
 
     @contextmanager
     def writer(self, token):
+        from .preview import producing
         from .writer import CollectionWriter
 
         self.require(token)
@@ -179,14 +180,16 @@ class _ProducerSession:
         try:
             with connection.open_writer(self.path, lease_check=lambda: self.require(token),
                                         schema_guard=record_schema) as handle:
-                yield CollectionWriter(self.root, handle)
+                writer = CollectionWriter(self.root, handle)
+                with producing(self.root, writer):
+                    yield writer
         finally:
             writer_lease._ACTIVE_WRITE_FENCE.reset(fence_context)
             writer_lease._ACTIVE_LEASE_MANAGER.reset(manager_context)
 
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
-               fence_client, scaffold=True):
+               fence_client, scaffold=True, facade_profile=None):
     if session.production:
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
@@ -243,7 +246,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                         else:
                             prepared = _prepare_new(writer, manifest_path, manifest_text, why=why,
                                                     request_id=request_id, scaffold=scaffold,
-                                                    fence_client=fence_client)
+                                                    fence_client=fence_client, facade_profile=facade_profile)
                     finally:
                         # A rejected prepare cannot revoke admission; a durable intent must gate reports.
                         runtime = manager._collection_store
@@ -254,7 +257,8 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
         return _resume_locked(session, fence_client, preparation_token=token)
 
 
-def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client):
+def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client,
+                 facade_profile=None):
     from . import ownership
 
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -274,7 +278,8 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
-                           target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())
+                           target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode(),
+                           facade_profile=facade_profile)
 
 
 def target_marker(root, old, sid, entries, *, fence, supersede=False):
@@ -1607,8 +1612,10 @@ class _CreateAdmission:
 
 
 def _prepare_create(writer, manifest_path, manifest_text, *, why, request_id,
-                    expected_marker, target_marker, scaffold=True):
+                    expected_marker, target_marker, scaffold=True, facade_profile=None):
     admission = _CreateAdmission(writer, expected_marker, target_marker)
+    # The calling tool's profile: the create requires it and applies that profile's scaffold.
+    writer._facade_profile = facade_profile
     receipt = writer._create_collection(manifest_path, manifest_text, why=why, request_id=request_id,
                                         scaffold=scaffold, admission=admission)
     try:

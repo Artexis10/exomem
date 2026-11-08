@@ -70,6 +70,25 @@ def unbound() -> Iterator[None]:
         _BOUND.reset(token)
 
 
+@contextmanager
+def producing(vault_root: Path, writer: CollectionWriter) -> Iterator[None]:
+    """Bind the producer's ``writer`` in place of the request's while the producer writes.
+
+    Opening the producer's writer retires the one a served request borrowed (``runtime.lent``), so a
+    canonical read nested in the producer's work reads through the producer's writer and transaction.
+    A context bound to no writer for this vault stays unbound.
+    """
+    binding = _BOUND.get()
+    if binding is None or not _bound_to(binding, vault_root):
+        yield
+        return
+    token = _BOUND.set((binding[0], writer, binding[2]))
+    try:
+        yield
+    finally:
+        _BOUND.reset(token)
+
+
 def _bound_to(binding: tuple[Path, CollectionWriter, bool], vault_root: Path) -> bool:
     # The vault root's canonical form is configuration, so a request's resolution scope resolves it once.
     return binding[0] == state_paths.resolved_vault_path(vault_root, expanduser=False)
@@ -532,7 +551,7 @@ def dispatch(
         if action == "create" and binding[2]:
             from .runtime import served_create
 
-            created = served_create(vault_root, args)
+            created = served_create(vault_root, args, facade_profile=profile)
             if created is not None:
                 return True, created
         if selector is None or selected_writer(vault_root, selector, prove=prove) is None:

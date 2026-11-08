@@ -139,3 +139,94 @@ def test_the_first_sqlite_create_records_the_floor_that_an_older_release_refuses
                         state_migration._OPTIONAL_COMPATIBILITY_IDS - {FLOOR})
     with pytest.raises(state_migration.StateMigrationManifestError):
         state_migration.require_vault_state_ready(root)
+
+
+ROADMAP = "8d8d8d8d-8d8d-4d8d-8d8d-8d8d8d8d8d8d"
+ROADMAP_PATH = manifest_path("planning").replace("Work", "Roadmap")
+ROADMAP_FOLDER = ROADMAP_PATH.removesuffix("/_collection.md")
+ROADMAP_TEXT = (manifest_text("planning").replace(CID, ROADMAP).replace("title: Work", "title: Roadmap")
+                .replace("strategy: markdown-items\n  source: Items\n", "strategy: sqlite\n  source: Summary\n"))
+OUTCOME = "9e9e9e9e-9e9e-4e9e-8e9e-9e9e9e9e9e9e"
+INITIATIVE = "afafafaf-afaf-4faf-8faf-afafafafafaf"
+
+
+def test_plan_memory_create_makes_a_summary_collection_whose_hierarchy_and_saved_views_work(
+        service, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: Planning create on a vault with a store writes item files or a file-canonical
+    collection, refuses summary mode, or its add, triage, hierarchy and saved views stop working."""
+    root = service.root
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
+    refused(lambda: call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH,
+                         manifest_text=manifest_text("planning").replace(CID, ROADMAP), why="items roadmap"),
+            "SQLITE_STORAGE_REQUIRED")
+
+    call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH, manifest_text=ROADMAP_TEXT,
+         why="new roadmap")
+    inspected = call(root, "plan_memory", action="inspect", collection=ROADMAP_PATH)
+    assert inspected["contract"]["view_mode"] == "summary"
+    call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=OUTCOME,
+         item={"title": "Reach readers", "kind": "outcome", "status": "planned",
+               "commitment": "committed", "horizon": "quarter"}, why="the outcome")
+    added = call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=INITIATIVE,
+                 item={"title": "Write the guide", "kind": "initiative", "status": "planned",
+                       "commitment": "committed", "horizon": "quarter",
+                       "parent": f"exomem://plan/{ROADMAP}/{OUTCOME}"}, why="the initiative")
+    triaged = call(root, "plan_memory", action="triage", collection=ROADMAP, plan_id=INITIATIVE,
+                   transition={"status": "active"}, why="started",
+                   expected_container_hash=added["after_container_hash"],
+                   expected_item_version=added["after_item_hash"])
+    assert triaged["outcome"] == "committed", triaged
+
+    tree = call(root, "plan_memory", action="query", collection=ROADMAP,
+                filters=[{"column": "plan_id", "op": "eq", "value": OUTCOME}], hierarchy_mode="descendants")
+    assert tree["hierarchy"]["edges"] == [{"parent": OUTCOME, "child": INITIATIVE}]
+    quarter = call(root, "plan_memory", action="query", collection=ROADMAP, view="quarter")
+    assert sorted(row["plan_id"] for row in quarter["rows"]) == sorted([OUTCOME, INITIATIVE])
+    assert [row["status"] for row in quarter["rows"] if row["plan_id"] == INITIATIVE] == ["active"]
+
+    # One overview page and one page per saved view; no Items directory and no file per row.
+    _until(lambda: "2 committed rows" in (root / ROADMAP_FOLDER / "Summary/_summary.md").read_text()
+           if (root / ROADMAP_FOLDER / "Summary/_summary.md").exists() else False, 30)
+    pages = [path for path in files_under(root, ROADMAP_FOLDER) if path.startswith("Summary/")]
+    assert len(pages) == 1 + len(inspected["saved_views"]) and len(pages) <= 16
+    assert "Summary/_summary.md" in pages
+    assert not (root / ROADMAP_FOLDER / "Items").exists()
+    quarter_page = next(root / ROADMAP_FOLDER / path for path in pages if "quarter" in path)
+    assert "quarter" in quarter_page.read_text()
+
+
+def test_a_summary_manifest_that_still_carries_per_item_recipes_is_readable_and_reports_them():
+    """Defect: a summary manifest with a filename or presentation recipe refuses to parse, so a
+    converted collection whose manifest kept them becomes unreadable."""
+    from pathlib import Path
+
+    from exomem import structured_collections as collections
+
+    text = ROADMAP_TEXT.replace("item_schema:\n", "item_filename:\n  version: 1\n  fields: [title]\n"
+                                "item_presentation:\n  version: 1\n  title: title\nitem_schema:\n")
+    manifest = collections.parse_manifest_bytes(Path("/vault"), ROADMAP_PATH, text.encode())
+    assert manifest.view_mode == "summary"
+    assert (manifest.item_filename, manifest.item_presentation) == (None, None)
+    assert manifest.ignored_recipes == ("item_filename", "item_presentation")
+
+
+def test_plan_memory_create_by_a_caller_without_unrestricted_access_scaffolds_on_the_served_store(
+        service):  # noqa: F811 - the imported fixture, by name
+    """Defect: a served Planning create crashes on a closed database when its scaffold checks the
+    caller's admission to the vault's planning values, because the producer's writer retired the
+    store writer that the request had bound."""
+    from test_collection_store_service import OWNER
+
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import request_scope
+
+    root = service.root
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "plan_memory")
+    # No owner scope: the caller lacks unrestricted access, as a direct or command-line caller does.
+    writer_lease.invoke_command(command, root, action="create", manifest_path=ROADMAP_PATH,
+                                manifest_text=ROADMAP_TEXT, why="new roadmap")
+    with request_scope(OWNER):
+        inspected = writer_lease.invoke_command(command, root, action="inspect", collection=ROADMAP_PATH)
+    assert inspected["contract"]["view_mode"] == "summary"
+    # The scaffold added one saved view per planning horizon value.
+    assert inspected["saved_views"]

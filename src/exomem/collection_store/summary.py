@@ -7,8 +7,10 @@ pages of at most ``MAX_PAGE_BYTES`` each. Acknowledgement commits the pages'
 pending basis; reconcile renders and publishes them later. A page labels what
 it counts, from which source and basis, and never claims the current state.
 
-A populated collection never changes view mode in place: the owner copies its
-accepted current values into a NEW collection of the other mode.
+The pages are one overview and one page per valid saved view, in manifest order,
+within ``MAX_PAGES``. A revise never changes a populated collection's view mode; the
+cutover's conversion (``conversion``) is the one step that moves an items-mode store
+collection to summary mode, under its own refusals.
 """
 
 from __future__ import annotations
@@ -30,7 +32,21 @@ def page_paths(manifest: collections.CollectionManifest) -> tuple[str, ...]:
     """The declared, bounded summary pages; items mode declares none."""
     if manifest.view_mode != SUMMARY:
         return ()
-    return (f"{manifest.storage.source}/_summary.md",)
+    return (f"{manifest.storage.source}/_summary.md", *view_pages(manifest))
+
+
+def view_pages(manifest: collections.CollectionManifest) -> dict[str, str]:
+    """Each valid saved view's page path, in manifest order, after the overview within ``MAX_PAGES``."""
+    pages: dict[str, str] = {}
+    for name in manifest.views:
+        if name not in manifest.normalized_views or len(pages) == MAX_PAGES - 1:
+            continue
+        slug = vault.slugify_title(name)
+        path, suffix = f"{manifest.storage.source}/_view-{slug}.md", 2
+        while path in pages:
+            path, suffix = f"{manifest.storage.source}/_view-{slug}-{suffix}.md", suffix + 1
+        pages[path] = name
+    return pages
 
 
 def capacity() -> dict:
@@ -99,9 +115,14 @@ def mode_change_refusal(conn: sqlite3.Connection, current: collections.Collectio
 
 
 def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManifest,
-                view_stamp: Mapping[str, str | int]) -> str:
-    """Render the overview page from the committed basis named in its stamp."""
+                view_stamp: Mapping[str, str | int], path: str | None = None) -> str:
+    """Render the overview page, or the saved view page at ``path``, from the basis in its stamp."""
     generation = view_stamp["v"]
+    view = view_pages(manifest).get(path)
+    if view is not None:
+        return _bounded(_page(*_view_page(
+            manifest, view, {"basis": {"manifest_version": manifest.manifest_version.hash},
+                             "exomem_view": dict(view_stamp)}, definition=True)))
     if manifest.derived:
         from .derived_rows import logged
 
@@ -129,9 +150,40 @@ def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManife
         + "Generated read-only from the collection store. Edits here are held, not applied, and "
         + "later commits appear when this page is next published.\n"
     )
+    return _bounded(text)
+
+
+def _bounded(text: str) -> str:
     if len(text.encode()) > MAX_PAGE_BYTES:
         raise RuntimeError("summary page exceeds its byte bound")
     return text
+
+
+def _view_page(manifest: collections.CollectionManifest, name: str, extra: Mapping, *,
+               definition: bool) -> tuple[dict, str]:
+    """A saved view's page as (frontmatter, body): how to run the view, never a row.
+
+    Rows reach a reader only through a governed query, so the page names the query to run.
+    Only the owner's page shows the definition, which may name a field a recipient cannot see.
+    """
+    import json
+
+    shown = ""
+    if definition:
+        text = json.dumps(manifest.normalized_views[name], sort_keys=True, indent=2, default=str)
+        if len(text.encode()) > MAX_PAGE_BYTES // 2:
+            text = "(the definition is too large for this page; inspect the collection to read it)"
+        shown = f"```json\n{text}\n```\n\n"
+    frontmatter = {"type": "collection-saved-view", "collection_id": manifest.collection_id, "view": name,
+                   "source": "collection manifest", **extra}
+    body = (f"# {manifest.title}: {name}\n\n"
+            f"Run this saved view with the collection's query action and `view: {name}` for its current rows.\n\n"
+            + shown + "Generated read-only from the collection manifest. Edits here are held, not applied.\n")
+    return frontmatter, body
+
+
+def _page(frontmatter: Mapping, body: str) -> str:
+    return "---\n" + vault.serialize_frontmatter(dict(frontmatter)) + "\n---\n\n" + body
 
 
 def released_page(operation, manifest, path, *, include_raw=False):
@@ -140,6 +192,15 @@ def released_page(operation, manifest, path, *, include_raw=False):
     import json
 
     from . import query_freshness
+
+    view = view_pages(manifest).get(path)
+    if view is not None:
+        # A recipient's saved view page holds no row and no definition, so it needs no row release.
+        frontmatter, body = _view_page(manifest, view, {}, definition=False)
+        content = _page(frontmatter, body)
+        result = {"path": path, "title": manifest.title, "frontmatter": frontmatter, "body": body,
+                  "content_hash": hashlib.sha256(content.encode()).hexdigest()}
+        return {**result, "content": content} if include_raw else result
 
     release = operation.summary_release(manifest.collection_id)
     if release is None:

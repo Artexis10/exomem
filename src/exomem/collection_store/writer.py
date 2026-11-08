@@ -42,9 +42,11 @@ from ..governance.principal import effective_principal
 from ..planning_values import PlanningValues
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
+    aliases,
     authority,
     chain,
     connection,
+    conversion,
     derived_rows,
     edit_back,
     filenames,
@@ -1351,11 +1353,20 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             row, manifest, _ = self._collection(cid)
             outside = facts.get("old_path") is not None
-            if (row["generation"] != observed[0] or not _renders_rows(manifest)
+            retired = not outside and aliases.retired(self.connection, path) is not None
+            if (row["generation"] != observed[0] or not (_renders_rows(manifest) or retired)
                     or (not outside and not path.startswith(manifest.storage.source + "/"))):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep basis changed")
             if not self._publication.eligible({"collection_id": cid, "path": manifest.path}):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "collection route is closed")
+            if retired:
+                # A retired item path of a converted collection is no view: a file there is held, never applied.
+                self._require_detached_path(manifest, path)
+                _fresh, guard = vault.read_bounded_guarded_bytes(self.root, path, limit=record_formats._MAX_ITEM_BYTES,
+                                                                expected_hash=facts["digest"])
+                self._recheck_guard(guard)
+                self._hold_detached(manifest, path, raw, edit_back.UNBOUND)
+                return result
             item = self._item(cid, facts["item_key"]) if facts["item_key"] is not None else None
             self._require_detached_path(manifest, path, item)
             projection = (None if item is None else self._publication.previous(item["view_path"]))
@@ -3506,6 +3517,105 @@ class CollectionWriter:
                 checkpoint_snapshot_hash=None,
                 affected_paths=(current.path,),
             )
+            self._precommit(proposed)
+            self._insert_txn(txn, receipt)
+        writer_lease.mark_active_mutation_committed()
+        records._refresh_manifest_due_state(self.root, proposed)
+        return receipt
+
+    def conversion_state(self, collection):
+        """The collection id, view mode and pending conversion record (``conversion``) of one collection."""
+        with self.read_snapshot(mutation=True):
+            row, _manifest, _declared = self._collection(collection)
+            return row["collection_id"], row["view_mode"], conversion.record(self.connection, row["collection_id"])
+
+    def advance_conversion(self, cid, value):
+        """Record the phase a conversion reached, or clear its record once the vault holds no item file."""
+        with self._mutation():
+            self._collection(cid)
+            conversion.put(self._execute, cid, value)
+
+    def _conversion_files(self, current):
+        """The published item files a conversion archives, refused while any view work is unsettled."""
+        cid = current.collection_id
+        if (self._publication.pending or summary.publication_outstanding(self.connection, cid)
+                or self.connection.execute("SELECT 1 FROM held_candidates WHERE collection_id=? "
+                                           "AND kind='view-correction' LIMIT 1", (cid,)).fetchone()):
+            raise conversion.outstanding("a view of the collection is unpublished or a view correction is held")
+        published = dict(self.connection.execute(
+            "SELECT path,published_sha256 FROM projection_state WHERE collection_id=? AND kind='item'", (cid,)))
+        for path, raw in conversion.read_files(self.root, sorted(published)).items():
+            # A file edit that edit-back has not yet applied or held would leave with the file.
+            if raw is None or hashlib.sha256(raw).hexdigest() != published[path]:
+                raise conversion.outstanding(f"{path} differs from the view the store published")
+        return published
+
+    def convert_to_summary(self, collection, *, why, before_commit):
+        """Convert a populated items-mode collection to summary mode in one transaction (design §17).
+
+        The new manifest version names ``storage.strategy: sqlite`` and ``view_mode: summary``. Rows
+        keep their keys, values, payload hashes, versions and audit, and the item projection state
+        retires. Each row's former view path stays in ``items.view_path`` as its retired alias, so an
+        old path still finds its row (C2.4) without a schema change: every reader of that column
+        renders, publishes, watches and governs a summary row by the collection, never by the alias.
+        The conversion record that the archive and the removal resume from commits here too.
+        """
+        records._validate_why(why)
+        with self._mutation():
+            identity, digest, replay = self._identity(
+                "revise", collection, {"view_mode": summary.SUMMARY, "why": why}, None)
+            if replay is not None:
+                return replay
+            row, current, declared = self._collection(collection)
+            cid = current.collection_id
+            if not _renders_rows(current):
+                raise conversion.unsupported(current.storage.strategy, current.view_mode)
+            files = self._conversion_files(current)
+            presentation = current.record_presentation
+            if presentation is not None and presentation.tables:
+                # Summary mode ignores the recipe, so its child-column allowlist would stop narrowing query rows.
+                raise conversion.disclosure_change(("the record_presentation table allowlist",))
+            stored = self.connection.execute(
+                "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (cid, row["manifest_version"])).fetchone()[0]
+            manifest_text = conversion.summary_manifest(stored)
+            proposed = collections.parse_manifest_bytes(self.root, current.path, manifest_text.encode())
+            if ((proposed.collection_id, proposed.semantic_profile, proposed.schema, proposed.storage.source,
+                 proposed.view_mode, proposed.derived) != (cid, current.semantic_profile, current.schema,
+                                                           current.storage.source, summary.SUMMARY, current.derived)
+                    or types.type_for_manifest(proposed).name != declared.name):
+                raise RuntimeError("a summary conversion changes only the storage strategy and view mode")
+            if proposed.view_diagnostics:
+                raise collections.CollectionError(proposed.view_diagnostics[0].code,
+                                                  proposed.view_diagnostics[0].reason)
+            record_formats.validate_storage_contract(proposed)
+            if declared.kind == "intended":
+                planning.require_planning_profile(proposed)
+            changed = governance.policy_path_changes(self._operation, cid, current.path)
+            if changed:
+                raise conversion.disclosure_change(changed)
+            txn = self._txn(row, proposed, "revise", why, identity, digest)
+            self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+            self._execute("UPDATE collections SET view_mode=?, manifest_version=?, audit_reader_version=2 "
+                          "WHERE collection_id=?", (summary.SUMMARY, txn["manifest_version_after"], cid))
+            self._execute("DELETE FROM projection_state WHERE collection_id=? AND kind='item'", (cid,))
+            self._pending_summary(proposed, txn["generation_after"])
+            conversion.put(self._execute, cid, {"phase": conversion.COMMITTED, "txn_id": txn["txn_id"],
+                                                "files": files})
+            after_container = self._advance(txn)
+            payload = records.lifecycle_request_hash(
+                action="revise", collection_id=cid, before_manifest_hash=current.manifest_version.hash,
+                before_container_hash=self._container(row), proposed_manifest_hash=proposed.manifest_version.hash,
+                acknowledged_gap_codes=(), rationale=why,
+            )
+            receipt = records._lifecycle_result(
+                operation="revise", manifest=current, before_manifest_hash=current.manifest_version.hash,
+                after_manifest_hash=proposed.manifest_version.hash, before_container_hash=self._container(row),
+                after_container_hash=after_container, payload_hash=payload, audit_correlation=txn["transition_id"],
+                continuity=True, acknowledged_gap_codes=(), gap_fingerprint=None, checkpoint_snapshot_hash=None,
+                affected_paths=(current.path,),
+            )
+            before_commit()
             self._precommit(proposed)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()

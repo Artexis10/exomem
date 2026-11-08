@@ -867,7 +867,7 @@ def route_with_proof(command, vault_root, arguments):
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
     proof = ownership.current(root)
-    summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
+    summary = arguments.get("action") == "create" and summary_create(root, arguments)
     if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
@@ -1015,12 +1015,13 @@ def summary_create(root, arguments):
         return False
 
 
-def served_create(vault_root, arguments):
+def served_create(vault_root, arguments, facade_profile=None):
     """Create a NEW summary collection on the serving session, or None for any other manifest.
 
     It runs on the store thread under the request principal, through the producer's own
     create (``admission.create_new``), which a vault already enrolled in this store
     completes with writer authority. Enrolling a vault is the owner's offline step.
+    ``facade_profile`` is the calling tool's profile, which the create requires and scaffolds.
     """
     from .. import structured_collections as collections
     from .. import writer_lease
@@ -1043,7 +1044,8 @@ def served_create(vault_root, arguments):
         result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
-            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
+            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
+            facade_profile=facade_profile)
         if result.get("status") == "pending":
             # Committed, but its replica publication did not finish: the store stays the
             # create's until this thread's create tick resumes it, so this request ends

@@ -236,6 +236,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
+    from exomem.collection_store import conversion as collection_conversion
     from exomem.governance import connector_boundary
     from exomem.governance import policy as governance_policy
 
@@ -244,6 +245,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "batch-workspace",
         "claims-store",
         "clip-store",
+        "collection-archive",
         "collection-store",
         "collection-replica",
         "collection-publication",
@@ -304,6 +306,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (memory_refs.sidecar_path(root), "refs-store"),
         (deferred_index.store_path(root), "deferred-index-store"),
         (collection_connection.store_path(root), "collection-store"),
+        (collection_conversion.archive_folder(root, "c" * 32, 1) / "manifest.json", "collection-archive"),
         (media_jobs.job_store_path(root), "media-jobs-store"),
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),

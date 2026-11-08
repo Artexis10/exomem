@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, NotRequired
 
@@ -2247,23 +2248,38 @@ def validate_collection_create(
 ) -> dict[str, Any]:
     """Preflight collection creation without writer authority or vault mutation."""
 
-    def require(manifest: collections.CollectionManifest) -> None:
-        require_create_storage(vault_root, manifest)
-        if manifest.storage.strategy != collections.SQLITE_STORAGE:
-            _refuse_file_view_mode(manifest)
-
     return _validate_collection_create_for_profile(
         vault_root,
         manifest_path,
         manifest_text,
         semantic_profile="records",
         scaffold=scaffold,
-        require=require,
+        require=partial(require_create_manifest, vault_root),
     )
 
 
+def require_create_manifest(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+    """Every facade's rule for a NEW collection: the vault's storage, and one view per row in a file."""
+    require_create_storage(vault_root, manifest)
+    if manifest.storage.strategy != collections.SQLITE_STORAGE:
+        _refuse_file_view_mode(manifest)
+
+
+def require_file_create(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+    """Every facade's gate before a file create: the vault's storage, and no sqlite collection.
+
+    The serving store thread creates a sqlite collection, so one that reaches the file create
+    had no store thread to run it.
+    """
+    require_create_storage(vault_root, manifest)
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        from .collection_store import ownership, runtime
+
+        runtime.refuse_unserved_create(vault_root, ownership.current(vault_root).marker)
+
+
 def require_create_storage(vault_root: Path, manifest: collections.CollectionManifest) -> None:
-    """Refuse a NEW Records collection's storage that this vault does not create.
+    """Refuse a NEW collection's storage that this vault does not create.
 
     A vault with an enrolled collection store creates only sqlite collections. A vault without
     one keeps file-canonical create until the cutover enrolls its store, and a sqlite create
@@ -2282,7 +2298,7 @@ def require_store_storage(manifest: collections.CollectionManifest) -> None:
     if manifest.storage.strategy in collections.MARKDOWN_ROW_STORAGE:
         raise collections.CollectionError(
             "SQLITE_STORAGE_REQUIRED",
-            "this vault has a collection store, so a new Records collection keeps its rows there: declare "
+            "this vault has a collection store, so a new collection keeps its rows there: declare "
             f"storage.strategy: {collections.SQLITE_STORAGE}; existing "
             f"{manifest.storage.strategy} collections stay readable",
             {

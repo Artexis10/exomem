@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .. import held_fs, memory_refs, record_formats, records, sync_providers, vault
 from .. import structured_collections as collections
-from . import authority, capability, connection, edit_back, views
+from . import aliases, authority, capability, connection, conversion, edit_back, summary, views
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ class Census:
         self._failure_count = 0
         self._fs = self._parent = self._iterator = None
         self._directory = self._cid = None
+        self._retired_only = False
         self._manifest = None
 
     def close(self):
@@ -236,6 +237,8 @@ class Census:
             (self.after, limit)).fetchall()
         # One ownership proof for the step; each collection is still admitted or not on its own.
         admitted = authority.admitted_collections(writer) if rows else frozenset()
+        # A conversion still removing its item files owns them until it records that it is done.
+        converting = conversion.pending(self.db) if rows else frozenset()
         for cid, generation, path, text, mode, layout in rows:
             if cid not in admitted:
                 continue
@@ -244,12 +247,19 @@ class Census:
                 continue
             self.db.execute("INSERT INTO temp.roots(cid,source,held_root,manifest,generation) VALUES (?,?,?,?,?)",
                             (cid, manifest.storage.source, records._held_directory(manifest), text, generation))
-            if mode == "items" and layout == "markdown-items":
+            if layout == "markdown-items" and (mode == "items" or (
+                    cid not in converting and self._retired_paths(cid, manifest.storage.source))):
                 self.db.execute("INSERT INTO temp.directories(path,cid) VALUES (?,?)", (manifest.storage.source, cid))
         if rows:
             self.after = rows[-1][0]
         else:
             self.phase, self.after = "projections", ""
+
+    def _retired_paths(self, cid, source):
+        """Whether a summary collection keeps retired item paths under its source, so files there are watched."""
+        # '/' has a fixed lexical successor; this range uses the view path index for one exact subtree.
+        return self.db.execute("SELECT 1 FROM main.items WHERE view_path>=? AND view_path<? AND collection_id=? LIMIT 1",
+                               (source + "/", source + "0", cid)).fetchone() is not None
 
     def _enumerate(self, limit, now):
         if self._iterator is None:
@@ -258,6 +268,9 @@ class Census:
                 self.phase, self.after = "complete", ""
                 return
             self._directory, self._cid = row
+            # A summary collection renders no item views; only a file at one of its retired item paths is input.
+            self._retired_only = self.db.execute("SELECT view_mode FROM main.collections WHERE collection_id=?",
+                                                 (self._cid,)).fetchone() == (summary.SUMMARY,)
             try:
                 self._fs = held_fs.acquire(self._root).require()
                 self._parent = self._fs.parent(self._directory).require()
@@ -291,6 +304,8 @@ class Census:
                 with opened.require() as file:
                     if Path(name).suffix.lower() != ".md" or self.db.execute(
                             "SELECT 1 FROM temp.projections WHERE path=?", (path,)).fetchone():
+                        continue
+                    if self._retired_only and aliases.retired(self.db, path) is None:
                         continue
                     self._candidate(self._fs, file, path, self._cid, now)
             self._fs.validate_directory(self._parent).require()

@@ -151,8 +151,8 @@ def require_planning_profile(
         raise CollectionError(
             "PLANNING_PROFILE_REQUIRED", "Planning actions require a planning semantic profile"
         )
-    if manifest.storage.strategy != "markdown-items":
-        raise CollectionError("INVALID_PLAN", "Planning requires markdown-items storage")
+    if manifest.storage.strategy not in ("markdown-items", collections.SQLITE_STORAGE):
+        raise CollectionError("INVALID_PLAN", "Planning requires sqlite or markdown-items storage")
     required_types = {
         "title": "string",
         "kind": "string",
@@ -179,6 +179,7 @@ def create_collection(
     record_governance.require_candidate_manifest_visibility(root, manifest_path)
     manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
     require_planning_profile(manifest)
+    records.require_file_create(root, manifest)
     if scaffold:
         manifest_text = _with_default_scaffold(manifest_text, manifest, vault_root=root)
         manifest = collections.parse_manifest_bytes(
@@ -209,6 +210,7 @@ def validate(
             manifest_text,
             semantic_profile="planning",
             scaffold=scaffold,
+            require=partial(records.require_create_manifest, root),
         )
         manifest = require_planning_profile(
             collections.parse_manifest_bytes(
@@ -226,6 +228,7 @@ def validate(
             effective_text,
             semantic_profile="planning",
             scaffold=scaffold,
+            require=partial(records.require_create_manifest, root),
         )
         require_planning_profile(
             collections.parse_manifest_bytes(
@@ -313,9 +316,11 @@ def _with_default_scaffold(
     if len(closing) < 2:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
     additions: list[str] = []
-    if manifest.item_filename is None and manifest.schema.natural_key == ("title",):
+    # A summary collection renders no item view, so it gets no per-item recipe.
+    per_item = manifest.view_mode != "summary"
+    if per_item and manifest.item_filename is None and manifest.schema.natural_key == ("title",):
         additions.extend(("item_filename:", "  version: 1", "  fields: [title]"))
-    if manifest.item_presentation is None:
+    if per_item and manifest.item_presentation is None:
         summary = [
             name
             for name in (
@@ -1232,10 +1237,12 @@ def _valid_inspection(payload: Mapping[str, Any], manifest: collections.Collecti
         "audit",
         "saved_views",
     }
-    optional = {name for name in ("presentation", "lifecycle_guards") if name in payload}
+    optional = {name for name in _OPTIONAL_INSPECTION_KEYS if name in payload}
     if not required <= set(payload) or set(payload) - required != optional:
         return False
     contract = payload["contract"]
+    # A summary collection's inspection names its view mode and its page bounds.
+    summary = manifest.view_mode == "summary"
     if not isinstance(contract, Mapping) or set(contract) != {
         "collection_id",
         "path",
@@ -1243,7 +1250,8 @@ def _valid_inspection(payload: Mapping[str, Any], manifest: collections.Collecti
         "semantic_profile",
         "schema_version",
         "storage",
-    }:
+        *(("view_mode",) if summary else ()),
+    } or ("capacity" in payload) != summary or (summary and contract["view_mode"] != "summary"):
         return False
     storage = contract["storage"]
     if (
@@ -1417,6 +1425,10 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
     return dict(value)
 
 
+#: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
+_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity")
+
+
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
     expected = {
         "kind",
@@ -1428,7 +1440,7 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         "audit",
         "saved_views",
     }
-    optional = {name for name in ("presentation", "lifecycle_guards") if name in value}
+    optional = {name for name in _OPTIONAL_INSPECTION_KEYS if name in value}
     if (
         not expected <= set(value)
         or set(value) - expected != optional
@@ -2057,8 +2069,7 @@ egress.register_projector(
         "diagnostics",
         "audit",
         "saved_views",
-        "presentation",
-        "lifecycle_guards",
+        *_OPTIONAL_INSPECTION_KEYS,
     ),
     validator=_validate_inspection_egress,
 )

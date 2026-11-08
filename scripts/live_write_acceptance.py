@@ -478,9 +478,7 @@ def _prepare_collections(client: Any) -> tuple[dict[str, Any], str]:
             for field in ("title", "kind", "status", "lifecycle", "priority", "commitment", "horizon", "health", "area", "parent")
         }},
     })
-    if isinstance(manifest.get("storage"), dict):
-        # Planning create keeps file storage until Planning gains summary mode; a Records example may be sqlite.
-        manifest["storage"] = {**manifest["storage"], "strategy": "markdown-items"}
+    # The storage stays the example's own: sqlite on a vault with a collection store, file storage otherwise.
     planning_path = "Knowledge Base/Planning/Acceptance/_collection.md"
     client.call("plan_memory", {
         "action": "create", "manifest_path": planning_path,

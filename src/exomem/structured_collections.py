@@ -40,6 +40,8 @@ SQLITE_STORAGE = "sqlite"
 # The manifest schema fixes this closed set; each value names an adapter or the store, not a vocabulary.
 # A vault with a collection store creates only sqlite collections; one without keeps file storage until it has one.
 SUPPORTED_STORAGE = frozenset({"markdown-log", "markdown-items", "dataset", SQLITE_STORAGE})
+# The manifest schema fixes these field names: each recipe renders one item view, which summary mode has not.
+PER_ITEM_RECIPES = ("record_presentation", "item_filename", "item_presentation")
 #: The strategies whose rows Exomem writes as Markdown files; a vault with a collection store creates none of them.
 MARKDOWN_ROW_STORAGE = frozenset({"markdown-items", "markdown-log"})
 _SUPPORTED_FIELD_TYPES = frozenset(
@@ -990,6 +992,8 @@ class CollectionManifest:
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
     derived: bool = False
+    #: Per-item recipes a summary manifest still carries; summary mode ignores them and reports them.
+    ignored_recipes: tuple[str, ...] = ()
     #: How the store derives this collection's item keys. It is store state, not manifest text: the store
     #: records it at creation and the writer overlays it on every manifest it hands out.
     item_key_scheme: str = item_keys.HASHED_V1
@@ -1880,11 +1884,23 @@ def _manifest_from_frontmatter(
             "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
         )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
-    presentation = _parse_record_presentation(
+    links = _parse_links(frontmatter.get("links", {}), schema)
+    # A sqlite collection has no item files, so summary is its only view mode and its default.
+    default_view_mode = "summary" if storage.strategy == SQLITE_STORAGE else "items"
+    view_mode = _parse_view_mode(frontmatter.get("view_mode", default_view_mode), storage, links)
+    # Summary rows have no item view, so a per-item recipe left in the manifest has nothing to
+    # render: the manifest stays readable and reports the recipe as ignored.
+    ignored_recipes = (
+        tuple(name for name in PER_ITEM_RECIPES if frontmatter.get(name) is not None)
+        if view_mode == "summary" else ()
+    )
+    presentation = None if ignored_recipes else _parse_record_presentation(
         frontmatter.get("record_presentation"), profile, storage, schema
     )
-    item_filename = _parse_item_filename(frontmatter.get("item_filename"), profile, storage, schema)
-    item_presentation = _parse_item_presentation(
+    item_filename = None if ignored_recipes else _parse_item_filename(
+        frontmatter.get("item_filename"), profile, storage, schema
+    )
+    item_presentation = None if ignored_recipes else _parse_item_presentation(
         frontmatter.get("item_presentation"), storage, schema
     )
     if presentation is not None and item_presentation is not None:
@@ -1899,13 +1915,8 @@ def _manifest_from_frontmatter(
     views, normalized_views, view_diagnostics = _parse_saved_views(
         frontmatter.get("views", {}), schema, storage, profile, planning_values, presentation
     )
-    links = _parse_links(frontmatter.get("links", {}), schema)
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
-    # A sqlite collection has no item files, so summary is its only view mode and its default.
-    default_view_mode = "summary" if storage.strategy == SQLITE_STORAGE else "items"
-    view_mode = _parse_view_mode(frontmatter.get("view_mode", default_view_mode), profile, storage,
-                                 presentation or item_filename or item_presentation, links)
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
     return CollectionManifest(
         collection_id=collection_id,
@@ -1932,6 +1943,7 @@ def _manifest_from_frontmatter(
         claim_match=claim_match,
         view_mode=view_mode,
         derived=derived,
+        ignored_recipes=ignored_recipes,
     )
 
 
@@ -1950,9 +1962,7 @@ def _parse_derived(value: object, view_mode: str) -> bool:
     return value
 
 
-def _parse_view_mode(
-    value: object, profile: str, storage: StorageSpec, per_item_recipe: object, links: CollectionLinks
-) -> str:
+def _parse_view_mode(value: object, storage: StorageSpec, links: CollectionLinks) -> str:
     """`items` keeps a view per row; `summary` has no per-row view or recipe to render.
 
     A summary collection carries no planning join: each joined write would load
@@ -1969,11 +1979,9 @@ def _parse_view_mode(
             "UNSUPPORTED_VIEW_MODE", "a sqlite collection has no item files, so its view mode is summary",
             {"field": "view_mode", "received": value, "allowed": ["summary"], "example": "view_mode: summary"},
         )
-    if value == "summary" and (profile != "records" or storage.strategy not in ("markdown-items", SQLITE_STORAGE)
-                               or per_item_recipe):
+    if value == "summary" and storage.strategy not in ("markdown-items", SQLITE_STORAGE):
         raise CollectionError(
-            "UNSUPPORTED_VIEW_MODE",
-            "summary view mode needs a Records sqlite or markdown-items collection without per-item presentation",
+            "UNSUPPORTED_VIEW_MODE", "summary view mode needs a sqlite or markdown-items collection",
             {"field": "view_mode", "received": value},
         )
     joined = next((index for index, plan in enumerate(links.plans) if plan.join), None)
