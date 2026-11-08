@@ -8,7 +8,6 @@ writer transaction. A refusal or a kill leaves file mode as it was.
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import sqlite3
 import tempfile
@@ -34,6 +33,7 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from . import availability, mode, ownership, verify
+from .write import frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
@@ -146,7 +146,7 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
                         body,
                         fact.sha256,
                         fact.size,
-                        _frontmatter_json(body),
+                        frontmatter_json(body),
                         revision,
                         fact.mtime_ns,
                     ),
@@ -162,29 +162,6 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
     except BaseException:
         conn.execute("ROLLBACK")
         raise
-
-
-def _frontmatter_json(body: bytes) -> str | None:
-    """The page's frontmatter as JSON, or None when it has none or the bytes are not text."""
-    try:
-        frontmatter, _, _ = vault.parse_frontmatter(body.decode("utf-8"))
-    except (UnicodeDecodeError, vault.FrontmatterError):
-        return None
-    # YAML dates have no JSON form; their text is the form a reader of the page sees.
-    return (
-        json.dumps(_text_keyed(frontmatter), sort_keys=True, ensure_ascii=False, default=str)
-        if frontmatter
-        else None
-    )
-
-
-def _text_keyed(value):
-    """Give every mapping a text key: YAML allows any scalar there, and JSON allows only text."""
-    if isinstance(value, dict):
-        return {str(key): _text_keyed(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_text_keyed(item) for item in value]
-    return value
 
 
 def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -> None:
