@@ -1,6 +1,6 @@
 ## 1. Specification
 
-- [ ] 1.1 Write the proposal, the design and the two deltas. Validate strictly with the CI-pinned OpenSpec.
+- [x] 1.1 Write the proposal, the design and the two deltas. Validate strictly with the CI-pinned OpenSpec.
 
 ## 2. Product
 
