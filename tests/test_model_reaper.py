@@ -23,6 +23,8 @@ def _evictable(monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import mode
 
     monkeypatch.setattr(mode, "retain_cpu_caches", lambda: False)
+    # These cases pin when a cache counts as idle; the normal-mode pressure gate has its own cases.
+    monkeypatch.setattr(mode, "release_idle_cpu_caches_only_under_pressure", lambda: False)
     monkeypatch.setattr(readiness, "is_warming", lambda: False)
 
 
@@ -111,6 +113,74 @@ def test_a_cache_left_alone_is_reaped_once_the_threshold_after_its_last_use() ->
     assert unloads == []
     _ticks(slot, clock, seconds=120)  # crosses 900 s since the last use
     assert len(unloads) == 1
+
+
+def test_normal_mode_keeps_an_idle_cache_while_memory_is_plentiful(monkeypatch) -> None:
+    """The live cost: every recall after fifteen quiet minutes rebuilt the find caches cold."""
+    from exomem import mode, runtime_resources
+
+    monkeypatch.setattr(mode, "release_idle_cpu_caches_only_under_pressure", lambda: True)
+    monkeypatch.setattr(runtime_resources, "memory_short", lambda floor: False)
+    clock = _Clock()
+    slot, unloads = _slot(clock, refilled=False)
+    _ticks(slot, clock, seconds=4 * 3600)
+    assert unloads == []
+
+
+def test_normal_mode_releases_an_idle_cache_once_memory_runs_short(monkeypatch) -> None:
+    from exomem import mode, runtime_resources
+
+    short = {"now": False}
+    monkeypatch.setattr(mode, "release_idle_cpu_caches_only_under_pressure", lambda: True)
+    monkeypatch.setattr(runtime_resources, "memory_short", lambda floor: short["now"])
+    clock = _Clock()
+    slot, unloads = _slot(clock, refilled=False)
+    _ticks(slot, clock, seconds=1800)
+    assert unloads == []
+    short["now"] = True
+    _ticks(slot, clock, seconds=60)
+    assert len(unloads) == 1
+
+
+def test_normal_mode_releases_an_idle_cache_when_memory_cannot_be_read(monkeypatch) -> None:
+    """A host that reports no memory keeps today's idle release rather than holding memory blind."""
+    from exomem import mode, runtime_resources
+
+    monkeypatch.setattr(mode, "release_idle_cpu_caches_only_under_pressure", lambda: True)
+    monkeypatch.setattr(runtime_resources, "memory_short", lambda floor: None)
+    clock = _Clock()
+    slot, unloads = _slot(clock, refilled=False)
+    _ticks(slot, clock, seconds=960)
+    assert len(unloads) == 1
+
+
+def test_the_pressure_gate_reads_the_configured_floor(monkeypatch) -> None:
+    from exomem import mode, runtime_resources
+
+    floors = []
+    monkeypatch.setenv("EXOMEM_CACHE_RELEASE_AVAILABLE_MIB", "512")
+    monkeypatch.setattr(mode, "release_idle_cpu_caches_only_under_pressure", lambda: True)
+    monkeypatch.setattr(runtime_resources, "memory_short", lambda floor: floors.append(floor) or False)
+    clock = _Clock()
+    slot, _ = _slot(clock, refilled=False)
+    _ticks(slot, clock, seconds=960)
+    assert floors and set(floors) == {512 * 1024 * 1024}
+
+
+def test_memory_is_short_when_the_unit_nears_its_cgroup_limit(tmp_path, monkeypatch) -> None:
+    from exomem import runtime_resources
+
+    group = tmp_path / "user.slice" / "exomem.service"
+    group.mkdir(parents=True)
+    (group / "memory.high").write_text("10737418240\n")  # 10 GiB
+    (group / "memory.current").write_text(str(10737418240 - 1024 * 1024 * 1024) + "\n")  # 1 GiB left
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("0::/user.slice/exomem.service\n")
+    monkeypatch.setattr(runtime_resources, "_PROC_CGROUP", cgroup)
+    monkeypatch.setattr(runtime_resources, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 40 * 1024**3)
+    assert runtime_resources.memory_short(2 * 1024**3) is True
+    assert runtime_resources.memory_short(512 * 1024**2) is False
 
 
 def test_the_page_cache_counts_the_pages_it_serves(tmp_path: Path) -> None:
