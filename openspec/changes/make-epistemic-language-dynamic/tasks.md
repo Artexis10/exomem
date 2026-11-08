@@ -43,4 +43,4 @@
 ## 7. Proof and delivery
 
 - [ ] 7.1 Prove each slice on real models: agents choose the right word on realistic and hostile inputs.
-- [ ] 7.2 Review, merge, release, and archive this change.
+- [ ] 7.2 Review, merge, release, and archive this change. Before the archive, refresh each MODIFIED block against the canonical spec, keeping the requirements and scenarios that later changes added. Three other changes copy "Current Relation Review Disposition".
