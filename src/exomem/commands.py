@@ -1557,7 +1557,7 @@ def op_bootstrap(
             "supersede_never_overwrite": (
                 "When a durable conclusion changes, supersede it so the earlier view "
                 "stays readable and linked. Never overwrite what was believed; a "
-                "store that silently rewrites its own past cannot be audited."
+                "store that rewrites its own past cannot be audited."
             ),
             "state_the_expectation_first": (
                 "Write down what you expect before the answer arrives. A durable "
