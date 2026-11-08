@@ -393,6 +393,15 @@ revision before you roll back:
 3. Count the cells that hold a key bundle:
    `psql "$EXOMEM_CELLCTL_DSN" -At -c "SELECT count(*) FROM exomem_cloud_cells WHERE media_key_wrapped IS NOT NULL"`
 4. If the count is above `0`, do not roll back past this release. Fix forward.
+5. If the target revision predates the export split, stop cellctl, so that it starts no
+   pack again: `kubectl -n exomem-cloud scale deployment cellctl --replicas=0`
+6. If you stopped cellctl in step 5, delete each running export pack Job before you roll
+   back: `kubectl delete jobs -A -l exomem.io/cell-job=export-pack`
+   The older cellctl applies a job-egress policy that selects every Job. A running pack
+   holds the media key, and it would then have public egress.
+7. Roll back, then wait for cellctl:
+   `kubectl -n exomem-cloud wait --for=condition=Available deployment/cellctl --timeout=180s`
+   The target revision sets the replica count of cellctl again, so cellctl runs.
 
 `--atomic` rolls back a failed deploy by itself, and skips the check too. Deploy this
 release once with the edge off before you turn the edge on. A failed first deploy with

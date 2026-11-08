@@ -228,6 +228,18 @@ spec:
             matchExpressions:
               - key: exomem.io/cell-job
                 operator: DoesNotExist
+        # add-cloud-media-store D8: the export pack of a cell namespace with the same label. It reads the
+        # cell's evicted originals with the runtime's edge credential; job-egress gives it no public egress.
+        - namespaceSelector:
+            matchLabels:
+              exomem.io/media-edge-access: "true"
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+              exomem.io/cell-job: export-pack
         # collect-released-media D3: the backup Job of every cell namespace. A retained cell's namespace has no
         # access label, and its backups still condemn its released names. The edge admits a collector
         # credential only for a cell that its active set lists, and only to condemn.

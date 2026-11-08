@@ -17,6 +17,7 @@ import pytest
 
 from cellctl import alerts, db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
+from cellctl.exports import ExportJob
 from cellctl.imports import StagedObjects
 from cellctl.manifests import STORAGE_CLASS, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
@@ -106,6 +107,12 @@ class FakeClusterGateway:
 
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
+
+    def observe_export_job(self, namespace: str, export_id: str, *, step: str) -> ExportJob:
+        return ExportJob()
+
+    def delete_export_staging(self, namespace: str, export_id: str) -> None:
+        self.events.append(("delete_export_staging", namespace, export_id))
 
     def run_job(self, manifest: dict) -> None:
         self.jobs.append(manifest)

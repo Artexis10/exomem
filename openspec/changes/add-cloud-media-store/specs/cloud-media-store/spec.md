@@ -286,6 +286,7 @@ In standard mode, cellctl SHALL store the wrapped bundle once on the cell row an
 Tenant-locked storage and delivery SHALL follow `cloud-cell-key-custody`; the bundle SHALL NOT enter a Kubernetes Secret in that mode.
 Only the cell runtime and the export packing step SHALL receive an unwrapped bundle.
 No pod with public egress SHALL receive it.
+cellctl's admission SHALL refuse a pod that names a media key of the cell Secret unless the pod is the runtime, the export packing step for the two keys it reads, or a backup for the collector credential. Each key SHALL be listed by name; a mount or an environment import of the whole Secret SHALL be refused.
 A restore needs no media key, because evicted originals stay in the store.
 The media edge, the gateway and the provider SHALL NOT receive the bundle.
 
@@ -316,6 +317,16 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 - **WHEN** the export's upload step, which has public egress, is rendered
 - **THEN** it mounts no media key bundle
 
+#### Scenario: The export pause step is inspected
+
+- **WHEN** the export's pause step, which copies under the hold, is rendered
+- **THEN** it mounts no media key bundle and no edge credential, and it has no public egress
+
+#### Scenario: A forged export step asks for a media key
+
+- **WHEN** cellctl's credential submits an upload or pause Job that lists the media identity, or a packing Job that lists the name key
+- **THEN** admission refuses the Job
+
 ### Requirement: A media edge is the only path between cells and the media bucket
 
 A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else, until `collect-released-media` adds `condemn` for a collector credential. It SHALL NOT send a list or delete request, and SHALL send a hide only for `condemn`, although its key's write capability permits any hide.
@@ -332,7 +343,7 @@ An unfinished file that no intent names SHALL NOT become a version and SHALL NOT
 cellctl SHALL treat a revocation as observed only when the edge's loaded generation equals the generation cellctl published, the reported set digest equals the SHA-256 of the set cellctl published, the reported bucket equals the configured bucket, and the settled generation is at least the published one.
 When the published active set is unreadable, cellctl SHALL plan the next generation above the edge's loaded generation.
 
-A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no other egress.
+A cell selected for the media store SHALL gain one egress edge, to the media edge's ClusterIP and port, with no DNS. The cell's export packing step SHALL reach it on the same terms and have no public egress.
 
 #### Scenario: A cell asks for another cell's object
 

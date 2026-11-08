@@ -17,6 +17,7 @@ from cellctl.capacity import (
     compute_local_capacity,
     parse_budget_frame,
 )
+from cellctl.export_layout import staging_bound_gib
 from cellctl.manifests import (
     BACKUP_FAMILY_ANNOTATION,
     BACKUP_OUTCOME_ANNOTATION,
@@ -543,7 +544,8 @@ async def test_a_rollback_keeps_the_larger_accepted_claim_pending_without_an_ear
         assert (await db.select_all_rows(controller))[0].hold_kind is None
         assert cluster.volumes["lv-" + cell_id]["spec"]["reservationTargetBytes"] == 28 * GIB
         quota = cluster.applied[(namespace_name(cell_id), "ResourceQuota", "cell-quota")]
-        assert quota["spec"]["hard"]["requests.storage"] == "56Gi"
+        # The quota admits the retained claim, the hourly backup's clone of it and the largest export staging claim.
+        assert quota["spec"]["hard"]["requests.storage"] == f"{2 * 28 + staging_bound_gib(28)}Gi"
         # A fresh controller repeats the same target, retaining the existing claim while identity/ack lags.
         await run()
         assert cluster.applied[(namespace_name(cell_id), "PersistentVolumeClaim", "cell-data")]["spec"]["resources"]["requests"]["storage"] == "28Gi" and not cluster.jobs
