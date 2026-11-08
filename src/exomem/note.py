@@ -2204,6 +2204,7 @@ def note(
             predecessor_content_hash=_predecessor_content_hash,
             vocabulary_binding=domain_binding,
             resolver=resolver,
+            draft_bound=any(item is not None for item in (draft_id, draft_hash, draft_token)),
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
         raise _note_error(error) from error

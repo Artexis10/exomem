@@ -215,14 +215,22 @@ def check_review_fields(
 
 
 def missing_review_fields_error(
-    missing: tuple[str, ...], *, hash_source: str = "the validate_only result"
+    missing: tuple[str, ...],
+    *,
+    validated: str,
+    hash_source: str = "the validate_only result",
 ) -> RelationReviewError:
-    """The refusal for a page that needs a review and lacks `missing` fields."""
+    """The refusal for a page that needs a review and lacks `missing` fields.
+
+    `validated` names the fields that tie the call to an earlier validate result;
+    a call that sends none of them commits in one call without the hash.
+    """
     return RelationReviewError(
         "INVALID_RELATION_REVIEW",
         f"this write needs a relation review and lacks {', '.join(missing)}; "
-        f"send relation_disposition=reviewed_none with relation_review_reason, "
-        f"and copy relation_review_hash from {hash_source}",
+        "send relation_disposition=reviewed_none, relation_review_reason and "
+        f"relation_review_hash (from {hash_source}) together, or send the first "
+        f"two without {validated} to commit in one call",
         missing,
     )
 
@@ -3013,6 +3021,57 @@ def load_relation_reviews(vault_root: Path) -> tuple[RelationReviewRecord, ...]:
         ) from error
 
 
+def load_lifecycle_decision_at(
+    vault_root: Path,
+    page_identity: str,
+    reference: str | None,
+    *,
+    admission: Callable[[str], bool] | None = None,
+) -> LifecycleDecision | None:
+    """Load the lifecycle decision a reference names, else None.
+
+    A reference to anything else (a creation receipt, an unreadable pointer) and
+    an artifact the caller may not read both read as no decision.
+    """
+    if reference is None:
+        return None
+    try:
+        _validate_lifecycle_reference(reference, page_identity=page_identity)
+    except RelationReviewError:
+        return None
+    if admission is not None and not admission(reference):
+        return None
+    fingerprint = reference.rsplit("/", 1)[-1].removesuffix(".json")
+    return load_lifecycle_decision(vault_root, page_identity, fingerprint, admission=admission)
+
+
+def _carried_decision(
+    vault_root: Path,
+    page_state: semantic_contract.SemanticPageState,
+    *,
+    admission: Callable[[str], bool] | None,
+) -> LifecycleDecision | None:
+    """The decision the page's last committed edit carried forward, if any.
+
+    Only a committed slot counts: its after side is the page as it stands now.
+    A pending slot describes a transition that may not have happened.
+    """
+    identity = page_state.identity
+    if admission is not None and not admission(_lifecycle_reference(identity, "prepared.json")):
+        return None
+    prepared = load_lifecycle_prepared(vault_root, identity, admission=admission)
+    if (
+        prepared is None
+        or prepared.after_path != page_state.path
+        or prepared.after_source_hash != page_state.source_hash
+        or prepared.after_fingerprint != page_state.review_fingerprint
+    ):
+        return None
+    return load_lifecycle_decision_at(
+        vault_root, identity, prepared.carried_from, admission=admission
+    )
+
+
 def load_relation_review(
     vault_root: Path,
     page_state: semantic_contract.SemanticPageState,
@@ -3020,6 +3079,17 @@ def load_relation_review(
     corpus: semantic_contract.SemanticCorpusContext,
     admission: Callable[[str], bool] | None = None,
 ) -> semantic_contract.RelationReviewState | None:
+    """The decision in force for a page, found in this order.
+
+    1. The lifecycle decision recorded for the page's exact current fingerprint.
+    2. The decision its last committed edit carried forward (`carried_from`); the
+       evaluator reads its older fingerprint as a decision that still binds the
+       page's identity.
+    3. The creation receipt.
+
+    A lifecycle decision recorded after creation must outrank the receipt, which
+    is why the committed slot is read first.
+    """
     try:
         if page_state.identity_kind != "exomem_id":
             return None
@@ -3033,6 +3103,8 @@ def load_relation_review(
                 page_state.review_fingerprint,
                 admission=admission,
             )
+            if decision is None:
+                decision = _carried_decision(vault_root, page_state, admission=admission)
             if decision is not None:
                 return semantic_contract.RelationReviewState(
                     "reviewed_none",
@@ -3957,7 +4029,9 @@ def prepare_commit_creation_draft(
             review_applies(preliminary.result.relation_disposition.kind),
         )
         if fields.missing:
-            raise missing_review_fields_error(fields.missing)
+            raise missing_review_fields_error(
+                fields.missing, validated="draft_id, draft_hash or draft_token"
+            )
         requested_review = relation_disposition == "reviewed_none" and not fields.ignored
         reason = review_reason(relation_review_reason) if requested_review else None
         preliminary_commit_result, _preliminary_record = _commit_plan(

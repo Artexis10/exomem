@@ -5,10 +5,9 @@ import test_single_purpose_tools_mcp as pilot_mcp
 from test_single_purpose_tools_mcp import _session
 
 from exomem import (
+    activation_manifest,
     commands,
-    relation_review,
     semantic_authoring,
-    semantic_contract,
     semantic_index,
     vault,
 )
@@ -42,16 +41,10 @@ def test_proposed_relation_review_completes_validation_without_persisting_conten
     )
     page = tmp_path / relative
     page.parent.mkdir(parents=True)
+    # The page lies past the activation boundary with no relation decision, so a write needs one.
+    activation_manifest.ensure_manifest(tmp_path)
     page.write_text(original)
     current = semantic_index.current_parent_index_state(tmp_path, relative, source=original).document.units[0]
-    decision = relation_review.build_lifecycle_decision(
-        page_identity=page_id,
-        after_fingerprint=semantic_contract.review_content_fingerprint(page_id, original),
-        reason="The complete corpus has this single page and no distinct relation target.",
-    )
-    decision_path = relation_review.lifecycle_decision_path(tmp_path, page_id, decision.after_fingerprint)
-    decision_path.parent.mkdir(parents=True)
-    decision_path.write_text(relation_review.serialize_lifecycle_decision(decision))
 
     if route == "existing-unit":
         def validate(**review):

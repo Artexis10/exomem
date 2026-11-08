@@ -44,6 +44,9 @@ from exomem import (
     multi_edit as multi_edit_module,
 )
 from exomem import (
+    note as note_module,
+)
+from exomem import (
     recover_from_trash as recover_module,
 )
 from exomem import (
@@ -2260,22 +2263,26 @@ def test_existing_commit_installs_boundary_and_commits_primary_last_once(
     assert committed.index_report.requested_paths[-1] == _PAGE
 
 
+def _write_page_needing_review(root: Path, source: str) -> Path:
+    """A page past the activation boundary with no relation decision: an edit must record one."""
+    activation_manifest.ensure_manifest(root)
+    return _write(root, _PAGE, source)
+
+
+def _decision_files(root: Path) -> list[str]:
+    """The immutable decision files recorded for the page, by name."""
+    directory = relation_review.lifecycle_prepared_path(root, _ID).parent
+    if not directory.is_dir():
+        return []
+    return sorted(p.name for p in directory.glob("*.json") if p.name != "prepared.json")
+
+
 def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
     tmp_path: Path,
 ) -> None:
-    before = _source("A")
-    page = _write(tmp_path, _PAGE, before)
-    current_decision = _decision(before, reason="Current state reviewed")
-    decision_path = relation_review.lifecycle_decision_path(
-        tmp_path, _ID, current_decision.after_fingerprint
-    )
-    decision_path.parent.mkdir(parents=True, exist_ok=True)
-    decision_path.write_text(
-        relation_review.serialize_lifecycle_decision(current_decision),
-        encoding="utf-8",
-        newline="\n",
-    )
-    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    before = _source(_semantic_body("Alpha"))
+    page = _write_page_needing_review(tmp_path, before)
+    after = before.replace("Alpha", "Beta")
 
     preview = semantic_writes.preflight_existing(
         tmp_path,
@@ -2308,6 +2315,181 @@ def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
         tmp_path, _ID, reviewed.after.review_fingerprint
     )
     assert loaded == reviewed.requested_decision
+
+
+def test_an_edit_that_names_no_validated_transition_commits_the_decision_in_one_call(
+    tmp_path: Path,
+) -> None:
+    before = _source(_semantic_body("Alpha"))
+    page = _write_page_needing_review(tmp_path, before)
+    after = before.replace("Alpha", "Beta")
+
+    reviewed = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        relation_disposition="reviewed_none",
+        relation_review_reason="No honest relation exists for the revised page",
+    )
+
+    assert reviewed.contract_result.should_block is False
+    committed = semantic_writes.commit_existing(tmp_path, preflight=reviewed)
+    assert committed.mutated is True
+    assert page.read_text(encoding="utf-8") == after
+    assert _decision_files(tmp_path) == [f"{reviewed.after.review_fingerprint}.json"]
+
+
+def test_a_validated_transition_without_the_hash_is_refused_by_name(tmp_path: Path) -> None:
+    """Naming a transition token ties the call to a validate result, whose hash it must send."""
+    before = _source(_semantic_body("Alpha"))
+    _write_page_needing_review(tmp_path, before)
+    after = before.replace("Alpha", "Beta")
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as refused:
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault.content_hash(before),
+            transition_token=preview.transition_token,
+            relation_disposition="reviewed_none",
+            relation_review_reason="No honest relation exists for the revised page",
+        )
+
+    assert refused.value.code == "INVALID_RELATION_REVIEW"
+    assert refused.value.missing == ("relation_review_hash",)
+
+
+def test_a_reviewed_none_sent_with_an_edit_that_needs_none_records_no_decision(
+    tmp_path: Path,
+) -> None:
+    """Sending the fields pre-emptively must not pile decision files toward the limit."""
+    before = _source(_semantic_body("Alpha"))
+    _write_page_needing_review(tmp_path, before)
+    standing = _decision(before, reason="Current state reviewed")
+    path = relation_review.lifecycle_decision_path(tmp_path, _ID, standing.after_fingerprint)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(relation_review.serialize_lifecycle_decision(standing), encoding="utf-8")
+    after = before.replace("Alpha", "Beta")
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        relation_disposition="reviewed_none",
+        relation_review_reason="Sent although the standing decision already covers this edit",
+    )
+    semantic_writes.commit_existing(tmp_path, preflight=preflight)
+
+    assert preflight.requested_decision is None
+    assert _decision_files(tmp_path) == [f"{standing.after_fingerprint}.json"]
+
+
+def _install_standing_decision(root: Path, source: str, *, reason: str) -> str:
+    """Record the decision for `source` as an earlier edit would; return its file name."""
+    decision = _decision(source, reason=reason)
+    path = relation_review.lifecycle_decision_path(root, _ID, decision.after_fingerprint)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(relation_review.serialize_lifecycle_decision(decision), encoding="utf-8")
+    return path.name
+
+
+_PEER_PAGE = "Knowledge Base/Notes/Insights/lifecycle-peer.md"
+
+
+def test_repeated_edits_of_a_reviewed_none_note_commit_in_one_call_and_record_no_decision(
+    tmp_path: Path,
+) -> None:
+    """The loop this change ends: each edit moved the page fingerprint and voided the decision.
+
+    A second governed page exists, so the lone-page rule cannot explain the result.
+    """
+    activation_manifest.ensure_manifest(tmp_path)
+    _write(tmp_path, _PEER_PAGE, _source(_semantic_body("Peer"), page_id=_OTHER_ID))
+    source = _source(_semantic_body("Alpha"))
+    page = _write(tmp_path, _PAGE, source)
+    standing = _install_standing_decision(tmp_path, source, reason="Nothing in the vault fits")
+
+    edit_module.edit(
+        tmp_path, path=_PAGE, why="reword", old_string="Alpha", new_string="Beta",
+        today=dt.date(2026, 7, 14),
+    )
+    append_module.append_to_file(
+        tmp_path, path=_PAGE, content="\n## Notes\n\nMore prose.\n", allow_curated=True,
+        today=dt.date(2026, 7, 15),
+    )
+    set_frontmatter_module.set_frontmatter_field(
+        tmp_path, path=_PAGE, field="title", value="Renamed", why="retitle",
+        today=dt.date(2026, 7, 16),
+    )
+
+    written = page.read_text(encoding="utf-8")
+    assert "Beta" in written and "More prose." in written and "title: Renamed" in written
+    assert _decision_files(tmp_path) == [standing]
+    audited = semantic_writes.evaluate_posthoc_batch(tmp_path, paths=[_PAGE], operation="audit")
+    disposition = audited.evaluations[0].contract_result.relation_disposition
+    assert (disposition.kind, disposition.satisfied, disposition.review_renewed) == (
+        "reviewed_none", True, True
+    )
+    assert disposition.review_reason == "Nothing in the vault fits"
+
+
+def test_a_decision_made_through_an_edit_stays_in_force_on_later_edits(tmp_path: Path) -> None:
+    """Bootstrap page, a second page, one refusal, one decision, then edits that ask nothing.
+
+    The slot's `carried_from` is how the third edit finds a decision recorded for
+    bytes that no longer exist; without it that edit is refused as STALE again.
+    """
+    observation = "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+    first = note_module.note(
+        tmp_path, content=f"# First\n\n{observation}", note_type="insight", title="First",
+        today=dt.date(2026, 7, 14),
+    )
+    note_module.note(
+        tmp_path, content=f"# Second\n\n{observation}", note_type="insight", title="Second",
+        today=dt.date(2026, 7, 14), relation_disposition="reviewed_none",
+        relation_review_reason="Nothing in the vault fits the second page",
+    )
+    first_source = (tmp_path / first.path).read_text(encoding="utf-8")
+    identity = first_source.split("exomem_id: ", 1)[1].splitlines()[0]
+
+    with pytest.raises(edit_module.EditError) as refused:
+        edit_module.edit(
+            tmp_path, path=first.path, why="reword", old_string="bounded", new_string="capped",
+            today=dt.date(2026, 7, 15),
+        )
+    assert "RELATION_DISPOSITION_STALE" in str(refused.value)
+
+    edit_module.edit(
+        tmp_path, path=first.path, why="reword", old_string="bounded", new_string="capped",
+        today=dt.date(2026, 7, 15), relation_disposition="reviewed_none",
+        relation_review_reason="Nothing in the vault fits the first page",
+    )
+    for day, (old, new) in enumerate((("capped", "limited"), ("limited", "bounded")), start=16):
+        edit_module.edit(
+            tmp_path, path=first.path, why="reword", old_string=old, new_string=new,
+            today=dt.date(2026, 7, day),
+        )
+
+    assert "bounded" in (tmp_path / first.path).read_text(encoding="utf-8")
+    directory = relation_review.lifecycle_prepared_path(tmp_path, identity).parent
+    decisions = sorted(p.name for p in directory.glob("*.json") if p.name != "prepared.json")
+    assert len(decisions) == 1
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, identity)
+    assert prepared is not None and prepared.carried_from is not None
+    assert prepared.carried_from.endswith(f"/{identity}/{decisions[0]}")
 
 
 def test_existing_reviewed_none_hyphen_alias_is_canonicalized(tmp_path: Path) -> None:
@@ -3300,7 +3482,7 @@ def test_an_observe_refusal_names_its_own_validate_form_for_the_omitted_findings
 
     reason = semantic_writes._blocking_reason(result)
 
-    assert "+4 more (operation=validate returns the full set)" in reason
+    assert "+4 more (observe_memory(operation='validate') returns the full set)" in reason
     assert "validate_only" not in reason
 
 

@@ -2038,9 +2038,10 @@ def op_bootstrap(
                     "draft_hash plus draft_token; changed drafts must be validated again"
                 ),
                 "reviewed_none": (
-                    "when validation requires it, commit the unchanged draft with "
-                    'relation_disposition="reviewed_none", the returned '
-                    "relation_review_hash, and an explicit bounded relation_review_reason; "
+                    "when no truthful relation applies, send "
+                    'relation_disposition="reviewed_none" and a bounded '
+                    "relation_review_reason; a validated draft also sends its "
+                    "relation_review_hash; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
                 "generic": (
@@ -2058,10 +2059,11 @@ def op_bootstrap(
             "reviewed_existing_edit": (
                 {
                     "rule": (
-                        "validate the exact edit; retain transition_token and "
-                        "relation_review_hash; commit that edit unchanged with an explicit "
-                        "reviewed_none reason only when no truthful relation applies, or "
-                        "relation_disposition generic with a reason for a generic entity edge"
+                        "if refused for relation review, re-send the edit with "
+                        "relation_disposition reviewed_none and a reason when no truthful "
+                        "relation applies; a validated edit adds transition_token and "
+                        "relation_review_hash; generic with a reason serves a generic "
+                        "entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2098,10 +2100,9 @@ def op_bootstrap(
                         },
                     },
                     "rule": (
-                        "retain semantic.transition_token and "
-                        "semantic.relation_review_hash from validation; commit the "
-                        "identical proposed edit with a bounded reason: reviewed_none, or "
-                        "generic for a generic entity edge"
+                        "if refused, re-send the edit with reviewed_none and a bounded "
+                        "reason; a validated edit adds semantic.transition_token and "
+                        "semantic.relation_review_hash; generic serves a generic entity edge"
                     ),
                 }
             ),

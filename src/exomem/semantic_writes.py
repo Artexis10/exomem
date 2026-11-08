@@ -978,6 +978,9 @@ class CreationPreflight:
     specific_offers: tuple[relation_barrier.Offer, ...] = ()
     #: The review fields a commit of this draft would find missing or ignored.
     review_fields: relation_review.ReviewFieldCheck = relation_review.ReviewFieldCheck()
+    #: Whether the caller named a validated draft. A call that did commits in one
+    #: call: the review hash it would copy from the validate result is the server's.
+    draft_bound: bool = True
 
     @property
     def draft_hash(self) -> str | None:
@@ -2200,6 +2203,11 @@ def _preflight_existing(
         ):
             provenance_server_at = prepared.provenance_server_at
     requested_decision: relation_review.LifecycleDecision | None = None
+    # One call: an edit that names no validated transition has no validate result to copy a
+    # hash from, so the server's own `transition_hash` stands in. Whether the page needs the
+    # decision is judged at the contract evaluation below, so a page that needs none records none.
+    one_call = False
+    review_requested: semantic_contract.RelationReviewState | None = None
     if relation_disposition == "reviewed_none":
         if applicability != "full":
             raise SemanticWriteError(
@@ -2207,12 +2215,15 @@ def _preflight_existing(
                 "reviewed-none applies only to an active compiled result",
             )
         if not validate_only and relation_review_hash is None:
-            absent = relation_review.missing_review_fields_error(
-                ("relation_review_hash",),
-                hash_source="semantic.relation_review_hash in the validate_only result",
-            )
-            raise SemanticWriteError(absent.code, absent.reason, missing=absent.missing)
-        if not validate_only and relation_review_hash != transition_hash:
+            if transition_token is not None:
+                absent = relation_review.missing_review_fields_error(
+                    ("relation_review_hash",),
+                    validated="transition_token",
+                    hash_source="semantic.relation_review_hash in the validate_only result",
+                )
+                raise SemanticWriteError(absent.code, absent.reason, missing=absent.missing)
+            one_call = True
+        elif not validate_only and relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
                 "review hash does not match the validated transition",
@@ -2238,13 +2249,15 @@ def _preflight_existing(
             )
         except relation_review.RelationReviewError as error:
             raise SemanticWriteError(error.code, error.reason) from error
-        after_review = semantic_contract.RelationReviewState(
+        review_requested = semantic_contract.RelationReviewState(
             "reviewed_none",
             requested_decision.page_identity,
             requested_decision.after_fingerprint,
             reason=requested_decision.reason,
             reference=requested_decision.reference,
         )
+        if not one_call:
+            after_review = review_requested
     choice = _generic_choice(relation_disposition, relation_review_reason)
     if choice is not None and not validate_only and relation_review_hash != transition_hash:
         raise SemanticWriteError(
@@ -2288,8 +2301,8 @@ def _preflight_existing(
         eligible_compiled=before.eligible_compiled,
         status_basis=status_basis,
     )
-    with mutation_timing_span(timings, "preflight.contract_eval"):
-        result = semantic_contract.evaluate(
+    def evaluate_with(review: semantic_contract.RelationReviewState | None):
+        return semantic_contract.evaluate(
             before=before,
             after=after,
             operation=operation,
@@ -2299,11 +2312,21 @@ def _preflight_existing(
             before_corpus=before_corpus,
             after_corpus=after_corpus,
             before_review=before_review,
-            after_review=after_review,
+            after_review=review,
             grandfathered=grandfathered and before.eligible_compiled,
             include_relation_disposition=applicability == "full",
             language_registry=language,
         )
+
+    with mutation_timing_span(timings, "preflight.contract_eval"):
+        result = evaluate_with(after_review)
+        if one_call:
+            disposition = result.relation_disposition
+            if disposition is not None and not disposition.satisfied:
+                after_review = review_requested
+                result = evaluate_with(after_review)
+            else:
+                requested_decision = None
     with mutation_timing_span(timings, "preflight.validity_token"):
         census_token = _capture_validity_stamp(
             root,
@@ -2514,6 +2537,20 @@ def _commit_existing_locked(
     )
     if stable_active:
         try:
+            # An edit that kept a reviewed-none decision in force records which
+            # lifecycle decision it was, so the next edit finds it again. A
+            # decision that lives in the creation receipt needs no pointer.
+            disposition = result.relation_disposition
+            carried_from = (
+                relation_review.load_lifecycle_decision_at(
+                    root,
+                    preflight.after.identity,
+                    disposition.review_reference,
+                    admission=admission,
+                )
+                if disposition is not None and disposition.review_renewed
+                else None
+            )
             prepared = relation_review.build_lifecycle_prepared_transition(
                 transition_id=_existing_transition_id(preflight.transition_token),
                 operation=preflight.operation,
@@ -2526,6 +2563,7 @@ def _commit_existing_locked(
                 decision=preflight.requested_decision,
                 transition_token=preflight.transition_token,
                 auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
+                carried_from=carried_from,
                 provenance_server_at=preflight.provenance_server_at,
             )
             current = relation_review.LifecyclePrimaryBinding(
@@ -4647,6 +4685,30 @@ def _evaluate_structural(
     )
 
 
+def _one_call_review_hash(
+    *,
+    draft_bound: bool,
+    disposition: str | None,
+    supplied_hash: str | None,
+    validation: relation_review.CreationDraftValidation | None,
+) -> str | None:
+    """The review hash a creation sends, or the server's own when it names no validated draft.
+
+    A call that named no draft has no validate result to copy a hash from, and the draft
+    hash binds only what the server just computed. A page that needs no review keeps the
+    caller's hash (or none), so the commit still reports the fields as ignored.
+    """
+    if (
+        draft_bound
+        or supplied_hash is not None
+        or validation is None
+        or relation_review.normalize_relation_disposition(disposition) != "reviewed_none"
+        or not relation_review.review_applies(validation.relation_disposition)
+    ):
+        return supplied_hash
+    return validation.draft_hash
+
+
 def preflight_creation(
     vault_root: Path,
     *,
@@ -4666,6 +4728,7 @@ def preflight_creation(
     vocabulary_binding: Any | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     resolver: vault.WikilinkResolver | None = None,
+    draft_bound: bool = True,
 ) -> CreationPreflight:
     # A fixed phase label. Its fields split out the two corpus-sized parts as
     # whole milliseconds: `structural_ms` and `relation_review_ms`.
@@ -4689,6 +4752,7 @@ def preflight_creation(
             vocabulary_binding=vocabulary_binding,
             status_basis=status_basis,
             resolver=resolver,
+            draft_bound=draft_bound,
         )
 
 
@@ -4712,6 +4776,7 @@ def _preflight_creation(
     vocabulary_binding: Any | None,
     status_basis: lifecycle_statuses.Basis | None,
     resolver: vault.WikilinkResolver | None,
+    draft_bound: bool,
 ) -> CreationPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
@@ -4818,6 +4883,19 @@ def _preflight_creation(
             and artifact.predecessor_content_hash == predecessor_content_hash
         ):
             provenance_server_at = artifact.provenance_server_at
+        # The `generic` disposition sends no review fields, so it has no hash to supply.
+        one_call_hash = (
+            {
+                "relation_review_hash": _one_call_review_hash(
+                    draft_bound=draft_bound,
+                    disposition=relation_disposition,
+                    supplied_hash=relation_review_hash,
+                    validation=validation,
+                )
+            }
+            if supplied_review_fields
+            else {}
+        )
         # This stamp also guards the relation-review verdict: both evaluations
         # read this page's definitions and the status basis after the entry
         # generation, so a change between or after them leaves it stale.
@@ -4854,9 +4932,10 @@ def _preflight_creation(
             generic_cleared=cleared,
             specific_offers=offers,
             review_fields=relation_review.check_review_fields(
-                supplied_review_fields,
+                {**supplied_review_fields, **one_call_hash},
                 relation_review.review_applies(validation.relation_disposition),
             ),
+            draft_bound=draft_bound,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -5663,6 +5742,12 @@ def _commit_creation(
         if preflight.draft_hash is not None and relation_review_hash != preflight.draft_hash:
             raise SemanticWriteError("DRAFT_HASH_MISMATCH", "draft hash requires fresh validation")
         relation_disposition = relation_review_hash = relation_review_reason = None
+    relation_review_hash = _one_call_review_hash(
+        draft_bound=preflight.draft_bound,
+        disposition=relation_disposition,
+        supplied_hash=relation_review_hash,
+        validation=preflight.creation_validation,
+    )
     _refuse_blocked_creation(preflight)
     planned = _plan_creation(root, preflight, auxiliary_writes, derived_auxiliary_writes)
     closure_plan = planned.closure_plan
