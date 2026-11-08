@@ -1951,6 +1951,100 @@ def test_a_job_ledger_held_past_its_busy_timeout_delays_the_paused_rows_until_it
     assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
 
 
+def test_a_job_ledger_domain_that_another_holder_keeps_past_the_mutation_timeout_delays_the_paused_rows_until_it_is_free(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+    from exomem.writer_lease import get_manager
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+    manager = get_manager()
+    # The wait for a held domain that the supervisor's open ends with MUTATION_BUSY.
+    monkeypatch.setattr(manager, "_mutation_timeout_seconds", 0.3)
+    present = media_worker.MediaWorker.present_runtime_requeue
+    requeue = media_jobs.MediaJobStore.requeue_runtime_block
+    holding, refused, release = threading.Event(), threading.Event(), threading.Event()
+
+    def hold_the_domain() -> None:
+        # What a scan or another writer of the ledger's private state does: the domain stays held.
+        with manager.reserved_identity_guard(vault, domains={"media-jobs-store"}, exclusive=False):
+            holding.set()
+            release.wait(timeout=15)
+
+    holder = threading.Thread(target=hold_the_domain)
+
+    def present_once_another_holder_keeps_the_domain(worker: media_worker.MediaWorker, job: media_jobs.MediaJob) -> bool:
+        if not holding.is_set():
+            holder.start()
+            assert holding.wait(timeout=5)
+        return present(worker, job)
+
+    def requeue_and_note_a_refusal(store: media_jobs.MediaJobStore, job: media_jobs.MediaJob) -> bool:
+        try:
+            return requeue(store, job)
+        except OpError:
+            refused.set()
+            raise
+
+    monkeypatch.setattr(
+        media_worker.MediaWorker, "present_runtime_requeue", present_once_another_holder_keeps_the_domain
+    )
+    monkeypatch.setattr(media_jobs.MediaJobStore, "requeue_runtime_block", requeue_and_note_a_refusal)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        assert refused.wait(timeout=15)
+        release.set()
+        holder.join(timeout=10)
+        _wait_for(
+            lambda: _no_runtime_block_left(vault) or not worker._thread.is_alive(),
+            "requeue the paused rows once the domain was free",
+        )
+        supervising = worker._thread.is_alive()
+    finally:
+        release.set()
+        if holder.is_alive():
+            holder.join(timeout=10)
+        if worker is not None:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    assert supervising
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.PENDING, "pending")] * 3
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_failure_that_is_not_a_busy_ledger_still_ends_the_supervisor_and_leaves_the_paused_rows_blocked(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    sidecars = _recordings_a_paused_start_blocked(vault)
+    _supervisor_starts_no_child(monkeypatch)
+
+    def a_failure_no_later_pass_can_outlast(_store: media_jobs.MediaJobStore) -> bool:
+        # Injected: the narrowest seam, a store call that the first supervisor pass makes. No contention
+        # produces a bare RuntimeError on this path, so the test supplies one.
+        raise RuntimeError("injected by the test")
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "has_parent_work", a_failure_no_later_pass_can_outlast)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    worker = None
+    try:
+        worker = server_runtime._start_media_worker(vault)
+        assert worker is not None
+        _wait_for(lambda: not worker._thread.is_alive(), "end on a failure that is not a busy ledger")
+    finally:
+        if worker is not None:
+            worker.stop()
+        _media_processing().set_media_runtime_available(vault)
+
+    assert _rows_and_pages(vault, sidecars) == [(media_jobs.BLOCKED, "blocked")] * 3
+
+
 def test_a_start_writes_no_page_for_a_paused_row_that_a_retry_returned_and_a_child_claimed_after_the_reread(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
