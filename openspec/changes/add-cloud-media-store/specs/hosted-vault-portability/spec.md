@@ -48,9 +48,9 @@ sidecar of an evicted original.
 
 ### Requirement: Export writes evicted originals byte-identical
 
-A Cloud export SHALL run in three steps: a pause, a pack and an upload. The pause SHALL run under the export hold, copy every archive member that is present on the volume into the export's staging claim, and write a plan that lists those members and each evicted original with its object name, version ID, plaintext size and SHA-256. The hold SHALL end when the pause reports, so the vault pauses only for the local copy. The pause SHALL hold no media key and have no egress.
+A Cloud export SHALL run in three steps: a pause, a pack and an upload. The pause SHALL run under the export hold, copy every archive member that is present on the volume into the export's staging claim, and write a plan that lists those members and each evicted original with its object name, version ID, plaintext size and SHA-256. The hold SHALL end when the pause reports, so the vault pauses only for the local copy. The pause SHALL hold no media key and have no public egress.
 
-The pack SHALL fetch each evicted original by its version ID through the media edge, decrypt it, and verify its size and SHA-256 against the plan before the archive completes. The pack SHALL have no egress except the media edge. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch, an absent version or an unreadable object SHALL fail the export without publishing it as complete.
+The pack SHALL fetch each evicted original by its version ID through the media edge, decrypt it, and verify its size and SHA-256 against the plan before the archive completes. The pack SHALL have no public egress. It SHALL reach only the in-cluster peers that the cell's runtime reaches, the media edge among them, and the media edge SHALL admit no other export step. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch, an absent version or an unreadable object SHALL fail the export without publishing it as complete.
 
 An export SHALL NOT omit a file without saying so. Originals under Trash SHALL be members like live ones. A companion that the pause cannot read SHALL be copied as a member, and the export SHALL report the count of such companions as partial. An evicted original that the cell cannot reach SHALL fail the export with a named code.
 
@@ -69,7 +69,7 @@ The pause SHALL have its own deadline: its pod runs within 2 minutes, and then c
 #### Scenario: The media key stays out of the egress pod
 
 - **WHEN** an export of a vault with evicted originals runs
-- **THEN** the pod that decrypts originals reaches only the media edge, the pod that uploads the archive holds no media key, and the pod that copies under the hold holds no key and has no egress
+- **THEN** the pod that decrypts originals has no public egress, the pod that uploads the archive holds no media key, and the pod that copies under the hold holds no key and has no public egress
 
 #### Scenario: The vault serves again after the local copy
 
