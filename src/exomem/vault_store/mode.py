@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .. import state_migration
-from ..collection_store import connection, schema
+from ..collection_store import capability, connection, schema
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
 FILE_MODE = "file"
@@ -38,3 +38,35 @@ def store_mode_active(vault_root: Path) -> bool:
             return False
         row = reader.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
     return row is not None and row[0] == STORE_MODE
+
+
+def status(vault_root: Path) -> dict:
+    """What the records say about this vault, read-only and without a lease.
+
+    A file-mode vault reports only the mode and the release gate. A store-mode vault adds the figures that
+    an operator checks before a rollback: stored pages and binaries, queued projections and held items.
+    """
+    report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
+    if not store_mode_active(vault_root):
+        return {**report, "mode": FILE_MODE}
+    reader, _ = connection._open_read_only(connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS)
+    with closing(reader):
+        revision, release, changed_at = reader.execute(
+            "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
+        ).fetchone()
+        counts = {
+            table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("store_pages", "store_binaries", "store_projection_queue", "store_held", "store_audit")
+        }
+    return {
+        **report,
+        "mode": STORE_MODE,
+        "revision": revision,
+        "release": release,
+        "changed_at": changed_at,
+        "pages": counts["store_pages"],
+        "binaries": counts["store_binaries"],
+        "queued_projections": counts["store_projection_queue"],
+        "held": counts["store_held"],
+        "audit_rows": counts["store_audit"],
+    }

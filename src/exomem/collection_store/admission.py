@@ -818,6 +818,35 @@ def migrate_route(vault_root, *, step, deadline=None):
     raise ValueError("migrate step must be dry-run, prepare, apply or handoff")
 
 
+def store_mode_route(vault_root, operation, step):
+    """The offline owner's route behind ``exomem store-mode migrate`` and ``rollback`` (OpenSpec make-vault-store-canonical).
+
+    It runs ``step(session, token, writer)`` as the owner's offline step: with the service stopped, in its own
+    producer session under the configured lease and the operator credential, inside the mutation boundary, with
+    the admitted store's one writer. A store that cannot be admitted refuses with its own reason. The lease
+    renews while the step runs, because a proof over a whole vault outlasts one lease.
+    """
+    require_owner(vault_root, operation)
+    root = Path(vault_root).resolve()
+
+    def apply(session, manager, fence_client):
+        manager.start_renewer()
+        opened = open_store(session, manager, fence_client=fence_client)
+        runtime = session.runtime(retire=False)
+        if opened["status"] != "admitted":
+            raise runtime._refusal()
+        with manager.writer_authority_guard(vault_root=root):
+            token = manager._fencing_token
+            with manager.consistency_guard(root, operation=f"vault_store_{operation}"):
+                state_migration._require_collection_store_recovery(session, token)
+                if not runtime.retire_idle_handle():
+                    raise connection.busy("the live store is still borrowed")
+                with session.writer(token) as writer:
+                    return step(session, token, writer)
+
+    return _offline_owner(root, operation, apply, committed=True)
+
+
 def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, abandon=False):
     """The owner's route behind `exomem collections export` and its maintain_memory mode (P1b.4).
 
@@ -977,12 +1006,14 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
+def _offline_owner(root, operation, work, *, operator=True, drain_views=True, committed=False):
     """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
     lease, which it hands back with the flushed head. ``operator=False`` is for a step
     that only reads the fence: its client carries the writer credential, not the operator's.
+    ``committed`` is for a step whose result is already durable when it returns: a failed hand-back
+    is reported on that result, never raised over it.
     """
     config = writer_lease.LeaseConfig.from_env()
     fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
@@ -1009,7 +1040,9 @@ def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
             try:
                 manager.close(**close_options)
             except OpError as error:
-                if operation == "migrate" and result.get("status") != "marker_admitted":
+                if committed:
+                    result = {**result, "lease": "expires", "lease_reason": error.code}
+                elif operation == "migrate" and result.get("status") != "marker_admitted":
                     # A migrate that admitted nothing has no head to hand off; the report must not hide.
                     result = {**result, "lease": "expires", "lease_reason": error.code}
                 elif operation != "rollback" or result["status"] != "disabled":
