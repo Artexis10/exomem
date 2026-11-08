@@ -3218,9 +3218,9 @@ def _resident_vector_paths(
 
     Reads only what is resident, as `related_pages` does: no matrix load, no encoder load, no wait. Only the
     admitted `allowed` pages can be returned, and each page's rank depends on its own chunks alone, so a page
-    the caller may not see never changes the result. `state` is `ready`, `off` when this install runs without
-    embeddings or no recall matrix exists yet, or `lane_failed` when the dense reading should run and cannot
-    (a cold matrix or encoder while the service warms, or a matrix built by another encoder).
+    the caller may not see never changes the result. `state` is `ready`; `off` when this install runs without
+    embeddings, or the matrix or encoder is not resident outside a warm-up; or `lane_failed` when the dense
+    reading should run and cannot (still warming, or a resident matrix built by another encoder).
     """
     import numpy as np
 
@@ -3229,17 +3229,20 @@ def _resident_vector_paths(
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return [], "off"
     try:
+        # Cold is expected outside a warming service (a one-shot CLI call never loads the encoder), so it is
+        # reported only while the service warms; a resident matrix from another encoder is a fault.
+        cold = "lane_failed" if readiness.should_defer("embeddings") else "off"
         embedding_index = embeddings.peek_embedding_index(vault_root)
         resident = embedding_index.resident_matrix() if embedding_index is not None else None
-        if resident is None:
-            return [], "lane_failed" if readiness.should_defer("embeddings") else "off"
-        identity = embedding_index.identity
         fingerprint = embeddings.activation_fingerprint()
-        if identity is None or fingerprint is None or identity.fingerprint != fingerprint:
+        if resident is None or fingerprint is None:
+            return [], cold
+        identity = embedding_index.identity
+        if identity is None or identity.fingerprint != fingerprint:
             return [], "lane_failed"
         vector = embeddings.embed_activation_query_if_loaded(text)
         if vector is None:
-            return [], "lane_failed"
+            return [], cold
         query = np.asarray(vector, dtype=np.float32).reshape(-1)
         norm = float(np.linalg.norm(query))
         if norm == 0.0 or resident.matrix.ndim != 2 or query.shape[0] != resident.matrix.shape[1]:
