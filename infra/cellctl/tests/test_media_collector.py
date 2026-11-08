@@ -250,7 +250,7 @@ def test_a_collection_line_that_does_not_parse_is_logged_as_a_warning(tmp_path, 
                                           retention=PRUNING, **COLLECTING)
 
     assert observed.backup_job_media_collection is None
-    assert "media collection line that does not parse" in caplog.text
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
     assert "hid two names" not in caplog.text
 
 

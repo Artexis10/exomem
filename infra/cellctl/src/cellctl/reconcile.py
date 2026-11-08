@@ -3186,12 +3186,17 @@ def _export_node(row: CellRow, observation: ClusterObservation) -> str | None:
     return observation.pv_node or row.node
 
 
+# The reason an export row gives while it waits for its node's export slot.
+EXPORT_WAITING_FOR_SLOT = "node_export_slot"
+
+
 async def _note_export_waiting(connection: asyncpg.Connection, row: CellRow, item: ExportRow) -> None:
     """D8: an export that waits for its node's slot says so in its row."""
 
-    if export_state(item).get("waiting") != "node_export_slot":
+    if export_state(item).get("waiting") != EXPORT_WAITING_FOR_SLOT:
         logger.info("cellctl: cell %s's export %s waits for its node's export slot", row.cell_id, item.export_id)
-        await db.write_export(connection, item.export_id, {"packing_report": json.dumps({"waiting": "node_export_slot"})})
+        await db.write_export(connection, item.export_id,
+                              {"packing_report": json.dumps({"waiting": EXPORT_WAITING_FOR_SLOT})})
 
 
 def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservation, decision) -> None:
