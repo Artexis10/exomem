@@ -210,7 +210,7 @@ class FilingReply:
     def of(cls, reply: dict) -> FilingReply:
         """A reply that does not read as the cell's `file` contract is a cell that does not file in the way this CLI knows."""
         progress, stop = reply.get("progress"), reply.get("stop")
-        names = ("filed", "failed", "remaining", "pages_done")
+        names = ("filed", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of the cell's `file` reply.
         # nosemgrep: ep-word-membership -- the closed states of the cell's `file` reply.
         if reply.get("filing") not in ("working", "stopped", "done") or not isinstance(progress, dict) or any(
                 type(progress.get(name)) is not int for name in names):

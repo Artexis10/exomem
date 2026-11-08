@@ -3866,6 +3866,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         done: dict = {}
         if finished is not None:
             finish = _presented_finish(finished)
+            # nosemgrep: ep-word-set -- the closed fields of `finish`'s own reply that a done `file` reply carries.
             done = {"coverage_run": finished["run_id"], **{
                 key: finish[key] for key in ("coverage", "first_question", "route", "indexing") if key in finish
             }}
