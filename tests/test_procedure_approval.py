@@ -374,6 +374,27 @@ def test_a_revoke_works_for_a_deleted_page_and_it_stays_unapproved_if_the_bytes_
     ]
 
 
+def test_a_served_read_of_a_revoked_page_gives_the_owner_the_revoke_entry(vault: Path) -> None:
+    # The serving shortcut skips the page read on a revoke; it must still report
+    # the entry that `verdict` reports, so both answer the owner alike.
+    rel = write_page(vault, "release-steps")
+    approve_page(vault, rel)
+    with owner_authority():
+        revoked = procedure_approval.revoke(
+            vault, REF, current_version=None, expected_version=None, principal="o", client="c"
+        ).appended
+
+    def served(*, owner: bool) -> procedure_approval.Verdict:
+        return procedure_approval.served_verdict(
+            vault, rel, procedure_approval.ledger(vault, REF), owner=owner, full_release=True,
+            read=lambda: (vault / rel).read_bytes(), holders=lambda: (rel,),
+        )
+
+    assert served(owner=True) == verdict_of(vault, rel)
+    assert served(owner=True).entry == revoked
+    assert served(owner=False) == procedure_approval.Verdict(procedure_approval.UNAPPROVED)
+
+
 def test_a_revoke_without_an_approval_or_a_repeat_of_one_appends_nothing(vault: Path) -> None:
     rel = write_page(vault, "release-steps")
     current = facts_of(vault, rel).version

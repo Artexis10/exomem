@@ -76,35 +76,43 @@ _FIELDS = frozenset(
     {"schema_version", "entry_id", "ref", "version", "action", "principal", "client", "recorded_at"}
 )
 
-# The three finding kinds this module raises. They are closed and carry no customer vocabulary.
-#: What to change for each failed eligibility test, so a refusal names its own fix.
-_CONDITION_FIX = {
+#: Why a page fails each eligibility test and what to change, so a refusal names its own fix.
+_INELIGIBLE = {
     NOT_COMPILED: (
-        "This page is not a compiled note. Approve a compiled procedure page; captured "
-        "material stays a source and is never approved."
+        "This page is not a compiled note. Captured material stays a source and is never approved.",
+        "Approve a compiled procedure page.",
     ),
     NOT_LIVE: (
-        "The page has no live status. Set a live status with the ordinary editor, read "
-        "the page again, then approve its new content_hash."
+        "The page has no live status.",
+        "Set a live status with the ordinary editor, read the page again, then approve its new "
+        "content_hash.",
     ),
     NO_METHOD_UNIT: (
-        "The page has no method unit. Add a procedure or method block with the ordinary "
-        "editor, read the page again, then approve its new content_hash."
+        "The page has no method unit.",
+        "Add a procedure or method block with the ordinary editor, read the page again, then "
+        "approve its new content_hash.",
     ),
     NO_STABLE_ID: (
-        "The page has no stable exomem_id. Run maintain_memory with mode backfill-ids and "
-        "apply its plan, then approve the page by the ref it now holds."
+        "The page has no stable exomem_id.",
+        "Run maintain_memory with mode backfill-ids and apply its plan, then approve the page by "
+        "the ref it now holds.",
     ),
     ID_UNRESOLVED: (
-        "No page holds this ref, or the page is not readable here. Check the ref in the "
-        "page's frontmatter, then approve again."
+        "No page holds this ref, or the page is not readable here.",
+        "Check the ref in the page's frontmatter, then approve again.",
     ),
     DUPLICATE_ID: (
-        "More than one page repeats this exomem_id. Give the copy a new exomem_id, then "
-        "approve the page again."
+        "More than one page repeats this exomem_id.",
+        "Give the copy a new exomem_id, then approve the page again.",
     ),
 }
 
+_UNAVAILABLE_FIX = (
+    "Check the Approvals folder in the vault and the vault's state directory. If the key file is "
+    "damaged, restore it from your backup. Without a backup, remove it and approve each page again."
+)
+
+# What the owner reads for each of the three finding kinds. They are closed and carry no customer vocabulary.
 _FINDING_TEXT = {
     FOREIGN: (
         "Its approval entries do not verify with this host's approval key. They may come "
@@ -117,25 +125,30 @@ _FINDING_TEXT = {
     ),
     UNAVAILABLE: (
         "The approvals ledger or the approval key cannot be read now, so the page reads "
-        "unapproved. Check the Approvals folder in the vault and the vault's state directory. "
-        "If the key file is damaged, restore it from your backup. Without a backup, remove it "
-        "and approve each page again."
+        f"unapproved. {_UNAVAILABLE_FIX}"
     ),
 }
 
 
 class ApprovalRefused(Exception):
-    """A write that refused before it changed anything. `code` names the cause."""
+    """A write that refused before it changed anything. `code` names the cause, `remediation` the fix."""
 
-    def __init__(self, code: str, message: str, *, condition: str | None = None) -> None:
+    def __init__(
+        self, code: str, message: str, remediation: str, *, condition: str | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.remediation = remediation
         self.condition = condition
 
 
 def _unavailable() -> ApprovalRefused:
-    return ApprovalRefused("ledger_unavailable", _FINDING_TEXT[UNAVAILABLE])
+    return ApprovalRefused(
+        "ledger_unavailable",
+        "The approvals ledger or the approval key cannot be read now, so nothing changed.",
+        _UNAVAILABLE_FIX,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,9 +316,9 @@ def _ensure_key(vault_root: Path) -> bytes:
     except OSError as error:
         raise ApprovalRefused(
             "key_unavailable",
-            "The approval key is damaged or unreadable. Restore the key file from your backup. "
-            "Without a backup, remove it from the vault's state directory and approve each "
-            "page again; earlier entries read as foreign until then.",
+            "The approval key is damaged or unreadable.",
+            "Restore the key file from your backup. Without a backup, remove it from the vault's "
+            "state directory and approve each page again; earlier entries read as foreign until then.",
         ) from error
     if key is not None:
         return key
@@ -633,15 +646,12 @@ def served_verdict(
     value and findings of `verdict` without the page's facts. A serving surface passes `read` and
     `holders` as callables, and a page with no approval entry costs one ledger read and no more.
     """
-    if (
-        ref_ledger is None
-        or not full_release
-        or ref_ledger.unreadable
-        or ref_ledger.unavailable
-        or ref_ledger.latest is None
-        or ref_ledger.latest.action != APPROVE
-    ):
+    if ref_ledger is None or not full_release or ref_ledger.unreadable or ref_ledger.unavailable:
         return verdict(None, ref_ledger, owner=owner, full_release=full_release)
+    latest = ref_ledger.latest
+    if latest is None or latest.action != APPROVE:
+        # As in `verdict`, the owner still sees the latest entry, here a revoke.
+        return Verdict(UNAPPROVED, latest if owner else None, ref_ledger.findings() if owner else ())
     facts = page_facts(vault_root, rel_path, read(), holders=holders())
     return verdict(facts, ref_ledger, owner=owner, full_release=full_release)
 
@@ -690,8 +700,8 @@ def _quarantine_ref(vault_root: Path, ref: str, *, include_foreign: bool) -> tup
         except (OSError, RuntimeError) as error:
             raise ApprovalRefused(
                 "quarantine_failed",
-                f"An unreadable approval entry could not be moved aside ({name}). Remove that "
-                "file from the ledger by hand, then try again.",
+                f"An approval entry could not be moved aside ({name}).",
+                "Remove that file from the ledger by hand, then try again.",
             ) from error
         _committed()
         moved.append(Moved(ref, name, kind, destination_name))
@@ -775,12 +785,13 @@ def approve(
     if facts is None or not facts.eligible or facts.ref != ref:
         # No facts means that no page holds the ref.
         condition = facts.condition if facts is not None and facts.ref == ref else ID_UNRESOLVED
-        raise ApprovalRefused("ineligible", _CONDITION_FIX[condition], condition=condition)
+        problem, fix = _INELIGIBLE[condition]
+        raise ApprovalRefused("ineligible", problem, fix, condition=condition)
     if expected_version != facts.version:
         raise ApprovalRefused(
             "stale_version",
-            "The page changed since it was read. Read the page again, then approve its "
-            "current content_hash.",
+            "The page changed since it was read.",
+            "Read the page again, then approve its current content_hash.",
         )
     moved = _quarantine_ref(vault_root, ref, include_foreign=False)
     current = ledger(vault_root, ref)
@@ -834,8 +845,8 @@ def revoke(
     ):
         raise ApprovalRefused(
             "stale_version",
-            "The page changed since it was read. Read the page again, then revoke with its "
-            "current content_hash.",
+            "The page changed since it was read.",
+            "Read the page again, then revoke with its current content_hash.",
         )
     moved = _quarantine_ref(vault_root, ref, include_foreign=False)
     current = ledger(vault_root, ref)

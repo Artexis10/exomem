@@ -154,6 +154,8 @@ def test_a_repeat_through_the_other_route_adds_nothing(vault, mcp, capsys) -> No
     repeat = approve(mcp, REF, version)
 
     assert first["data"]["diagnostics"]["appended"] is True
+    # A repeat commits nothing, so no terminal adds a summary: the leaf's own sentence leads.
+    assert next(iter(repeat)) == "outcome"
     assert repeat["outcome"] == "This version is already approved. Nothing was added."
     assert repeat["diagnostics"]["entry_id"] == first["data"]["diagnostics"]["entry_id"]
     assert "changes" not in repeat
@@ -216,7 +218,8 @@ def test_a_stale_version_is_refused_and_names_the_fix(vault, mcp) -> None:
     refused = approve(mcp, REF, version)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_STALE_VERSION"
-    assert "Read the page again, then approve its current content_hash" in refused["error"]["message"]
+    assert refused["error"]["message"] == "The page changed since it was read."
+    assert refused["error"]["remediation"] == "Read the page again, then approve its current content_hash."
     assert not ref_directory(vault).exists()
 
 
@@ -252,7 +255,7 @@ def test_a_page_that_repeats_its_id_is_refused_with_the_fix_for_that_condition(v
     refused = approve(mcp, REF, facts_of(vault, first).version)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INELIGIBLE"
-    assert "Give the copy a new exomem_id" in refused["error"]["message"]
+    assert "Give the copy a new exomem_id" in refused["error"]["remediation"]
     assert not ref_directory(vault).exists()
 
 
@@ -260,7 +263,7 @@ def test_a_ref_that_no_page_holds_is_refused_and_writes_no_key(vault, mcp) -> No
     refused = approve(mcp, f"exomem://memory/{OTHER_ID}", "0" * 64)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INELIGIBLE"
-    assert "Check the ref in the page's frontmatter" in refused["error"]["message"]
+    assert "Check the ref in the page's frontmatter" in refused["error"]["remediation"]
     assert not procedure_approval.key_path(vault).exists()
 
 
@@ -455,13 +458,17 @@ def test_quarantine_moves_a_damaged_entry_aside_and_the_listing_stops_reporting_
 
     moved = call(mcp, "approve_procedure", {"kind": "quarantine"})
     after = listing(mcp)
+    idle = call(mcp, "approve_procedure", {"kind": "quarantine"})
 
     assert [(item["ref"], item["kind"]) for item in before["findings"]] == [(REF, "unreadable")]
+    assert before["outcome"].endswith(" 1 finding needs your attention.")
     assert moved["user_summary"].startswith("Moved 1 unreadable entry aside.")
     assert [row["file"] for row in moved["diagnostics"]["moved_aside"]] == ["1" * 32]
     assert after["findings"] == []
     assert after["approvals"][0]["verdict"] == "approved"
     assert "1" * 32 not in entry_names(vault)
+    assert next(iter(idle)) == "outcome"
+    assert idle["outcome"] == "No approval entries needed moving. Nothing changed."
 
 
 def test_approvals_checked_with_another_key_read_foreign_until_quarantined_and_approved_again(
@@ -481,7 +488,7 @@ def test_approvals_checked_with_another_key_read_foreign_until_quarantined_and_a
     assert [(item["ref"], item["kind"]) for item in foreign["findings"]] == [
         (REF, "foreign_or_tampered")
     ]
-    assert moved["user_summary"].startswith("Moved 1 foreign or tampered aside.")
+    assert moved["user_summary"].startswith("Moved 1 foreign or tampered entry aside.")
     assert again["diagnostics"]["appended"] is True
     assert listing(mcp)["approvals"][0]["verdict"] == "approved"
 

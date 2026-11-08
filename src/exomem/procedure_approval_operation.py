@@ -24,7 +24,7 @@ LISTING = "procedure_approvals"
 QUARANTINE = "quarantine"
 ACTIONS = (procedure_approval.APPROVE, procedure_approval.REVOKE, QUARANTINE)
 
-#: One refusal code per ledger refusal; the module's own message is the text that names the fix.
+#: One refusal code per ledger refusal; the module's own message and remediation name the cause and the fix.
 _REFUSAL_CODE_PREFIX = "APPROVE_PROCEDURE_"
 #: Bounds for the change shown in an approve result, so one call cannot return a whole page twice.
 _DIFF_LINES = 120
@@ -94,6 +94,7 @@ def _refusal(error: procedure_approval.ApprovalRefused) -> OpError:
     return OpError(
         f"{_REFUSAL_CODE_PREFIX}{error.code.upper()}",
         error.message,
+        error.remediation,
         details={"condition": error.condition} if error.condition else None,
     )
 
@@ -253,7 +254,7 @@ def run(
     if outcome.quarantined:
         moved = _count(len(outcome.quarantined), "unreadable approval entry", "unreadable approval entries")
         sentence += f" Moved {moved} aside."
-    result: dict[str, Any] = {"operation": OPERATION, "action": action, "outcome": sentence}
+    result: dict[str, Any] = {"outcome": sentence, "operation": OPERATION, "action": action}
     if action == procedure_approval.APPROVE and outcome.appended is not None:
         result["changes"] = _changes(root, page, outcome.previous_approved_version)
     result["diagnostics"] = {
@@ -278,12 +279,12 @@ def _quarantine_result(
         if unreadable:
             parts.append(_count(unreadable, "unreadable entry", "unreadable entries"))
         if foreign:
-            parts.append(f"{foreign} foreign or tampered")
+            parts.append(_count(foreign, "foreign or tampered entry", "foreign or tampered entries"))
         sentence = f"Moved {' and '.join(parts)} aside. No approval was added or changed."
     return {
+        "outcome": sentence,
         "operation": OPERATION,
         "action": QUARANTINE,
-        "outcome": sentence,
         "diagnostics": {"ref": ref, "moved_aside": _moved_rows(moved)},
     }
 
@@ -337,7 +338,7 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
             f"{counts['unapproved']} unapproved."
         )
         if findings:
-            sentence += f" {_count(len(findings), 'finding', 'findings')} need your attention."
+            sentence += f" {_count(len(findings), 'finding needs', 'findings need')} your attention."
     return {
         "kind": LISTING,
         "outcome": sentence,
