@@ -4608,21 +4608,13 @@ def _derive_relation_facts(
                         "reverse": False,
                     }
                 )
-        frontmatter_relations = (
-            ("sources", "derived_from", False),
-            ("evidence", "evidenced_by", False),
-            ("evidences", "evidenced_by", False),
-            ("evidence_paths", "evidenced_by", False),
-            ("related", "links_to", False),
-            ("supersedes", "supersedes", False),
-            ("superseded_by", "supersedes", True),
-        )
-        for field_name, raw_relation, reverse in frontmatter_relations:
+        for field_name, binding in registry.frontmatter_fields().items():
+            reverse = binding.direction == "reverse"
             for raw_target in _frontmatter_targets(state.frontmatter.get(field_name)):
                 raw_facts.append(
                     {
                         "authored": state,
-                        "raw_relation": raw_relation,
+                        "raw_relation": binding.relation,
                         "raw_target": raw_target,
                         "line": None,
                         "anchor": field_name,

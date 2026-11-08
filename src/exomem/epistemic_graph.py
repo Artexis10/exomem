@@ -12420,77 +12420,30 @@ def _page_level_edges(
     visible: Callable[[str], bool] | None,
     check: Callable[[], None] | None = None,
 ) -> list[GraphEdge]:
-    """Frontmatter and body-link edges, whose meaning no vocabulary instance changes."""
+    """Frontmatter and body-link edges, whose meaning no vocabulary instance changes.
+
+    The core pack binds each frontmatter field to a relation and a direction.
+    """
     rel = page.rel_path
     file_key = _file_key(rel)
     edges: list[GraphEdge] = []
-    for occurrence, target in enumerate(_frontmatter_links(page.frontmatter.get("sources"))):
-        if check is not None:
-            check()
-        edges.append(
-            page_edge(
-                file_key,
-                _file_key(_with_md(target)),
-                "derived_from",
-                "frontmatter",
-                source_path=rel,
-                source_anchor="sources",
-                review_evidence={"internal": {"occurrence": occurrence}},
-            )
-        )
-    for field in ("evidence", "evidences", "evidence_paths"):
-        for target in _frontmatter_links(page.frontmatter.get(field)):
+    for field, binding in relation_registry.core_registry().frontmatter_fields().items():
+        for occurrence, target in enumerate(_frontmatter_links(page.frontmatter.get(field))):
             if check is not None:
                 check()
+            other_key = _file_key(_with_md(target))
+            reverse = binding.direction == "reverse"
             edges.append(
                 page_edge(
-                    file_key,
-                    _file_key(_with_md(target)),
-                    "evidenced_by",
+                    other_key if reverse else file_key,
+                    file_key if reverse else other_key,
+                    binding.relation,
                     "frontmatter",
                     source_path=rel,
                     source_anchor=field,
+                    review_evidence={"internal": {"occurrence": occurrence}},
                 )
             )
-    for target in _frontmatter_links(page.frontmatter.get("supersedes")):
-        if check is not None:
-            check()
-        edges.append(
-            page_edge(
-                file_key,
-                _file_key(_with_md(target)),
-                "supersedes",
-                "frontmatter",
-                source_path=rel,
-                source_anchor="supersedes",
-            )
-        )
-    for target in _frontmatter_links(page.frontmatter.get("superseded_by")):
-        if check is not None:
-            check()
-        edges.append(
-            page_edge(
-                _file_key(_with_md(target)),
-                file_key,
-                "supersedes",
-                "frontmatter",
-                source_path=rel,
-                source_anchor="superseded_by",
-            )
-        )
-    for target in _frontmatter_links(page.frontmatter.get("related")):
-        if check is not None:
-            check()
-        edges.append(
-            page_edge(
-                file_key,
-                _file_key(_with_md(target)),
-                "links_to",
-                "frontmatter",
-                source_path=rel,
-                source_anchor="related",
-            )
-        )
     for observation in _body_wikilink_observations(
         vault_root, body, skip_lines=canonical_lines,
         resolver=resolver, visible=visible, check=check,
