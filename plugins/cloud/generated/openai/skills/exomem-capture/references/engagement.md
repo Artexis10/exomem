@@ -238,7 +238,7 @@ Use one applicable authored writer to record a verdict or resolving relation und
 For example, `change_observations(operation={'kind': 'update'})` uses the real unit fingerprint and current parent hash.
 The due fingerprint binds a review finding and is not the unit fingerprint.
 The existing projection update clears a resolved finding; do not add a second dismissal.
-If presentation dismissal is the decision, use one `triage_memory(ref, action="dismiss", expected_fingerprint, why)` mutation.
+If presentation dismissal is the decision, use one `triage_memory(operation={'kind': 'decision', 'ref': ..., 'action': 'dismiss', 'expected_fingerprint': ..., 'why': ...})` mutation.
 That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
 
 ## Passing the conversation to activation

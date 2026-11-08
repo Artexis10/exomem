@@ -494,6 +494,9 @@ def _stop_leaked_graph_drain():
 
     graph_drain.stop()
     graph_drain._DEBT.clear()
+    # A quiet window stamped under a faked clock must not outlive its test: a later
+    # test compares against real `time.monotonic()`, which can read lower.
+    graph_drain._last_debt = 0.0
 
 
 @pytest.fixture(autouse=True)
