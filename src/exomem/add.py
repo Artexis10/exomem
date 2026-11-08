@@ -1253,7 +1253,7 @@ def _episode_frontmatter_lines(
             missing=["extra_frontmatter"],
             reason=(
                 f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for "
-                "conversation recaps; record one with episode_memory"
+                "conversation recaps; record one with record_episode"
             ),
         )
     allowed = {name for name, _required in EPISODE_FRONTMATTER_FIELDS}

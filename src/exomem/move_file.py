@@ -591,7 +591,7 @@ def _move_file_local(
             code="EPISODE_KIND_RESERVED",
             reason=(
                 f"Sources/{source_taxonomy.EPISODE_PATH_LABEL}/ holds only conversation "
-                "recaps recorded with episode_memory: nothing moves into it, and a recap "
+                "recaps recorded with record_episode: nothing moves into it, and a recap "
                 "is not moved, renamed or promoted out of it"
             ),
         )

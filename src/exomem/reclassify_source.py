@@ -432,7 +432,7 @@ def _refuse_episode_kind(current_kind: str, target_kind: str | None) -> None:
         raise ReclassifyError(
             "EPISODE_KIND_RESERVED",
             f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for conversation "
-            "recaps recorded with episode_memory: a recap cannot be reclassified, "
+            "recaps recorded with record_episode: a recap cannot be reclassified, "
             "and nothing else can become one",
         )
 
