@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import access, call_spans, privacy_log, procedure_approval, reserved_paths
 from . import find as find_module
-from .governance import principal, raw_protection
+from .governance import principal
 from .kbdir import kb_prefix
 from .vault import (
     VaultPathError,
@@ -324,7 +324,7 @@ def approval_fields(vault_root: Path, result: GetResult, *, ref: str, full_relea
     the page content stays readable. `ref` is the reference index's ref for this path, which the index gives
     only to the single valid owner of an id. So the page is its own holder, and the verdict needs no second index.
     """
-    owner = raw_protection.is_owner(principal.effective_principal())
+    owner = procedure_approval.owner_view(vault_root, principal.effective_principal())
     try:
         ref_ledger = procedure_approval.ledger(vault_root, ref)
         if not ref_ledger.held:

@@ -565,6 +565,18 @@ def page_facts(
     return PageFacts(ref, version, True)
 
 
+def owner_view(vault_root: Path, who: object) -> bool:
+    """Whether `who` gets the owner's view of the ledger: `stale`, entries, findings and every action.
+
+    The owner audience alone is not enough. An owner connection that a connector boundary fences
+    from some scopes reads the vault as a restricted reader, so it must not approve its own edited
+    text, revoke or move entries of pages it cannot see, or list their refs.
+    """
+    from .governance import egress, raw_protection
+
+    return raw_protection.is_owner(who) and egress.unrestricted_content_access(Path(vault_root), who)
+
+
 def verdict(
     facts: PageFacts | None,
     ref_ledger: RefLedger | None,

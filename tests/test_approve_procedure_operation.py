@@ -16,6 +16,9 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 from mcp.types import Implementation
+from test_confined_writers import confined as confined
+from test_confined_writers import unarmed as unarmed
+from test_connector_boundary import configured_boundary as configured_boundary
 from test_procedure_approval import (
     KB,
     METHOD,
@@ -297,6 +300,64 @@ def test_a_caller_who_is_not_the_owner_is_refused_and_changes_nothing(vault, nam
     assert refused.value.code == "APPROVE_PROCEDURE_OWNER_ONLY"
     assert not (vault / KB / "_Approvals").exists()
     assert not procedure_approval.key_path(vault).exists()
+
+
+@pytest.fixture(params=["confined-writer", "limited-reader"])
+def fenced_owner(request):
+    """The owner signed in through a connector client that the host boundary fences from some scopes.
+
+    Its page `Notes/Insights/own-*` is readable in full: it is the confined writer's own matter and
+    lies in the limited reader's public scope. A `private-project` page is hidden from both.
+    """
+    if request.param == "confined-writer":
+        _config, authenticate = request.getfixturevalue("confined")
+        return authenticate("writer")
+    _config, authenticate = request.getfixturevalue("configured_boundary")
+    return authenticate("limited")
+
+
+def _hidden_procedure(vault: Path) -> str:
+    rel = f"{KB}/Notes/hidden-release.md"
+    (vault / rel).write_text(
+        f"---\ntype: insight\nstatus: active\nproject: private-project\nexomem_id: {OTHER_ID}\n---\n\n"
+        f"# hidden-release\n\n{METHOD}",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def _ledger_bytes(vault: Path) -> dict[str, bytes]:
+    root = vault / KB / "_Approvals"
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_a_fenced_owner_connection_can_neither_approve_revoke_quarantine_nor_list(vault, fenced_owner) -> None:
+    """The owner audience behind a fenced connector reads as a restricted reader, so it holds no ledger power."""
+    rel = write_page(vault, "own-release")
+    hidden = _hidden_procedure(vault)
+    owner = principal.owner_principal(surface="cli")
+    for ref, path in ((REF, rel), (f"exomem://memory/{OTHER_ID}", hidden)):
+        invoke("approve_procedure", vault, owner, action="approve", ref=ref, expected_version=facts_of(vault, path).version)
+    write_raw(ref_directory(vault, f"exomem://memory/{OTHER_ID}"), "1" * 32, b"not json {")
+    # The fenced connection may edit its own page, so it could otherwise endorse text the owner never read.
+    (vault / rel).write_text(page_text(vault, rel) + "\nAn edit that the owner never approved.\n", encoding="utf-8")
+    before = _ledger_bytes(vault)
+    key = procedure_approval.key_path(vault).read_bytes()
+
+    for name, arguments in (
+        ("approve_procedure", {"action": "approve", "ref": REF, "expected_version": facts_of(vault, rel).version}),
+        ("approve_procedure", {"action": "revoke", "ref": f"exomem://memory/{OTHER_ID}"}),
+        ("approve_procedure", {"action": "quarantine"}),
+        ("approve_procedure", {"action": "quarantine", "ref": f"exomem://memory/{OTHER_ID}"}),
+        ("review_memory", {"mode": "procedure_approvals"}),
+    ):
+        with pytest.raises(OpError) as refused:
+            invoke(name, vault, fenced_owner, **arguments)
+        assert refused.value.code == "APPROVE_PROCEDURE_OWNER_ONLY", arguments
+        assert OTHER_ID not in f"{refused.value.message} {refused.value.remediation}"
+
+    assert _ledger_bytes(vault) == before
+    assert procedure_approval.key_path(vault).read_bytes() == key
 
 
 def test_the_command_is_owner_only_and_off_cloud_with_the_declared_annotations(mcp) -> None:

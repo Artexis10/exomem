@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate
+from test_connector_boundary import configured_boundary as configured_boundary
 from test_context_catalogue import _built, _page
 from test_governance_egress import _external
 from test_working_set_withheld_twins import _withhold
@@ -206,6 +207,29 @@ def test_a_restricted_reader_sees_approved_or_unapproved_and_never_the_entry(
     # The page's version is its content_hash, which a full reader receives anyway; the entry's author is not.
     for secret in (entry.principal, entry.client, entry.entry_id):
         assert secret not in str(guest) and secret not in str(reading)
+
+
+def test_a_fenced_owner_connection_sees_two_states_and_no_finding(
+    vault: Path, configured_boundary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner behind a connector that denies a scope reads like a restricted reader on every surface."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+    _config, authenticate = configured_boundary
+    limited = authenticate("limited")
+    rel = _procedure(vault)
+    _index(vault)
+    _approve(vault, rel)
+    assert _read(vault, rel, limited)["approval"] == "approved"
+
+    _edit_directly(vault, rel)
+    assert _read(vault, rel)["approval"] == "stale"
+    assert "approval" not in _read(vault, rel, limited)
+    assert _method(_activate(vault, limited, turn=TURN, max_chars=8000), rel)["approval"] == "unapproved"
+    entry_file = next((vault / "Knowledge Base" / "_Approvals" / REF_ID).iterdir())
+    entry_file.write_text("not json {")
+    assert [finding["ref"] for finding in _read(vault, rel)["diagnostics"]["approval_findings"]] == [REF]
+    fenced = _read(vault, rel, limited)
+    assert "diagnostics" not in fenced and "approval" not in fenced
 
 
 def test_a_reader_below_full_release_sees_no_endorsement(vault: Path) -> None:

@@ -33,7 +33,7 @@ from . import (
     working_set,
     working_set_currency,
 )
-from .governance import egress, principal, raw_protection
+from .governance import egress, principal
 
 log = logging.getLogger(__name__)
 
@@ -297,7 +297,7 @@ def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[
     refs = {path: source.ref for path, source in projections.items() if source.ref}
     if not refs:
         return values, True
-    owner = raw_protection.is_owner(principal.effective_principal())
+    owner = procedure_approval.owner_view(root, principal.effective_principal())
     ledgers = procedure_approval.ledgers(root, refs.values())
     named: dict[str, str | None] | None = None
 

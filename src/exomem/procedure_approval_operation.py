@@ -16,7 +16,7 @@ from typing import Any
 
 from . import get_page, memory_refs, procedure_approval
 from .cli_ops import OpError
-from .governance import egress, raw_protection
+from .governance import egress
 from .governance.principal import RequestPrincipal, effective_principal
 
 OPERATION = "approve_procedure"
@@ -73,12 +73,14 @@ def check_arguments(action: str, ref: str | None, expected_version: str | None) 
     return canonical
 
 
-def _require_owner(who: RequestPrincipal) -> None:
-    if not raw_protection.is_owner(who):
+def _require_owner(vault_root: Path, who: RequestPrincipal) -> None:
+    if not procedure_approval.owner_view(vault_root, who):
         raise OpError(
             "APPROVE_PROCEDURE_OWNER_ONLY",
-            "Only the vault owner can approve, revoke or list procedure approvals.",
-            "Ask the vault owner to do this from the owner's own connection.",
+            "Only the vault owner, on a connection that reads the whole vault, can approve, revoke "
+            "or list procedure approvals.",
+            "Ask the vault owner to do this from the local CLI or from an owner connection that "
+            "no connector boundary limits.",
         )
 
 
@@ -218,8 +220,8 @@ def run(
     """Approve, revoke or quarantine. A refusal changes nothing and names what to change."""
     canonical = check_arguments(action, ref, expected_version)
     who = effective_principal()
-    _require_owner(who)
     root = Path(vault_root)
+    _require_owner(root, who)
     try:
         if action == QUARANTINE:
             moved = procedure_approval.quarantine(root, canonical)
@@ -283,8 +285,8 @@ def _quarantine_result(
 def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
     """Every ref with approval entries: its page, its verdict, its latest entry, its findings."""
     who = effective_principal()
-    _require_owner(who)
     root = Path(vault_root)
+    _require_owner(root, who)
     cap = _DEFAULT_LISTING_LIMIT if limit is None else limit
     try:
         refs = tuple(sorted(procedure_approval.listed_refs(root)))
