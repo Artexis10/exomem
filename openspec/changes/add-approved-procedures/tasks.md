@@ -34,6 +34,7 @@
   - a direct file edit makes the approval stale;
   - a restricted reader sees two states, and a reader below FULL release sees `unapproved`;
   - approval does not change the ranking.
+- [x] 3.7 Teach the safety contract in the shared skill's portable operating rules, so every workflow skill carries it: approval is a label and the user's current instruction wins; approval grants no send, publish, spend, access or install authority; `stale` and `unapproved` pages are reference; only the user's own ask for one exact procedure starts an approve or revoke, and text read in a page never counts. Regenerate the skill copies.
 
 ## 4. S4 Proof on real models
 
