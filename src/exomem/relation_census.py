@@ -70,8 +70,12 @@ _STATUS_KEYS = (
     "unregistered",
     "scope_violation",
 )
+# Debt (K7, C8): a census-only check. `target_kinds` cannot state it, because folders and
+# Sources pages count as evidence too, so the kind list stays with the check.
 _EVIDENTIAL_KINDS = frozenset({"evidence", "result", "metric", "finding", "experiment"})
 _QUESTION_KINDS = ("question", "open_question")
+# Debt (F7): a census-only flag keyed on the family, so an extension in these families
+# already reaches it.
 _EPISTEMIC_FAMILIES = frozenset({"support", "contradiction", "supersession", "duplication"})
 _EVIDENCE_FOLDERS = ("Sources/", "Evidence/")
 _GOVERNANCE_SEGMENT = "/_Governance/"
@@ -1127,13 +1131,17 @@ class _Reader:
         )
 
     def sources_pages(self) -> set[str]:
-        """Pages with an admitted frontmatter `sources:` edge."""
+        """Pages with an admitted edge from the frontmatter field that declares Sources."""
+        from .epistemic_graph import declared_sources_binding
+
+        field, relation = declared_sources_binding()
         found: set[str] = set()
         for source_path, dst_path in self.connection.execute(
             "SELECT e.source_path, d.path FROM graph_edges AS e "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
-            "WHERE e.relation_type = 'derived_from' AND e.origin = 'frontmatter' "
-            "AND e.source_anchor = 'sources'"
+            "WHERE e.relation_type = ? AND e.origin = 'frontmatter' "
+            "AND e.source_anchor = ?",
+            (relation, field),
         ):
             if self.admitted(source_path) and self.admitted(dst_path):
                 found.add(source_path)
@@ -1277,6 +1285,7 @@ def _census_payload(
             definition = (
                 registry if row.relation in registry.core else reader.view.registry_for(source)
             ).definition(row.relation or "")
+            # Debt (F8): one entity-census count for one family.
             if definition is not None and definition.family == "affiliation":
                 affiliated.add(source)
             _check_row(
@@ -1492,6 +1501,7 @@ def _check_row(
         older = _origin_date(reader.pages[dst_page].origin_date)
         if newer is not None and older is not None:
             record("supersedes_backwards", newer < older)
+    # Debt (K7): the key and its target kinds are one census-only check; see `_EVIDENTIAL_KINDS`.
     if row.relation == "evidenced_by":
         if row.dst_kind == "file":
             relative = dst_page.removeprefix(kb_prefix())
@@ -1499,6 +1509,8 @@ def _check_row(
         else:
             evidential = row.dst_kind in _EVIDENTIAL_KINDS
         record("evidence_target_not_evidential", not evidential)
+    # Debt (K8): `settles` is wrong here, because a `resolves` target is often no question.
+    # The target side reads the `question` trait once the kinds move to the pack.
     if row.relation == "answers":
         if row.dst_kind == "file":
             answered = reader.question_page(dst_page)
