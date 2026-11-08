@@ -1184,7 +1184,7 @@ def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated
 # written-to catalogue nothing a previous turn computed may be reused. The
 # carry is not flat like the compiler's seed-capped stages: its windows grow
 # with the rarity cap, 0.5% of the knowledge base by design
-# (`working_set.carry_fetch_size`: 11 rows at 2k notes, 41 at 8k), it admits
+# (`working_set.carry_fetch_size`: 11 rows at 2k notes, 38 at 8k), it admits
 # every page on each request, and its catalogue ranking reads the pages that
 # hold the turn's words, which here are words every generated note holds. The
 # bound admits that growth and refuses work that grows with the whole corpus.
@@ -1201,10 +1201,9 @@ def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated
 # with nothing regressed (121.1ms against a 119.4ms bound; 2k medians 40-59ms
 # make the ratio sit near 3), and a faster 2k arm tightened it. Counts measured
 # 2026-11-08 on main: stem rows 84 @ 2k and 192 @ 8k, ranked candidates 11 and
-# 38, nothing rebuilt or tokenized; a scan of every page holding a turn word
-# reads all 7,357 admitted pages @ 8k for each everyday word. Full-run 8k
-# medians reach 134ms, so the ceiling keeps 3x over that and stays under the
-# 607ms the regression took on a faster machine.
+# 38, nothing rebuilt or tokenized; without the scan's early stop, 6,860 stem
+# rows @ 2k. Full-run 8k medians reach 134ms, so the ceiling keeps 3x over
+# that and stays under the 607ms the regression took on a faster machine.
 CEIL_CARRY_MS = 400.0
 CARRY_SAMPLES = 5
 #: Resolves no anchor and names no page, so both carry rungs run and the turn
@@ -1290,9 +1289,10 @@ def test_unresolved_carry_does_not_scale_with_the_corpus(tmp_path: Path, model_f
             admitted = rungs["phrase"][call_spans.ADMITTED_PAGES]
             # Each word's rarity count stops one row past its window.
             window = working_set.rare_document_cap(admitted) + working_set.RETRIEVAL_CARRY_FETCH
-            # The title rung ranks the fetch window; two windows leave room for a
-            # second batch, while testing every matched row reads the corpus.
-            ranked = 2 * working_set.carry_fetch_size(admitted)
+            # The title rung tests corroboration in batches that double from the
+            # fetch window, so two batches read three windows; testing every
+            # matched row reads the corpus.
+            ranked = 3 * working_set.carry_fetch_size(admitted)
             counts = {
                 rung: {key: rungs[rung][key] for key in working_set.CARRY_SPAN_FIELDS}
                 for rung in rungs
@@ -1300,8 +1300,11 @@ def test_unresolved_carry_does_not_scale_with_the_corpus(tmp_path: Path, model_f
             work = f"{notes} notes, {admitted} admitted: {counts}"
             assert sum(rungs[rung][call_spans.STATS_REBUILT] for rung in rungs) == 0, work
             assert sum(rungs[rung][call_spans.PAGES_TOKENIZED] for rung in rungs) == 0, work
-            assert rungs["phrase"][call_spans.STEM_ROWS] <= len(stems) * (window + 1), work
-            assert rungs["title"][call_spans.CANDIDATES] <= ranked, work
+            # Both counts must also be read: a rung that answered without passing
+            # the counted scan (a one-statement query, say) reports 0 and would
+            # pass every upper bound.
+            assert 1 <= rungs["phrase"][call_spans.STEM_ROWS] <= len(stems) * (window + 1), work
+            assert 1 <= rungs["title"][call_spans.CANDIDATES] <= ranked, work
         if notes == N_NOTES_LARGE:
             large_ms = statistics.median(ms for ms, _rungs in samples)
 
