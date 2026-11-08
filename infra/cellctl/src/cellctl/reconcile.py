@@ -290,11 +290,12 @@ class LoopMemory:
     # generation at or below its own, so the next plan rises past it.
     media_edge_foreign: int = 0
     # D10: each metered cell's physical figure from its latest listing (UNKNOWN when it failed), the
-    # `last_backup_at` it was listed for (once per backup hold), and when a failed listing may be retried.
-    # A restart forgets all three and lists each cell once more.
+    # `last_backup_at` it was listed for (once per backup hold), when a failed listing may be retried, and
+    # how many listings in a row failed. A restart forgets all four and lists each cell once more.
     media_physical: dict[str, PhysicalFigure] = field(default_factory=dict)
     media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
     media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
+    media_meter_failures: dict[str, int] = field(default_factory=dict)
     # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
     # process fills it from every deleted row, so a restart never loses the alert; the receiver
     # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
@@ -1725,6 +1726,10 @@ async def _cleanup_alerts(
 # A failed listing is tried again after this long: the meter is a report, and a provider outage
 # must not turn it into a listing on every pass.
 MEDIA_METER_RETRY = timedelta(minutes=5)
+# Failed listings in a row before the unknown-figure alert fires. Three, five minutes apart, outlast a
+# provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
+# switch off the hide and over-allowance alerts with no notice.
+MEDIA_METER_UNKNOWN_AFTER = 3
 
 
 async def _media_physical_meter(
@@ -1732,10 +1737,11 @@ async def _media_physical_meter(
     listing, now: datetime,
 ) -> None:
     """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
-    shows. A hide marker alerts at once, since the edge cannot hide. So does a prefix above the cell's
-    allowance times the configured headroom. An unknown figure changes no alert: it is neither within the
-    allowance nor resolved. The figure is the operator's; the owner's meter and the cell's record stay as
-    they are."""
+    shows. A hide marker alerts at once: the edge sends no hide request, so the edge key or another key hid
+    a name. So does a prefix above the cell's allowance times the configured headroom. An unknown figure
+    changes neither alert, since it is neither within the allowance nor clean, and a figure that stays
+    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. The figure is the operator's; the
+    owner's meter and the cell's record stay as they are."""
     edge = cluster_config.media_edge
     if edge is None or listing is None:
         return
@@ -1751,11 +1757,13 @@ async def _media_physical_meter(
         figure = await asyncio.to_thread(meter_prefix, listing, row.cell_id)
         memory.media_physical[row.cell_id] = figure
         if figure is UNKNOWN:
+            memory.media_meter_failures[row.cell_id] = memory.media_meter_failures.get(row.cell_id, 0) + 1
             memory.media_meter_retry_at[row.cell_id] = now + MEDIA_METER_RETRY
             # One failed listing ends the pass's metering: a provider that is down would otherwise cost
             # one timeout per cell before this pass reconciles anything else.
             break
         memory.media_meter_retry_at.pop(row.cell_id, None)
+        memory.media_meter_failures.pop(row.cell_id, None)
         memory.media_metered_for[row.cell_id] = row.last_backup_at
         # Without a delivery Secret the log line is the only notice, so a hide entry logs as a warning.
         logger.log(logging.WARNING if figure.hides else logging.INFO,
@@ -1764,19 +1772,23 @@ async def _media_physical_meter(
                    figure.unfinished, figure.hides)
     allowance = edge.store_policy.get("allowance_bytes")
     for cell_id, figure in list(memory.media_physical.items()):
-        hide_alert, over_alert = alerts.media_alerts(cell_id)
+        hide_alert, over_alert, unknown_alert = alerts.media_alerts(cell_id)
         if cell_id not in metered:
-            # A cell that left the store (deleted) forgets its figure; an alert it raised resolves.
-            for alert in (hide_alert, over_alert):
+            # A cell that left the store (deleted) forgets its figure, and its allowance and unknown-figure
+            # alerts resolve. A hide alert stays: only a listing that shows no hide entry resolves it, and
+            # this cell is listed no more.
+            for alert in (over_alert, unknown_alert):
                 if memory.alert_delivered.get(alert):
                     await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
             del memory.media_physical[cell_id]
             memory.media_metered_for.pop(cell_id, None)
             memory.media_meter_retry_at.pop(cell_id, None)
+            memory.media_meter_failures.pop(cell_id, None)
             continue
         exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
+        stays_unknown = memory.media_meter_failures.get(cell_id, 0) >= MEDIA_METER_UNKNOWN_AFTER
         for alert, firing in ((hide_alert, None if figure.hides is None else figure.hides > 0),
-                              (over_alert, exceeds)):
+                              (over_alert, exceeds), (unknown_alert, stays_unknown)):
             # None is unknown: send nothing. A cell that never alerted needs no resolution either.
             if firing or (firing is False and memory.alert_delivered.get(alert)):
                 await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)

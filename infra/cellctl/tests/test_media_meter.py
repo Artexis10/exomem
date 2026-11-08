@@ -18,7 +18,7 @@ from .test_media_edge import CANARY, NOW, OTHER, _alerting, _delete, _fleet
 staging = test_reconcile.staging
 
 PREFIX = cell_object_prefix(CANARY)
-HIDE_ALERT, OVER_ALERT = alerts.media_alerts(CANARY)
+HIDE_ALERT, OVER_ALERT, UNKNOWN_ALERT = alerts.media_alerts(CANARY)
 MINUTE = timedelta(minutes=1)
 
 
@@ -29,7 +29,8 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     delivered: list[tuple[str, bool]] = []
 
     def deliver(url: str, *, alert: str, active: bool, observed_at: object) -> None:
-        if alert.startswith((alerts.MEDIA_HIDE_ALERT, alerts.MEDIA_OVER_ALLOWANCE_ALERT)):
+        if alert.startswith((alerts.MEDIA_HIDE_ALERT, alerts.MEDIA_OVER_ALLOWANCE_ALERT,
+                             alerts.MEDIA_METER_UNKNOWN_ALERT)):
             delivered.append((alert, active))
 
     monkeypatch.setattr(alerts, "deliver", deliver)
@@ -133,6 +134,27 @@ async def test_a_failed_listing_resolves_nothing_and_is_tried_again_after_five_m
         await fleet.close()
 
 
+async def test_a_figure_unknown_for_three_listings_in_a_row_alerts_and_a_good_listing_resolves_it(cell_db, sent) -> None:
+    # A revoked list key fails every listing; without this alert it would switch off both abuse alerts.
+    fleet = await _fleet(cell_db, CANARY)
+    _alerting(fleet)
+    try:
+        listing = fleet.media_listing = _listing((40, "upload"))
+        listing.fail_listing_with = RuntimeError("the list key was revoked")
+        await fleet.run(NOW)
+        await fleet.run(NOW + 5 * MINUTE)
+        assert sent == []
+
+        await fleet.run(NOW + 10 * MINUTE)
+        assert (sent, len(listing.listed)) == ([(UNKNOWN_ALERT, True)], 3)
+
+        listing.fail_listing_with = None
+        await fleet.run(NOW + 15 * MINUTE)
+        assert sent == [(UNKNOWN_ALERT, True), (UNKNOWN_ALERT, False)]
+    finally:
+        await fleet.close()
+
+
 async def test_one_failed_listing_ends_the_passs_metering_so_a_provider_outage_costs_one_timeout(cell_db, sent) -> None:
     fleet = await _fleet(cell_db, CANARY, OTHER, cell_ids=(CANARY, OTHER))
     try:
@@ -162,7 +184,8 @@ async def test_a_cell_is_listed_once_per_backup_and_only_by_its_own_prefix(cell_
         await fleet.close()
 
 
-async def test_a_deleted_cell_leaves_the_meter_and_its_alert_resolves(cell_db, sent, staging) -> None:
+async def test_a_deleted_cell_leaves_the_meter_but_its_hide_alert_stays(cell_db, sent, staging) -> None:
+    # Deletion is no evidence that the hide entry is gone; only a listing that shows none would be.
     fleet = await _fleet(cell_db, CANARY)
     _alerting(fleet)
     try:
@@ -172,7 +195,8 @@ async def test_a_deleted_cell_leaves_the_meter_and_its_alert_resolves(cell_db, s
 
         await _delete(fleet, CANARY, NOW + MINUTE)
 
-        assert sent == [(HIDE_ALERT, True), (HIDE_ALERT, False)]
+        assert sent == [(HIDE_ALERT, True)]
         assert CANARY not in fleet.memory.media_physical and len(listing.listed) == 1
     finally:
         await fleet.close()
+

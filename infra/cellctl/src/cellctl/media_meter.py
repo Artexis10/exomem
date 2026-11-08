@@ -25,8 +25,8 @@ class PhysicalFigure:
     """What one listing of a cell's prefix showed.
 
     `bytes` sums the content lengths of upload versions. `unfinished` counts large files that were
-    started and never finished. `hides` counts hide markers: the edge cannot hide, so any one means a
-    credential beyond the edge's touched the bucket. A field is None when the listing could not show it.
+    started and never finished. `hides` counts hide markers: the edge sends no hide request, so any one
+    means the edge key or another key hid a name. A field is None when the listing could not show it.
     """
 
     bytes: int | None
