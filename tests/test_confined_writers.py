@@ -909,7 +909,7 @@ def _remember(vault: Path, who, title: str, **kwargs: Any) -> Any:
         anchor.parent.mkdir(parents=True, exist_ok=True)
         anchor.write_text("---\ntype: insight\nstatus: active\nproject: shared-project\n---\n# Anchor\n\nShared anchor text.\n", encoding="utf-8")
     content = ("## Finding\n\nA durable conclusion.\n\n## Observations\n\n- [finding] One bath runs every stage. ^bath\n\n"
-               f"## Relations\n\n- relates_to [[{ANCHOR.removesuffix('.md')}]]\n")
+               f"## Relations\n\n- supports [[{ANCHOR.removesuffix('.md')}]]\n")
     return _call(vault, who, "remember", content=content, title=title, note_type="insight", **kwargs)
 
 
@@ -1049,7 +1049,7 @@ def test_a_fenced_episode_records_prepares_and_resumes_without_touching_policy(c
     leaf = {"leaf_key": "write", "effect_revision": 1, "kind": "create-note", "args": {
         "title": "Steady bath model", "slug": "steady-bath-model", "content": (
             "## Observations\n\n- [finding] One bath. ^bath\n\n"
-            f"## Relations\n\n- relates_to [[{OWN_NOTE.removesuffix('.md')}]]\n")}}
+            f"## Relations\n\n- supports [[{OWN_NOTE.removesuffix('.md')}]]\n")}}
     proposal = {"route": "focused_note", "alternatives": [], "evidence": "complete", "title": "Steady bath model",
                 "reason": "A named model none of the existing pages own.", "leaves": [leaf]}
 

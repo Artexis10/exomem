@@ -5030,6 +5030,14 @@ def writer_view_relations(
     )
 
 
+def writer_visible(corpus: SemanticCorpusContext) -> Callable[[str], bool]:
+    """Whether the current writer may see a page; every page for the owner or an ungoverned vault."""
+    visible = corpus.writer_visibility
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
+    return visible if callable(visible) else (lambda path: True)
+
+
 def writer_authored_facts(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -5776,7 +5784,7 @@ _RELATION_QUALITY_ADVISORIES = MappingProxyType({
         "no qualifying specific relation names the relationship",
         "Optional. Review the source and registered vocabulary with "
         "`{inspect}`. Author a specific relation "
-        "only when supported; genuine generic relations or no edge remain valid. "
+        "only when supported; a plain link or no edge remains valid. "
         "Never author an edge merely to clear this warning.",
     ),
     "RELATION_AUTHORED_ALL_GENERIC": (
@@ -5784,8 +5792,9 @@ _RELATION_QUALITY_ADVISORIES = MappingProxyType({
         "generic associations; incoming specific relations may still qualify",
         "Optional. Review the source and registered vocabulary with "
         "`{inspect}`. Use governed authorship "
-        "for a supported specific relation; keep genuine generic relations or no "
-        "edge when appropriate. Never author an edge merely to clear this warning.",
+        "for a supported specific relation; where none fits, propose a relation, write a "
+        "plain link or leave no edge, because a write cannot add a generic relation. "
+        "Never author an edge merely to clear this warning.",
     ),
 })
 RELATION_QUALITY_CODES = frozenset(_RELATION_QUALITY_ADVISORIES)

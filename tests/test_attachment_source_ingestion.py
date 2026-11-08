@@ -1192,7 +1192,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
             "note_type": "insight",
             "content": (
                 "## Observations\n\n- [constraint] Verify access after the reopening.\n\n"
-                "## Relations\n\n- relates_to [[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n"
+                "## Relations\n\n- links_to [[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]\n"
             ),
             "sources": [f"{page_path}#Capture" if mode == "text" else page_path],
         }, run_middleware=False))
@@ -1213,8 +1213,9 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
             )).structured_content
         assert original.decode() in readback["body"], readback
         assert prepared["suggested_sources"] == [page_path.removesuffix(".md")], prepared
+    # A plain link connects the page and names no relation, the advisory a write can still earn.
     assert [item["code"] for item in written["semantic_advisory"]["findings"]] == [
-        "RELATION_AUTHORED_ALL_GENERIC",
+        "RELATION_TYPED_EDGE_ABSENT",
     ]
     assert written["semantic_advisory"]["findings"][0]["remediation"]
     next_action = written["semantic_advisory"]["next_action"]

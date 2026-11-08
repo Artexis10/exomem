@@ -37,6 +37,9 @@ _ORIGINS = {
     "frontmatter",
     "wikilink",
 }
+#: The origins that carry an edge a writer authored, as against one a reader derives from
+#: structure (`frontmatter`, `wikilink`, `semantic_block`, `semantic_unit`).
+AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: Explicit spelling of a core relation: `core.<key>` names the core meaning of a
 #: bare label that a vault alias also uses.
@@ -167,6 +170,11 @@ class RelationRegistry:
     def generic_key(self) -> str:
         """The key of the one generic relation; the core pack guarantees exactly one."""
         return next(key for key, definition in self.core.items() if definition.generic)
+
+    @cached_property
+    def link_key(self) -> str:
+        """The key of the plain link: the one core relation a body `[[wikilink]]` mints."""
+        return next(key for key, definition in self.core.items() if "wikilink" in definition.origins)
 
     @cached_property
     def active_keys_by_label(self) -> dict[str, tuple[str, ...]]:
@@ -364,6 +372,11 @@ def core_registry() -> RelationRegistry:
 def generic_relation_key() -> str:
     """The core pack's generic relation, for code that must not name it."""
     return core_registry().generic_key
+
+
+def link_relation_key() -> str:
+    """The core pack's plain link, the relation a writer keeps when no specific one fits."""
+    return core_registry().link_key
 
 
 class _EveryKey:

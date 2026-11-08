@@ -9813,9 +9813,6 @@ class EpistemicGraphIndex:
                 if effective != "open":
                     filtered["decided"] += 1
                     continue
-                # Where a specific relation fits both pages, the item carries them and offers no
-                # bullet: the agent picks the relation, and accept refuses without one.
-                options = fit.options(candidate, registry=selected_registries[source])
                 item = {
                     "review_id": review_id,
                     "ref": relation_queue.relation_review_ref(review_id),
@@ -9828,14 +9825,22 @@ class EpistemicGraphIndex:
                     ),
                     "method": candidate["method"],
                     "evidence": candidate.get("evidence") or {},
-                    "bullet": None if options else relation_queue._bullet(candidate),
                     "target_ref": from_ref,
                     "state": "open",
                     "signal_version": signal_version,
                     "source_path": source,
                 }
-                if options:
-                    item["options"] = options
+                # A generic candidate names no relation: it carries the ranked options and the
+                # plain link, and accept refuses without a choice.
+                generic = relation_queue.generic_choice(
+                    selected_registries[source],
+                    candidate,
+                    fit.options(candidate, registry=selected_registries[source]),
+                )
+                if generic is not None:
+                    item.update({**generic, "relation_label": None})
+                else:
+                    item["bullet"] = relation_queue._bullet(candidate)
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
                 visible.append(item)
@@ -10795,8 +10800,8 @@ def suggest_relations(
         warnings.append("model-backed graph relation suggestions unavailable")
     from . import relation_queue
 
-    # A generic proposal between pages that a specific relation fits carries those relations,
-    # so the agent chooses one instead of taking the generic as the answer.
+    # A generic proposal names no relation: it carries the ranked specific relations and the
+    # plain link, so the agent chooses one instead of taking the generic as the answer.
     fit = relation_queue.RelationFit(vault_root)
     proposed = _dedupe_candidates(candidates)[: max(0, limit)]
     # A candidate the relation queue holds open carries the fields that accept it, so the agent
@@ -10823,15 +10828,15 @@ def suggest_relations(
                 )
     shown = []
     for candidate in proposed:
-        options = fit.options(candidate)
         entry = {
             **candidate,
             "relation_label": relation_registry.spelling_label(
                 registry, str(candidate.get("relation_type") or "")
             ),
         }
-        if options:
-            entry["options"] = options
+        generic = relation_queue.generic_choice(registry, candidate, fit.options(candidate))
+        if generic is not None:
+            entry.update({**generic, "relation_label": None})
         review = reviews.get(relation_queue.candidate_identity(candidate))
         if review is not None:
             entry["review"] = review
@@ -14426,7 +14431,7 @@ def _structural_candidates(
     page's selected meaning before any row cap.
 
     All three target PAGES. That is why the two co-participation generators
-    propose only `relates_to`: "both pages carry the same question" would look
+    propose no specific relation: "both pages carry the same question" would look
     like `duplicates`, but with a page-level target the accepted bullet would
     read `- duplicates [[B]]` and assert that the *pages* duplicate, which is
     false — only their question units do. Revisit once `to` can address a unit.
@@ -14451,7 +14456,7 @@ def _structural_candidates(
             conn.close()
     # The two co-participation generators routinely find the SAME peer — pages
     # that share a question usually also answer the same thing — and both
-    # propose `relates_to`, so they emit the identical bullet. `_dedupe_candidates`
+    # propose no relation, so they emit the identical candidate. `_dedupe_candidates`
     # keys on `method` and would keep both, spending two of ten slots on one
     # edge the reviewer can only accept once (after which the second is filtered
     # as an authored edge anyway). Suppress the later duplicate here, where the
@@ -14611,7 +14616,7 @@ def _shared_resolution_target_candidates(
     kind: two pages are adjacent when each carries a UNIT-level `answers` or
     `resolves` edge to the same target — competing or complementary answers to
     one thing. That mirrors `_shared_source_candidates` and, like it, observes
-    nothing directional, so the proposal is `relates_to`.
+    nothing directional, so the candidate proposes no relation.
 
     Evidence carries the other page's unit identity and the relation kinds both
     sides used, for the same fingerprint reason as `shared_open_question`.

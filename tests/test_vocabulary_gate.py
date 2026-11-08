@@ -219,10 +219,7 @@ def test_v2_link_creation_with_connection_requires_and_uses_each_effect_authorit
                 return link.link(
                     vault, entity_type="decision", name="Bounded change", summary="An approved change.",
                     project="project-alpha", decision_status="accepted",
-                    relations=[{
-                        "kind": "relates_to", "target": "Entities/Decisions/Established",
-                        "reason": "No narrower relation joins the two decisions.",
-                    }],
+                    relations=[{"kind": "depends_on", "target": "Entities/Decisions/Established"}],
                     today=dt.date(2026, 9, 7),
                 )
 

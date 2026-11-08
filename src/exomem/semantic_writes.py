@@ -33,7 +33,6 @@ from . import (
     promotions,
     provenance,
     relation_barrier,
-    relation_offer,
     relation_registry,
     relation_review,
     request_budget,
@@ -972,10 +971,6 @@ class CreationPreflight:
     #: Where the typed writer filed the page and why; absent for writers that do not place pages.
     placement: dict[str, Any] | None = None
     provenance_server_at: str | None = None
-    #: A `generic` disposition or per-edge reasons, and the generic edges they kept.
-    generic_cleared: relation_barrier.Cleared | None = None
-    #: Generic edges between two notes that a specific relation fits, offered after the commit.
-    specific_offers: tuple[relation_barrier.Offer, ...] = ()
     #: The review fields a commit of this draft would find missing or ignored.
     review_fields: relation_review.ReviewFieldCheck = relation_review.ReviewFieldCheck()
     #: Whether the caller named a validated draft. A call that did commits in one
@@ -1135,10 +1130,6 @@ class ExistingPreflight:
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     provenance_server_at: str | None = None
-    #: A `generic` disposition and the generic edges it kept; None when none was given.
-    generic_cleared: relation_barrier.Cleared | None = None
-    #: Generic edges between two notes that a specific relation fits, offered after the commit.
-    specific_offers: tuple[relation_barrier.Offer, ...] = ()
 
     @property
     def before_hash(self) -> str:
@@ -2009,10 +2000,10 @@ def _preflight_existing(
             "LIFECYCLE_TRANSITION_INVALID_OPERATION",
             "existing semantic write operation is unsupported",
         )
-    if relation_disposition not in {None, "reviewed_none", relation_barrier.GENERIC}:
+    if relation_disposition not in {None, "reviewed_none"}:
         raise SemanticWriteError(
             "INVALID_RELATION_REVIEW",
-            "relation disposition must be 'reviewed_none', 'reviewed-none' or 'generic'",
+            "relation disposition must be 'reviewed_none' or 'reviewed-none'",
         )
     root = Path(vault_root)
     # Idempotent backstop, deliberately kept: every caller today already hands
@@ -2258,43 +2249,15 @@ def _preflight_existing(
             reason=requested_decision.reason,
             reference=requested_decision.reference,
         )
-    choice = _generic_choice(relation_disposition, relation_review_reason)
-    if choice is not None and not validate_only and relation_review_hash != transition_hash:
-        if relation_review_hash is None:
-            # Generic keeps the validated route: the barrier's offers come from the validate
-            # result, so a missing hash is a missing field, not a mismatch.
-            raise SemanticWriteError(
-                "INVALID_RELATION_REVIEW",
-                "generic needs the transition_token and relation_review_hash from the "
-                "validate_only result; send relation_disposition=generic, "
-                "relation_review_reason, transition_token and relation_review_hash together",
-                missing=("relation_review_hash",),
-            )
-        raise SemanticWriteError(
-            "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
-            "review hash does not match the validated transition",
-        )
-    verdict = relation_barrier.evaluate(
+    refusal = relation_barrier.evaluate(
         after,
         after_corpus,
         prior=before,
         prior_corpus=before_corpus,
         operation=operation,
-        choice=choice,
     )
-    generic_edges, refusal = verdict.kept, verdict.refusal
     if refusal is not None:
-        raise SemanticWriteError(
-            relation_barrier.CODE,
-            refusal.reason,
-            details={
-                **refusal.details(),
-                "relation_review_hash": transition_hash,
-                "transition_token": token,
-            },
-        )
-    if generic_edges and provenance_server_at is None:
-        provenance_server_at = _new_provenance_time(root)
+        raise SemanticWriteError(relation_barrier.CODE, refusal.reason, details=refusal.details())
 
     manifest = activation_manifest.load_manifest(root)
     boundary = activation_manifest.plan_activation_boundary(
@@ -2378,20 +2341,7 @@ def _preflight_existing(
         closure_plan,
         origin_inputs,
         provenance_server_at=provenance_server_at,
-        generic_cleared=(
-            relation_barrier.Cleared(choice, generic_edges) if choice is not None else None
-        ),
-        specific_offers=verdict.offers,
     )
-
-
-def _generic_choice(
-    disposition: str | None, reason: str | None
-) -> relation_barrier.Choice | None:
-    try:
-        return relation_barrier.call_choice(disposition, reason)
-    except relation_review.RelationReviewError as error:
-        raise SemanticWriteError(error.code, error.reason) from error
 
 
 def _reevaluate_existing(
@@ -2738,10 +2688,6 @@ def _revalidate_existing_preflight(
         relation_disposition = "reviewed_none"
         relation_review_hash = preflight.transition_hash
         relation_review_reason = preflight.requested_decision.reason
-    elif preflight.generic_cleared is not None:
-        relation_disposition = relation_barrier.GENERIC
-        relation_review_hash = preflight.transition_hash
-        relation_review_reason = preflight.generic_cleared.choice.reason
     # The nested preflight records into its own collector, folded in below as
     # `revalidate.preflight.*`, so the stages of `commit.revalidate` show.
     nested = MutationTimings() if timings is not None else None
@@ -3125,27 +3071,12 @@ def _undeclared_referents_block(
         return None
 
 
-def _relation_advisory_context(
-    vault_root: Path,
-    state: Any,
-    offers: tuple[relation_barrier.Offer, ...],
-    *,
-    path: str,
-    source: str,
-) -> dict[str, Any]:
-    """What the mutation terminal needs to build a write's `relation_advisory`.
-
-    The lookup hints are always present; `specific_options` is present only when the write
-    has options to offer, so a write without any keeps the context it always had.
-    """
-    context: dict[str, Any] = {
+def _relation_advisory_context(vault_root: Path, state: Any) -> dict[str, Any]:
+    """What the mutation terminal needs to build a write's `relation_advisory`."""
+    return {
         "vault": str(Path(vault_root)),
         "registry_hash": state.relation_registry_hash,
     }
-    options = relation_offer.specific_options(vault_root, offers, path=path, source=source)
-    if options:
-        context["specific_options"] = options
-    return context
 
 
 def _predecessor_state(corpus: Any, predecessor_path: str | None) -> Any:
@@ -3225,13 +3156,7 @@ def commit_existing(
         previous_state=preflight.before,
         candidate=candidate,
     )
-    context = _relation_advisory_context(
-        vault_root,
-        preflight.after,
-        preflight.specific_offers,
-        path=preflight.path,
-        source=preflight.after_source,
-    )
+    context = _relation_advisory_context(vault_root, preflight.after)
     return replace(
         committed,
         structure_suggestion=suggestion,
@@ -4734,7 +4659,6 @@ def preflight_creation(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
-    generic_reasons: tuple[tuple[str, str, str], ...] = (),
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     vocabulary_binding: Any | None = None,
@@ -4758,7 +4682,6 @@ def preflight_creation(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
-            generic_reasons=generic_reasons,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
             vocabulary_binding=vocabulary_binding,
@@ -4782,7 +4705,6 @@ def _preflight_creation(
     relation_disposition: str | None,
     relation_review_hash: str | None,
     relation_review_reason: str | None,
-    generic_reasons: tuple[tuple[str, str, str], ...],
     predecessor_path: str | None,
     predecessor_content_hash: str | None,
     vocabulary_binding: Any | None,
@@ -4794,26 +4716,16 @@ def _preflight_creation(
     root = Path(vault_root)
     origin_inputs = _prepare_origin_inputs(root, path, source)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
-    if relation_disposition not in {None, "reviewed_none", relation_barrier.GENERIC}:
+    if relation_disposition not in {None, "reviewed_none"}:
         raise SemanticWriteError(
             "INVALID_RELATION_REVIEW",
-            "relation disposition must be 'reviewed_none', 'reviewed-none' or 'generic'",
+            "relation disposition must be 'reviewed_none' or 'reviewed-none'",
         )
-    choice = _generic_choice(relation_disposition, relation_review_reason)
-    if generic_reasons:
-        choice = replace(choice or relation_barrier.Choice(), by_edge=generic_reasons)
-    # `generic` answers the barrier only; the relation review below never sees it, and the reason
-    # it carries is the barrier's, so no review field counts as supplied.
-    review_disposition = None if relation_disposition == relation_barrier.GENERIC else relation_disposition
-    supplied_review_fields = (
-        {}
-        if relation_disposition == relation_barrier.GENERIC
-        else {
-            "relation_disposition": relation_disposition,
-            "relation_review_hash": relation_review_hash,
-            "relation_review_reason": relation_review_reason,
-        }
-    )
+    supplied_review_fields = {
+        "relation_disposition": relation_disposition,
+        "relation_review_hash": relation_review_hash,
+        "relation_review_reason": relation_review_reason,
+    }
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer
@@ -4859,7 +4771,7 @@ def _preflight_creation(
                 draft_id=draft_id,
                 operation=operation,
                 draft_token=draft_token,
-                requested_disposition=review_disposition,
+                requested_disposition=relation_disposition,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
             )
@@ -4867,19 +4779,13 @@ def _preflight_creation(
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
         validation = attempt.validation
         artifact = attempt.artifact
-        cleared, offers = _creation_barrier(
+        _refuse_generic_relations(
             state,
             after_corpus,
             before_corpus,
             operation=operation,
-            choice=choice,
+            writer=writer,
             predecessor_path=predecessor_path,
-            retry={
-                "relation_review_hash": validation.draft_hash,
-                "draft_id": draft_id,
-                "draft_token": draft_token,
-                "draft_hash": validation.draft_hash,
-            },
         )
         provenance_server_at = _new_provenance_time(root)
         if (
@@ -4941,8 +4847,6 @@ def _preflight_creation(
             origin_inputs,
             relation_review.prevalidated_attempt(attempt, census_token),
             provenance_server_at=provenance_server_at,
-            generic_cleared=cleared,
-            specific_offers=offers,
             review_fields=relation_review.check_review_fields(
                 {**supplied_review_fields, **one_call_hash},
                 relation_review.review_applies(validation.relation_disposition),
@@ -4954,15 +4858,13 @@ def _preflight_creation(
         if state.page_type is not None or semantic_contract.compiled_intent(state)
         else "not_semantic"
     )
-    # A structural page has no draft hash, so its retry carries the reason alone.
-    cleared, offers = _creation_barrier(
+    _refuse_generic_relations(
         state,
         after_corpus,
         before_corpus,
         operation=operation,
-        choice=choice,
+        writer=writer,
         predecessor_path=predecessor_path,
-        retry={},
     )
     census_token = _capture_validity_stamp(
         root,
@@ -4992,40 +4894,30 @@ def _preflight_creation(
             vocabulary_binding.parent_guard,
         ) if vocabulary_binding is not None else (),
         origin_inputs,
-        provenance_server_at=_new_provenance_time(root) if cleared and cleared.edges else None,
-        generic_cleared=cleared,
-        specific_offers=offers,
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
     )
 
 
-def _creation_barrier(
+def _refuse_generic_relations(
     state: semantic_contract.SemanticPageState,
     after_corpus: semantic_contract.SemanticCorpusContext,
     before_corpus: semantic_contract.SemanticCorpusContext,
     *,
     operation: str,
-    choice: relation_barrier.Choice | None,
+    writer: str,
     predecessor_path: str | None,
-    retry: dict[str, Any],
-) -> tuple[relation_barrier.Cleared | None, tuple[relation_barrier.Offer, ...]]:
-    """Refuse an unanswered generic edge to an entity; else the choice with its kept edges, and the offers."""
-    verdict = relation_barrier.evaluate(
+) -> None:
+    """Refuse a creation that adds a generic relation."""
+    refusal = relation_barrier.evaluate(
         state,
         after_corpus,
         prior=before_corpus.pages.get(predecessor_path) if predecessor_path is not None else None,
         prior_corpus=before_corpus,
         operation=operation,
-        choice=choice,
+        writer=writer,
     )
-    if verdict.refusal is not None:
-        raise SemanticWriteError(
-            relation_barrier.CODE,
-            verdict.refusal.reason,
-            details={**verdict.refusal.details(), **retry},
-        )
-    cleared = relation_barrier.Cleared(choice, verdict.kept) if choice is not None else None
-    return cleared, verdict.offers
+    if refusal is not None:
+        raise SemanticWriteError(relation_barrier.CODE, refusal.reason, details=refusal.details())
 
 
 def _entry_commit_generation(root: Path):  # noqa: ANN201 - int | None
@@ -5181,13 +5073,7 @@ def _creation_post_commit(
         previous_state=_predecessor_state(preflight.corpus, predecessor_path),
         candidate=candidate,
     )
-    context = _relation_advisory_context(
-        vault_root,
-        preflight.semantic_state,
-        preflight.specific_offers,
-        path=preflight.destination,
-        source=preflight.source,
-    )
+    context = _relation_advisory_context(vault_root, preflight.semantic_state)
     return replace(
         committed,
         structure_suggestion=suggestion,
@@ -5749,11 +5635,6 @@ def _commit_creation(
 ) -> CreationCommit:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     root = Path(vault_root)
-    if relation_disposition == relation_barrier.GENERIC:
-        # The preflight already answered the barrier; here `generic` only has to name this draft.
-        if preflight.draft_hash is not None and relation_review_hash != preflight.draft_hash:
-            raise SemanticWriteError("DRAFT_HASH_MISMATCH", "draft hash requires fresh validation")
-        relation_disposition = relation_review_hash = relation_review_reason = None
     relation_review_hash = _one_call_review_hash(
         draft_bound=preflight.draft_bound,
         disposition=relation_disposition,

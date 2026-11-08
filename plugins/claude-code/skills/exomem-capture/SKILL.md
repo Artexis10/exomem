@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 03ed5fc95d395a73b2ec7b66cad9627bc482811267bbebaa7afa2289d9939e9e
+  skill_contract: 7e5002bc53a41b6872ae9c92894bd9403a32dec06e0af8cd9800e4392cf7cbfd
   version: "0.1.0"
 ---
 
@@ -159,12 +159,12 @@ new meaning; save with the current hash and `why`. Report saved versus queued
 and the returned restore route. Use only exposed operations.
 
 ## Relation governance
-Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
-joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
-them), or choose no edge. Durable recurring
-meaning is proposal-first through `propose-relation` and hash-guarded
-`save-relations`; corrections use a new canonical key and deprecate the old one.
+Resolve typed meaning with `resolve-relation` before authoring, and name a specific
+truthful relation on every edge. When none fits, propose a new relation type: durable
+recurring meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`. A plain link is the last resort. A write that adds the generic
+relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations and the
+exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 After writing, report the `user_summary` (`Saved -> <path> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.

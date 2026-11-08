@@ -90,7 +90,7 @@ def test_note_returns_structural_write_feedback(vault: Path) -> None:
             "## Claim\n\n"
             "The writer should report the note structure.\n\n"
             "## Relations\n"
-            "- relates_to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]]\n"
+            "- supports [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]]\n"
         ),
         note_type="insight",
         title="Feedback note",
@@ -126,7 +126,7 @@ def test_note_feedback_surfaces_unregistered_relation_promotion_route(
             "## Observations\n\n"
             "- [constraint] Keep vocabulary promotion reviewed.\n\n"
             "## Relations\n"
-            f"- relates_to [[{target}]]\n"
+            f"- supports [[{target}]]\n"
             f"- parent [[{target}]]\n"
         ),
         note_type="insight",

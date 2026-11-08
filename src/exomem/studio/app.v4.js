@@ -419,6 +419,12 @@ async function openProposal(kind) {
   }
 }
 
+// A candidate the generator could only call generic names no relation; it offers the plain link,
+// and the generic relation is never written or shown in its place.
+function candidateRelation(candidate) {
+  return candidate.relation_type || candidate.plain_link || "";
+}
+
 async function prepareRelationProposal() {
   const proposal = await command("connect_memory", {
     operation: "suggest-relations",
@@ -439,7 +445,7 @@ async function prepareRelationProposal() {
   select.name = "candidate";
   candidates.forEach((candidate, index) => {
     const modelLabel = candidate.method === "model" ? " · model-backed proposal" : "";
-    select.append(new Option(`${candidate.relation_type || "relates_to"} → ${candidate.to}${modelLabel}`, String(index)));
+    select.append(new Option(`${candidateRelation(candidate)} → ${candidate.to}${modelLabel}`, String(index)));
   });
   wrapper.append(select);
   const warnings = (proposal.warnings || []).map((warning) => element("p", String(warning), "section-note"));
@@ -553,7 +559,7 @@ async function guardedWrite(write, options = {}) {
 async function submitRelation() {
   const data = new FormData(byId("dialog-form"));
   const candidate = dialogAction.proposal.candidates?.[Number(data.get("candidate"))];
-  if (!candidate) {
+  if (!candidate || !candidateRelation(candidate)) {
     showError(byId("dialog-error"), new ApiError("Choose a valid proposal before confirming."));
     return;
   }
@@ -562,7 +568,7 @@ async function submitRelation() {
     why: data.get("why"),
     heading: "Relations",
     section_position: "append",
-    new_string: `- ${candidate.relation_type || "relates_to"} [[${String(candidate.to || "").replace(/\.md$/, "")}]]`,
+    new_string: `- ${candidateRelation(candidate)} [[${String(candidate.to || "").replace(/\.md$/, "")}]]`,
     expected_hash: context.target.content_hash,
   }));
 }
@@ -685,7 +691,7 @@ function renderRelationCandidate(item, group) {
   const li = element("li", "", "relation-candidate");
   const summary = element("div", "", "relation-summary");
   const destination = String(item.to || "").replace(/\.md$/, "");
-  summary.append(element("strong", `${item.relation_type || "relates_to"} → ${destination}`));
+  summary.append(element("strong", `${candidateRelation(item)} → ${destination}`));
   summary.append(element("span", `method: ${label(item.method)}`, "tag"));
   li.append(summary);
   const actions = element("div", "", "actions");
@@ -709,7 +715,7 @@ function openRelationAccept(item, group) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed accept";
   byId("dialog-title").textContent = "Accept this relation?";
-  byId("dialog-description").textContent = `${group.title || group.path} · ${item.relation_type || "relates_to"} → ${destination}`;
+  byId("dialog-description").textContent = `${group.title || group.path} · ${candidateRelation(item)} → ${destination}`;
   replaceChildren(byId("dialog-fields"), [inputField("Audit reason", "why", "Accepted reviewed relation", {required: true})]);
   byId("dialog-error").hidden = true;
   byId("dialog-confirm").disabled = false;
@@ -723,7 +729,7 @@ function openRelationTriage(item, action) {
   const destination = String(item.to || "").replace(/\.md$/, "");
   byId("dialog-kicker").textContent = "Governed triage";
   byId("dialog-title").textContent = `${label(action)} this relation candidate?`;
-  byId("dialog-description").textContent = `${item.relation_type || "relates_to"} → ${destination}`;
+  byId("dialog-description").textContent = `${candidateRelation(item)} → ${destination}`;
   const fields = [];
   if (action === "snooze") {
     const labelNode = element("label", "Snooze through");
@@ -755,6 +761,10 @@ async function submitRelationAccept() {
     return;
   }
   const {item, group} = dialogAction;
+  if (!candidateRelation(item)) {
+    showError(byId("dialog-error"), new ApiError("This candidate names no relation to write. Dismiss it."));
+    return;
+  }
   await guardedWrite(
     () => command("connect_memory", {
       operation: "accept-relation",
@@ -762,6 +772,8 @@ async function submitRelationAccept() {
       expected_hash: group.content_hash,
       why,
       expected_fingerprint: item.fingerprint,
+      // A candidate with no relation of its own is accepted as the plain link it shows.
+      ...(item.relation_type ? {} : {requested_relation: item.plain_link}),
     }),
     {
       precheck: false,

@@ -55,13 +55,12 @@ CENSUS_VERSION = 1
 AUDIENCE_RESTRICTED = "audience_restricted"
 POLICY_BLOCKED = "policy_blocked"
 
-_AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
+_AUTHORED_ORIGINS = relation_registry.AUTHORED_ORIGINS
 # The indexer mints a `derived_from` edge from every unit or block to its own
 # page. That is structure, not an authored relation, and it never connects a
 # page to anything else.
 _STRUCTURAL_ORIGINS = ("semantic_unit", "semantic_block")
 _BODY_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
-_LINK = "links_to"
 _STATUS_KEYS = (
     "core_specific",
     "core_generic",
@@ -262,9 +261,6 @@ def operation_provenance(
         placement = preflight.placement
 
     added = added_edges(before, after, prior_path=prior_path, current_path=state.path)
-    # The reason a caller gave for each generic edge it kept, bound to that edge's identity.
-    cleared = getattr(preflight, "generic_cleared", None)
-    reasons = dict(cleared.edges) if cleared is not None else {}
     additions = []
     for edge in added.edges:
         fact = edge.fact
@@ -307,8 +303,10 @@ def operation_provenance(
                 "origin": fact.origin,
                 "endpoint_class": endpoint_class,
                 "generic": definition.generic if definition is not None else None,
-                "reason": reasons.get(edge.identity),
-                "reason_recorded": edge.identity in reasons,
+                # The v1 log schema keeps these two fields. No write keeps a generic edge on a
+                # stated reason any more, so no new event records one.
+                "reason": None,
+                "reason_recorded": False,
             }
         )
     # The v1 log schema fixes mutation kinds; note-type keys stay in their registry.
@@ -463,14 +461,30 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             "available": numerator is not None,
         }
 
-    def generic_share(population: list[dict]) -> dict[str, Any]:
-        known = [edge for edge in population if type(edge.get("generic")) is bool]
+    def share(
+        population: list[dict],
+        counted: Callable[[dict], bool],
+        known_when: Callable[[dict], bool] = lambda edge: True,
+    ) -> dict[str, Any]:
+        """The share of `population` edges that `counted` picks, over those the log classifies."""
+        known = [edge for edge in population if type(edge.get("generic")) is bool and known_when(edge)]
         measured = bool(events) and (bool(known) or (not population and not unknown_identity))
         return metric(
-            sum(edge["generic"] for edge in known) if measured else None,
+            sum(counted(edge) for edge in known) if measured else None,
             len(known) if measured else None,
             covered={**coverage, "classified_edges": len(known), "cohort_edges": len(population)},
         )
+
+    def generic_share(population: list[dict]) -> dict[str, Any]:
+        return share(population, lambda edge: edge["generic"])
+
+    # The edges a writer authored as a relation (a `## Relations` bullet or a semantic
+    # relation), never a body wikilink; the log must name each edge's relation to class it.
+    link_key = relation_registry.link_relation_key()
+    authored = [edge for edge in edges if edge.get("origin") in _AUTHORED_ORIGINS]
+
+    def names_relation(edge: dict) -> bool:
+        return isinstance(edge.get("relation"), str)
 
     generic = [edge for edge in edges if edge.get("generic") is True]
     reasoned = [edge for edge in generic if edge.get("reason_recorded") is True]
@@ -478,7 +492,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "status": "partial" if reasoned else "unavailable",
         "numerator": len(reasoned),
         "denominator": len(generic) if events else None,
-        "limitation": "Only writes that answered the generic-relation barrier record an edge-bound reason.",
+        "limitation": "Only events logged before the generic-relation barrier refused every new generic edge record an edge-bound reason.",
     }
     reasons = [
         unicodedata.normalize("NFKC", " ".join(edge["reason"].split())).casefold()
@@ -545,6 +559,11 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             len(recorded_edges) if events and (edges or not unknown_identity) else None,
         ),
         "raw_generic_share": generic_share(edges),
+        # Of the relation edges writers authored: a specific relation, and a plain link.
+        "specific_share": share(
+            authored, lambda edge: not edge["generic"] and edge["relation"] != link_key, names_relation
+        ),
+        "plain_link_share": share(authored, lambda edge: edge["relation"] == link_key, names_relation),
         "endpoint_classes": classes,
         "unreasoned_generic_edges": metric(
             sum(
@@ -608,8 +627,8 @@ def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], di
         ),
         proposed_fix=(
             "Review the recorded choices through schema_memory(subject='relations', "
-            "operation='census'). Use a specific predicate when the evidence supports it; "
-            "keep an honest generic choice with its reason. This signal never blocks a write."
+            "operation='census'). Use a specific relation when the evidence supports it; "
+            "otherwise propose a relation or write a plain link. This signal never blocks a write."
         ),
         meta={
             "signal_version": hashlib.sha256(
@@ -1214,7 +1233,7 @@ def _census_payload(
         typed = (
             row.relation is not None
             and row.status != "unregistered"
-            and row.relation != _LINK
+            and row.relation != relation_registry.link_relation_key()
             and row.origin != "wikilink"
         )
         if row.touches_other:
@@ -1516,7 +1535,7 @@ def sample(
     can read and judge them locally; the file never leaves the machine, and
     nothing but the folded counts re-enters the census. Specific means an
     authored, registered edge between pages in view that is neither
-    `relates_to` nor `links_to`. Each family keeps the edges with the smallest
+    the generic relation nor the plain link. Each family keeps the edges with the smallest
     seeded hash of their identity, so one pass draws a uniform, reproducible
     sample while holding at most `size` candidates per family.
     """
@@ -1539,7 +1558,7 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, generic_key, _LINK)
+                or row.relation in (None, generic_key, relation_registry.link_relation_key())
                 or row.status == "unregistered"
             ):
                 continue
