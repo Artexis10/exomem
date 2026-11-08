@@ -27,7 +27,7 @@ A capture that carries identity SHALL be decided by that identity alone and SHAL
 
 ### Requirement: A capture whose payload is already stored reuses the earlier Source
 
-A `capture_source` call without `source_identity` SHALL, within one acquisition of the vault mutation boundary, look up the payload of its text through the duplicate-handling index. The payload SHALL be the text exactly as the writer would store it. When a live Source of the same protection class that the caller can read in full holds an identical payload, the call SHALL write no Source, no index or log entry and no activity record. It SHALL return that Source's stable reference with `capture_outcome: "reused"` and `duplicate_of` naming its path and ref, and SHALL leave that Source unchanged. The result SHALL also state the earlier Source's title, kind and URL, so the caller can see what it matched. The call SHALL NOT merge the new call's title, tags, reason, kind or URL into the earlier Source.
+A `capture_source` call without `source_identity` SHALL, within one acquisition of the vault mutation boundary, look up the payload of its text through the duplicate-handling index. The payload SHALL be the text exactly as the writer would store it. When a live Source of the same protection class that the caller can read in full holds an identical payload, the call SHALL write no Source, no index or log entry and no activity record. It SHALL return that Source's stable reference with `capture_outcome: "reused"` and `duplicate_of` naming its path and ref, and SHALL leave that Source unchanged. The result SHALL also state the earlier Source's title, kind and URL, so the caller can see what it matched. The call SHALL NOT merge the new call's title, tags, reason, kind, URL or any other metadata into the earlier Source. The result SHALL name, in `fields_not_applied`, each caller-provided field whose value differs from the earlier Source's value, with the provided value and the kept value, so the caller sees what was not applied. A field that the caller omitted, or that equals the earlier value, SHALL NOT be listed.
 
 File handles keep the existing `already_stored` outcome, which the preservation requirements extend across the vault. A call that carries `source_identity` is decided by that identity alone and SHALL NOT be reused by payload. This requirement concerns payload identity only. It writes no field into a Source that lacks one, and it leaves implicit deduplication of existing Sources to the reviewed fold.
 
@@ -41,6 +41,14 @@ File handles keep the existing `already_stored` outcome, which the preservation 
 
 - **WHEN** a caller captures stored text again with a different title and different tags
 - **THEN** the call returns the earlier Source with `duplicate_of` and its earlier title
+- **AND** `fields_not_applied` names `title` and `tags`
+- **AND** the earlier Source is byte-identical to before the call
+
+#### Scenario: A differing URL is named, not dropped silently
+
+- **WHEN** a caller captures stored text again with a different URL, a different title and an extra metadata field
+- **THEN** the result lists `url`, `title` and that field in `fields_not_applied`, each with the provided and the kept value
+- **AND** a field that equals the earlier Source's value is absent from the list
 - **AND** the earlier Source is byte-identical to before the call
 
 #### Scenario: A capture carries an identity

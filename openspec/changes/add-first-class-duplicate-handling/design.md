@@ -78,9 +78,9 @@ When the index is missing, the system rebuilds it from canonical pages. While it
 
 A capture that carries a caller identity (`source_identity`) is decided by that identity alone. Why: the caller has said which fact this is. Two facts with the same text but different identities are two Sources, and the existing identity rules already cover replay.
 
-### D7. Reuse writes nothing and merges nothing
+### D7. Reuse writes nothing, merges nothing and names what it did not apply
 
-A capture whose payload is already stored returns the earlier Source with `capture_outcome: "reused"` and `duplicate_of`. The earlier Source stays unchanged. A different URL, title or tags on the new call are dropped. Why: the Source is append-only and the caller can add a link or note on top. A merge would need a Source write, which is the one thing the lane refuses. A shared URL with different text is the opposite case: it writes a new Source and returns a `same_url` advisory with up to five named earlier Sources and a count. Why: the text is new content, and the skill already promises to surface a repeated URL.
+A capture whose payload is already stored returns the earlier Source with `capture_outcome: "reused"` and `duplicate_of`. The earlier Source stays unchanged. The result lists each caller-provided field that differs from the earlier Source (URL, title, tags or other metadata) in `fields_not_applied`, so nothing is dropped silently. Why: the Source is append-only and the caller can add a link or note on top. A merge would need a Source write, which is the one thing the lane refuses. A shared URL with different text is the opposite case: it writes a new Source and returns a `same_url` advisory with up to five named earlier Sources and a count. Why: the text is new content, and the skill already promises to surface a repeated URL.
 
 ### D8. One Evidence page lists every family
 
@@ -102,7 +102,7 @@ Fallback, if the owner of the lane prefers that no step moves a file: the two fo
 
 ### D12. A recap revision is rewritten in place with history
 
-The recorder rewrites the episode's page and creates one compiled-history entry that holds the exact previous bytes, in one atomic write. A failed history write fails the revision. Why: the owner asked to keep history for good, and the compiled-history store already has no rotation and stays outside notes, titles and search. A new compiled-history parent kind is needed (episode pages), which widens the parent set of that store. The writing of history belongs to the semantic-write contract. This change covers it only for episode pages.
+The recorder rewrites the episode's page and creates one compiled-history entry that holds the exact previous bytes, in one atomic write. A failed history write fails the revision. Why: the owner asked to keep history for good, and the compiled-history store already has no rotation and stays outside notes, titles and search. Episode pages become a new parent kind of that store. The parent set belongs to `semantic-write-contract`, so this change widens it there as a modification. The recap requirements only refer to it.
 
 Only the episode recorder may rewrite a Source. Its target check is closed: a recap Source in the episode folder, with the caller's `episode` key and filename group. Why: the append-only guard must stay for every other writer, and a general exception would reopen it.
 
@@ -137,7 +137,7 @@ Adding a family, an import mapping or a back-reference uses a content-hash-guard
 | The journal path of a trashed revision goes stale | Resume decides from the recorded trash identity. The trash move happens only after history read-back. |
 | Undo trashes history entries that a fold created | Compensation removes only the entries that the manifest names, and only while the revision file is restored. This conflicts with "kept without limit" in one case: an undone fold. It is a question to the owner. |
 | Adoption of a collection creates duplicate own-notes | Out of scope. One draft per collection path stays. The audit does not group notes. |
-| A reused capture loses a different URL or title | The reuse answer names the earlier Source. The caller can link or add a note. D7 is a question to the owner. |
+| A reused capture does not apply a different URL or title | The reuse answer names the earlier Source and each field it did not apply. The caller can link or add a note. |
 | The audit costs time on a large vault | It reads the index and re-hashes only members of groups of two or more. |
 | A fold of a wrong canonical choice | The preview shows it, the owner confirms, and compensation restores it. |
 
@@ -170,7 +170,7 @@ These choices are the packet's own and need the owner's view:
 3. Exemption of identity-bearing captures (D6).
 4. Reuse and fold per lane and protection class (D2).
 5. No fold for `duplicate_source_url` (D15).
-6. No merge of a different URL, title or tags on payload reuse (D7).
+6. Payload reuse applies none of the call's fields and names each differing one (D7).
 7. "Re-import after a rename". A moved staging root maps by relative path and writes nothing. A rename of one file inside the collection is a new path with identical bytes. It records a new mapping and writes no second original.
 8. Opt-in audit categories (D15).
 9. One own-note draft per collection path stays (non-goals).

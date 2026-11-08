@@ -43,6 +43,7 @@ Three gaps cause this:
 - `adoption-studio`: store-once within a tree and against the vault, `also_imported_from`, and idempotent re-runs.
 - `governed-curation-lane`: the two fold step kinds, their manifests, and their compensation.
 - `agent-bootstrap-contract`: one page per episode, history, the recorder exception, coverage after revision, and the layout migration.
+- `semantic-write-contract`: episode pages become parents of compiled-history entries, written by the recorder and by the recap fold step.
 
 ## Impact
 
