@@ -10,11 +10,14 @@ arm:
   which is upstream's stateless baseline.
 - ``F``: a plain memory folder in the workspace, with upstream's own Claude
   memory instruction.
-- ``P``: Exomem as its users get it, the primary Exomem arm. The shipped Claude plugin (skills
-  and hooks) at its default prominence, the documented balanced custom-instruction block, the
-  Skill tool and the full Exomem tool surface over a fresh disposable vault. The task prompt
-  carries no memory instruction. The workspace resets per question, so Exomem is the only thing
-  that persists. Each turn records the characters the hooks injected.
+- ``PP``: the primary Exomem arm. Exactly ``P``, and the task prompt also carries CL-Bench's
+  per-task memory sentence pointed at Exomem: the sentence ``E`` gets, in the place ``F`` has its own.
+- ``P``: Exomem as its users get it. The shipped Claude plugin (skills and hooks) at its default
+  prominence, the documented balanced custom-instruction block, the Skill tool and the full Exomem
+  tool surface over a fresh disposable vault. The task prompt carries no memory instruction. It
+  measures the product gap that a capture change must close, and only describes. The workspace
+  resets per question, so Exomem is the only thing that persists. Each turn records the characters
+  the hooks injected.
 - ``E``: ablation. Exomem over MCP alone on a fresh disposable vault, with our memory
   instruction in the task prompt. The workspace resets per question.
 - ``EH``: diagnostic. ``E`` plus the shipped plugin at its default activation; each turn
@@ -90,8 +93,10 @@ class ArmSpec:
     persists: str  # "none" | "folder" | "exomem"
     plugin: bool = False  # the shipped Claude plugin (skills and hooks) loads beside the memory
     #: Exomem as its users get it: the balanced instruction block and the Skill tool, and the task
-    #: prompt carries no memory instruction. Needs ``plugin``.
+    #: prompt carries no memory instruction unless ``told``. Needs ``plugin``.
     shipped: bool = False
+    #: The task prompt carries the per-task memory sentence although the arm ships the plugin.
+    told: bool = False
 
     @property
     def exomem(self) -> bool:
@@ -101,6 +106,7 @@ class ArmSpec:
 ARMS = {
     "N": ArmSpec("N", "none"),
     "F": ArmSpec("F", "folder"),
+    "PP": ArmSpec("PP", "exomem", plugin=True, shipped=True, told=True),
     "P": ArmSpec("P", "exomem", plugin=True, shipped=True),
     "E": ArmSpec("E", "exomem"),
     "EH": ArmSpec("EH", "exomem", plugin=True),
@@ -411,10 +417,10 @@ class ClaudeActor:
         self.model = model
         self.effort = effort
         self.envelope = envelope or discover_agent_envelope()
-        # The shipped arm's task prompt says nothing about memory: the plugin and the block do.
+        # The shipped arm's task prompt says nothing about memory (the plugin and the block do), unless told.
         self.memory_instruction = (
             None
-            if spec.shipped
+            if spec.shipped and not spec.told
             else EXOMEM_MEMORY_INSTRUCTION
             if spec.exomem
             else memory_instruction.format(memory_dir=str(self.work / "memory"))

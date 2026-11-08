@@ -28,6 +28,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 RETRIES = 2
+#: f35 held-out: the orderings of the decision schedule, in the order they are added (PREREGISTRATION
+#: section 7, sequence 10). The decision plays the first. It adds the next ones, in this order, only
+#: when a decision interval contains its bound.
+HELDOUT_RUN_INDEXES = (1, 2, 3)
 #: f35 held-out: the one run that replaces a run voided by a harness fault. A second voided run voids the decision.
 REPLACEMENT_RUN = 4
 #: f36 and f37: more struck units than this voids the decision. f35 voids it at a second voided run.

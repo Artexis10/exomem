@@ -24,7 +24,7 @@ from .stats import paired_interval
 
 DOCS = REPO_ROOT / "docs" / "benchmarks" / "outcome"
 #: The Exomem arms of the panel, and the controls that explain an actor change.
-PANEL = {"clbench": ("P", "E"), "lab": ("WP",), "planted": ("E",)}
+PANEL = {"clbench": ("PP", "P"), "lab": ("WP",), "planted": ("E",)}
 CONTROLS = {"clbench": ("N", "F"), "lab": ("S",), "planted": ("P",)}
 #: What each suite measures per case, read out of the per-case report.
 MEASURES = {
@@ -117,6 +117,7 @@ def projection(suite: str, report: dict) -> dict:
         "failed_judgements": len(report.get("failed_judgements") or []),
         "struck_units": report.get("struck_units") or [],
         "judge": report.get("judge"),
+        "judge_family": report.get("judge_family"),
     }
 
 
@@ -152,7 +153,7 @@ def run_panel(
         else "only with --controls (no earlier panel)"
     )
     print(
-        f"panel {version}: CL-Bench P,E on multi_group; LAB dev WP; planted dev E. "
+        f"panel {version}: CL-Bench PP,P on multi_group; LAB dev WP; planted dev E. "
         f"Control arms run {again}.",
         flush=True,
     )

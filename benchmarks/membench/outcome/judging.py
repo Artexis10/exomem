@@ -27,9 +27,12 @@ from .isolation import claude_env
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 #: The Codex judge's reasoning effort. The Claude judge takes the CLI default, as before.
 DEFAULT_EFFORT = {"claude": None, "codex": "high"}
-#: The judge a decision needs: another model family than the actor, on the Codex subscription.
-#: A held-out report judged by anything else never reads as decision evidence.
-DECISION_JUDGE = ("codex", DEFAULT_MODELS["codex"])
+#: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus on the Claude
+#: subscription. A held-out report judged by anything else never reads as decision evidence.
+DECISION_JUDGE = ("claude", DEFAULT_MODELS["claude"])
+#: How a judge backend relates to the actor, which always runs through the Claude CLI. A Claude judge is
+#: the actor's own model family, so its reports say so; a Codex judge re-judges a sample for agreement only.
+JUDGE_FAMILY = {"claude": "same as actor", "codex": "other than actor"}
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,11 @@ class JudgeSpec:
     def record(self) -> dict:
         """What a judgement file says about its judge."""
         return {"backend": self.backend, "model": self.model, "effort": self.effort}
+
+    @property
+    def family(self) -> str:
+        """The judge's model family against the actor's, for the report."""
+        return JUDGE_FAMILY[self.backend]
 
 
 _STDIN_PROMPT = "<prompt on stdin>"
@@ -212,6 +220,27 @@ def failed_judgements(judge_dir: Path) -> list[str]:
         settled = {row["id"] for row in rows if row["verdict"]}
         failed |= {f"{row['id']} ({name})" for row in rows if row["id"] not in settled}
     return sorted(failed)
+
+
+def write_sample(judge_run: Path, sample_run: Path, fraction: float, seed: int) -> int:
+    """Copy a seeded random share of ``judge_run``'s items into ``sample_run`` as its whole item set.
+
+    A second judge then judges ``sample_run`` once, in files that the first judge's report never
+    reads, so it cannot change a decision. ``seed + 1`` already picks a judge's own re-judge sample, so
+    this one takes ``seed + 2``. Returns how many items it holds; repeating the call over unchanged items is a no-op.
+    """
+    lines = (judge_run / "judge" / "items.jsonl").read_text().splitlines(keepends=True)
+    chosen = random.Random(seed + 2).sample(lines, math.ceil(len(lines) * fraction))
+    target = sample_run / "judge" / "items.jsonl"
+    if target.exists():
+        if target.read_text() != "".join(chosen):
+            raise SystemExit(
+                f"{target} holds another sample; move {sample_run} aside to sample again"
+            )
+        return len(chosen)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("".join(chosen))
+    return len(chosen)
 
 
 def judge_all(

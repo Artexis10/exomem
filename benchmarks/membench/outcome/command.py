@@ -17,25 +17,38 @@ from functools import partial
 from pathlib import Path
 
 from . import gate, record
-from .faults import REPLACEMENT_RUN, LimitRejected, park, replayed, run_pool
+from .faults import HELDOUT_RUN_INDEXES, REPLACEMENT_RUN, LimitRejected, park, replayed, run_pool
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL
-from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows
+from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows, write_sample
 from .workspace import RUN_ROOT, require_pinned_checkout
 
 SUITES = ("clbench", "lab", "planted")
 PLANTED_ARMS = ("E", "P")
 #: The comparisons each suite reports when both arms ran: (treatment, baseline).
 PAIRS = {
-    "clbench": ("F-N", "P-N", "E-N", "EH-N", "P-F", "E-F", "EH-F", "P-E", "EH-E"),
+    "clbench": (
+        "F-N",
+        "PP-N",
+        "P-N",
+        "E-N",
+        "EH-N",
+        "PP-F",
+        "P-F",
+        "E-F",
+        "EH-F",
+        "P-E",
+        "EH-E",
+    ),
     "lab": ("WP-S", "W-S", "WP-W"),
     "planted": ("E-P",),
 }
 SPLITS = ("dev", "heldout", "panel")
-#: CL-Bench's decision schedule: upstream's default schedule at seed 42, three independent orderings.
-#: Development rounds and the panel play the ``multi_group`` variant only, so the post-migration
-#: questions of this schedule stay unseen until the decision run.
+#: CL-Bench's decision schedule: upstream's default schedule at seed 42. Development rounds and the
+#: panel play the ``multi_group`` variant only, so the post-migration questions of this schedule
+#: stay unseen until the decision run.
 SCHEDULE = {"schedule": "default", "seed": 42}
-HELDOUT_RUN_INDEXES = (1, 2, 3)
+#: The arms that decide f35. E and EH are ablations: a held-out run refuses them.
+DECISION_ARMS = ("N", "F", "PP", "P")
 #: The share of items a judge sees twice, to measure how often it repeats itself.
 REJUDGE_FRACTION = 0.2
 
@@ -133,10 +146,20 @@ def read_record(run_dir: Path) -> dict:
 
 
 def clbench_indexes(split: str, seeds: list[int] | None) -> tuple[int | None, ...]:
-    """The ``run_index`` values a split plays: the decision's three, or one plain run."""
+    """The ``run_index`` values a split plays: the decision's first ordering unless ``seeds`` adds more, or one plain run."""
     if split == "heldout":
-        return tuple(seeds or HELDOUT_RUN_INDEXES)
+        return tuple(sorted(set(seeds or HELDOUT_RUN_INDEXES[:1])))
     return tuple(seeds or (None,))
+
+
+def require_orderings_in_order(seeds: list[int]) -> None:
+    """A held-out run adds orderings in their order: 1, then 2, then 3. Index 4 is the replacement, once."""
+    orderings = sorted(set(seeds) - {REPLACEMENT_RUN})
+    if orderings != list(HELDOUT_RUN_INDEXES[: len(orderings)]):
+        raise refuse(
+            f"a held-out run adds orderings in order, so --seeds takes 1, 1,2 or 1,2,3, "
+            f"and {REPLACEMENT_RUN} once as the replacement for a voided one, not {','.join(map(str, seeds))}"
+        )
 
 
 def clbench_cells(run_dir: Path, split: str, arms, seeds, limit, model, effort):
@@ -265,17 +288,19 @@ def run_suite(
     if split == "panel" and (seeds or limit):
         raise refuse("the panel plays its fixed slice of development cases: no --seeds or --limit")
     known = suite_arms(suite)
-    requested = arms or list(known)
+    decides = DECISION_ARMS if split == "heldout" and suite == "clbench" else known
+    requested = arms or list(decides)
     if set(requested) - set(known):
         raise refuse(f"--arms takes {', '.join(known)} for {suite}, not {','.join(requested)}")
+    if set(requested) - set(decides):
+        raise refuse(
+            f"a held-out CL-Bench run plays {', '.join(decides)}; E and EH are ablations and never decide"
+        )
     arms = [a for a in known if a in requested]
     if seeds and suite != "clbench":
         raise refuse(f"--seeds selects CL-Bench run indexes; {suite} has no seeds")
-    if split == "heldout" and seeds and not set(seeds) <= {*HELDOUT_RUN_INDEXES, REPLACEMENT_RUN}:
-        raise refuse(
-            f"a held-out run uses run indexes {HELDOUT_RUN_INDEXES}, and {REPLACEMENT_RUN} "
-            f"once as the replacement for a voided one, not {sorted(seeds)}"
-        )
+    if split == "heldout" and seeds:
+        require_orderings_in_order(seeds)
     if limit and split != "dev":
         raise refuse("--limit is for dev runs; a decision run plays the whole split")
     verdict = passed_gate(suite, split)
@@ -360,6 +385,8 @@ def report_suite(
         built = {
             "suite": suite,
             "run_id": run_ids[0],
+            # The decision judge shares the actor's model family; every judged report says so.
+            "judge_family": spec.family,
             **judge.score(judge_run, wanted, heldout=heldout),
         }
         if suite == "lab":
@@ -374,13 +401,37 @@ def report_suite(
     return built
 
 
+def rejudge_sample(suite: str, run_id: str, primary: JudgeSpec, spec: JudgeSpec, jobs: int) -> dict:
+    """Re-judge a seeded random share of the decision items with ``spec``, into a judging directory of its own.
+
+    The agreement block it returns is description only: the decision reads the primary judge's
+    verdicts, which this never touches. A judgement that failed is counted as unjudged, not as a disagreement.
+    """
+    if suite == "lab":
+        from .lab import judge
+    else:
+        from .planted import judge
+    run_dir = runs_dir() / run_id
+    judge_run = run_dir / f"judge-{primary.backend}"
+    sample_run = run_dir / f"judge-{spec.backend}-sample"
+    sampled = write_sample(judge_run, sample_run, REJUDGE_FRACTION, judge.SEED)
+    judge.judge(sample_run, spec, 0.0, jobs)
+    return {
+        "judge": spec.record(),
+        "judge_family": spec.family,
+        "description_only": "the decision reads the primary judge's verdicts only",
+        "items_sampled": sampled,
+        **judge.sample_agreement(judge_run, sample_run),
+    }
+
+
 def summary(report: dict) -> list[str]:
     """One line per paired measure and per arm's units, then the decision when the report has one."""
     lines = []
     for pair, body in report["pairs"].items():
         measures = {"": body} if "mean_difference" in body else body
         for name, m in measures.items():
-            label = f"{pair} {name}".strip()
+            label = f"{pair} {name}".strip() + (f" ({m['role']})" if m.get("role") else "")
             if m.get("mean_difference") is None:
                 lines.append(f"{label}: {m.get('verdict', 'unknown')}")
             else:
@@ -394,9 +445,19 @@ def summary(report: dict) -> list[str]:
             f"{units['invalid']} invalid, {'unknown' if units['missing'] is None else units['missing']} missing"
             + (f", {body['unanswered']} unanswered" if "unanswered" in body else "")
         )
+    sample = report.get("rejudge_sample")
+    if sample:
+        lines.append(
+            f"rejudge sample by {sample['judge']['model']} (description only): "
+            f"{sample['items_judged']} of {sample['items_sampled']} items judged, agreement {sample['agreement']}"
+        )
     decision = report.get("decision")
     if decision:
         lines.append(f"decision: {decision['status']}")
+        if "run_indexes_played" in decision:
+            lines.append(f"  run indexes played: {decision['run_indexes_played']}")
+        if decision.get("next_ordering"):
+            lines.append(f"  {decision['next_ordering']}")
         why = decision.get("why") or []
         lines += [f"  {reason}" for reason in ([why] if isinstance(why, str) else why)]
         lines += [
@@ -456,6 +517,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
     stored = read_record(run_dir)
     if stored.get("suite", args.suite) != args.suite:
         raise refuse(f"{run_dir} is a {stored['suite']} run, not {args.suite}")
+    if args.rejudge_sample and args.suite == "clbench":
+        raise refuse("--rejudge-sample re-judges lab and planted items; CL-Bench needs no judge")
     spec = (
         JudgeSpec.of(args.judge, args.judge_model, args.judge_effort, args.judge_exe)
         if args.suite != "clbench"
@@ -467,6 +530,10 @@ def _cmd_report(args: argparse.Namespace) -> int:
             f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
         )
     built = report_suite(args.suite, [args.run_id], spec, jobs=args.jobs)
+    if args.rejudge_sample:
+        built["rejudge_sample"] = rejudge_sample(
+            args.suite, args.run_id, spec, JudgeSpec.of(args.rejudge_sample), args.jobs
+        )
     built["run"] = {k: stored.get(k) for k in ("model", "effort", "arms", "seeds", "gate")}
     stamped = gate.stamp(built, stored)
     target = run_dir / (f"report-{spec.backend}.json" if spec else "report.json")
@@ -515,7 +582,10 @@ def register(sub) -> None:
         help="dev is an instrument run; heldout is a decision run and passes the gate first",
     )
     p_run.add_argument("--arms", help="comma-separated arm codes; default all of the suite's arms")
-    p_run.add_argument("--seeds", help="CL-Bench only: comma-separated run indexes")
+    p_run.add_argument(
+        "--seeds",
+        help="CL-Bench only: comma-separated run indexes. A held-out run plays 1; 1,2 and 1,2,3 add orderings in order",
+    )
     p_run.add_argument("--jobs", type=int, default=1, help="parallel cells, tasks or arms")
     p_run.add_argument(
         "--limit", type=int, help="dev only: play the first N questions, tasks or cases"
@@ -529,6 +599,12 @@ def register(sub) -> None:
     p_report.add_argument("suite", choices=SUITES)
     p_report.add_argument("--run-id", required=True)
     p_report.add_argument("--jobs", type=int, default=1, help="parallel judge calls")
+    p_report.add_argument(
+        "--rejudge-sample",
+        choices=sorted(DEFAULT_MODELS),
+        help="also re-judge a seeded random 20%% of the items with this backend's judge, "
+        "into files of their own, and add the agreement to the report; it never changes a decision",
+    )
     _judge_args(p_report)
     p_report.set_defaults(func=_cmd_report)
 
