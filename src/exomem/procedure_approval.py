@@ -376,6 +376,7 @@ def _parse_entry(data: bytes) -> tuple[Entry, dict[str, object], str] | None:
         or not _ENTRY_ID_SHAPE.fullmatch(text["entry_id"])
         or not is_version(text["version"])
         or not _DIGEST_SHAPE.fullmatch(mac)
+        # nosemgrep: ep-lexical-intent -- the closed entry actions this module writes; not a reading of meaning.
         or text["action"] not in ACTIONS
         or _parse_timestamp(text["recorded_at"]) is None
     ):
