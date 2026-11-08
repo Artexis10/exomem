@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Handing a generated file to the user adopts it
-The active agent SHALL adopt each generated file at the moment it hands that file to the user to download or use, without waiting for the user to select, approve or report using it. Generated candidates the agent never hands over (drafts, previews and unoffered variants) SHALL stay ephemeral; filename, MIME type and apparent quality SHALL NOT decide adoption. A definite sent or published report about one uniquely identified offered artifact SHALL require local exact-byte adoption before any delivery observation is recorded. These facts establish eligibility, not write confirmation; agent-initiated adoption and delivery SHALL still obey the `proactive_capture` disposition.
+The active agent SHALL adopt each generated file at the moment it hands that file to the user to download or use, without waiting for the user to select, approve or report using it. Generated candidates the agent never hands over (drafts, previews and unoffered variants) SHALL stay ephemeral; filename, MIME type and apparent quality SHALL NOT decide adoption. The rule SHALL cover files the agent generates and gives the user, such as downloads, attachments and sandbox outputs, and SHALL NOT cover files the agent writes or edits in the user's own workspace or repository, which already persist there; the skill's engagement reference SHALL state that scope. A definite sent or published report about one uniquely identified offered artifact SHALL require local exact-byte adoption before any delivery observation is recorded. These facts establish eligibility, not write confirmation; agent-initiated adoption and delivery SHALL still obey the `proactive_capture` disposition.
 
 #### Scenario: A file handed over is kept without being asked
 - **WHEN** the agent gives the user a generated ZIP to download and the user says nothing about choosing it
@@ -11,9 +11,14 @@ The active agent SHALL adopt each generated file at the moment it hands that fil
 - **WHEN** the agent generates several intermediate files and hands only the final one to the user
 - **THEN** it invokes no Source, Evidence, Record or adoption-receipt write for the files it never handed over
 
+#### Scenario: Files in the user's own workspace are out of scope
+- **WHEN** the agent edits a file in the user's own repository
+- **THEN** it invokes no Source, Evidence or adoption-receipt write for that edit
+
 #### Scenario: A later revision is kept beside the first
-- **WHEN** the agent hands over a file and later hands over a revised version
-- **THEN** both exact files are preserved, and handing over identical bytes again stores nothing new
+- **WHEN** the agent hands over a file and later hands over a revised version under the same file name and a new adoption key
+- **THEN** both exact files are preserved, the revision under the next free file name
+- **AND** handing over identical bytes again, under any key or file name, returns `already_stored` for the existing copy and writes nothing
 
 #### Scenario: Delivery report preserves before recording
 - **WHEN** the user reports that one uniquely identified offered artifact was sent but no local adoption receipt exists
