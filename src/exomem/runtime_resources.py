@@ -680,9 +680,12 @@ def available_memory() -> int | None:
 
 
 def cgroup_memory_headroom() -> int | None:
-    """Bytes this process's cgroup may still grow before its `memory.high` throttle, or None.
+    """Bytes this process's cgroup may still grow before its nearest limit, or None.
 
-    None where the host has no cgroup v2 hierarchy or the cgroup sets no `memory.high`.
+    The limit is the smaller of `memory.high` (throttle) and `memory.max` (hard cap). Use is
+    the working set: `memory.current` less `inactive_file`, the cache the kernel reclaims
+    before it throttles. None where the host has no cgroup v2 hierarchy or the cgroup sets
+    no limit.
     """
     try:
         line = next(
@@ -690,10 +693,26 @@ def cgroup_memory_headroom() -> int | None:
             if entry.startswith("0::")
         )
         group = _CGROUP_ROOT / line[3:].lstrip("/")
-        high = (group / "memory.high").read_text(encoding="ascii").strip()
-        if high == "max":
+        limits = []
+        for name in ("memory.high", "memory.max"):
+            try:
+                value = (group / name).read_text(encoding="ascii").strip()
+            except OSError:
+                continue
+            if value != "max":
+                limits.append(int(value))
+        if not limits:
             return None
-        return int(high) - int((group / "memory.current").read_text(encoding="ascii").strip())
+        used = int((group / "memory.current").read_text(encoding="ascii").strip())
+        try:
+            for stat in (group / "memory.stat").read_text(encoding="ascii").splitlines():
+                key, _, amount = stat.partition(" ")
+                if key == "inactive_file":
+                    used -= int(amount)
+                    break
+        except OSError:
+            pass
+        return min(limits) - used
     except (OSError, StopIteration, ValueError):
         return None
 

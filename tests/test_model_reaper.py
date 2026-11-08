@@ -183,6 +183,40 @@ def test_memory_is_short_when_the_unit_nears_its_cgroup_limit(tmp_path, monkeypa
     assert runtime_resources.memory_short(512 * 1024**2) is False
 
 
+def test_memory_is_short_when_the_unit_nears_a_hard_cap_without_a_throttle(tmp_path, monkeypatch) -> None:
+    """A unit capped by memory.max alone (Docker mem_limit, systemd MemoryMax) still reports pressure."""
+    from exomem import runtime_resources
+
+    group = tmp_path / "system.slice" / "exomem.service"
+    group.mkdir(parents=True)
+    (group / "memory.high").write_text("max\n")
+    (group / "memory.max").write_text("4294967296\n")  # 4 GiB
+    (group / "memory.current").write_text(str(4294967296 - 512 * 1024 * 1024) + "\n")  # 512 MiB left
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("0::/system.slice/exomem.service\n")
+    monkeypatch.setattr(runtime_resources, "_PROC_CGROUP", cgroup)
+    monkeypatch.setattr(runtime_resources, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 40 * 1024**3)
+    assert runtime_resources.memory_short(2 * 1024**3) is True
+
+
+def test_reclaimable_file_cache_does_not_count_as_pressure(tmp_path, monkeypatch) -> None:
+    """Inactive file cache is what the kernel drops first, so it must not release recall's caches."""
+    from exomem import runtime_resources
+
+    group = tmp_path / "user.slice" / "exomem.service"
+    group.mkdir(parents=True)
+    (group / "memory.high").write_text("10737418240\n")  # 10 GiB
+    (group / "memory.current").write_text(str(9 * 1024**3) + "\n")  # 1 GiB left counting cache
+    (group / "memory.stat").write_text("anon 6442450944\ninactive_file 2147483648\n")  # 2 GiB reclaimable
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("0::/user.slice/exomem.service\n")
+    monkeypatch.setattr(runtime_resources, "_PROC_CGROUP", cgroup)
+    monkeypatch.setattr(runtime_resources, "_CGROUP_ROOT", tmp_path)
+    monkeypatch.setattr(runtime_resources, "available_memory", lambda: 40 * 1024**3)
+    assert runtime_resources.memory_short(2 * 1024**3) is False
+
+
 def test_the_page_cache_counts_the_pages_it_serves(tmp_path: Path) -> None:
     page = tmp_path / "Knowledge Base" / "Notes" / "a.md"
     page.parent.mkdir(parents=True)
