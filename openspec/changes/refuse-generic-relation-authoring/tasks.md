@@ -10,7 +10,7 @@
 
 - [x] 2.1 Render bare `connections` as plain links in `link.py`. Check: `create-entity` with `connections` writes plain-link bullets.
 - [x] 2.2 Make similarity and co-participation candidates name no relation, carry the options and the plain link, and require a choice to accept. Check: accepting a shared-source candidate is refused without a choice and commits with one; the plain link commits; the generic relation is refused.
-- [ ] 2.3 Stop Studio sending the generic relation. Check: the relation review view accepts with a chosen relation or the plain link.
+- [x] 2.3 Stop Studio sending the generic relation. Check: the relation review view accepts with a chosen relation or the plain link.
 - [x] 2.4 Delete `relation_offer.py`, its post-commit projection and the tests that exercised only it.
 - [x] 2.5 List the disposition of every caller of `relation_registry.generic_relation_key()` and every `relates_to` literal under `src/exomem`. Check: the PR lists each call site as kept for legacy reads, changed, or reported debt.
 
