@@ -1603,7 +1603,7 @@ def _task_links(
     for position, neighbor in enumerate(index.neighbors_for([c["source_ref"] for c in candidates], keep=visible)):
         if neighbor.direction != "outbound" or neighbor.other_rel not in by_path:
             continue
-        tier = 0 if (neighbor.relation_type and neighbor.family and neighbor.family != "link") else 1
+        tier = 0 if neighbor.typed else 1
         relation = neighbor.relation_type or neighbor.relation_label or ""
         # One line per target: when a typed relation and a plain link reach the same page, the typed one names it.
         best = ranked.setdefault(neighbor.seed_rel, {})

@@ -1010,8 +1010,7 @@ def collect_candidates(
                             continue
                         if eligible_paths is not None and target_rel not in eligible_paths:
                             continue
-                        family = neighbor.family
-                        tier = 0 if (neighbor.relation_type and family and family != "link") else 1
+                        tier = 0 if neighbor.typed else 1
                         current_best = best_tier_for_target.get(target_rel)
                         if current_best is None or tier < current_best:
                             best_tier_for_target[target_rel] = tier

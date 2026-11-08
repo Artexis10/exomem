@@ -366,7 +366,7 @@ def compile_context(
             candidates, block["interpretation"] = context_fit.interpret(
                 root, caller=caller, candidates=candidates, turn=turn, conversation=conversation, sources=sources,
             )
-        linked: list[tuple[dict[str, Any], list[dict[str, str]]]] = []
+        linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
             links = item.pop("links", [])
@@ -377,13 +377,22 @@ def compile_context(
                     block["candidates"].pop()
                     block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
                 else:
-                    linked.append((item, links))
+                    linked.append((item, links, False))
+            elif links:
+                # The turn slice carries no links, so a named lead returns here only to list them.
+                linked.append((item, links, True))
             for method in methods_by_source.get(item["source_ref"], ()):
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
                     block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
-        for item, links in linked:
+        for item, links, named in linked:
+            if named:
+                block["candidates"].append(item)
+                if packet_chars(block) > allowance:
+                    block["candidates"].pop()
+                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    continue
             item["links"] = []
             for link in links:
                 item["links"].append(link)
@@ -394,6 +403,10 @@ def compile_context(
                 item["links_omitted"] = item.get("links_omitted", 0) + len(links) - len(item["links"])
             if not item["links"]:
                 del item["links"]
+                if named:
+                    # A named lead without one listed link would only repeat the turn slice's route.
+                    block["candidates"].remove(item)
+                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)

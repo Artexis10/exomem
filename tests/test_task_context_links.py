@@ -25,10 +25,10 @@ def _linked(vault: Path, name: str, *, frontmatter: str = "") -> str:
     return _page(vault, name, frontmatter, body=UNRELATED)
 
 
-def _discover_packet(vault: Path, monkeypatch: pytest.MonkeyPatch, *, max_chars: int = 8000) -> dict:
+def _discover_packet(vault: Path, monkeypatch: pytest.MonkeyPatch, *, max_chars: int = 8000, turn_slice: str = "off") -> dict:
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     # The turn slice drops a lead it already carries; with it off, the task context shows discovery itself.
-    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", turn_slice)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     return _activate(vault, turn=TURN, max_chars=max_chars)
@@ -50,6 +50,8 @@ def test_a_lead_lists_typed_links_first_and_adds_no_neighbour_as_a_lead(vault: P
         f"{LEAD_BODY}\nThe report is [[{report.removesuffix('.md')}]].\n\n"
         f"## Relations\n\n- links_to [[{plain.removesuffix('.md')}]]\n- evidenced_by [[{report.removesuffix('.md')}]]\n"
     ))
+    # An inbound edge is the other page's link, not the lead's; listing it would reverse the relation.
+    _page(vault, "inbound-note", body=f"{UNRELATED}\nSee [[{lead.removesuffix('.md')}]].\n")
     task = _discover(vault, monkeypatch)
     links = _lead(task, lead)["links"]
     assert links == [
@@ -115,3 +117,12 @@ def test_unavailable_graph_keeps_the_leads_and_says_links_are_missing(vault: Pat
     assert "links" not in _lead(task, lead)
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
+
+
+def test_a_page_the_turn_names_still_lists_its_links(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turn slice carries the named page without links, so discovery must still list where it leads."""
+    targets = [_linked(vault, f"reference-{index}") for index in range(3)]
+    lead = _page(vault, "optical-alignment-workshop", body=LEAD_BODY + "\n" + "\n".join(f"- [[{t.removesuffix('.md')}]]" for t in targets) + "\n")
+    packet = _discover_packet(vault, monkeypatch, turn_slice="on")
+    assert lead in str(packet["turn_slice"])
+    assert {link["target_ref"] for link in _lead(packet["task_context"], lead)["links"]} == set(targets)

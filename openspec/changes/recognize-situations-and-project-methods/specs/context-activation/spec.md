@@ -74,6 +74,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **AND** links with a typed relation, as the relation registry's declared family marks it, come before plain links, and the graph owner's order stands within each group
 - **AND** a candidate with more links than it lists carries the count of those it omits, and a link to a page the caller may not see is never listed
 - **AND** no linked page becomes a candidate by that link, so the agent decides which link to follow
+- **AND** a page the turn slice already carries returns as a candidate only to list its links, when at least one fits
 
 #### Scenario: Links cost the allowance last
 

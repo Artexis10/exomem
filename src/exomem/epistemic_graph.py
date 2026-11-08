@@ -439,6 +439,11 @@ class GraphNeighbor:
     family: str
     relation_label: str | None = None
 
+    @property
+    def typed(self) -> bool:
+        """A registered relation outside the plain-link family; ranks before plain links wherever both appear."""
+        return bool(self.relation_type and self.family and self.family != "link")
+
 
 @dataclass(frozen=True)
 class RelationMatch:
