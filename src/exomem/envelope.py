@@ -90,7 +90,7 @@ PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
 #: right for the vault's own setting, and the key set cannot grow without a spec change.
 LINK_ACCEPTANCE_MEANING: dict[str, str] = {
     "off": "accept a queued relation only on an explicit request",
-    "advisory": "name a matching queued relation and stop",
+    "advisory": "name a matching queued relation without accepting it",
     "confirm-shortcut": "accept a matching queued relation on the user's exact confirmation",
 }
 
