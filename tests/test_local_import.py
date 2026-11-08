@@ -189,8 +189,8 @@ def test_the_command_exits_with_an_error_and_names_the_rerun_when_a_file_could_n
     assert (status, result["ok"], result["code"]) == (1, False, "COPY_INCOMPLETE")
     assert "Run the same command again" in captured.err and result["import_id"] in captured.err
     # The path to adopt what is staged so far is printed, but not as the next step of a finished import.
-    assert "Next: run adoption_studio file" not in captured.err
-    assert f'adoption_studio file with path "{result["start_path"]}"' in captured.err
+    assert "Next: run import_memory" not in captured.err
+    assert f'import_memory with operation kind "file" and path "{result["start_path"]}"' in captured.err
 
     monkeypatch.setattr(local_import.import_selection, "select", scan)
     assert cli._dispatch_main(["import", str(folder), "--vault", str(vault)]) == 0
@@ -216,7 +216,7 @@ def test_a_file_the_vault_refuses_is_left_out_with_its_code_and_the_import_still
     assert records[-1]["kind"] == "done"
     assert _tree(vault / result["start_path"] / "Field Notes") == {"good.md": b"kept"}
     assert "1 file left out because the vault refused it" in captured.err
-    assert captured.err.strip().splitlines()[-1].startswith("Next: run adoption_studio file")
+    assert captured.err.strip().splitlines()[-1].startswith("Next: run import_memory with operation kind \"file\"")
 
 
 def _settled_vault(tmp_path: Path) -> Path:
@@ -420,7 +420,7 @@ def test_exomem_import_command_prints_the_result_and_the_start_path(tmp_path, mo
     assert result["start_path"] == f"_Imports/{result['import_id']}"
     assert result["staged"] == {"files": 1, "bytes": 4}
     # The last thing a person reads is the route, and the second copy is named with the way to discard it.
-    assert captured.err.strip().splitlines()[-1].startswith("Next: run adoption_studio file")
+    assert captured.err.strip().splitlines()[-1].startswith("Next: run import_memory with operation kind \"file\"")
     assert "No Exomem command discards it" in captured.err and str(vault / "_Imports" / result["import_id"]) in captured.err
 
 

@@ -3773,10 +3773,12 @@ def file(
         if run is None:
             if exc.code == "KB_NOT_INITIALIZED":
                 # `file` has no such argument, so `start`'s own advice would send the agent to one it cannot pass.
+                begin = capabilities.active_call_text(
+                    "adoption_studio", {"action": "start", "path": _clean(path), "initialize_kb": True}
+                )
                 raise AdoptionRunError(
                     exc.code,
-                    f"{kb_dirname()}/ is required; run adoption_studio start on this path with initialize_kb=true, "
-                    "then repeat the file call: it carries on that run",
+                    f"{kb_dirname()}/ is required; run {begin}, then repeat the file call: it carries on that run",
                 ) from exc
             raise
         return _filing_reply(root, store, run, stop={"code": exc.code, "reason": exc.reason})
