@@ -7669,7 +7669,9 @@ def _op_activate_context_body(
 
             return context_task.compile_context(
                 vault_root, caller=caller, catalogue=catalogue, turn=turn,
-                conversation=working_set_conversation_module.bound(conversation), snapshot=snapshot,
+                # Already bounded by the caller; bounding a bounded value again would return none.
+                conversation=conversation if conversation is not None else working_set_conversation_module.NONE,
+                snapshot=snapshot,
                 held=(held_map or {}).get("method_versions", ()), max_chars=allowance, timings=timings,
                 index_token=evidence_token,
                 prepare_slice=prepare_slice,

@@ -54,6 +54,19 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **WHEN** a relevant comparison method is stored outside the current subject's anchor neighborhood
 - **THEN** method discovery can supply it with applicability evidence and its source reference
 
+#### Scenario: Different wording still finds the stored page
+
+- **WHEN** an unrestricted caller's turn paraphrases or misspells a stored page and shares no material term with it
+- **THEN** discovery ranks admitted pages by the dense reading of the resident recall matrix as well as by keyword, and supplies the page
+- **AND** a page enters through the dense reading only when one of its chunks clears the corpus-relative chance band over the admitted rows, so an unrelated turn gains no dense candidate
+- **AND** the dense reading never loads a model or a matrix on the request; while a service cannot run it (warming, or a matrix evicted after an idle gap, whose background reload the request starts), the keyword result stands and task context reports `partial`
+
+#### Scenario: A late deadline keeps what was found
+
+- **WHEN** the request budget runs out after some discovery lanes ran
+- **THEN** each later lane checks the budget before it starts and is skipped with a `budget` missing reason, the costliest lane last
+- **AND** task context returns the candidates already found with state `partial`, not an empty result
+
 #### Scenario: A large structured collection is relevant
 - **WHEN** a collection description identifies a source of exact facts
 - **THEN** activation supplies its bounded query route without indexing or enumerating all collection rows
