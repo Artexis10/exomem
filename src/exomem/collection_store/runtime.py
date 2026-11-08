@@ -1556,8 +1556,14 @@ class StoreServer:
             return
         self._stack, self.session, self.runtime = stack, session, self.manager._collection_store
 
-    def _serve(self, request):
+    def unserved(self):
+        """The refusal for a request that arrives while this vault's store is not open."""
         from ..cli_ops import OpError
+
+        code, message = self.refusal
+        return OpError(code, message, "Retry once the service serves the collection store.")
+
+    def _serve(self, request):
         from ..governance import policy
         from . import ownership
         from .preview import preview_store
@@ -1597,8 +1603,7 @@ class StoreServer:
 
         try:
             if self.runtime is None:
-                code, message = self.refusal
-                raise OpError(code, message, "Retry once the service serves the collection store.")
+                raise self.unserved()
             request.result = request.context.run(bound)
         except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
             if isinstance(error, connection.CollectionStoreError) and error.code == "COLLECTION_STORE_BUSY":

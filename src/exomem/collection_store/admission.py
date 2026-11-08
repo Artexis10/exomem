@@ -830,9 +830,13 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
     vault reached it.
     """
     require_owner(vault_root, "export")
+    from ..vault_store import availability
     from . import export
 
     root = Path(vault_root).resolve()
+    if retire_local or (plan_id is not None and not abandon):
+        # Applying and retiring both drop the store; in store mode that store holds the pages.
+        availability.refuse_page_loss(root, "exporting the collections to files")
     if retire_local:
         # Reading the fence needs only the writer credential, and the step changes this host alone.
         return _offline_owner(root, "export", export.retire_local, operator=False)
@@ -1170,6 +1174,11 @@ def _takeover_facts(session, runtime, token, raw, marker, fence):
 
 def _settle(session, runtime, token, facts, staged, action, reason, check, *, unchanged=None):
     """Under the boundary: revalidate cheaply what the decision read, then apply it."""
+    if action == "adopt":
+        from ..vault_store import availability
+
+        # The replica is a copy without pages, so adopting it over a store-mode store would drop them.
+        availability.refuse_page_loss(session.root, "adopting the vault replica as the live store")
     manager = session.manager
     state_migration._require_collection_store_recovery(session, token)
     # An adoption replaces the live store with the staged replica, which staging migrated.
