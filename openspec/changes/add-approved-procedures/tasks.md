@@ -6,16 +6,19 @@
 
 ## 2. S2 Ledger and operation
 
-- [ ] 2.1 In `src/exomem/reserved_paths.py`, add the `procedure-approvals` descriptor (vault-canonical, tree `_approvals`, `owning_command approve_procedure`) and an external-state descriptor for the approval key file. Prove that generic, import, capture, move and recovery routes refuse the tree.
-- [ ] 2.2 Add `src/exomem/procedure_approval.py` with the entry files, the HMAC and key, the atomic rename write, the eligibility test, the one verdict function, the owner-only findings and the `quarantine` move. Generate the key on the first write, with mode 0600, outside the vault.
+- [ ] 2.1 In `src/exomem/reserved_paths.py`, add the `procedure-approvals` descriptor (vault-canonical, tree `_approvals`, `owning_command approve_procedure`) and an external-canonical descriptor for the approval key file, so that no rebuild, reset, wipe or migration of machine-local state touches it. Prove that generic, import, capture, move and recovery routes refuse the tree.
+- [ ] 2.2 Add `src/exomem/procedure_approval.py` with the entry files, the HMAC over each entry's canonical bytes, the key, the atomic rename write, a writer time later than every verified entry of the ref, the eligibility test, the one verdict function, the owner-only findings, and the quarantine step and action. Generate the key on the first write, with mode 0600, outside the vault.
 - [ ] 2.3 Register `approve_procedure` (actions `approve`, `revoke` and `quarantine`; `expected_version` required for `approve`, optional for `revoke`) in `src/exomem/operation_entries.py` and `src/exomem/commands.py`. Classify it in row 4 of the credential matrix, keep it off Cloud, and set the MCP annotations to not read-only, not destructive and idempotent. Make the approve result show what changed since the last approved version. Check the MCP tool, the generated CLI route and registry parity.
 - [ ] 2.4 Add the owner-only `procedure_approvals` kind to `read_review`, listing refs, verdicts and the findings.
 - [ ] 2.5 Test the operation:
   - a stale version, an ineligible page, a repeated `exomem_id` and a non-owner principal each refuse;
-  - an `approve` that repeats the latest entry writes nothing, and a `revoke` works for a deleted page;
-  - a vault copied, imported, synced or cloned to a host with another key reads `unapproved` everywhere, shows one finding and accepts a re-approval;
+  - an `approve` that repeats the latest verified entry appends nothing, and a `revoke` works for a deleted page;
+  - a vault copied, imported, synced or cloned to a host with another key reads `unapproved` everywhere, shows one finding per ref and accepts a re-approval;
   - a crash between the temporary write and the rename leaves no entry and no changed verdict;
-  - an unreadable entry (parse failure, newer schema version, failed MAC) fails only its ref, and `quarantine` and re-approval clear it;
+  - an unreadable entry (parse failure, newer schema version, path mismatch) fails only its ref, and `quarantine` and re-approval clear it;
+  - a foreign or tampered entry (failed MAC) is ignored and reported, a change to any field fails the MAC, and neither `quarantine` without a ref nor an `approve` or `revoke` moves it, while `quarantine` with its ref does;
+  - a refused `approve` moves nothing, and a repeat after the quarantine step appends nothing and reads `approved`;
+  - a state reset leaves the key file unchanged, and a missing tree on a host with a key gives no finding;
   - a move or a trash restore with unchanged bytes keeps the approval;
   - the key file has mode 0600 and no surface returns it.
 

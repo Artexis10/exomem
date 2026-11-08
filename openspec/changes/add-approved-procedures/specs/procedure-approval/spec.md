@@ -13,12 +13,13 @@ A page is eligible only when all of these hold:
 
 A Source, Evidence or Entity page SHALL never be eligible. Eligibility SHALL depend on those facts and never on the note type's key. The shipped `procedure` note type guides authoring and grants no eligibility of its own.
 
-An approval SHALL live outside the page, in the approvals ledger. The ledger is a reserved, append-only, vault-canonical record, and only the `approve_procedure` operation SHALL write it. The operation SHALL take a stable memory ref, an action (`approve`, `revoke` or `quarantine`) and `expected_version`. Every action SHALL be owner-only, so that a host can permission the tool apart from the write tools. These rules apply:
+An approval SHALL live outside the page, in the approvals ledger. The ledger is a reserved, append-only, vault-canonical record, and only the `approve_procedure` operation SHALL write it. The operation SHALL take an action (`approve`, `revoke` or `quarantine`) and a stable memory ref. `expected_version` applies to `approve` and `revoke`. `quarantine` takes an optional ref and no `expected_version`. Every action SHALL be owner-only, so that a host can permission the tool apart from the write tools. These rules apply:
 
-- `approve` SHALL require `expected_version` and SHALL refuse before writing when it differs from the page's current version.
-- `approve` SHALL refuse before writing when the page is not eligible.
-- `revoke` SHALL take the ref and MAY carry `expected_version`. When it does, `revoke` SHALL refuse before writing on a mismatch. `revoke` SHALL work for a retired or deleted page. A `revoke` for a ref that has no `approve` entry SHALL write nothing and SHALL say that no approval exists.
-- A call that repeats the latest entry's action and version SHALL write nothing and SHALL report the existing entry.
+- `approve` SHALL require `expected_version` and SHALL refuse before any write or move when it differs from the page's current version.
+- `approve` SHALL refuse before any write or move when the page is not eligible.
+- `revoke` SHALL take the ref and MAY carry `expected_version`. When it does, `revoke` SHALL refuse before any write or move on a mismatch. `revoke` SHALL work for a retired or deleted page.
+- An `approve` or `revoke` SHALL run in this order: the guard checks above, then the quarantine step for its ref, then the repeat test.
+- After the quarantine step, a call that repeats the latest verified entry's action and version SHALL append nothing and SHALL report the existing entry. A `revoke` for a ref with no verified `approve` entry SHALL append nothing and SHALL say that no approval exists.
 
 Each entry SHALL record the stable ref, the version, the action, the principal, the client label that the server observed, the time and the entry id. A `revoke` records the version that it withdraws: its `expected_version`, or else the version of the latest `approve` entry. The server SHALL write an entry under the vault mutation boundary. A second session or client of the same host that opens the same vault SHALL see it.
 
@@ -59,8 +60,8 @@ An entry binds the stable ref and the exact bytes. A move or a trash restore tha
 - **THEN** the result shows what changed in the page since that version
 - **AND** when the earlier version is not in the page's retained history, the result says that it cannot show the change
 
-#### Scenario: A repeated approve writes nothing
-- **WHEN** the owner repeats an `approve` for the version that the latest entry already approves
+#### Scenario: A repeated approve appends nothing
+- **WHEN** the owner repeats an `approve` for the version that the latest verified entry already approves, and no unreadable entry exists for the ref
 - **THEN** the ledger gains no entry
 - **AND** the result reports the existing entry
 
@@ -91,8 +92,8 @@ An approval SHALL exist only as an entry that `approve_procedure` wrote and that
 #### Scenario: A copied vault carries no working approval
 - **WHEN** a vault with approvals is copied, imported, synced or cloned to a host that holds a different approval key, or none
 - **THEN** every verdict on that host is `unapproved`
-- **AND** the owner sees one finding that says the entries do not verify with this host's key
-- **AND** the owner re-approves on that host, or restores the key from the owner's own backup
+- **AND** the owner sees one finding per ref that says its entries are foreign or tampered
+- **AND** the owner re-approves on that host, or copies the key from the owner's own backup
 
 ### Requirement: Every surface reports one verdict
 
@@ -109,7 +110,7 @@ A page that is not eligible, including a retired or superseded page, SHALL read 
 - the `procedure_approvals` kind of `read_review`, which is owner-only;
 - the `approve_procedure` result.
 
-A ref that has an unreadable entry SHALL read `unapproved`, and the page content SHALL stay readable. The finding that names the ref SHALL reach the owner only, in the `procedure_approvals` listing and in the owner's `read_memory` diagnostics. A caller that is not the owner SHALL receive `unapproved` and no finding. One ref's unreadable entry SHALL NOT change another ref's verdict.
+A ref that has an unreadable entry SHALL read `unapproved`, and the page content SHALL stay readable. An entry that is foreign or tampered SHALL be ignored for the verdict and SHALL raise a finding. Each finding names its ref and SHALL reach the owner only, in the `procedure_approvals` listing and in the owner's `read_memory` diagnostics. A caller that is not the owner SHALL receive `unapproved` and no finding. One ref's entries SHALL NOT change another ref's verdict.
 
 #### Scenario: Every surface agrees on one verdict
 - **WHEN** a page is approved and the owner reads it, activates a matching task and lists approvals with `read_review`
@@ -158,13 +159,17 @@ The owner SHALL create, edit and retire a procedure through the ordinary writers
 
 ### Requirement: The approvals ledger is authentic and crash-safe
 
-The ledger SHALL hold one file per entry under `_Approvals/<ref>/`, named by its entry id, so that the path names the ref and the entry. Each entry SHALL carry an HMAC over its ref, version, action, principal, time and entry id. The key SHALL be one per owner. The product SHALL generate it, keep it outside the vault in the state root with mode 0600, and serve it on no surface, listing or diagnostic. An entry whose MAC does not verify with this host's key SHALL be ignored for the verdict.
+The ledger SHALL hold one file per entry under `_Approvals/<ref>/`, named by its entry id, so that the path names the ref and the entry. Each entry SHALL carry an HMAC over its canonical bytes, which cover every field except the MAC itself, including the schema version and the client label. The key SHALL be one per owner. The product SHALL generate it, keep it outside the vault in the state root with mode 0600, and serve it on no surface, listing or diagnostic. Nothing that rebuilds, resets, wipes or migrates machine-local state SHALL touch the key. A host that syncs a vault needs the same key, and the owner copies it by hand.
 
 The server SHALL write each entry to a temporary name in the same directory. It SHALL then rename the file into place in one step, so that a crash leaves the whole entry or none. A leftover temporary file SHALL never be an entry. The rename is the entry's receipt, and the operation SHALL keep no separate receipt.
 
-The latest entry for a ref SHALL be the one with the greatest recorded UTC time, then the greatest entry id. The time comes from the host clock. Hosts that share a key and a vault order their entries by their clocks. A skew larger than the gap between two actions on one ref can order them wrongly.
+The latest entry for a ref SHALL be the verified entry with the greatest recorded UTC time, then the greatest entry id. The time comes from the host clock. The writer SHALL record a time later than every verified entry of that ref. A skew between hosts matters only when two hosts write one ref before their copies of the vault meet.
 
-An entry is unreadable in four cases: it fails to parse, it carries a schema version that this build does not know, it fails its MAC, or its path does not match its content. An unreadable entry SHALL make only its own ref `unapproved` and SHALL raise an owner-only finding. It SHALL NOT block another ref and SHALL NOT block an `approve` or `revoke`. An `approve` or `revoke` SHALL first move the unreadable entry files of its ref into a quarantine folder inside `_Approvals`, SHALL report them, and then SHALL append its own entry. The action `quarantine` SHALL move unreadable entry files aside without appending, for one named ref or for every unreadable entry, and SHALL report them. A quarantined file SHALL never be read for a verdict. A missing `_Approvals` tree SHALL mean no approvals: every verdict reads `unapproved` and no finding appears.
+An entry is foreign or tampered when it parses, carries a known schema version and sits under the right path, but fails its MAC. The server SHALL ignore it for the verdict, SHALL report it to the owner as foreign or tampered, and SHALL NOT move it on its own.
+
+An entry is unreadable when it fails to parse, carries a schema version that this build does not know, or sits under a path that does not match its content. An unreadable entry SHALL make only its own ref `unapproved` and SHALL raise an owner-only finding. It SHALL NOT block another ref and SHALL NOT block an `approve` or `revoke`.
+
+The quarantine step of an `approve` or `revoke` SHALL move the unreadable entry files of its ref into a quarantine folder inside `_Approvals`, and SHALL report them. The action `quarantine` SHALL move unreadable entry files aside without appending, for one named ref or for every ref, and SHALL report them. Neither SHALL move a foreign or tampered entry, except that `quarantine` with a named ref SHALL move every entry of that ref that fails to verify. A quarantined file SHALL never be read for a verdict. A missing `_Approvals` tree SHALL mean no approvals: every verdict reads `unapproved` and no finding appears, even on a host that holds an approval key.
 
 #### Scenario: A crash leaves no half entry
 - **WHEN** the process stops after the temporary file is written and before the rename
@@ -174,7 +179,12 @@ An entry is unreadable in four cases: it fails to parse, it carries a schema ver
 #### Scenario: A hand-written entry does not approve
 - **WHEN** someone writes an entry file under `_Approvals` that claims an approval and its MAC does not verify
 - **THEN** the page reads `unapproved`
-- **AND** the owner sees one finding that names the ref
+- **AND** the owner sees one finding that names the ref and says the entry is foreign or tampered
+- **AND** the file stays where it is
+
+#### Scenario: A change to any field fails the MAC
+- **WHEN** someone edits one field of a verified entry, such as the client label
+- **THEN** the entry fails its MAC and no longer counts for the verdict
 
 #### Scenario: A newer entry format fails its own ref
 - **WHEN** an entry carries a schema version that this build does not know
@@ -182,14 +192,33 @@ An entry is unreadable in four cases: it fails to parse, it carries a schema ver
 - **AND** a `revoke` or `approve` for another ref still succeeds
 
 #### Scenario: Re-approval repairs a damaged ref
-- **WHEN** the owner approves a ref that has an unreadable entry file
-- **THEN** the call moves the unreadable file into the quarantine folder and reports it
-- **AND** the call appends its own entry, and the page reads `approved`
+- **WHEN** the owner approves a ref that has an unreadable entry file, with a current `expected_version` and an eligible page
+- **THEN** the call moves the unreadable file into the quarantine folder and reports it, and then appends its own entry
+- **AND** the page reads `approved`
+
+#### Scenario: A refused approve moves nothing
+- **WHEN** the owner approves a ref that has an unreadable entry file, but the page is not eligible or `expected_version` is stale
+- **THEN** the call refuses before any write or move
+- **AND** the unreadable file stays in place and the ref still reads `unapproved`
+
+#### Scenario: A repeat after quarantine appends nothing
+- **WHEN** the owner approves a version that the latest verified entry already approves, and the ref also has an unreadable entry file
+- **THEN** the call moves the unreadable file aside and reports it
+- **AND** the call appends no entry, and the page reads `approved`
 
 #### Scenario: Quarantine moves unreadable entries aside
 - **WHEN** the owner calls `approve_procedure` with the action `quarantine` and no ref
-- **THEN** every unreadable entry file moves into the quarantine folder and the result lists them
-- **AND** no entry is appended and no readable entry moves
+- **THEN** every entry file that fails to parse or carries an unknown schema version moves into the quarantine folder, and the result lists them
+- **AND** no entry is appended, and no readable, foreign or tampered entry moves
+
+#### Scenario: A named ref also quarantines a foreign entry
+- **WHEN** the owner calls `quarantine` with a ref that has a foreign or tampered entry
+- **THEN** that entry moves into the quarantine folder and the result lists it
+- **AND** foreign entries of other refs stay where they are
+
+#### Scenario: A state reset keeps the key
+- **WHEN** a rebuild, reset, wipe or migration of machine-local state runs
+- **THEN** the approval key file is unchanged
 
 #### Scenario: The key is never served
 - **WHEN** any surface, listing or diagnostic reports ledger state
@@ -197,6 +226,6 @@ An entry is unreadable in four cases: it fails to parse, it carries a schema ver
 - **AND** the key file has mode 0600 in the state root, outside the vault
 
 #### Scenario: A vault without the tree has no approvals
-- **WHEN** the vault holds no `_Approvals` tree
+- **WHEN** the vault holds no `_Approvals` tree, on a host that holds an approval key
 - **THEN** every verdict is `unapproved`
 - **AND** no finding appears

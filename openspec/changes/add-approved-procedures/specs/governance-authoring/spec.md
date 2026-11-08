@@ -8,7 +8,8 @@ consolidation command that owns its run state; until that command exists, no pub
 command SHALL mutate or enumerate it. `_Approvals` SHALL be reserved exclusively for
 `approve_procedure`, the owner-only operation that owns the approvals ledger. The operation
 SHALL append approval and revocation entries, SHALL NOT rewrite or delete one, and SHALL move
-an unreadable entry file aside only through its `quarantine` action. Owner identity, L6 disclosure, Tier-2 enablement,
+an entry file aside only through its `quarantine` action or through the quarantine step of an
+`approve` or `revoke`. Owner identity, L6 disclosure, Tier-2 enablement,
 an idempotency key, a filesystem alias, or a caller-provided bypass flag MUST NOT grant
 generic administration-tree authority.
 
