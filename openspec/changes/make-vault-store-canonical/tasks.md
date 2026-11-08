@@ -30,7 +30,7 @@
 - [ ] 5.1 Merge the lexical unit rows and graph unit nodes into one unit row set under today's identity rule (authored anchor, else fingerprint-bound reference), and prove it reproduces both for the same bytes.
 - [ ] 5.2 Resolve links to `[[Page#^anchor]]` as unit-level edges; make claim-level writes change the page and the unit in one transaction.
 - [ ] 5.3 Record origin, hash, size, format and derivation for every stored file, mapped onto the existing Evidence custody fields; add the governed write that supersedes a false original and keeps the copy as derived.
-- [ ] 5.4 Before unit results ship, compare search alone with search plus agent-followed unit-level links on tasks that span several pages, scored by outcome, case by case with 95% intervals; rerun the recall-lane ablation beside it.
+- [ ] 5.4 Before unit results ship, compare search alone with search plus agent-followed unit-level links on tasks that span several pages, scored by outcome with the outcome evaluation's method, case by case with 95% intervals; rerun the graph-lane ablation with unit-level edges beside it.
 
 ## 6. Embeddings, Cloud and Windows
 
