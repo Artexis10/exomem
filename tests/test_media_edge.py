@@ -246,6 +246,18 @@ def test_a_repeated_condemn_hides_once_and_the_version_still_reads_by_id(harness
     assert harness.request("GET", f"{OBJECTS_PATH}{name_of(data)}?version={version}").content == data
 
 
+def test_each_hide_logs_its_name_and_cell_once_for_the_burst_triage(
+        harness: Harness, caplog: pytest.LogCaptureFixture):
+    """The operator matches each hide marker of a burst to one of these lines; a silent hide looks like a foreign key."""
+    data = b"a released original"
+    harness.put(data)
+    caplog.set_level("INFO", logger="exomem.media_edge")
+    harness.condemn(name_of(data))
+    harness.condemn(name_of(data))
+    lines = [record.getMessage() for record in caplog.records if name_of(data) in record.getMessage()]
+    assert len(lines) == 1 and CELL_A in lines[0]
+
+
 def test_a_version_that_a_newer_upload_superseded_heads_condemned(harness: Harness):
     data = b"one name, two uploads"
     first = harness.put(data).json()["version"]

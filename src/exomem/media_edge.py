@@ -568,6 +568,9 @@ class MediaEdge:
                 return head.file_id
 
             await self._dispatch(intent, hide)
+            # The burst triage matches each hide marker to one such line: a marker without one
+            # came by another route.
+            log.info("condemn hid %s for cell %s", key, cell)
             return True
         finally:
             self._writing.discard(key)
