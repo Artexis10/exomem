@@ -184,7 +184,7 @@ def test_a_direct_edit_makes_the_approval_stale_for_the_owner_and_unapproved_for
     assert _method(_activate(vault, turn=TURN, max_chars=8000), rel)["approval"] == "stale"
     assert _read(vault, rel)["approval"] == "stale"
     assert _method(guest, rel)["approval"] == "unapproved"
-    assert _read(vault, rel, _external())["approval"] == "unapproved"
+    assert "approval" not in _read(vault, rel, _external())
     assert version not in str(guest) and "fixture client" not in str(guest)
 
 
@@ -208,7 +208,7 @@ def test_a_restricted_reader_sees_approved_or_unapproved_and_never_the_entry(
         assert secret not in str(guest) and secret not in str(reading)
 
 
-def test_a_reader_below_full_release_sees_unapproved(vault: Path) -> None:
+def test_a_reader_below_full_release_sees_no_endorsement(vault: Path) -> None:
     """A page that the reader gets only as an excerpt carries no endorsement for that reader."""
     rel = _procedure(vault)
     _index(vault)
@@ -217,7 +217,7 @@ def test_a_reader_below_full_release_sees_unapproved(vault: Path) -> None:
     _withhold(vault, rel, ceiling=5)
     excerpt = _read(vault, rel, _external())
     assert excerpt["release_level"] < 6
-    assert excerpt["approval"] == "unapproved"
+    assert "approval" not in excerpt
 
 
 def test_approval_does_not_change_which_methods_are_served_or_their_order(vault: Path) -> None:
@@ -276,7 +276,7 @@ def test_a_read_parses_the_page_for_its_verdict_only_when_an_approval_entry_need
     parses = []
     real = procedure_approval.page_facts
     monkeypatch.setattr(procedure_approval, "page_facts", lambda *args, **kwargs: parses.append(args[1]) or real(*args, **kwargs))
-    assert _read(vault, rel)["approval"] == "unapproved"
+    assert "approval" not in _read(vault, rel)
     assert parses == []
     _approve(vault, rel)
     parses.clear()
@@ -326,11 +326,24 @@ def test_a_damaged_entry_fails_its_own_ref_and_shows_the_owner_one_finding(vault
     assert owner["approval"] == "unapproved"
     assert [finding["ref"] for finding in owner["diagnostics"]["approval_findings"]] == [REF]
     guest = _read(vault, rel, _external())
-    assert "diagnostics" not in guest
+    assert "diagnostics" not in guest and "approval" not in guest
 
 
 def _approve_version(vault: Path, rel: str) -> str:
     return procedure_approval.page_facts(vault, rel, (vault / rel).read_bytes()).version
+
+
+def test_a_page_whose_ref_has_no_ledger_entry_carries_no_approval_and_a_revoked_one_does(vault: Path) -> None:
+    """Only the owner sees that a ref has history, so an ordinary note gains no field and no reader can tell
+    a revoked procedure from one nobody approved."""
+    ordinary = _page(vault, "plain-note", "exomem_id: 3a9d5b71-6c2e-4f08-8d14-0e7b2c9a5f13\n", body="Neutral observation.\n")
+    rel = _procedure(vault)
+    _index(vault)
+    assert "approval" not in _read(vault, ordinary) and "approval" not in _read(vault, rel)
+    _approve(vault, rel)
+    _revoke(vault, rel)
+    assert _read(vault, rel)["approval"] == "unapproved"
+    assert "approval" not in _read(vault, rel, _external())
 
 
 def test_a_page_without_a_stable_ref_reports_no_approval(vault: Path) -> None:

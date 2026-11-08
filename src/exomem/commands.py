@@ -8064,7 +8064,7 @@ def op_read_memory(
 
     Missing/stale units report status; never substituted.
     Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
-    Procedures: approval is approved, stale (owner) or unapproved; only approved is endorsed.
+    Procedures: approval, when present, is approved, stale (owner) or unapproved; absent reads unapproved.
 
     Args:
         path: Vault-relative path or KB shorthand.

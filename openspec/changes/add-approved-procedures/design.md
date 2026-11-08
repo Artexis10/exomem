@@ -74,7 +74,7 @@ The owner retires a procedure by changing its status, and supersedes it by writi
 
 ### Delivery adds a label and one line, not steps
 
-`task_context.methods` items gain `approval`. An approved item adds one short prose line, "Approved procedure: <title>. Read it, then follow it where it fits.", that the shared counter charges. `read_memory` reports the same verdict. The continuity `method_versions` hints carry `approval`, and revalidation resets held methods when it differs. Approve and revoke change no page bytes, so the version check alone would keep a revoked method alive. Approval adds no ranking.
+`task_context.methods` items gain `approval`. An approved item adds one short prose line, "Approved procedure: <title>. Read it, then follow it where it fits.", that the shared counter charges. `read_memory` reports the same verdict when the page's ref has at least one ledger entry, and omits the field otherwise, so an ordinary note gains no field and absence reads `unapproved`. The continuity `method_versions` hints carry `approval`, and revalidation resets held methods when it differs. Approve and revoke change no page bytes, so the version check alone would keep a revoked method alive. Approval adds no ranking.
 
 - **Why a reset on a verdict change.** The existing reset invalidates a held projection when the source version changes. A verdict change needs the same effect without a byte change.
 - **Rejected: inline steps in the packet.** Steps spend the budget and hide the page's exclusions. The agent reads the page, and the version it reads is the version that the verdict names.

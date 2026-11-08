@@ -192,6 +192,11 @@ class RefLedger:
         return self.verified[-1] if self.verified else None
 
     @property
+    def held(self) -> bool:
+        """Whether the ledger holds anything for this ref, or could not be read to say."""
+        return bool(self.verified or self.foreign or self.unreadable or self.unavailable)
+
+    @property
     def latest_approve(self) -> Entry | None:
         return next((entry for entry in reversed(self.verified) if entry.action == APPROVE), None)
 
