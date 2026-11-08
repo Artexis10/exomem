@@ -176,6 +176,104 @@ def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
         ) from error
 
 
+def _backup_fill(source_path: Path, *, preserve_schema: bool):
+    """The whole-file copy: SQLite's online backup of the store, as backup and Cloud portability need it."""
+
+    def fill(destination: sqlite3.Connection, check: Callable[[], None], paced_check: Callable[[], None]) -> None:
+        source = (connection._open_read_only(source_path, _BUSY_TIMEOUT_MS)[0]
+                  if preserve_schema else connection.open_reader(source_path, busy_timeout_ms=_BUSY_TIMEOUT_MS))
+        with closing(source):
+            check()
+            source.execute("BEGIN")
+            source.execute("SELECT key FROM store_meta LIMIT 1").fetchone()
+            check()
+            source.backup(destination, pages=64, sleep=0.01, progress=lambda _status, _remaining, _total: paced_check())
+
+    return fill
+
+
+def _quoted(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _collection_fill(source_path: Path):
+    """The collection copy: every table of the live store except what store mode adds to it.
+
+    The copy is made in one read transaction over the attached live store. Each table the live store
+    holds is created and, unless it is one of ``schema.VAULT_STORE_TABLES``, filled with every row. The
+    lexical and graph objects that a migration copied in (named by ``store_mode_objects``) are left out
+    whole. The AUTOINCREMENT counters of the copied tables carry over. Indexes and triggers follow the
+    rows, so no trigger fires on the copy.
+    """
+
+    def fill(destination: sqlite3.Connection, check: Callable[[], None], paced_check: Callable[[], None]) -> None:
+        from .native_operands import FileRole, register_native_operands
+
+        # An expression index reads its operands' metadata from the copy's own tables, so it binds to "main".
+        register_native_operands(destination, databases={FileRole.STORE: "main"})
+        destination.execute("ATTACH DATABASE ? AS live", (f"{Path(source_path).resolve().as_uri()}?mode=ro",))
+        with connection.checked_sql(destination, paced_check):
+            destination.execute("BEGIN")
+            # The first read pins one snapshot of the live store for everything below.
+            found = int(destination.execute(
+                "SELECT value FROM live.store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchone()[0])
+            if found != schema.SCHEMA_VERSION:
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_SCHEMA_PENDING" if found < schema.SCHEMA_VERSION else "COLLECTION_STORE_SCHEMA_NEWER",
+                    "the collection store is not at the schema that this release copies")
+            # A store older than the schema that adds store mode has no objects to leave out.
+            left_out = {name for (name,) in destination.execute("SELECT name FROM live.store_mode_objects")
+                        } if found >= schema.VAULT_STORE_SCHEMA_VERSION else set()
+            # SQLite's own schema kinds (table, index, trigger, view) decide the order, so no list of them is kept.
+            by_kind: dict[str, dict[str, str]] = {}
+            for kind, name, owner, sql in destination.execute(
+                    "SELECT type, name, tbl_name, sql FROM live.sqlite_master "
+                    "WHERE sql IS NOT NULL AND substr(name, 1, 7) <> 'sqlite_'").fetchall():
+                if name not in left_out and owner not in left_out:
+                    by_kind.setdefault(kind, {})[name] = sql
+            tables, indexes = by_kind.pop("table", {}), by_kind.pop("index", {})
+            # A virtual table's shadow tables and module state are not rows to copy, so refuse the copy.
+            if any(name in tables for (name,) in destination.execute(
+                    "SELECT name FROM pragma_table_list WHERE schema = 'live' AND type = 'virtual'")):
+                raise connection.CollectionStoreError(
+                    "COLLECTION_SNAPSHOT_INVALID", "the collection store holds a virtual table that store mode does not own")
+            for sql in tables.values():
+                destination.execute(sql)
+            check()
+            # The schema fixes this set: store mode's tables stay in the copy, empty.
+            copied = [name for name in tables if name not in schema.VAULT_STORE_TABLES]
+            for name in copied:
+                columns = destination.execute(
+                    "SELECT name, type, pk FROM pragma_table_xinfo(?, 'live') WHERE hidden = 0 ORDER BY cid", (name,)).fetchall()
+                names = [_quoted(column) for column, _type, _pk in columns]
+                without_rowid = destination.execute(
+                    "SELECT wr FROM pragma_table_list WHERE schema = 'live' AND name = ?", (name,)).fetchone()[0]
+                keyed = [column for column in columns if column[2]]
+                # A rowid table keeps its rowids, which an INTEGER PRIMARY KEY column already carries.
+                if not without_rowid and not (len(keyed) == 1 and keyed[0][1].upper() == "INTEGER"):
+                    names.insert(0, "rowid")
+                listed = ", ".join(names)
+                destination.execute(f"INSERT INTO main.{_quoted(name)}({listed}) SELECT {listed} FROM live.{_quoted(name)}")
+                check()
+            # An AUTOINCREMENT counter outlives the rows it numbered (a dropped rollup keeps its id), so a copy that
+            # derived it from its rows would reissue an id. The counters of the tables left empty stay out with them.
+            destination.execute("DELETE FROM main.sqlite_sequence")
+            destination.execute(
+                f"INSERT INTO main.sqlite_sequence(name, seq) SELECT name, seq FROM live.sqlite_sequence "
+                f"WHERE name IN ({', '.join('?' * len(copied))})", copied)
+            for sql in indexes.values():
+                destination.execute(sql)
+            for sqls in by_kind.values():
+                for sql in sqls.values():
+                    destination.execute(sql)
+            destination.execute(f"PRAGMA main.user_version = {int(destination.execute('PRAGMA live.user_version').fetchone()[0])}")
+            destination.execute("COMMIT")
+        # Integrity checks cover every attached database, and the copy alone must stand.
+        destination.execute("DETACH DATABASE live")
+
+    return fill
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotArtifact:
     path: Path
@@ -220,16 +318,62 @@ def staged_store_snapshot(
     preserve_schema: bool = False,
     cleanup: bool = True,
 ) -> Iterator[SnapshotArtifact]:
+    """Yield a closed, fsynced whole-file copy of the store in the caller's existing private directory."""
+    with _staged_copy(
+        _backup_fill(source_path, preserve_schema=preserve_schema), directory=directory, deadline=deadline,
+        cancelled=cancelled, scratch_token=scratch_token, preserve_schema=preserve_schema, cleanup=cleanup,
+    ) as artifact:
+        yield artifact
+
+
+@contextmanager
+def staged_collection_snapshot(
+    vault_root: Path,
+    *,
+    directory: Path,
+    deadline: float,
+    cancelled: Callable[[], bool] | None = None,
+    scratch_token: str | None = None,
+    cleanup: bool = True,
+) -> Iterator[SnapshotArtifact]:
+    """Stage the live vault store as the collection replica: its collection data without store mode's tables.
+
+    The copy has the live store's schema, so it adopts as a store of that schema. It carries every
+    collection row and none of the pages, lexical rows or graph rows that a store-mode vault keeps.
+    In file mode those tables are empty, so the copy holds the same data as ``staged_snapshot``.
+    """
+    with _staged_copy(
+        _collection_fill(connection.store_path(vault_root)), directory=directory, deadline=deadline,
+        cancelled=cancelled, scratch_token=scratch_token, cleanup=cleanup, attaches_source=True,
+    ) as artifact:
+        yield artifact
+
+
+@contextmanager
+def _staged_copy(
+    fill: Callable[[sqlite3.Connection, Callable[[], None], Callable[[], None]], None],
+    *,
+    directory: Path,
+    deadline: float,
+    cancelled: Callable[[], bool] | None = None,
+    scratch_token: str | None = None,
+    preserve_schema: bool = False,
+    cleanup: bool = True,
+    attaches_source: bool = False,
+) -> Iterator[SnapshotArtifact]:
     """Yield a closed, fsynced copy in the caller's existing private directory.
 
-    This trusted internal API authorizes only its unique scratch family. The
+    ``fill(destination, check, paced_check)`` writes the scratch database; this stages, validates and
+    fsyncs whatever it wrote. This trusted internal API authorizes only its unique scratch family. The
     caller owns staging-directory access and any later destination publication.
     ``deadline`` is an absolute monotonic cooperative limit; OS I/O can block.
     ``cancelled`` (the caller's custody and fencing check) may raise its own error.
     It runs at every phase boundary, and at most every ``_RECHECK_SECONDS`` within a
     phase. A passed deadline raises ``TimeoutError`` (COLLECTION_SNAPSHOT_DEADLINE),
     never COLLECTION_SNAPSHOT_INVALID.
-    The calling worker thread owns the source reader and closes it after backup.
+    ``fill`` opens and closes whatever it reads the live store through: a reader for the backup, an attached
+    database for the collection copy. This function owns only the scratch database's connection.
+    ``attaches_source`` opens the scratch database as a URI, so that the fill can attach the source read-only.
     Publication passes ``cleanup=False`` because its durable intent owns scratch;
     context exit then closes handles and leaves retirement to witnessed recovery.
     """
@@ -284,49 +428,16 @@ def staged_store_snapshot(
                         raise existing.error
                 owns_companions = True
                 check()
-                with closing(
-                    sqlite3.connect(path, isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000)
-                ) as destination:
+                with closing(sqlite3.connect(
+                    path.as_uri() if attaches_source else path, uri=attaches_source,
+                    isolation_level=None, timeout=_BUSY_TIMEOUT_MS / 1000,
+                )) as destination:
                     check()
-                    source = (connection._open_read_only(source_path, _BUSY_TIMEOUT_MS)[0]
-                              if preserve_schema else connection.open_reader(
-                                  source_path, busy_timeout_ms=_BUSY_TIMEOUT_MS))
-                    with closing(source):
-                        check()
-                        source.execute("BEGIN")
-                        source.execute("SELECT key FROM store_meta LIMIT 1").fetchone()
-                        check()
-                        source.backup(
-                            destination,
-                            pages=64,
-                            sleep=0.01,
-                            progress=lambda _status, _remaining, _total: paced_check(),
-                        )
+                    fill(destination, check, paced_check)
                     check()
-                    # A check that stops the SQL (deadline, cancellation, custody,
-                    # fencing) is re-raised as itself, whatever error type the caller's
-                    # check uses; it says nothing about the copy.
-                    interruption = None
-
-                    def validation_progress() -> int:
-                        nonlocal interruption
-                        try:
-                            paced_check()
-                        except BaseException as error:  # noqa: BLE001 - SQLite would discard it
-                            interruption = error
-                            return 1
-                        return 0
-
-                    destination.set_progress_handler(validation_progress, 1000)
-                    try:
+                    with connection.checked_sql(destination, paced_check):
                         version = schema.schema_version(destination) if preserve_schema else None
                         metadata = _validate(destination, check, version=version)
-                    except connection.CollectionStoreError as error:
-                        if interruption is not None:
-                            raise interruption from error.__cause__
-                        raise
-                    finally:
-                        destination.set_progress_handler(None, 0)
                 check()
                 if any(path.with_name(path.name + suffix).exists() for suffix in _COMPANIONS):
                     raise connection.CollectionStoreError(

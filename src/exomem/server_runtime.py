@@ -92,8 +92,10 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 
     vault_root = resolve_vault()
     from . import state_migration
+    from .vault_store import availability
 
     state_migration.require_vault_state_ready(vault_root)
+    availability.require_servable(vault_root)
     source_schema = schema.load_source_schema(vault_root)
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 

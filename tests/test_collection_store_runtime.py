@@ -305,7 +305,7 @@ def test_coalesced_publication_keeps_warm_release_work_bounded(runtime, monkeypa
 
     monkeypatch.setattr(governance, "subjects", observed_subjects)
     copying, resume = threading.Event(), threading.Event()
-    staged_snapshot = snapshot.staged_snapshot
+    staged_snapshot = snapshot.staged_collection_snapshot
 
     @contextmanager
     def paused_copy(*args, **kwargs):
@@ -314,7 +314,7 @@ def test_coalesced_publication_keeps_warm_release_work_bounded(runtime, monkeypa
         with staged_snapshot(*args, **kwargs) as artifact:
             yield artifact
 
-    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    monkeypatch.setattr(snapshot, "staged_collection_snapshot", paused_copy)
     with ThreadPoolExecutor(max_workers=1) as pool:
         published = pool.submit(runtime.manager._publish_collection_store,
                                 runtime.manager._fencing_token, deadline=time.monotonic() + 15)
@@ -350,7 +350,7 @@ def test_external_sql_during_publication_invalidates_warm_data_without_a_head_ch
         assert record_memory(runtime.root, "inspect", collection=CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
     head = runtime.sample_head()
     copying, resume = threading.Event(), threading.Event()
-    staged_snapshot = snapshot.staged_snapshot
+    staged_snapshot = snapshot.staged_collection_snapshot
 
     @contextmanager
     def paused_copy(*args, **kwargs):
@@ -359,7 +359,7 @@ def test_external_sql_during_publication_invalidates_warm_data_without_a_head_ch
         with staged_snapshot(*args, **kwargs) as artifact:
             yield artifact
 
-    monkeypatch.setattr(snapshot, "staged_snapshot", paused_copy)
+    monkeypatch.setattr(snapshot, "staged_collection_snapshot", paused_copy)
     with ThreadPoolExecutor(max_workers=1) as pool:
         published = pool.submit(runtime.manager._publish_collection_store,
                                 runtime.manager._fencing_token, deadline=time.monotonic() + 15)
