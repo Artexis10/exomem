@@ -1591,13 +1591,13 @@ def _semantic_advisory_projection(leaf: Any) -> dict[str, Any] | None:
         for finding in findings:
             code = finding.get("code") if isinstance(finding, Mapping) else None
             # These closed finding codes are protocol data, not relation vocabulary.
-            if isinstance(code, str) and code in semantic_contract.RELATION_QUALITY_ADVISORIES:
+            if isinstance(code, str) and code in semantic_contract.RELATION_QUALITY_CODES:
                 codes.add(code)
     if not codes:
         return None
     return {
         "findings": [
-            {"code": code, **semantic_contract.RELATION_QUALITY_ADVISORIES[code]}
+            {"code": code, **semantic_contract.relation_quality_advisory(code)}
             for code in sorted(codes)
         ],
         "next_action": {"tool": "schema_memory", "args": {"operation": "inspect", "subject": "relations"}},

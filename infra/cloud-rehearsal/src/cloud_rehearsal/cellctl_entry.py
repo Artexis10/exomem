@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Iterator
 
 import boto3
 from botocore.config import Config
 from cellctl.k8s_client import ClusterClient
 from cellctl.main import build_cluster_config, build_reconcile_config, build_secrets_config
+from cellctl.media_meter import HIDE, UPLOAD
 from cellctl.reconcile import run_loop
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
@@ -49,13 +51,17 @@ class S3BackedFakeB2(FakeB2):
             config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 2}),
         )
 
-    def list_object_versions(self, prefix: str) -> list[ObjectVersion]:
-        versions: list[ObjectVersion] = []
+    def iter_object_versions(self, prefix: str) -> Iterator[ObjectVersion]:
+        """Every listing reads the S3 double; FakeB2's own objects stay empty here. `list_object_versions`
+        is FakeB2's, which collects this. A delete marker is S3's form of a hide marker."""
         paginator = self._s3.get_paginator("list_object_versions")
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for item in page.get("Versions", []) + page.get("DeleteMarkers", []):
-                versions.append(ObjectVersion(key=item["Key"], version_id=item["VersionId"]))
-        return versions
+            entries = [(item, UPLOAD) for item in page.get("Versions", [])]
+            entries += [(item, HIDE) for item in page.get("DeleteMarkers", [])]
+            # B2 lists in name order; S3 returns a page's versions and delete markers apart.
+            for item, action in sorted(entries, key=lambda entry: entry[0]["Key"]):
+                yield ObjectVersion(key=item["Key"], version_id=item["VersionId"], size=item.get("Size"),
+                                    action=action)
 
 
 def main() -> None:

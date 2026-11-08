@@ -798,6 +798,11 @@ class MediaJobStore:
                              "object TEXT NOT NULL, created_at REAL NOT NULL)")
                 conn.execute("CREATE INDEX IF NOT EXISTS media_protections_original_object "
                              "ON media_protections(binary_rel, object)")
+                self._migrate_protection_names(conn)
+                # collect-released-media D5: names whose reference retired, one row per release. Rows are never
+                # updated or deleted, and no row carries a time: only reachability decides a condemnation.
+                conn.execute("CREATE TABLE IF NOT EXISTS media_releases ("
+                             "id INTEGER PRIMARY KEY AUTOINCREMENT, object TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS media_cache ("
                              "binary_rel TEXT PRIMARY KEY, reference TEXT NOT NULL, "
                              "sha256 TEXT NOT NULL, identity TEXT NOT NULL, last_read REAL NOT NULL)")
@@ -906,6 +911,18 @@ class MediaJobStore:
             conn.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, ciphertext_size, created_at) "
                          "SELECT binary_rel, sha256, code, ciphertext_size, created_at FROM media_offload_refusals_old")
             conn.execute("DROP TABLE media_offload_refusals_old")
+
+    @staticmethod
+    def _migrate_protection_names(conn: sqlite3.Connection) -> None:
+        """collect-released-media D1: `uploadable` marks a name minted for this record that no sidecar can carry yet.
+
+        Only such a name takes another upload, on a retry. A record from before the column, and a reuse record, read
+        0, so a retry for them mints a fresh name instead of adding a version under a name that a sidecar or a
+        retained backup may hold.
+        """
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_protections)").fetchall()}
+        if "uploadable" not in columns:
+            conn.execute("ALTER TABLE media_protections ADD COLUMN uploadable INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _migrate_census_blockers(conn: sqlite3.Connection) -> None:

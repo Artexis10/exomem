@@ -133,18 +133,21 @@ counterpart — a provenance link, a supersession, any typed relation — satisf
 the rule as written and needs no extra argument, so connected material passes
 for free and only disconnected material needs the explicit disposition.
 
-Validation reports the obligation before it can block a commit: a
-`validate_only=true` call returns `relation_review_hash` alongside the draft
-fields, and lists the finding under `blocking_findings`. Read that list on every
-validation rather than only on failure — it is the sole notice you get. To
-commit an unrelated page, re-issue the identical creation with the returned
-`draft_id`, `draft_hash` and `draft_token`, plus
-`relation_disposition="reviewed_none"`, the returned `relation_review_hash`, and
-a `relation_review_reason` naming why nothing qualified. Committing with the
-draft fields alone refuses with `SEMANTIC_CONTRACT_BLOCKED` and a
-`RELATION_DISPOSITION_MISSING` finding whose `remediation` restates this
-sequence. Prefer adding the real relation over asserting none exists; the
-disposition is for material that genuinely stands alone.
+To commit an unrelated page, send `relation_disposition="reviewed_none"` and a
+`relation_review_reason` naming why nothing qualified with the creation itself;
+that one call commits and records the decision. Committing without them refuses
+with `SEMANTIC_CONTRACT_BLOCKED` and a `RELATION_DISPOSITION_MISSING` finding
+whose `remediation` restates this. A `validate_only=true` call reports the
+obligation first: it returns `relation_review_hash` alongside the draft fields
+and lists the finding under `blocking_findings`. Committing that validated
+draft sends its `draft_id`, `draft_hash` and `draft_token` and the
+`relation_review_hash` too. Prefer adding the real relation over asserting none
+exists; the disposition is for material that genuinely stands alone.
+
+The decision binds the page, not its bytes. A later edit of a page that holds a
+`reviewed_none` decision commits without any review field, and records no new
+decision, while the page stays unconnected. An edit that removes a page's last
+qualifying relation is still refused.
 
 A refused Record append or update is held rather than lost: the refusal names
 every failing field under `details.issues` and returns a `held` reference, so fix

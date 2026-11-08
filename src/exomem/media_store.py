@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -81,6 +81,9 @@ class ObjectTooLarge(MediaStoreError):
 class ObjectHead:
     size: int
     sha256: str
+    # A hide or a newer version made the version non-current, so the bucket rule will delete it
+    # (collect-released-media D3). It still reads by version until then.
+    condemned: bool = False
 
 
 class Store(Protocol):
@@ -741,14 +744,22 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     held_fs.flush_directory_path(snapshot.sidecar_path.parent).require()
 
 
-def _confirmed(store: Store, reference: StoredObject) -> bool:
+def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
+    """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
         head = store.head(reference.object, reference.version)
-    if head is None:
-        return False
-    if head != ObjectHead(reference.ciphertext_size, reference.ciphertext_sha256):
+    if head is not None and (head.size, head.sha256) != (reference.ciphertext_size, reference.ciphertext_sha256):
         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the pinned ciphertext differs")
-    return True
+    return head
+
+
+def _confirmed(store: Store, reference: StoredObject) -> bool:
+    """Whether the version may stand for the bytes: it exists, matches and is current.
+
+    A condemned version never does (collect-released-media D5): nothing evicts on it, reuses it or publishes it.
+    """
+    head = _verified_head(store, reference)
+    return head is not None and not head.condemned
 
 
 def forget_original(vault: Path, path: str | Path) -> None:
@@ -761,23 +772,59 @@ def forget_original(vault: Path, path: str | Path) -> None:
     with _guard(vault, "media_store_forget_original"):
         if original_state(vault, path) != snapshot:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the deletion binding changed")
+        _release_name(MediaJobStore(vault), snapshot.reference.object)
         _publish_reference(vault, snapshot, None)
 
 
-def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> None:
+def _durable(store: MediaJobStore, statement: str, parameters: tuple[object, ...]) -> None:
+    """One statement, committed with a full sync: a crash-consistent clone taken after it holds the row."""
     conn = store._connect()
     try:
-        # D9 requires FULL before BEGIN: NORMAL can omit this record from a clone.
+        # D9 requires FULL before BEGIN: NORMAL can omit this commit from a clone.
         conn.execute("PRAGMA synchronous=FULL")
         with conn:
-            # One record per object covers every retried attempt for this original.
-            conn.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) "
-                         "SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
-                         "WHERE binary_rel = ? AND object = ?)",
-                         (uuid.uuid4().hex, store._relative(snapshot.path), name, time.time(),
-                          store._relative(snapshot.path), name))
+            conn.execute(statement, parameters)
     finally:
         conn.close()
+
+
+def _release_name(store: MediaJobStore, name: str) -> None:
+    """collect-released-media D5: record that a reference to `name` is about to retire.
+
+    The caller commits this before it removes the reference, so a crash between the two keeps the reference. A
+    released name is only a candidate: a hold condemns it once no retained backup references or protects it.
+    """
+    _durable(store, "INSERT INTO media_releases(object) VALUES (?)", (name,))
+
+
+def _upload_name(store: MediaJobStore, snapshot: OriginalSnapshot) -> str:
+    """collect-released-media D1: the name minted for this original's open record, or a fresh random one.
+
+    A retry after a lost reply reuses the record's name, which keeps the edge's nonce recovery and serial-write
+    hold. A name that a sidecar may carry is sealed (`_seal`) and never receives another upload.
+    """
+    conn = store._connect(readonly=True)
+    try:
+        row = conn.execute("SELECT object FROM media_protections WHERE binary_rel = ? AND uploadable = 1 "
+                           "ORDER BY created_at LIMIT 1", (store._relative(snapshot.path),)).fetchone()
+    finally:
+        conn.close()
+    return str(row["object"]) if row is not None else secrets.token_hex(32)
+
+
+def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str, *, uploadable: bool) -> None:
+    # One record per object covers every retried attempt for this original.
+    relative = store._relative(snapshot.path)
+    _durable(store, "INSERT INTO media_protections(token, binary_rel, object, created_at, uploadable) "
+                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
+                    "WHERE binary_rel = ? AND object = ?)",
+             (uuid.uuid4().hex, relative, name, time.time(), int(uploadable), relative, name))
+
+
+def _seal(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> None:
+    """Before a sidecar can carry `name`, take it out of upload reuse; the record keeps protecting it."""
+    _durable(store, "UPDATE media_protections SET uploadable = 0 WHERE binary_rel = ? AND object = ?",
+             (store._relative(snapshot.path), name))
 
 
 def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStoreError, ciphertext_size: int | None) -> None:
@@ -953,7 +1000,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
         if not snapshot.offloadable:
             return None
         if snapshot.reference is not None:
-            if _confirmed(backend, snapshot.reference):
+            head = _verified_head(backend, snapshot.reference)
+            if head is not None and not head.condemned:
                 with ExitStack() as stack:
                     source = (stack.enter_context(reserved_paths.open_generic_binary(vault, ledger._relative(path)))
                               if snapshot.state == "cached" else None)
@@ -967,11 +1015,15 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                         _publish_reference(vault, snapshot, snapshot.reference)
                         _finish_reference(ledger, original_state(vault, path), source)
                 return snapshot.reference
-            # Only a definitive missing version permits removal. Unknown, denied
-            # or timed-out HEADs propagate and retain the canonical reference.
+            # Only a definitive missing version permits removal, or a condemned one whose bytes are still here,
+            # which then go up again under a new name. Unknown, denied or timed-out HEADs propagate and retain the
+            # canonical reference, and so does a condemned version that is the only copy: it still hydrates.
+            if head is not None and snapshot.state != "cached":
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the stored version is condemned and the bytes are absent")
             with _guard(vault, "media_store_absent_version"):
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+                _release_name(ledger, snapshot.reference.object)
                 _publish_reference(vault, snapshot, None)
             snapshot = original_state(vault, path)
         if snapshot.state != "local":
@@ -983,10 +1035,6 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             return None
         decision, reuse = _offload_admission(vault, snapshot, usage=census())
         _require_allowance(ledger, snapshot, decision.code)
-        name_key = Path(str(config["name_key_path"])).read_bytes()
-        if len(name_key) < 32:
-            raise ValueError("the media name key requires at least 32 bytes")
-        name = hmac.new(name_key, bytes.fromhex(snapshot.binary_sha256), hashlib.sha256).hexdigest()
         key_version = str(config["key_version"])
         if reuse is not None and not _confirmed(backend, reuse.reference):
             reuse = None
@@ -1006,7 +1054,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     usage=census(),
                 )
                 _require_allowance(ledger, snapshot, decision.code)
-                _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
+                name = reuse.reference.object if reuse is not None else _upload_name(ledger, snapshot)
+                _protect(ledger, snapshot, name, uploadable=reuse is None)
             if reuse is not None:
                 reference = reuse.reference
                 assert reference is not None
@@ -1038,6 +1087,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 finally:
                     _release(ledger, token)
             if not _confirmed(backend, reference):
+                # A condemned answer here means that a late attempt superseded this one; the retry uploads again.
                 raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
             with _guard(vault, "media_store_publish"):
                 source.require_current()
@@ -1050,6 +1100,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 if batch is not None:
                     # Charged before the write: a failed write leaves the batch over-counting, never under.
                     batch.charge(ledger, snapshot, reference)
+                _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference
@@ -1364,8 +1415,10 @@ def _evict_one(vault: Path, path: Path) -> str:
         # An unavailable or unverified version cannot authorize removal; an outage also ends the pass.
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
     if not confirmed:
+        # An absent or condemned version authorizes no removal: the bytes go up again under a new name.
         with _guard(vault, "media_store_absent_version"):
             if original_state(vault, path) == snapshot:
+                _release_name(ledger, snapshot.reference.object)
                 _publish_reference(vault, snapshot, None)
                 enqueue_offload(vault, path)
         return KEPT

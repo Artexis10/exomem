@@ -22,6 +22,9 @@ from .media_edge_protocol import (
     SHA256_HEADER,
     SIZE_HEADER,
     STATUS_ABSENT,
+    STATUS_CONDEMNED,
+    STATUS_CURRENT,
+    STATUS_HEADER,
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
@@ -126,8 +129,13 @@ class EdgeStore:
             return None
         if response.status_code != 200:
             raise _refusal(response)
+        status = response.headers.get(STATUS_HEADER)
+        # An answer without a known status could hide a condemned version, which must never stand for the bytes.
+        if status not in {STATUS_CURRENT, STATUS_CONDEMNED}:
+            raise _unavailable("the media edge answered without a version status")
         try:
-            return ObjectHead(int(response.headers[SIZE_HEADER]), response.headers[SHA256_HEADER])
+            return ObjectHead(int(response.headers[SIZE_HEADER]), response.headers[SHA256_HEADER],
+                              condemned=status == STATUS_CONDEMNED)
         except (KeyError, ValueError) as error:
             raise _unavailable("the media edge answered without a size and digest") from error
 

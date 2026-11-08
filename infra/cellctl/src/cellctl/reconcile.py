@@ -24,6 +24,7 @@ import asyncpg
 from kubernetes.client.rest import ApiException
 
 from . import alerts, cell_readiness, db
+from .backup_source import MEDIA_COLLECTION_COMPLETE
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -95,6 +96,7 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import (
+    COLLECTOR_AUDIENCE,
     ActiveSet,
     EdgeEvidence,
     MediaEdgeConfig,
@@ -1274,13 +1276,13 @@ def _media_revocation(
     cell the edge may admit: a turned-off store writes it, and the statement that retires a deleted cell's
     media bundle adds `revoke_requested_at` before the pass publishes a set without the cell
     (db.retire_content_keys). The wait ends when the edge is confirmed to serve the exact published set and
-    that set omits the cell; the record keeps what was observed."""
+    that set omits the cell's runtime and collector credentials; the record keeps what was observed."""
     if cluster_config.media_edge is None:
         return False, None
     record = _media_store_of(row)
     if not isinstance(record, dict) or not record or "revoked_generation" in record:
         return False, None
-    if (active is not None and row.cell_id not in active.cells
+    if (active is not None and row.cell_id not in active.cells and row.cell_id not in active.collectors
             and memory.media_edge_confirmed == (active.generation, active.sha256())):
         return False, {**record, "revoked_generation": active.generation, "set_sha256": active.sha256(),
                        "observed_at": now.isoformat()}
@@ -1294,12 +1296,29 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
     return active.cells.get(row.cell_id)
 
 
+def _media_collects(cluster_config: ClusterConfig, row: CellRow) -> bool:
+    """collect-released-media D3: a cell on the edge's collect list collects while it holds a store, a retained
+    one too, so its backups keep condemning the names that it released. A deleted cell has no store, and a cell
+    taken off the list loses its collector entry, so both stop; an empty list lets the edge turn off."""
+    edge = cluster_config.media_edge
+    return edge is not None and edge.collects(row.cell_id) and _media_mode(cluster_config, row) is not None
+
+
+def _media_collector_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
+    """The collector credential version the edge admits for this cell's backup Job; None when it collects nothing."""
+    if active is None or not _media_collects(cluster_config, row):
+        return None
+    return active.collectors.get(row.cell_id)
+
+
 def _publish_media_edge_set(
-    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory,
+    collectors: Mapping[str, int] | None = None,
 ) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is to
+    `cells` maps each served or draining cell to its credential epoch, and `collectors` each cell whose
+    backup Job collects (collect-released-media D3). Returns the set the edge is to
     load, or None when the cluster would not say, in which case no keyed cell renders this pass. An
     unchanged set writes nothing."""
     try:
@@ -1312,12 +1331,13 @@ def _publish_media_edge_set(
                 memory.media_edge_foreign = max(memory.media_edge_foreign, cluster.media_edge_evidence(edge.url).loaded)
             except Exception as error:  # noqa: BLE001 - the edge may be away; the settled check learns it later
                 logger.warning("cellctl could not seed the media edge generation: %s", _describe_error(error))
-        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign)
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign,
+                                  collectors=collectors)
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
-            logger.info("cellctl: media edge active set published at generation %d for %d cell(s)",
-                        planned.generation, len(planned.cells))
+            logger.info("cellctl: media edge active set published at generation %d for %d cell(s) and %d collector(s)",
+                        planned.generation, len(planned.cells), len(planned.collectors))
         return planned
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
@@ -1442,7 +1462,9 @@ async def reconcile_once(
         # D12: a draining cell keeps its entry although the edge no longer selects it.
         media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
-            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory)
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory, collectors={
+            row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
+            if _media_collects(cluster_config, row)})
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -1728,8 +1750,20 @@ async def _cleanup_alerts(
 MEDIA_METER_RETRY = timedelta(minutes=5)
 # Failed listings in a row before the unknown-figure alert fires. Three, five minutes apart, outlast a
 # provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
-# switch off the hide and over-allowance alerts with no notice.
+# switch off the over-allowance alert with no notice.
 MEDIA_METER_UNKNOWN_AFTER = 3
+# Hidden names the meter's line shows beside their count. Every owner deletion adds one, and a rescue lists
+# the markers from the bucket itself, so the line needs only a sample to show what is being hidden.
+MEDIA_HIDDEN_NAMES_LOGGED = 5
+
+
+def _hidden_sample(hidden: tuple[str, ...]) -> str:
+    """The first MEDIA_HIDDEN_NAMES_LOGGED hidden names in name order, and how many the line leaves out."""
+    if not hidden:
+        return ""
+    shown = ", ".join(hidden[:MEDIA_HIDDEN_NAMES_LOGGED])
+    left = len(hidden) - MEDIA_HIDDEN_NAMES_LOGGED
+    return f": {shown}" + (f" and {left} more" if left > 0 else "")
 
 
 async def _media_physical_meter(
@@ -1737,11 +1771,12 @@ async def _media_physical_meter(
     listing, now: datetime,
 ) -> None:
     """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
-    shows. A hide marker alerts at once: the edge sends no hide request, so the edge key or another key hid
-    a name. So does a prefix above the cell's allowance times the configured headroom. An unknown figure
-    changes neither alert, since it is neither within the allowance nor clean, and a figure that stays
-    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. Without the list key each try counts
-    as a failed listing, since a missing key switches off both abuse alerts as a revoked one does. The figure
+    shows. A prefix above the cell's allowance times the configured headroom alerts. An unknown figure
+    changes no alert, since it is not within the allowance, and a figure that stays unknown for
+    MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. collect-released-media D4: a hide raises no
+    alert, since every owner deletion ends in one; the log counts the hidden names, and the out-of-cluster
+    watcher alerts on a burst. Without the list key each try counts
+    as a failed listing, since a missing key switches off the over-allowance alert as a revoked one does. The figure
     is the operator's; the owner's meter and the cell's record stay as they are."""
     edge = cluster_config.media_edge
     if edge is None:
@@ -1767,18 +1802,19 @@ async def _media_physical_meter(
         memory.media_meter_retry_at.pop(row.cell_id, None)
         memory.media_meter_failures.pop(row.cell_id, None)
         memory.media_metered_for[row.cell_id] = row.last_backup_at
-        # Without a delivery Secret the log line is the only notice, so a hide entry logs as a warning.
-        logger.log(logging.WARNING if figure.hides else logging.INFO,
-                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s) and %d hide marker(s) in the bucket",
-                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes,
-                   figure.unfinished, figure.hides)
+        # A repeated name loses its older version once the lifecycle rule applies, so a count that is not
+        # zero, or not known, logs as a warning: the operator re-offloads those originals first.
+        logger.log(logging.INFO if figure.repeated == 0 else logging.WARNING,
+                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s), %s name(s) with more than one "
+                   "upload version and %d hidden name(s) in the bucket%s",
+                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes, figure.unfinished,
+                   "an unknown number of" if figure.repeated is None else figure.repeated, len(figure.hidden or ()),
+                   _hidden_sample(figure.hidden or ()))
     allowance = edge.store_policy.get("allowance_bytes")
     for cell_id, figure in list(memory.media_physical.items()):
-        hide_alert, over_alert, unknown_alert = alerts.media_alerts(cell_id)
+        over_alert, unknown_alert = alerts.media_alerts(cell_id)
         if cell_id not in metered:
-            # A cell that left the store (deleted) forgets its figure, and its allowance and unknown-figure
-            # alerts resolve. A hide alert stays: only a listing that shows no hide entry resolves it, and
-            # this cell is listed no more.
+            # A cell that left the store (deleted) forgets its figure, and its alerts resolve.
             for alert in (over_alert, unknown_alert):
                 if memory.alert_delivered.get(alert):
                     await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
@@ -1789,8 +1825,7 @@ async def _media_physical_meter(
             continue
         exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
         stays_unknown = memory.media_meter_failures.get(cell_id, 0) >= MEDIA_METER_UNKNOWN_AFTER
-        for alert, firing in ((hide_alert, None if figure.hides is None else figure.hides > 0),
-                              (over_alert, exceeds), (unknown_alert, stays_unknown)):
+        for alert, firing in ((over_alert, exceeds), (unknown_alert, stays_unknown)):
             # None is unknown: send nothing. A cell that never alerted needs no resolution either.
             if firing or (firing is False and memory.alert_delivered.get(alert)):
                 await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
@@ -2547,6 +2582,14 @@ async def _reconcile_row(
     if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
         # D5: the failed Job's own code, value-free; the Job goes a pass later.
         logger.warning("cellctl: cell %s's backup failed: %s", row.cell_id, observation.backup_job_failure_code)
+    collection = observation.backup_job_media_collection
+    if collection is not None and "last_backup_at" in decision.row_updates:
+        # collect-released-media D5: the pass that ends the hold reads the Job last, before its pod's TTL deletes it.
+        counts = ["an unknown number of" if count is None else count
+                  for count in (collection.hidden, collection.candidates, collection.skipped)]
+        logger.log(logging.INFO if collection.outcome == MEDIA_COLLECTION_COMPLETE else logging.WARNING,
+                   "cellctl: cell %s's media collection %s (%s): %s name(s) hidden of %s candidate(s), %s refused by "
+                   "the edge", row.cell_id, collection.outcome, collection.reason, *counts)
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
     # crash between the two leaves the rollout paused and no other cell can
@@ -2682,6 +2725,14 @@ async def _reconcile_row(
             }
         elif media_mode == MEDIA_RETAINED:
             media_fields = {"media_store_retained": True}
+        collector_version = _media_collector_version(cluster_config, media_active, row)
+        if collector_version is not None:
+            # collect-released-media D3: only the backup Job mounts it. The render digest leaves it out, since the
+            # runtime never reads it, and every hold applies the Secret before it runs its Job. Without a version
+            # the backup still runs and collects nothing.
+            media_fields["media_collector_url"] = edge.url
+            media_fields["media_collector_credential"] = sign_credential(
+                edge.signing_key, cell_id=row.cell_id, version=collector_version, audience=COLLECTOR_AUDIENCE)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,

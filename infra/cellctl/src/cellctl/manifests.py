@@ -21,7 +21,14 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from .backup_source import VAULT_CHECK_COMMAND, media_census_command
+from .backup_source import (
+    MEDIA_COLLECT_START,
+    MEDIA_MANIFEST_PATH,
+    VAULT_CHECK_COMMAND,
+    media_census_command,
+    media_collect_command,
+    media_manifest_command,
+)
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
@@ -88,6 +95,14 @@ MEDIA_HYDRATION_KEYS = ("max_temporary_bytes", "max_hydrations")
 MEDIA_STORE_CONFIG_ENV = "EXOMEM_MEDIA_STORE_CONFIG"
 MEDIA_EDGE_URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 MEDIA_EDGE_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
+# collect-released-media D3: the backup Job's collector credential, a Secret key that only that Job mounts.
+# The environment name is COLLECTOR_CREDENTIAL_FILE_ENV in src/exomem/media_collect.py; cellctl cannot import
+# the cell, so tests/test_media_collection.py fails when they differ.
+MEDIA_COLLECTOR_CREDENTIAL_KEY = "media-edge-collector-credential"
+MEDIA_COLLECTOR_DIR = "/run/exomem/media-collector"
+MEDIA_COLLECTOR_VOLUME = "media-collector"
+MEDIA_COLLECTOR_FILE = "collector-credential"
+MEDIA_COLLECTOR_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_COLLECTOR_CREDENTIAL_FILE"
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 JOB_KIND_LABEL = "exomem.io/cell-job"
@@ -323,6 +338,10 @@ class CellManifestSpec:
     # identity, disabled, so its evicted originals still read as evicted, never as deleted. It
     # gets no credential, no key and no egress to the edge.
     media_store_retained: bool = False
+    # collect-released-media D3: a cell whose backup Job condemns its released names through the edge, served,
+    # draining or retained. Only the backup Job receives the URL, the credential and egress to the edge.
+    media_collector_url: str = ""
+    media_collector_credential: str = ""
 
     def __post_init__(self) -> None:
         check_artifact_broker_url(self.artifact_broker_url)
@@ -340,6 +359,9 @@ class CellManifestSpec:
             raise ValueError("a cell the media edge serves does not also retain a disabled store")
         if self.media_edge_url:
             check_media_store_policy(self.media_store_policy)
+        check_media_edge_url(self.media_collector_url)
+        if bool(self.media_collector_url) != bool(self.media_collector_credential):
+            raise ValueError("a collecting cell needs both the media edge URL and its collector credential")
 
     @property
     def media_store(self) -> bool:
@@ -573,6 +595,16 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
             ],
         },
     }
+    if spec.media_collector_url:
+        # collect-released-media D3: the policy selects every Job, and the edge's own ingress admits only the
+        # backup Job's pods, which alone mount the collector credential.
+        job_egress["spec"]["egress"].append({
+            "to": [{
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NAMESPACE}},
+                "podSelector": {"matchLabels": {GATEWAY_POD_LABEL: MEDIA_EDGE_POD_LABEL_VALUE}},
+            }],
+            "ports": [{"protocol": "TCP", "port": MEDIA_EDGE_PORT}],
+        })
     return [default_deny, runtime_ingress, job_egress]
 
 
@@ -646,6 +678,8 @@ def render_secret(spec: CellManifestSpec) -> dict:
         })
     elif spec.media_store_retained:
         data[MEDIA_STORE_CONFIG_KEY] = _b64(_media_store_config(spec))
+    if spec.media_collector_credential:
+        data[MEDIA_COLLECTOR_CREDENTIAL_KEY] = _b64(spec.media_collector_credential)
     return {
         "apiVersion": "v1",
         "kind": "Secret",
@@ -1341,6 +1375,28 @@ def _job_pod_spec(
     }
 
 
+def _with_media_collector(pod_spec: dict, spec: CellManifestSpec) -> dict:
+    """collect-released-media D3: the backup Job's edge URL and its collector credential, the one key of the
+    cell's Secret that it mounts. The key is optional: a Secret that does not hold it yet leaves the backup
+    running and collecting nothing, where a required key would keep the pod from starting."""
+    container = pod_spec["containers"][0]
+    container["env"] = [*container["env"],
+                        {"name": MEDIA_EDGE_URL_ENV, "value": spec.media_collector_url},
+                        {"name": MEDIA_COLLECTOR_CREDENTIAL_ENV, "value": f"{MEDIA_COLLECTOR_DIR}/{MEDIA_COLLECTOR_FILE}"}]
+    container["volumeMounts"] = [*container["volumeMounts"],
+                                 {"name": MEDIA_COLLECTOR_VOLUME, "mountPath": MEDIA_COLLECTOR_DIR, "readOnly": True}]
+    pod_spec["volumes"] = [*pod_spec["volumes"], {
+        "name": MEDIA_COLLECTOR_VOLUME,
+        "secret": {
+            "secretName": spec.secret_name,
+            "defaultMode": 0o440,
+            "optional": True,
+            "items": [{"key": MEDIA_COLLECTOR_CREDENTIAL_KEY, "path": MEDIA_COLLECTOR_FILE}],
+        },
+    }]
+    return pod_spec
+
+
 def render_backup_job(
     spec: CellManifestSpec,
     *,
@@ -1351,7 +1407,10 @@ def render_backup_job(
 ) -> dict:
     """`claim_name` is the hourly hold's clone; by default the Job reads the
     stopped cell's own claim. `retention` None skips `forget --prune`, the
-    expensive call that needs restic's exclusive lock (D3)."""
+    expensive call that needs restic's exclusive lock (D3).
+
+    A collecting cell's backup also stores the media manifest of its source in
+    the snapshot, and its pruning backup then collects (collect-released-media D5)."""
 
     job_name = _job_name_for_hold(spec, BACKUP_JOB_NAME)
     repo = _restic_repo(spec, bucket_name, endpoint)
@@ -1369,15 +1428,22 @@ def render_backup_job(
     # backup with no real snapshot. The backup now fails the shell (and the
     # Job) directly on either a non-zero `restic backup` or an id that does
     # not match a real 64-hex-character snapshot id.
+    collects = bool(spec.media_collector_url)
+    # collect-released-media D5: the manifest comes from the source restic backs up, so a reference the owner
+    # deletes after the capture is still in it. The shell creates the file before the command runs, so the
+    # backup path always exists; a failed or cut-off manifest is unknown, never a guess.
+    backed_up = (*BACKUP_PATHS, MEDIA_MANIFEST_PATH) if collects else BACKUP_PATHS
     commands = [
+        *([MEDIA_COLLECT_START] if collects else []),
         # D5: no backup of a source that holds no vault (backup_source.py).
         # The Job fails, the hold records BACKUP_FAILED, and cellctl logs the
         # Job's code. An emptied volume's cell then leaves serving, and its
         # row shows cell-init's refusal.
         VAULT_CHECK_COMMAND,
+        *([media_manifest_command()] if collects else []),
         "restic snapshots || restic init",
         # Without --host restic records the Job pod's random hostname.
-        f"restic backup --json --host {shlex.quote(spec.cell_id)} {' '.join(BACKUP_PATHS)} "
+        f"restic backup --json --host {shlex.quote(spec.cell_id)} {' '.join(backed_up)} "
         "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
@@ -1396,7 +1462,13 @@ def render_backup_job(
         # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
         # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
         media_census_command(spec.hold_started_at),
+        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole.
+        *([media_collect_command()] if collects and retention is not None else []),
     ]
+    pod_spec = _job_pod_spec(
+        spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo,
+        claim_name=claim_name, tolerate_cordon=spec.local_volume,
+    )
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -1411,10 +1483,7 @@ def render_backup_job(
             "ttlSecondsAfterFinished": 300,
             "template": {
                 "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_BACKUP}},
-                "spec": _job_pod_spec(
-                    spec, job_kind=JOB_KIND_BACKUP, command=commands, data_read_only=True, repo=repo,
-                    claim_name=claim_name, tolerate_cordon=spec.local_volume,
-                ),
+                "spec": _with_media_collector(pod_spec, spec) if collects else pod_spec,
             },
         },
     }

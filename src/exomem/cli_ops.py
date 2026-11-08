@@ -95,9 +95,9 @@ _REMEDIATION: dict[str, str | Callable[[], str]] = {
         "owner to check the server log, which names the file."
     ),
     "INVALID_RELATION_REVIEW": (
-        "Send relation_disposition=reviewed_none, relation_review_reason and the "
-        "relation_review_hash from the validate_only result together; send none of them "
-        "when the page needs no relation review."
+        "Send relation_disposition=reviewed_none and relation_review_reason alone to "
+        "commit in one call; with a validated transition_token or draft, add its "
+        "relation_review_hash. Send none when the page needs no relation review."
     ),
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
         "Select an explicit governed rich kind or author a canonical note-level relation."

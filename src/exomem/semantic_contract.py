@@ -26,6 +26,7 @@ from . import (
     activation,
     activation_manifest,
     call_spans,
+    capabilities,
     foreground_priority,
     freshness,
     lifecycle_statuses,
@@ -636,6 +637,12 @@ class RelationDisposition:
     # before reaching any caller-visible surface.
     review_reason: str | None = None
     review_reference: str | None = None
+    # True when a reviewed-none decision stays in force although the page's bytes
+    # moved on: the decision binds the page's identity until an edit of the page
+    # removes its last connection, so an edit that leaves the page unconnected does
+    # not ask for it again. A disconnection made by another page's edit or outside
+    # the server does not lapse it.
+    review_renewed: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in _DISPOSITION_KINDS:
@@ -657,6 +664,7 @@ class RelationDisposition:
             "qualifying_signal": self.qualifying_signal,
             "review_reason": self.review_reason,
             "review_reference": self.review_reference,
+            "review_renewed": self.review_renewed,
         }
 
 
@@ -855,7 +863,18 @@ VALIDATE_FORM = "validate_only=true"
 
 # Tool parameter spellings fixed by the tool signatures, not registry vocabulary.
 # A writer operation absent here validates with VALIDATE_FORM.
-_OPERATION_VALIDATE_FORMS = MappingProxyType({"observe": "operation=validate"})
+_OPERATION_VALIDATE_ROUTES = MappingProxyType({
+    "observe": ("observe_memory", MappingProxyType({"operation": "validate"})),
+})
+
+
+def validate_form(operation: str) -> str:
+    """The validate call of a writer operation, spelled for the surface serving this call."""
+    route = _OPERATION_VALIDATE_ROUTES.get(operation)
+    if route is None:
+        return VALIDATE_FORM
+    command, arguments = route
+    return capabilities.active_call_text(command, arguments)
 
 
 def blocking_finding_text(finding: ContractFinding) -> str:
@@ -893,8 +912,7 @@ def blocking_reason(
     rendered = "; ".join(blocking_finding_text(item) for item in shown)
     omitted = len(findings) - len(shown)
     if omitted:
-        validate_form = _OPERATION_VALIDATE_FORMS.get(result.operation, VALIDATE_FORM)
-        rendered += f"; +{omitted} more ({validate_form} returns the full set)"
+        rendered += f"; +{omitted} more ({validate_form(result.operation)} returns the full set)"
     return f"{prefix}: {rendered}"
 
 
@@ -4914,6 +4932,13 @@ def _qualifying_body_wikilink_targets(
     return tuple(targets)
 
 
+def _unique_stable_identity(page: SemanticPageState, corpus: SemanticCorpusContext) -> bool:
+    return (
+        page.identity_kind == "exomem_id"
+        and corpus.identity_census.paths_by_identity.get(page.identity) == (page.path,)
+    )
+
+
 def review_identity_is_current(
     review: RelationReviewState,
     page: SemanticPageState,
@@ -4928,11 +4953,7 @@ def review_identity_is_current(
     exists to prevent. That is categorically different from the page's own
     content having changed, and must never be treated as recoverable.
     """
-    return (
-        page.identity_kind == "exomem_id"
-        and review.page_identity == page.identity
-        and corpus.identity_census.paths_by_identity.get(page.identity) == (page.path,)
-    )
+    return review.page_identity == page.identity and _unique_stable_identity(page, corpus)
 
 
 def is_relation_review_current(
@@ -5050,7 +5071,19 @@ def _relation_disposition(
     before: SemanticPageState | None,
     before_corpus: SemanticCorpusContext,
     mode: str,
+    carry_stale_review: bool,
+    prior: RelationDisposition | None = None,
 ) -> RelationDisposition:
+    """Judge one page's relation disposition.
+
+    A reviewed-none decision binds the page's stable identity, not its exact bytes.
+    `carry_stale_review` lets a decision found for an older fingerprint stand for
+    the page as it is now; it is set for a page that already exists in the vault
+    (the before state of an edit, and any audit). `prior` is the disposition the
+    page held before the edit being judged; an edit that leaves the page
+    unconnected keeps a prior reviewed-none, and an edit that disconnects a
+    connected page does not (prior is then a qualifying relation).
+    """
     outbound, inbound, visible = writer_view_relations(page, corpus)
     directional: list[tuple[str, RelationFact]] = []
     directional.extend(("outbound", fact) for fact in outbound)
@@ -5138,28 +5171,17 @@ def _relation_disposition(
             review_reference=review.reference,
         )
     if (
-        review is not None
+        carry_stale_review
+        and review is not None
         and review.kind == "reviewed_none"
         and not review_is_current
         and review_identity_is_current(review, page, corpus)
-        and _no_other_governed(other_governed, other_unknown)
     ):
-        # Renewable ONLY because the identity check above still holds: the review
-        # provably describes this page, and the sole thing that drifted is its
-        # content fingerprint. A review that went non-current through contested
-        # stable identity is a different matter entirely and stays stale.
-        #
-        # The review's content fingerprint moved, but its SUBJECT did not: with
-        # no other governed page in the corpus there is nothing a qualifying
-        # typed relation could point at, so "reviewed none" is not merely the
-        # easier answer, it is the only available one. Without this, every edit
-        # to the page re-fires RELATION_DISPOSITION_STALE — the fingerprint
-        # changes on any content change — and each append costs three tool calls
-        # (blocked, validate_only, commit-with-tokens) to re-assert a fact that
-        # cannot have changed. Worse, the remediation steers toward
-        # `reviewed_none`, which succeeds and leaves the cause in place, so the
-        # loop never terminates. A fresh Knowledge Base hits this by
-        # construction: its first note has no peer to relate to.
+        # The decision's content fingerprint moved but its subject did not: the
+        # same page, still unconnected. The fingerprint hashes the whole page,
+        # including the server-written `updated:` stamp, so binding to it made
+        # every edit void the decision and cost three calls to re-assert a fact
+        # that had not changed. A contested identity never reaches this branch.
         return RelationDisposition(
             "reviewed_none",
             True,
@@ -5167,6 +5189,31 @@ def _relation_disposition(
             rejected_facts=tuple(rejected),
             review_reason=review.reason,
             review_reference=review.reference,
+            review_renewed=True,
+        )
+    if (
+        prior is not None
+        and prior.kind == "reviewed_none"
+        and before is not None
+        and before.eligible_compiled
+        and before.identity == page.identity
+        and _unique_stable_identity(page, corpus)
+    ):
+        # The edit being judged leaves an unconnected page unconnected. The
+        # decision stays in force on what the before state proved; it lapses
+        # only when the edit being judged removes the page's last connection,
+        # and that case never gets here because `prior` is then a qualifying
+        # relation. A disconnection that no edit of this page made (a peer's
+        # edit, or one outside the server) is not seen here: the older decision
+        # carries, and the audit reports it as carried.
+        return RelationDisposition(
+            "reviewed_none",
+            True,
+            True,
+            rejected_facts=tuple(rejected),
+            review_reason=prior.review_reason,
+            review_reference=prior.review_reference,
+            review_renewed=True,
         )
     if (
         review_is_current
@@ -5498,7 +5545,7 @@ def _endpoint_findings(
                     f"relation {fact.canonical_relation!r}: the {' and '.join(sides)} page is "
                     "outside the endpoints the relation declares"
                 ),
-                remediation=RELATION_QUALITY_ADVISORIES["endpoint_mismatch"]["remediation"],
+                remediation=relation_quality_advisory("endpoint_mismatch")["remediation"],
                 governed_element_identity=("relations", fact.identity),
                 resolved_rule=("relations", fact.canonical_relation, "endpoints"),
             )
@@ -5680,11 +5727,9 @@ def _disposition_finding(
     disposition: RelationDisposition,
     *,
     existing: bool = True,
-    operation: str = "edit",
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
-    validate_form = _OPERATION_VALIDATE_FORMS.get(operation, VALIDATE_FORM)
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"
@@ -5695,36 +5740,19 @@ def _disposition_finding(
         path=page.path,
         span=None,
         detail=_disposition_detail(page, disposition),
-        # The two branches are NOT equivalent, and presenting them as equals
-        # trained agents to always take the second one: `reviewed_none` reliably
-        # succeeds and reliably leaves the cause in place, so the next edit
-        # blocks again at three tool calls apiece, forever. Lead with the fix
-        # that actually resolves it and say plainly what the fallback costs.
-        # Kept terse deliberately. Findings share a bounded response budget, and
-        # a wordier draft of this string pushed omitted contract results from 1
-        # to 17 in the 120 KB directory-review validation. The size guard in
-        # test_legacy_edit_reports_identity_backfill_before_review_replay is the ceiling to
-        # respect when editing it.
+        # Both routes resolve the finding, and neither names a validate call: a
+        # reviewed-none decision binds the page until it gains or loses a connection,
+        # so sending it with its reason commits in one call on every route. Findings
+        # share a bounded response budget, so this stays short; the size guard in
+        # test_legacy_edit_reports_identity_backfill_before_review_replay is the
+        # ceiling to respect when editing it.
         remediation=(
             ("Add a qualifying typed relation. " + relation_review_stable_id_remediation())
             if existing and page.identity_kind == "path"
             else (
-                "Add a qualifying typed relation. Retriggers: "
-                f"{validate_form}; re-issue the same edit with "
-                "transition_token=<returned>, "
-                "relation_disposition=\"reviewed_none\", "
-                "relation_review_hash=<returned>, "
-                "relation_review_reason."
-            )
-            if existing
-            else (
-                "Add a qualifying typed relation. Retriggers: "
-                f"call {validate_form}, then "
-                "re-issue the same creation unchanged with draft_id=<returned draft_id>, "
-                "draft_hash=<returned draft_hash>, draft_token=<returned "
-                "draft_token>, relation_disposition=\"reviewed_none\", "
-                "relation_review_hash=<returned relation_review_hash>, and "
-                "relation_review_reason."
+                "Add a qualifying typed relation, or re-issue the same "
+                f"{'edit' if existing else 'creation'} with "
+                "relation_disposition=\"reviewed_none\" and relation_review_reason."
             )
         ),
         governed_element_identity=("relations", "disposition"),
@@ -5733,44 +5761,43 @@ def _disposition_finding(
 
 
 # These closed contract finding codes share fixed presentation text with compact replies.
-RELATION_QUALITY_ADVISORIES = MappingProxyType({
-    "endpoint_mismatch": {
-        "detail": (
-            "an authored relation joins a page outside the endpoints its relation declares; "
-            "the edge is written"
-        ),
-        "remediation": (
-            "Optional. The edge is kept. Review the relation with "
-            "`schema_memory(operation='inspect', subject='relations')`; keep it, or use a "
-            "relation whose declared endpoints fit. Never rewrite an edge merely to clear "
-            "this warning."
-        ),
-    },
-    "RELATION_TYPED_EDGE_ABSENT": {
-        "detail": (
-            "connected through wikilinks, cited provenance or generic associations only; "
-            "no qualifying specific relation names the relationship"
-        ),
-        "remediation": (
-            "Optional. Review the source and registered vocabulary with "
-            "`schema_memory(operation='inspect', subject='relations')`. Author a specific relation "
-            "only when supported; genuine generic relations or no edge remain valid. "
-            "Never author an edge merely to clear this warning."
-        ),
-    },
-    "RELATION_AUTHORED_ALL_GENERIC": {
-        "detail": (
-            "the admitted registered explicit relations authored by this page are all "
-            "generic associations; incoming specific relations may still qualify"
-        ),
-        "remediation": (
-            "Optional. Review the source and registered vocabulary with "
-            "`schema_memory(operation='inspect', subject='relations')`. Use governed authorship "
-            "for a supported specific relation; keep genuine generic relations or no "
-            "edge when appropriate. Never author an edge merely to clear this warning."
-        ),
-    },
+# `{inspect}` is the relation-vocabulary read, spelled for the surface serving the call.
+_RELATION_QUALITY_ADVISORIES = MappingProxyType({
+    "endpoint_mismatch": (
+        "an authored relation joins a page outside the endpoints its relation declares; "
+        "the edge is written",
+        "Optional. The edge is kept. Review the relation with "
+        "`{inspect}`; keep it, or use a "
+        "relation whose declared endpoints fit. Never rewrite an edge merely to clear "
+        "this warning.",
+    ),
+    "RELATION_TYPED_EDGE_ABSENT": (
+        "connected through wikilinks, cited provenance or generic associations only; "
+        "no qualifying specific relation names the relationship",
+        "Optional. Review the source and registered vocabulary with "
+        "`{inspect}`. Author a specific relation "
+        "only when supported; genuine generic relations or no edge remain valid. "
+        "Never author an edge merely to clear this warning.",
+    ),
+    "RELATION_AUTHORED_ALL_GENERIC": (
+        "the admitted registered explicit relations authored by this page are all "
+        "generic associations; incoming specific relations may still qualify",
+        "Optional. Review the source and registered vocabulary with "
+        "`{inspect}`. Use governed authorship "
+        "for a supported specific relation; keep genuine generic relations or no "
+        "edge when appropriate. Never author an edge merely to clear this warning.",
+    ),
 })
+RELATION_QUALITY_CODES = frozenset(_RELATION_QUALITY_ADVISORIES)
+
+
+def relation_quality_advisory(code: str) -> dict[str, str]:
+    """The detail and remediation of a relation-quality advisory, for the serving surface."""
+    detail, remediation = _RELATION_QUALITY_ADVISORIES[code]
+    inspect = capabilities.active_call_text(
+        "schema_memory", {"operation": "inspect", "subject": "relations"}
+    )
+    return {"detail": detail, "remediation": remediation.format(inspect=inspect)}
 
 
 def _authored_generic_finding(
@@ -5801,7 +5828,7 @@ def _authored_generic_finding(
         severity="warning",
         path=page.path,
         span=None,
-        **RELATION_QUALITY_ADVISORIES["RELATION_AUTHORED_ALL_GENERIC"],
+        **relation_quality_advisory("RELATION_AUTHORED_ALL_GENERIC"),
         governed_element_identity=("relations", "authored_generic"),
         resolved_rule=("relations", "*", "authored_generic"),
     )
@@ -5824,7 +5851,7 @@ def _typed_edge_finding(
         severity="warning",
         path=page.path,
         span=None,
-        **RELATION_QUALITY_ADVISORIES["RELATION_TYPED_EDGE_ABSENT"],
+        **relation_quality_advisory("RELATION_TYPED_EDGE_ABSENT"),
         governed_element_identity=("relations", "typed_edge"),
         resolved_rule=("relations", "*", "typed_edge"),
     )
@@ -5862,6 +5889,8 @@ def _raw_findings(
     before_corpus: SemanticCorpusContext,
     mode: str,
     include_relation_disposition: bool,
+    carry_stale_review: bool,
+    prior: RelationDisposition | None = None,
 ) -> tuple[list[ContractFinding], RelationDisposition | None]:
     disposition = None
     if include_relation_disposition:
@@ -5873,6 +5902,8 @@ def _raw_findings(
             before=before,
             before_corpus=before_corpus,
             mode=mode,
+            carry_stale_review=carry_stale_review,
+            prior=prior,
         )
     findings: list[ContractFinding] = []
     structure_finding = compiled_structure_finding(page)
@@ -5919,7 +5950,6 @@ def _raw_findings(
             page,
             disposition,
             existing=before is not None or mode == "posthoc",
-            operation=operation,
         )
         if disposition_finding is not None:
             findings.append(disposition_finding)
@@ -5990,21 +6020,8 @@ def evaluate(
     effective_after_corpus = (
         after_corpus if after_context_matches else after_corpus.with_candidate(after)
     )
-    after_findings, disposition = _raw_findings(
-        after,
-        after_contracts,
-        effective_after_corpus,
-        review=after_review,
-        operation=operation,
-        before=before,
-        before_corpus=effective_before_corpus,
-        mode=mode,
-        include_relation_disposition=include_relation_disposition,
-    )
-    if not after_context_matches:
-        after_findings.append(_corpus_mismatch_finding(after, phase="after"))
-    if before is not None and not before_context_matches:
-        after_findings.append(_corpus_mismatch_finding(before, phase="before"))
+    # The before state is judged first: the page's standing decision decides
+    # whether an edit that leaves it unconnected needs the decision asked again.
     before_findings: list[ContractFinding] = []
     before_disposition: RelationDisposition | None = None
     if before is not None:
@@ -6018,7 +6035,29 @@ def evaluate(
             before_corpus=effective_before_corpus,
             mode=mode,
             include_relation_disposition=include_relation_disposition,
+            carry_stale_review=True,
         )
+    # An audit judges the page as it stands, so it carries a decision the way the
+    # before state does. A precommit check of an edit carries only through the
+    # before state's disposition, so a create-like operation never carries.
+    transition_carry = mode == "precommit" and operation not in _CREATE_LIKE
+    after_findings, disposition = _raw_findings(
+        after,
+        after_contracts,
+        effective_after_corpus,
+        review=after_review,
+        operation=operation,
+        before=before,
+        before_corpus=effective_before_corpus,
+        mode=mode,
+        include_relation_disposition=include_relation_disposition,
+        carry_stale_review=mode == "posthoc",
+        prior=before_disposition if transition_carry else None,
+    )
+    if not after_context_matches:
+        after_findings.append(_corpus_mismatch_finding(after, phase="after"))
+    if before is not None and not before_context_matches:
+        after_findings.append(_corpus_mismatch_finding(before, phase="before"))
 
     raw_before_error_keys = {
         finding.key for finding in before_findings if finding.severity == "error"

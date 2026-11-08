@@ -19,11 +19,13 @@ from exomem.media_edge import EdgeConfig, MediaEdge
 from exomem.media_edge_b2 import B2
 from exomem.media_edge_protocol import (
     AUDIENCE,
+    COLLECTOR_AUDIENCE,
     GENERATION_PATH,
     OBJECTS_PATH,
     PENDING_PATH,
     SHA256_HEADER,
     SIZE_HEADER,
+    STATUS_HEADER,
 )
 from tests.fake_b2 import FakeB2
 
@@ -46,15 +48,18 @@ class Harness:
             public_key_file=self.public_key_file, active_set_file=self.active_set_file, bucket=self.fake.bucket,
             b2_key_id="key", b2_application_key="secret", max_object_bytes=config.pop("max_object_bytes", BOUND),
             state_dir=tmp_path / "state", **config)
-        self.publish(1, {CELL_A: 1, CELL_B: 1})
+        self.publish(1, {CELL_A: 1, CELL_B: 1}, collectors={CELL_A: 1, CELL_B: 1})
         self.edge = self.build()
 
     def build(self) -> MediaEdge:
         client = httpx.AsyncClient(transport=self.fake.transport())
         return MediaEdge(self.config, B2(client, key_id="key", application_key="secret", bucket=self.fake.bucket))
 
-    def publish(self, generation: int, cells: dict[str, int]) -> None:
-        self.active_set_file.write_text(json.dumps({"generation": generation, "cells": cells}))
+    def publish(self, generation: int, cells: dict[str, int], collectors: dict[str, int] | None = None) -> None:
+        value = {"generation": generation, "cells": cells}
+        if collectors is not None:
+            value["collectors"] = collectors
+        self.active_set_file.write_text(json.dumps(value))
 
     def credential(self, cell: str = CELL_A, version: int = 1, **overrides) -> str:
         claims = {"v": 1, "aud": AUDIENCE, "sub": cell, "ver": version, "issued_ms": int(time.time() * 1000)}
@@ -70,6 +75,10 @@ class Harness:
                     "authorization": f"Bearer {token or self.credential(cell)}", **(headers or {})})
 
         return asyncio.run(send())
+
+    def condemn(self, name: str, *, cell: str = CELL_A, token: str | None = None):
+        return self.request("POST", f"{OBJECTS_PATH}{name}/condemn",
+                            token=token or self.credential(cell, aud=COLLECTOR_AUDIENCE))
 
     def put(self, data: bytes, *, name: str | None = None, **kwargs):
         name = name or hashlib.sha256(data).hexdigest()
@@ -178,18 +187,108 @@ def test_an_upload_exactly_at_the_bound_is_admitted(harness: Harness):
     assert harness.fake.upload_bytes == BOUND
 
 
+@pytest.mark.parametrize("audience", [AUDIENCE, COLLECTOR_AUDIENCE])
 @pytest.mark.parametrize(("method", "path", "status"), [
     ("DELETE", f"{OBJECTS_PATH}{'0' * 64}?version=1", 405),
     ("DELETE", f"{OBJECTS_PATH}{'0' * 64}", 405),
+    ("DELETE", f"{OBJECTS_PATH}{'0' * 64}/condemn", 405),
     ("POST", f"{OBJECTS_PATH}{'0' * 64}/hide", 404),
     ("POST", f"{OBJECTS_PATH}{'0' * 64}/delete", 404),
     ("GET", OBJECTS_PATH, 404),
     ("GET", f"{OBJECTS_PATH}?prefix=", 404),
     ("GET", "/v1/list", 404),
 ])
-def test_no_hide_list_or_delete_route_exists(harness: Harness, method: str, path: str, status: int):
-    assert harness.request(method, path).status_code == status
+def test_no_list_delete_or_other_hide_route_exists_for_either_audience(
+        harness: Harness, audience: str, method: str, path: str, status: int):
+    token = harness.credential(aud=audience)
+    assert harness.request(method, path, token=token).status_code == status
     assert harness.fake.calls == []
+
+
+def test_a_runtime_credential_cannot_condemn(harness: Harness):
+    data = b"a stored original"
+    version = harness.put(data).json()["version"]
+    harness.fake.calls.clear()
+    assert harness.condemn(name_of(data), token=harness.credential()).status_code == 401
+    assert harness.fake.calls == []
+    head = harness.request("HEAD", f"{OBJECTS_PATH}{name_of(data)}?version={version}")
+    assert head.headers[STATUS_HEADER] == "current"
+
+
+@pytest.mark.parametrize(("method", "suffix"), [("PUT", ""), ("POST", "/admit"), ("GET", "?version=1"),
+                                                ("HEAD", "?version=1")])
+def test_a_collector_credential_can_only_condemn(harness: Harness, method: str, suffix: str):
+    data = b"a stored original"
+    response = harness.request(method, f"{OBJECTS_PATH}{name_of(data)}{suffix}", content=data,
+                               headers=declaration(data), token=harness.credential(aud=COLLECTOR_AUDIENCE))
+    assert response.status_code == 401
+    assert harness.fake.calls == []
+
+
+def test_a_collector_condemns_only_under_its_own_cells_prefix(harness: Harness):
+    data = b"only cell a holds this name"
+    version = harness.put(data).json()["version"]
+    response = harness.condemn(name_of(data), cell=CELL_B)
+    assert response.status_code == 200 and response.json() == {"hidden": False}
+    assert "b2_hide_file" not in harness.fake.calls
+    head = harness.request("HEAD", f"{OBJECTS_PATH}{name_of(data)}?version={version}")
+    assert head.headers[STATUS_HEADER] == "current"
+
+
+def test_a_repeated_condemn_hides_once_and_the_version_still_reads_by_id(harness: Harness):
+    data = b"a released original"
+    version = harness.put(data).json()["version"]
+    assert harness.condemn(name_of(data)).json() == {"hidden": True}
+    assert harness.condemn(name_of(data)).json() == {"hidden": False}
+    assert harness.fake.calls.count("b2_hide_file") == 1
+    head = harness.request("HEAD", f"{OBJECTS_PATH}{name_of(data)}?version={version}")
+    assert head.status_code == 200 and head.headers[STATUS_HEADER] == "condemned"
+    assert harness.request("GET", f"{OBJECTS_PATH}{name_of(data)}?version={version}").content == data
+
+
+def test_each_hide_logs_its_name_and_cell_once_for_the_burst_triage(
+        harness: Harness, caplog: pytest.LogCaptureFixture):
+    """The operator matches each hide marker of a burst to one of these lines; a silent hide looks like a foreign key."""
+    data = b"a released original"
+    harness.put(data)
+    caplog.set_level("INFO", logger="exomem.media_edge")
+    harness.condemn(name_of(data))
+    harness.condemn(name_of(data))
+    lines = [record.getMessage() for record in caplog.records
+             if record.name == "exomem.media_edge" and name_of(data) in record.getMessage()]
+    assert len(lines) == 1 and CELL_A in lines[0]
+
+
+def test_a_version_that_a_newer_upload_superseded_heads_condemned(harness: Harness):
+    data = b"one name, two uploads"
+    first = harness.put(data).json()["version"]
+    second = harness.put(data).json()["version"]
+    statuses = [harness.request("HEAD", f"{OBJECTS_PATH}{name_of(data)}?version={version}").headers[STATUS_HEADER]
+                for version in (first, second)]
+    assert statuses == ["condemned", "current"]
+
+
+def test_a_collector_removed_from_the_set_is_refused_while_its_runtime_credential_works(harness: Harness):
+    data = b"a stored original"
+    harness.put(data)
+    harness.publish(2, {CELL_A: 1, CELL_B: 1}, collectors={CELL_B: 1})
+    assert harness.condemn(name_of(data)).status_code == 401
+    assert harness.put(b"another original").status_code == 201
+    assert "b2_hide_file" not in harness.fake.calls
+
+
+def test_an_uncertain_hide_keeps_the_generation_open_until_it_lands(harness: Harness):
+    """A revoked collector's hide that lands after the drain report would pass unseen by the revocation."""
+    data = b"a released original"
+    harness.put(data)
+    harness.fake.lose("b2_hide_file", "late")
+    assert harness.condemn(name_of(data)).status_code == 503
+    harness.publish(2, {CELL_A: 1, CELL_B: 1}, collectors={CELL_B: 1})
+    assert harness.generation() == 1
+    assert harness.put(data).status_code == 409  # the pending hide holds the name
+    harness.fake.land_late()
+    asyncio.run(harness.edge.recover_pending())
+    assert harness.generation() == 2
 
 
 def test_a_restart_keeps_an_uncertain_write_open_until_the_late_write_lands(
@@ -367,6 +466,7 @@ def test_a_request_accepted_under_a_generation_holds_it_until_the_request_finish
     json.dumps({"generation": 0, "cells": {}}).encode(),
     json.dumps({"generation": 1, "cells": {}}).encode(),
     json.dumps({"generation": 2, "cells": {"not-a-cell-id": 1}}).encode(),
+    json.dumps({"generation": 2, "cells": {CELL_A: 1}, "collectors": {CELL_A: "1"}}).encode(),
 ])
 def test_a_bad_active_set_keeps_the_previous_one(harness: Harness, content: bytes):
     assert harness.generation() == 1
