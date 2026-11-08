@@ -10,7 +10,7 @@
 ## 2. Write path
 
 - [ ] 2.1 Give the four derivation entry points (page parse, parent state, recall-candidate gate, lexical row builder) a bytes input, replacing the spike's overrides.
-- [ ] 2.2 Commit every file of a governed write with its lexical rows, graph rows, audit rows and projection intents in one `BEGIN IMMEDIATE`, through the collection store's existing writer lease and transaction owner; make preserved binary files durable before that commit.
+- [ ] 2.2 Commit every file of a governed write with its lexical rows, graph rows, audit rows and projection intents in one `BEGIN IMMEDIATE`, through the collection store's existing writer lease and transaction owner; make preserved binary files durable before that commit. Give `unique_path` and `respell_new_path` a store form that lists folder contents from the store, not the disk; store mode needs this for any title-style name, with or without D12.
 - [ ] 2.3 Re-resolve dependent pages whose links start resolving in the same transaction.
 - [ ] 2.4 Prove with hard-kill trials that no kill leaves repair state, and with a whole-table diff that rows equal file mode for the same bytes.
 
@@ -21,7 +21,7 @@
 
 ## 4. Projection and outside edits
 
-- [ ] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path.
+- [ ] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path. Optional, for D12: project a store move as a rename, through the queue's move intent, when the file on disk matches the manifest.
 - [ ] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
 - [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
 
@@ -49,3 +49,21 @@
 
 - [ ] 8.1 After the switch, delete the modules and paths listed in design D9 that only file mode uses, and the requirements that only describe them.
 - [ ] 8.2 Before archiving, refresh each MODIFIED requirement against later changes to the same requirement, such as `fix-startup-retrieval-liveness` on Lexical Index Synchronization.
+
+## 9. Root layout and readable names (D12)
+
+Group 9 starts after the weeks 2 and 3 workstreams merge. It never gates 7.4. The relayout may share the switch's maintenance window when group 9 is done.
+
+- [ ] 9.1 Resolve the managed root once from the `_Schema/` marker. Route the ~130 wrapper-shaped sites through two helpers. In `root`, keep `_Imports/<id>` stages outside the store.
+- [ ] 9.2 Name the areas in registries: an area `folder` on compiled, source, evidence and entity types. Derive `init`'s folders from them. Remove `init._FOLDERS` and the area-root literals.
+- [ ] 9.3 In `root`, place pages flat inside areas, keeping only the group folders D12 names. Make the compiled-type write gate read the area from the registry.
+- [ ] 9.4 Give `root` vaults title names by default: a date prefix for dated and started stems, vault-wide case-insensitive uniqueness read from the store, and deterministic ` (2)`, ` (3)` suffixes.
+- [ ] 9.5 Make every writer emit `[[Name]]` links, or `[[Area/Name]]` when the name is ambiguous, including the index and log generators. Keep graph rows on resolved paths.
+- [ ] 9.6 Add the path alias table, its resolver step and its rollback export. Update it on every move.
+- [ ] 9.7 In store mode, rename a derived name in the same write as a retitle. Accept link-only repoints in append-only pages, each with its own audit reason. Reconcile it with `make-source-reclassification-reversible`, whose reclassification refuses on append-only path links, so that refusal reads as file mode only.
+- [ ] 9.8 Add `store-mode relayout` with plan, apply and verify, and enforce its preconditions.
+- [ ] 9.9 Start `exomem init` and Cloud cells in `root`. Remove paths taught in the scaffold skill and references, and keep the scaffold generic.
+- [ ] 9.10 In Cloud import, map `nested` trees to `root` through the relayout planner. Make Cloud export emit the cell's own layout.
+- [ ] 9.11 Rehearse on a disposable real-vault copy: plan counts, apply, verify, recall canary, rollback drill. Repeat on native Windows.
+- [ ] 9.12 Reopen `add-readable-note-filenames` and correct its `vault-file-naming` requirements. Add the wikilink characters, leading dots and the 200-byte cap to Filesystem-Safe Title Names. Make `title` the default style in `root`. Make collision detection vault-wide with the ` (2)` suffix. Keep No Existing File Is Renamed true: a style change renames nothing, and only a relayout or a retitle does.
+- [ ] 9.13 Reopen `add-note-type-registry` and correct its `Notes/<Name>` folder rule in its spec, its `semantic-write-contract` delta and its design. The folder becomes an area name, with the parent supplied by the layout. Let source, evidence and entity types declare `folder` too (9.2).

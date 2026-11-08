@@ -21,6 +21,7 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 - **Canonicity of originals (stage 2).** Every stored file records its origin, hash, size, format and derivation. A file wrongly filed as an original can be superseded by the true original and kept as derived.
 - **Migration and rollback.** Migration runs offline and verifies equal derived rows and byte-identical projection before activation. Rollback drains the projection, refuses while held edits are unexported, exports the audit trail and canonicity records, then rebuilds file mode from the Markdown.
 - **What store mode retires.** For writes that Exomem commits, store mode needs no lexical freshness witnesses and catalogue repair, no graph sync checkpoints and drains, no derived receipts, no deferred full-refresh receipts and no self-write echo suppression. File mode keeps them until it is retired.
+- **Root layout and readable names (D12).** A separate package, task group 9, drops the wrapper folder and the `Notes/` level, names pages after their titles with vault-wide unique names, and moves existing vaults through one verified relayout. It never gates the switch.
 - **File mode stays** until the switch. Both modes share the derivation code and the readers.
 
 ## Capabilities
@@ -28,11 +29,14 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 ### New Capabilities
 
 - `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified, reversible migration.
+- `vault-layout`: the managed root, areas named by registries, flat page paths, unique readable names, short links, retitle renames, path aliases and the verified relayout.
 
 ### Modified Capabilities
 
 - `epistemic-graph`: graph rows live in the canonical store in store mode and commit with their page; file mode is unchanged.
 - `live-index-freshness`: in store mode, lexical rows commit with their page, and graph audit re-derives from store bytes instead of repairing from Markdown.
+- `command-surface`: in store mode, a move repoints links in append-only `Sources/` and `Evidence/` pages and changes no other byte.
+- `adoption-studio`: in a `root` vault, a classified item's Source directory is `Sources/<Kind>/`.
 
 ## Impact
 
