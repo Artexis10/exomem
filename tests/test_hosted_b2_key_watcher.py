@@ -800,7 +800,9 @@ def version(name: str, action: str, *, hours_ago: float) -> dict[str, Any]:
     }
 
 
-def test_a_hide_burst_above_the_budget_alerts_with_a_count_and_a_token_and_no_name() -> None:
+def test_a_hide_burst_above_the_budget_alerts_with_a_count_and_a_token_and_no_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """A compromised edge or Job that hides many names must page the operator inside the grace, and the
     public log must not name what it hid. The third hide sits on the second page, so a watcher that
     counted one page would stay at the budget and stay quiet."""
@@ -811,13 +813,15 @@ def test_a_hide_burst_above_the_budget_alerts_with_a_count_and_a_token_and_no_na
     )
 
     code, out, err = run(media_environment(media_account(hide_budget=2)), fake)
+    # main() writes to the process streams, which the public CI log shows.
+    printed = capsys.readouterr()
 
     assert code == 1
     assert active_alerts(fake) == {"fixture:MEDIA_HIDE_BURST"}
     assert "account fixture: 3 media hides in the window" in out
     assert "MEDIA_HIDE_BURST" in out
     assert [item for item in (CELL_PREFIX, MEDIA_BUCKET_ID, MEDIA_KEY_ID, MEDIA_KEY, "fixture-file-")
-            if item in out + err] == []
+            if item in out + err + printed.out + printed.err] == []
     assert all(set(json.loads(raw)) == {"schema_version", "transition_id", "job", "alert", "active"}
                for endpoint, _, raw in fake.sent if endpoint == "alert")
 
