@@ -79,7 +79,7 @@ Effective prominence SHALL resolve from a valid operator environment override, t
 
 ### Requirement: Consistent contract projection and guidance
 
-Bootstrap, workflow effective capture and the delegation envelope SHALL use the same effective request preference, and SHALL derive every statement of capture authority from the same resolved gate rather than from the level alone, so the served contract and the delegation envelope can never disagree about whether this agent may write unasked. Bootstrap SHALL teach the inspect/set route that the served command set actually offers: the agent-accessible operation when it is served, otherwise the custom-instructions route, and never a command-line route. Changing prominence MUST NOT alter the four levels' existing meanings, compute policy or authority ceilings. Cross-client persistence SHALL be promised only for the same canonical identity and vault/state root; local-owner and OAuth identities SHALL remain distinct. Where the detected client resolves to the coding context, and therefore may run the standalone nudge hooks, bootstrap and every arm of the agent-accessible operation SHALL serve a hook-cadence statement naming what those hooks resolve from, that the saved preference is not among it, and the route that changes the cadence on the client machine; every other surface SHALL serve no such statement. The server MUST NOT claim that a saved level changes hook cadence, because the hooks read the client machine and the preference is held by the server.
+Bootstrap, workflow effective capture, the delegation envelope and the activation capture-policy block SHALL use the same effective request preference, and SHALL derive every statement of capture authority from the same resolved gate rather than from the level alone, so the served contract and the delegation envelope can never disagree about whether this agent may write unasked. Bootstrap SHALL teach the inspect/set route that the served command set actually offers: the agent-accessible operation when it is served, otherwise the custom-instructions route, and never a command-line route. Changing prominence MUST NOT alter the four levels' existing meanings, compute policy or authority ceilings. Cross-client persistence SHALL be promised only for the same canonical identity and vault/state root; local-owner and OAuth identities SHALL remain distinct. Where the detected client resolves to the coding context, and therefore may run the standalone nudge hooks, bootstrap and every arm of the agent-accessible operation SHALL serve a hook-cadence statement naming what those hooks resolve from, that the saved preference is not among it, and the route that changes the cadence on the client machine; every other surface SHALL serve no such statement. The server MUST NOT claim that a saved level changes hook cadence, because the hooks read the client machine and the preference is held by the server.
 
 #### Scenario: Saved Off disables proactive capture in every request projection
 - **WHEN** a user selects Off and then resolves a workflow and bootstraps
@@ -104,6 +104,11 @@ Bootstrap, workflow effective capture and the delegation envelope SHALL use the 
 #### Scenario: Hookless surface is told a route it can take
 - **WHEN** bootstrap is served through a descriptor that excludes the agent-accessible operation
 - **THEN** the guidance names the custom-instructions route and does not name a command-line route
+
+#### Scenario: The activation block states the same permission as the envelope
+- **WHEN** an activation packet carries a `capture_policy` block, at any level, under an envelope override and under the unreadable-record floor
+- **THEN** the block's disposition equals the delegation envelope's proactive capture class in the same request scope
+- **AND** the block's `link_acceptance`, when it carries one, equals the delegation envelope's link acceptance class in the same request scope
 
 ### Requirement: Client context tunes eagerness only
 
