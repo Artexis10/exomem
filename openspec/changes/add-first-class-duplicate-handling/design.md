@@ -134,6 +134,7 @@ Adding a family, an import mapping or a back-reference uses a content-hash-guard
 | The index home is rejected by the single-store owner | The contract names no home. The index moves as one table. |
 | A recap revision silently changes what an old citation claims | Pinned revision files and the coverage reset (D13). A citation holds the text the page held when cited. |
 | The `ingested_into` reset makes older notes show as uncovered | The audit reports an uncovered Decided line as it does today. This is the honest state. It is a question to the owner. |
+| An origin binding names a folded recap revision | `recover_input` rebuilds the bytes from the head's history (A10). `prove_original` reports `unavailable` for that binding, because the revision's reference no longer resolves. Compensation restores it. A resolver fallback is follow-up work. |
 | The journal path of a trashed revision goes stale | Resume decides from the recorded trash identity. The trash move happens only after history read-back. |
 | Undo trashes history entries that a fold created | Compensation removes only the entries that the manifest names, and only while the revision file is restored. This conflicts with "kept without limit" in one case: an undone fold. It is a question to the owner. |
 | Adoption of a collection creates duplicate own-notes | Out of scope. One draft per collection path stays. The audit does not group notes. |
