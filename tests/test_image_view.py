@@ -107,10 +107,13 @@ def test_agent_compares_photos_in_one_call(served):
     before = _upload(client, "before.jpg", _photo(800, 600), "image/jpeg")
     after = _upload(client, "after.jpg", _photo(640, 480), "image/jpeg")
 
-    result = _call(mcp, {"kind": "image", "paths": [before, after], "max_side": 512})
+    result = _call(mcp, {"kind": "image", "paths": [before, after], "max_side": 256})
 
-    assert [item["file_name"] for item in result.structured_content["images"]] == ["before.jpg", "after.jpg"]
-    assert [item["shown_pixels"] for item in result.structured_content["images"]] == [[512, 384], [512, 384]]
+    images = result.structured_content["images"]
+    assert [item["file_name"] for item in images] == ["before.jpg", "after.jpg"]
+    assert [item["shown_pixels"] for item in images] == [[256, 192], [256, 192]]
+    # The JPEG decodes at a reduced scale; the reported original is still the stored size.
+    assert [item["original_pixels"] for item in images] == [[800, 600], [640, 480]]
     assert [block.type for block in result.content] == ["text", "image", "image"]
 
 

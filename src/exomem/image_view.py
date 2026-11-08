@@ -96,6 +96,8 @@ def _render(data: bytes, suffix: str, max_side: int) -> tuple[tuple[int, int], t
     from PIL import Image, ImageOps
 
     with image_codecs.open_image(io.BytesIO(data), suffix=suffix) as opened:
+        # The stored size, before a reduced-scale decode changes what `size` reports.
+        stored = opened.size
         # JPEG decodes directly at a reduced scale; other formats ignore the draft request.
         opened.draft("RGB", (max_side, max_side))
         # The header names the decode size. Check it before anything that loads pixels:
@@ -103,7 +105,7 @@ def _render(data: bytes, suffix: str, max_side: int) -> tuple[tuple[int, int], t
         if opened.size[0] * opened.size[1] > MAX_DECODE_PIXELS:
             raise _TooLarge
         exif = opened.getexif()
-        original = opened.size if exif.get(_ORIENTATION) not in _QUARTER_TURNS else opened.size[::-1]
+        original = stored if exif.get(_ORIENTATION) not in _QUARTER_TURNS else stored[::-1]
         taken_at = _taken_at(opened)
         image = ImageOps.exif_transpose(opened)
         # Pillow shrinks bilevel and palette images by nearest neighbour, which drops thin
