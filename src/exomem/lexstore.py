@@ -3146,6 +3146,12 @@ class _AdmittedStatisticsEntry:
 #: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
 #: no base, and its next build counts every page.
 _ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
+#: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
+#: each other's pages: each build subtracted the other set's terms and re-read its own texts, about 2.5 s of CPU a
+#: recall on a 13,000-page vault (measured 2026-11-08). A base built from another shares that base's page entries
+#: and its frequency mapping is its statistics entry's own, so an extra base costs about a dictionary slot a page.
+_ADMITTED_BASES_MAX = 4
 
 
 class _PageTerms(NamedTuple):
@@ -5016,9 +5022,9 @@ class LexicalStore:
         # unchanged. Each entry holds one vocabulary-sized mapping and the page
         # terms it was counted from.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
-        # scope -> the pages the latest admitted corpus of that scope was built from;
-        # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
-        self._admitted_bases: dict[str, _AdmittedBase] = {}
+        # (scope, admitted-set digest) -> the pages that admitted corpus was last built from, most recent
+        # last; see `_admitted_corpus` and `_ADMITTED_BASES_MAX`. Guarded by `_term_frequency_cache_lock`.
+        self._admitted_bases: OrderedDict[tuple[str, str], _AdmittedBase] = OrderedDict()
         # scope -> the public-instance parents the latest admitted unit corpus of that scope was built
         # from; see `_UnitBase`. Guarded by `_term_frequency_cache_lock`.
         self._unit_bases: dict[str, _UnitBase] = {}
@@ -10277,7 +10283,11 @@ class LexicalStore:
             else:
                 call_spans.measure(call_spans.STATS_REBUILT)
                 with self._term_frequency_cache_lock:
-                    base = self._admitted_bases.get(scope)
+                    # This admitted set's own base; a set seen first starts from the scope's latest base.
+                    base = self._admitted_bases.get((scope, digest)) or next(
+                        (kept for (kept_scope, _), kept in reversed(self._admitted_bases.items()) if kept_scope == scope),
+                        None,
+                    )
                 held = base.pages if base is not None else {}
                 # Only a page the base lacks, or holds under another identity, has its text read.
                 rows.update(self._stemmed_texts(conn, col, [
@@ -10286,10 +10296,11 @@ class LexicalStore:
                 ]))
                 statistics, postings, base = _admitted_corpus(rows, digests, base)
                 with self._term_frequency_cache_lock:
-                    if base is None:
-                        self._admitted_bases.pop(scope, None)
-                    else:
-                        self._admitted_bases[scope] = base
+                    self._admitted_bases.pop((scope, digest), None)
+                    if base is not None:
+                        self._admitted_bases[(scope, digest)] = base
+                        while len(self._admitted_bases) > _ADMITTED_BASES_MAX:
+                            self._admitted_bases.popitem(last=False)
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.
