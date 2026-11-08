@@ -4909,6 +4909,34 @@ class _CatchUpPlan:
     deleted: frozenset[str]
 
 
+#: Each full-text table holds one row per row of its parent table, under the parent's rowid. The catalogue DDL
+#: fixes these three tables, so a comparison that cannot join on rowid across databases reads them from here.
+FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "unit_fts": "semantic_units"}  # nosemgrep: ep-word-set -- Table names that the catalogue DDL fixes.
+
+
+def create_catalogue_schema(conn: sqlite3.Connection) -> None:
+    """Create the catalogue's tables, indexes, triggers and full-text tables on ``conn``.
+
+    This is the catalogue's own DDL for a database that is not its sidecar: store mode copies the
+    catalogue into the collection store through it (OpenSpec make-vault-store-canonical), so the
+    store's tables are the ones this module declares. It owns no transaction and stamps no schema version.
+    """
+    LexicalStore._create_catalog_tables(conn)
+    LexicalStore._create_catalog_indexes(conn)
+    LexicalStore._ensure_fts_schema(conn)
+
+
+def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
+    """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
+
+    ``conn`` already holds the schema that ``create_catalogue_schema`` made. Store mode compares what this
+    derives with the rows it copied in. It owns no transaction and stamps no meta row.
+    """
+    store = LexicalStore(vault_root)
+    members, signatures = store._walk_entries()
+    store._insert_members(conn, members, signatures)
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -5907,7 +5935,8 @@ class LexicalStore:
             return False
         return self._pages_has_current_columns(conn, raise_errors=raise_errors)
 
-    def _create_catalog_tables(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _create_catalog_tables(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages("
             " path TEXT PRIMARY KEY,"
@@ -5963,7 +5992,7 @@ class LexicalStore:
             "INSERT OR IGNORE INTO meta(key, value) "
             "VALUES('frequency_revision', hex(randomblob(16)))"
         )
-        self._create_frequency_revision_triggers(conn, "pages")
+        LexicalStore._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
             " record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),"
@@ -6004,24 +6033,25 @@ class LexicalStore:
             " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
-        self._create_frequency_revision_triggers(conn, "semantic_units")
+        LexicalStore._create_frequency_revision_triggers(conn, "semantic_units")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS unit_revisions("
             " parent_path TEXT PRIMARY KEY, revision TEXT NOT NULL)"
         )
-        self._create_unit_revision_triggers(
+        LexicalStore._create_unit_revision_triggers(
             conn, "semantic_units", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
             lambda row: f"{row}.parent_path",
         )
         # A summary written beside its page row changes how the parent's units read, so it counts as a unit write.
-        self._create_unit_revision_triggers(
+        LexicalStore._create_unit_revision_triggers(
             conn, "pages",
             (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
             lambda row: f"{row}.path",
         )
 
+    @staticmethod
     def _create_unit_revision_triggers(
-        self, conn: sqlite3.Connection, table: str, events: tuple[tuple[str, str], ...],
+        conn: sqlite3.Connection, table: str, events: tuple[tuple[str, str], ...],
         parent: Callable[[str], str],
     ) -> None:
         """Give a parent a fresh revision whenever a write changes what its units rank as.
@@ -6042,9 +6072,8 @@ class LexicalStore:
                 "WHERE path IS NOT NULL; END"
             )
 
-    def _create_frequency_revision_triggers(
-        self, conn: sqlite3.Connection, table: str
-    ) -> None:
+    @staticmethod
+    def _create_frequency_revision_triggers(conn: sqlite3.Connection, table: str) -> None:
         """Attest mutations from every connection in the writer's transaction.
 
         Random revisions separate independently built/replaced catalogues too.
@@ -6060,7 +6089,8 @@ class LexicalStore:
                 "WHERE key = 'frequency_revision'; END"
             )
 
-    def _create_catalog_indexes(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _create_catalog_indexes(conn: sqlite3.Connection) -> None:
         # Covering indexes so the per-corpus-change count/max reconcile stays
         # index-ranged instead of scanning 100k rows.
         conn.execute("CREATE INDEX IF NOT EXISTS pages_kb ON pages(in_kb, mtime_ns)")
@@ -6128,7 +6158,8 @@ class LexicalStore:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return bool(row and row[0] == str(SCHEMA_VERSION))
 
-    def _ensure_fts_schema(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         """Create the optional FTS5/trigram virtual tables when available.
 
         These back the BM25 (`fts`, `unit_fts`) and substring (`tri`) lanes
@@ -6142,7 +6173,7 @@ class LexicalStore:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
-            self._create_frequency_revision_triggers(conn, "fts_content")
+            LexicalStore._create_frequency_revision_triggers(conn, "fts_content")
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -6151,11 +6182,11 @@ class LexicalStore:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts "
                 f"USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
-            self._create_frequency_revision_triggers(conn, "unit_fts_content")
+            LexicalStore._create_frequency_revision_triggers(conn, "unit_fts_content")
             # The shadow row's id is the unit's rowid, whose parent the `semantic_units` row names. FTS5
             # writes an update as a delete and an insert; the UPDATE trigger, like the frequency one above,
             # covers a direct write to the shadow row.
-            self._create_unit_revision_triggers(
+            LexicalStore._create_unit_revision_triggers(
                 conn, "unit_fts_content", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
                 lambda row: f"(SELECT parent_path FROM semantic_units WHERE rowid = {row}.id)",
             )
@@ -6634,8 +6665,7 @@ class LexicalStore:
                 conn.execute("DELETE FROM unit_fts")
             # The deletes above left a revision for every parent they removed; the inserts below give each page its own.
             conn.execute("DELETE FROM unit_revisions")
-            for path, (in_kb, in_vault) in members.items():
-                self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+            self._insert_members(conn, members, signatures)
             self._stamp_whole_build(conn)
         self._witnessed.clear()
         self._term_frequency_cache = None
@@ -6651,6 +6681,11 @@ class LexicalStore:
             return
         for scope, target in targets.items():
             self._bless(conn, scope, target)
+
+    def _insert_members(self, conn: sqlite3.Connection, members, signatures) -> None:
+        """Insert a page row, with its full-text and unit rows, for each walked file (caller owns the txn)."""
+        for path, (in_kb, in_vault) in members.items():
+            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness
