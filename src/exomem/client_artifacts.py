@@ -1108,7 +1108,11 @@ def _existing_receipt(
         "destination": destination,
     }
     if any(receipt[field] != value for field, value in expected.items()):
-        raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for another identity")
+        raise _receipt_error(
+            "ADOPTION_KEY_REUSED",
+            "this adoption.key already names another file or destination; give this hand-over its own key, "
+            "such as the file name plus a version",
+        )
     _verify_canonical_artifact(vault_root, receipt)
     return snapshot
 
@@ -1211,6 +1215,8 @@ def _already_stored_outcome(
         **duplicate.receipt(
             size=artifact.size, content_type=_effective_content_type(artifact, lane=lane)
         ),
+        # A stored row names its page as `page`; the earlier copy's page answers the same question.
+        "page": duplicate.sidecar_path,
     }
 
 
@@ -1245,7 +1251,11 @@ def _assert_replay_identity(
         "media_id": f"sha256:{artifact.sha256}",
     }
     if any(receipt[field] != value for field, value in identity.items()):
-        raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for different bytes")
+        raise _receipt_error(
+            "ADOPTION_KEY_REUSED",
+            "this adoption.key already names other bytes; give this revision its own key, "
+            "such as the file name plus a version",
+        )
     _verify_canonical_artifact(vault_root, receipt)
     try:
         snapshot.page_guard.recheck(vault_root)
