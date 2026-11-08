@@ -315,21 +315,29 @@ def get_page(
 def approval_fields(vault_root: Path, result: GetResult, *, ref: str, full_release: bool) -> dict:
     """The approval verdict of the page just read, for this caller, as result fields.
 
-    `approval` is the one verdict of `procedure_approval`. The owner's read also carries `diagnostics` with
-    the findings of the ref's ledger; any other caller receives none. A page whose approval cannot be checked
-    reads `unapproved`: approval only ever adds an endorsement, and the page content stays readable.
-    `ref` is the reference index's ref for this path, which the index gives only to the single valid owner of
-    an id. So the page is its own holder, and the verdict needs no second index.
+    `approval` is the one verdict of `procedure_approval`, reported only when the ref's ledger holds an
+    entry of any class, or cannot be read. A page whose ref has none carries no field, so an ordinary note
+    gains nothing, and the absence reads `unapproved`. The owner's read also carries `diagnostics` with the
+    findings of the ref's ledger. Any other caller receives the field only as `approved`, so the field's
+    presence never separates a stale or revoked page from one nobody approved, and receives no finding.
+    A page whose approval cannot be checked reads `unapproved`: approval only ever adds an endorsement, and
+    the page content stays readable. `ref` is the reference index's ref for this path, which the index gives
+    only to the single valid owner of an id. So the page is its own holder, and the verdict needs no second index.
     """
+    owner = raw_protection.is_owner(principal.effective_principal())
     try:
+        ref_ledger = procedure_approval.ledger(vault_root, ref)
+        if not ref_ledger.held:
+            return {}
         outcome = procedure_approval.served_verdict(
-            vault_root, result.path, procedure_approval.ledger(vault_root, ref),
-            owner=raw_protection.is_owner(principal.effective_principal()), full_release=full_release,
+            vault_root, result.path, ref_ledger, owner=owner, full_release=full_release,
             read=lambda: result.content.encode("utf-8"), holders=lambda: (result.path,),
         )
     except Exception:  # noqa: BLE001 - an unchecked approval reads unapproved and never blocks the read
         log.warning("approval verdict unavailable for %s", result.path, exc_info=True)
-        return {"approval": procedure_approval.UNAPPROVED}
+        return {"approval": procedure_approval.UNAPPROVED} if owner else {}
+    if not owner and outcome.value != procedure_approval.APPROVED:
+        return {}
     fields: dict = {"approval": outcome.value}
     if outcome.findings:
         fields["diagnostics"] = {"approval_findings": [finding.row() for finding in outcome.findings]}

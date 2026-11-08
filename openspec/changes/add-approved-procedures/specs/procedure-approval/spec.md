@@ -110,12 +110,19 @@ A page that is not eligible, including a retired or superseded page, SHALL read 
 - the `procedure_approvals` kind of `read_review`, which is owner-only;
 - the `approve_procedure` result.
 
+The `read_memory` result SHALL carry `approval` only when the page's ref has at least one ledger entry, whatever its class or action. A page whose ref has none SHALL carry no `approval` field, and that absence SHALL read `unapproved`. The decision SHALL NOT read the page's note type.
+
 A ref that has an unreadable entry SHALL read `unapproved`, and the page content SHALL stay readable. An entry that is foreign or tampered SHALL be ignored for the verdict and SHALL raise a finding. Each finding names its ref and SHALL reach the owner only, in the `procedure_approvals` listing and in the owner's `read_memory` diagnostics. A caller that is not the owner SHALL receive `unapproved` and no finding. One ref's entries SHALL NOT change another ref's verdict.
 
 #### Scenario: Every surface agrees on one verdict
 - **WHEN** a page is approved and the owner reads it, activates a matching task and lists approvals with `read_review`
 - **THEN** the method item, the `read_memory` result and the `procedure_approvals` listing each report `approved` for the same version
 - **AND** after an edit, all three report `stale` to the owner
+
+#### Scenario: An ordinary note carries no approval field
+- **WHEN** a page whose ref has no ledger entry is read with `read_memory`
+- **THEN** the result carries no `approval` field
+- **AND** a page whose ref has a revoked, foreign or unreadable entry still carries it
 
 #### Scenario: Restricted readers see two states
 - **WHEN** a reader that is not the owner reads or activates a page whose approval is stale
