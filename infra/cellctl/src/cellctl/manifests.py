@@ -1711,8 +1711,10 @@ def render_export_job(spec: CellManifestSpec, item, step: str, *, deadline_secon
         pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
                             claim_name=staging, tolerate_cordon=spec.local_volume)
         container = pod["containers"][0]
-        container["command"] = _cell_command(command)
-        container["env"] = [*_init_env(spec), log_env, *_containment_env(spec)]
+        # Only the spool is mounted below /data, so the upload keeps its scratch in the pod's own /tmp.
+        container["command"] = _cell_command(command, scratch=False)
+        container["env"] = [*({**entry, "value": "/tmp"} if entry["name"] == "TMPDIR" else entry
+                              for entry in _init_env(spec)), log_env, *_containment_env(spec)]
         # Read-write, because the upload deletes each part that it sent.
         container["volumeMounts"] = [{"name": "data", "mountPath": f"/data/{SPOOL_SUBPATH}", "subPath": SPOOL_SUBPATH}
                                      if mount["name"] == "data" else mount for mount in container["volumeMounts"]]
