@@ -1822,7 +1822,14 @@ def _find_projected_hits_pinned(
                         if target in primary_set:
                             position += 1
                             continue
-                        tier = 1 if edge.relation_type == "links_to" else 0
+                        # A stored edge carries its canonical key and no parent, so only a core
+                        # plain link ranks last; an extension of one ranks typed (debt: the
+                        # producer would have to store the parent).
+                        tier = (
+                            1
+                            if "plain_link" in core_relations.behaviours_of(edge.relation_type)
+                            else 0
+                        )
                         current_tier = best_tier.get(target)
                         if current_tier is None or tier < current_tier:
                             best_tier[target] = tier

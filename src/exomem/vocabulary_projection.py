@@ -161,7 +161,8 @@ def _note_pairs(connection, path, known_types, after):
             "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
             "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_page_key "
             "WHERE e.source_path=? AND t.kind='file' "
-            f"AND exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) IN ('links_to', ?) "
+            f"AND (exomem_edge_behaves({epistemic_graph.EDGE_COLUMNS}, 'plain_link') = 1 "
+            f"OR exomem_edge_relation({epistemic_graph.EDGE_COLUMNS}) = ?) "
             f"AND t.page_type IN ({placeholders}) AND t.path {comparison} ? "
             "ORDER BY t.path LIMIT ?",
             (

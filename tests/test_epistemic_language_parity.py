@@ -763,10 +763,12 @@ def test_referent_resolution_ranks_a_plain_or_unregistered_edge_last(fixture_vau
 def test_projected_graph_lane_ranks_a_plain_link_below_a_typed_edge(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The projected lane tiers by relation key; stored edges carry no extension parent.
+    """The projected lane tiers by the `plain_link` behaviour of the stored key.
 
-    `links_to` is the only plain link. An unregistered relation key and an
-    extension of `links_to` both rank with the typed edges today.
+    A stored edge carries its canonical key and no extension parent, so only the core plain
+    link ranks last. An unregistered key and an extension of `links_to` both rank with the
+    typed edges, and intended change 6 does not reach this lane until the producer stores
+    the parent.
     """
     for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_CLIP", "EXOMEM_DISABLE_RANKING"):
         monkeypatch.delenv(name, raising=False)
@@ -822,7 +824,7 @@ def test_projected_graph_lane_ranks_a_plain_link_below_a_typed_edge(
     assert "b-supports" in typed  # CORE
     # CORE: unlike the referent tier, this lane keeps an unregistered key typed.
     assert "d-unregistered" in typed
-    assert "c-see-also" in typed  # FLIPS 6
+    assert "c-see-also" in typed  # CORE: no stored parent, so no plain link
 
 
 # ---------------------------------------------------------------------------
