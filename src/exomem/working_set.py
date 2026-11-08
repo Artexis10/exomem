@@ -1405,25 +1405,27 @@ def task_candidates(
     )
     from .governance import egress
 
-    page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-    entries = [entry for entry in catalogue.task_entries() if entry.path
-               and context_views._admits(entry, caller.visible)
-               and (page_visible is None or page_visible(entry.path))]
+    with find_types.timing_span(timings, "working_set.task_context_entries"):
+        page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+        entries = [entry for entry in catalogue.task_entries() if entry.path
+                   and context_views._admits(entry, caller.visible)
+                   and (page_visible is None or page_visible(entry.path))]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
     allowed = set(by_path)
-    fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
-    registry = context_roles.load_roles(vault_root)
-    categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
-    restricted = not context_task.full_source_access(vault_root, caller)
     token_corpus = None
     statistics = None
-    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+    with find_types.timing_span(timings, "working_set.task_context_policy"):
+        fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
+        registry = context_roles.load_roles(vault_root)
+        categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
+        restricted = not context_task.full_source_access(vault_root, caller)
+        metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
-        with find_types.timing_span(timings, "working_set.task_context.released_corpus"):
+        with find_types.timing_span(timings, "working_set.task_context_released_corpus"):
             projections = projections if projections is not None else {}
             token_corpus = {}
             corpus_bytes = 0
@@ -1465,7 +1467,7 @@ def task_candidates(
             continue
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
-            with find_types.timing_span(timings, "working_set.task_context.routing"):
+            with find_types.timing_span(timings, "working_set.task_context_routing"):
                 targets = _routing_targets(
                     vault_root, index_token[1], index_token=index_token,
                     visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
@@ -1487,7 +1489,7 @@ def task_candidates(
             for path, _score in hits[:limit]:
                 add(path, origin)
             continue
-        with find_types.timing_span(timings, "working_set.task_context.text"):
+        with find_types.timing_span(timings, "working_set.task_context_text"):
             result = lexstore.search_bm25_result(
                 vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
                 allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
@@ -1502,7 +1504,7 @@ def task_candidates(
         for path, _score in hits[:limit]:
             add(path, origin)
         if categories:
-            with find_types.timing_span(timings, "working_set.task_context.methods"):
+            with find_types.timing_span(timings, "working_set.task_context_methods"):
                 methods = lexstore.get_store(vault_root).search_semantic_units_result(
                     [], limit + 1, categories, (), "kb", fresh,
                     allowed_parent_paths=allowed,
@@ -1525,7 +1527,7 @@ def task_candidates(
         nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
         try:
             for path in list(found)[:MAX_ITEMS_PER_ROLE]:
-                with find_types.timing_span(timings, "working_set.task_context.graph"):
+                with find_types.timing_span(timings, "working_set.task_context_graph"):
                     graph = epistemic_graph.graph_context(
                         vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
                         traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
@@ -1546,7 +1548,7 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_failed"})
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
-    with find_types.timing_span(timings, "working_set.task_context.order"):
+    with find_types.timing_span(timings, "working_set.task_context_order"):
         ordered = list(found.values()) if restricted else [
             found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
         ]
