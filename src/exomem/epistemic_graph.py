@@ -10577,6 +10577,7 @@ def suggest_relations(
     """Return proposed relation candidates without mutating files or sidecars."""
     candidates: list[dict[str, Any]] = []
     warnings: list[str] = []
+    page = None
     # A draft has no page instance yet; its wikilink candidates read as core meanings.
     registry = relation_registry.core_registry()
     if path:
@@ -10624,16 +10625,44 @@ def suggest_relations(
     # A generic proposal between pages that a specific relation fits carries those relations,
     # so the agent chooses one instead of taking the generic as the answer.
     fit = relation_queue.RelationFit(vault_root)
+    proposed = _dedupe_candidates(candidates)[: max(0, limit)]
+    # A candidate the relation queue holds open carries the fields that accept it, so the agent
+    # needs no queue read first. The others carry none, and a failed lookup says so.
+    reviews: dict[str, dict[str, str]] = {}
+    if page is not None and proposed:
+        try:
+            reviews, unsettled = relation_queue.open_reviews(
+                vault_root,
+                rel,
+                identities={relation_queue.candidate_identity(c) for c in proposed},
+            )
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            # The class name stands for the cause: an OS or database message can carry a path.
+            warnings.append(
+                "relation review fields unavailable: the relation queue could not be read "
+                f"for this page ({type(exc).__name__})"
+            )
+        else:
+            if unsettled:
+                warnings.append(
+                    f"relation review fields unavailable for {len(unsettled)} candidate(s): "
+                    "the relation queue could not confirm them"
+                )
     shown = []
-    for candidate in _dedupe_candidates(candidates)[: max(0, limit)]:
+    for candidate in proposed:
         options = fit.options(candidate)
-        labelled = {
+        entry = {
             **candidate,
             "relation_label": relation_registry.spelling_label(
                 registry, str(candidate.get("relation_type") or "")
             ),
         }
-        shown.append({**labelled, "options": options} if options else labelled)
+        if options:
+            entry["options"] = options
+        review = reviews.get(relation_queue.candidate_identity(candidate))
+        if review is not None:
+            entry["review"] = review
+        shown.append(entry)
     return {
         "candidates": shown,
         "warnings": warnings,
