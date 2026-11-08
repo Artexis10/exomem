@@ -68,7 +68,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     ]
     for rel, sha256 in conn.execute("SELECT path, sha256 FROM store_pages ORDER BY path"):
         try:
-            on_disk = vault.read_bytes_without_pinning(vault_root / rel)
+            on_disk = vault.read_disk_bytes_without_pinning(vault_root / rel)
         except FileNotFoundError:
             found.deleted.append(rel)
             continue
@@ -249,7 +249,7 @@ def _export(
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
     beside: dict[str, bytes] = {}
     for rel in found.edited:
-        on_disk = vault.read_bytes_without_pinning(root / rel)
+        on_disk = vault.read_disk_bytes_without_pinning(root / rel)
         if rel not in kept:
             kept[rel] = on_disk
         elif kept[rel] != on_disk:

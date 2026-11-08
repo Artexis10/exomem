@@ -55,8 +55,8 @@ def test_wikilink_resolver_from_entries_matches_disk_resolution(tmp_path: Path) 
 def test_a_title_key_from_a_pages_bytes_equals_the_key_that_a_disk_resolver_reads(
     tmp_path: Path,
 ) -> None:
-    """Defect: store mode resolves wikilinks from stored bytes, so a different title key than the file
-    read gives sends one link to two pages (a CRLF page, a page whose title is its filename)."""
+    """Defect: store mode resolves wikilinks from stored bytes, so a different title key than the
+    file read gives sends one link to two pages (a CRLF page, a page whose title is its filename)."""
     pages = {
         "Knowledge Base/Notes/titled.md": b"---\ntitle: Real Title\n---\n# Heading\n",
         "Knowledge Base/Notes/crlf.md": b"---\r\ntitle: Windows Title\r\n---\r\n# Heading\r\n",
@@ -73,9 +73,8 @@ def test_a_title_key_from_a_pages_bytes_equals_the_key_that_a_disk_resolver_read
     assert {rel: vault.title_key_from_bytes(raw, rel) for rel, raw in pages.items()} == {
         rel: resolver.title_key_for_path(rel) for rel in pages
     }
-    assert vault.title_key_from_bytes(pages["Knowledge Base/Notes/just_the_name.md"], "just_the_name.md") == (
-        "just the name"
-    )
+    just_the_name = pages["Knowledge Base/Notes/just_the_name.md"]
+    assert vault.title_key_from_bytes(just_the_name, "just_the_name.md") == "just the name"
 
 
 def test_wikilink_resolver_from_entries_performs_no_io(tmp_path: Path, monkeypatch) -> None:

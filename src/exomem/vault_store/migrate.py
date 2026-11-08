@@ -71,7 +71,7 @@ def snapshot(
     for owned in ownership.iter_owned(vault_root, on_skip=on_skip):
         path = Path(vault_root) / owned.rel
         if owned.ownership is ownership.Ownership.PAGE:
-            body = vault.read_bytes_without_pinning(path)
+            body = vault.read_disk_bytes_without_pinning(path)
             digest = hashlib.sha256(body).hexdigest()
         else:
             body = None

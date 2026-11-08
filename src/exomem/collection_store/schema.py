@@ -1045,11 +1045,12 @@ _TRIGGERS_V15 = _append_only_triggers("store_audit")
 def _migrate_to_16(conn: sqlite3.Connection) -> None:
     """Give the store-mode read path what it needs: a page mtime and two covering indexes.
 
-    ``store_pages.mtime_ns`` is the modification time of the projected file, so a page read answers the
-    same stat as a file read. It starts from the projection manifest's value. ``store_pages_meta`` lets a
-    metadata read (path, revision, hash, size, mtime, frontmatter) skip the page body, and
-    ``store_audit_by_path`` lets an audit read by path skip the whole trail. Nothing here changes a row's
-    meaning, so every vault keeps its data and every older reader of the tables keeps working.
+    ``store_pages.mtime_ns`` is the modification time of the projected file, so a page read answers
+    the same stat as a file read. It starts from the projection manifest's value.
+    ``store_pages_meta`` lets a metadata read (path, revision, hash, size, mtime, frontmatter) skip
+    the page body, and ``store_audit_by_path`` lets an audit read by path skip the whole trail.
+    Nothing here changes a row's meaning, so every vault keeps its data and every older reader of
+    the tables keeps working.
     """
     conn.execute("ALTER TABLE store_pages ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
     conn.execute(
