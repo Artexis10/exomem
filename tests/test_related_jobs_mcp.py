@@ -140,8 +140,9 @@ def test_import_run_remains_readable_through_the_deprecated_spelling(build, seam
 def test_video_variant_retains_native_image_content(build, monkeypatch):
     native = ImageContent(type="image", data="aW1hZ2U=", mimeType="image/png")
 
-    def video(vault_root, path: str, max_frames: int = 8, start_sec: float | None = None,
-              end_sec: float | None = None) -> ToolResult:
+    def video(vault_root, path: str | None = None, media: str = "video", paths: list[str] | None = None,
+              max_frames: int = 8, start_sec: float | None = None, end_sec: float | None = None,
+              max_side: int | None = None) -> ToolResult:
         return ToolResult(content=[native])
 
     monkeypatch.setattr(commands, "PRODUCT_COMMANDS", tuple(

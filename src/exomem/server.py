@@ -1385,6 +1385,10 @@ def run(
         if worker_socket is not None:
             uvicorn_config["uds"] = str(worker_socket)
         worker_options = {"uvicorn_config": uvicorn_config}
+        # Only this process answers /download, so only the short links it mints can resolve.
+        from . import download_links
+
+        download_links.serve()
         mcp.run(
             transport=transport,
             host=host,

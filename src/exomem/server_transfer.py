@@ -34,6 +34,7 @@ from . import (
     artifact_recovery,
     auth_sessions,
     cf_access,
+    download_links,
     local_ingress,
     media_store,
     originals,
@@ -623,7 +624,8 @@ class _OriginalDownloadResponse(Response):
     def __init__(self, vault_root: Path, capability: str):
         super().__init__(headers=_RECOVERY_HEADERS)
         self.vault_root = vault_root
-        self.capability = capability
+        # A short link id names its grant; an unknown or expired id claims nothing.
+        self.capability = download_links.expand(capability) or ""
 
     async def __call__(self, scope, receive, send):
         started = False
@@ -1446,7 +1448,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             if len(grants) != 1 or "path" in request.query_params:
                 return JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "original recovery is unavailable"},
                     status_code=404, headers=_RECOVERY_HEADERS)
-            return _OriginalDownloadResponse(vault_root, grants[0])
+            grant = download_links.expand(grants[0])
+            if grant is None:
+                return JSONResponse({"code": "DOWNLOAD_LINK_EXPIRED",
+                    "reason": "this download link has expired or the server restarted; ask the agent for a fresh link"},
+                    status_code=404, headers=_RECOVERY_HEADERS)
+            return _OriginalDownloadResponse(vault_root, grant)
         response = await _download_legacy(request)
         for key, value in _RECOVERY_HEADERS.items():
             response.headers[key] = value
