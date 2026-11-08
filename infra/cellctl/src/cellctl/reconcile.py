@@ -96,6 +96,7 @@ from .manifests import (
 )
 from .media_edge import (
     ActiveSet,
+    EdgeEvidence,
     MediaEdgeConfig,
     mint_bundle,
     open_bundle,
@@ -106,6 +107,7 @@ from .media_edge import (
     unwrap_bundle,
     wrap_bundle,
 )
+from .media_meter import UNKNOWN, PhysicalFigure, meter_prefix, over_allowance
 from .rollout import (
     current_image,
     initial_image,
@@ -281,9 +283,19 @@ class LoopMemory:
     # A volume confirmed absent stays absent: its id is never reused.
     volumes_absent: set[str] = field(default_factory=set)
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
-    # add-cloud-media-store D6: the newest active set generation the edge reported as loaded and
-    # drained. A restart forgets it and asks the edge again; it is never assumed.
-    media_edge_confirmed_generation: int = 0
+    # add-cloud-media-store D6: the generation and digest of the active set the edge reported as
+    # loaded and drained, exactly. A restart forgets it and asks the edge again; it is never assumed.
+    media_edge_confirmed: tuple[int, str] | None = None
+    # The generation of a set the edge loaded that cellctl did not publish. The edge refuses a
+    # generation at or below its own, so the next plan rises past it.
+    media_edge_foreign: int = 0
+    # D10: each metered cell's physical figure from its latest listing (UNKNOWN when it failed), the
+    # `last_backup_at` it was listed for (once per backup hold), when a failed listing may be retried, and
+    # how many listings in a row failed. A restart forgets all four and lists each cell once more.
+    media_physical: dict[str, PhysicalFigure] = field(default_factory=dict)
+    media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
+    media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
+    media_meter_failures: dict[str, int] = field(default_factory=dict)
     # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
     # process fills it from every deleted row, so a restart never loses the alert; the receiver
     # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
@@ -638,7 +650,7 @@ class ClusterGateway:
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
-    def media_edge_generation(self, url: str) -> int: ...  # pragma: no cover
+    def media_edge_evidence(self, url: str) -> EdgeEvidence: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -1192,9 +1204,9 @@ def _log_orphan_namespaces(cluster: ClusterGateway, rows: list[CellRow], now: da
 # egress and active-set entry, with offload off, until it drains. Retained: its store identity alone.
 MEDIA_SERVED, MEDIA_DRAINING, MEDIA_RETAINED = "served", "draining", "retained"
 MEDIA_KEYED = (MEDIA_SERVED, MEDIA_DRAINING)
-# D12: the custody observation's key for a turned-off store's record. Substrate has no column for it,
-# and a new one needs a Substrate migration; the observation is cellctl's to write (simplest choice).
-MEDIA_STORE_RECORD = "media_store"
+# D9, D12: a turned-off store's record and a deleted cell's revocation share one custody key, which
+# db.retire_content_keys also writes.
+MEDIA_STORE_RECORD = db.MEDIA_STORE_RECORD
 
 
 def _media_store_of(row: CellRow) -> object:
@@ -1252,6 +1264,29 @@ def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: Med
             "captured_at": census.captured_at.isoformat()}
 
 
+def _media_revocation(
+    cluster_config: ClusterConfig, row: CellRow, active: ActiveSet | None, memory: LoopMemory, now: datetime,
+) -> tuple[bool, dict | None]:
+    """D9: whether a deleted cell still waits for the edge to show a set without it, and the `media_store`
+    record to write. cellctl deletes nothing in the media bucket; the operator's clean-up does, after its grace.
+
+    A cell waits while its `media_store` record holds no `revoked_generation`. The record exists for every
+    cell the edge may admit: a turned-off store writes it, and the statement that retires a deleted cell's
+    media bundle adds `revoke_requested_at` before the pass publishes a set without the cell
+    (db.retire_content_keys). The wait ends when the edge is confirmed to serve the exact published set and
+    that set omits the cell; the record keeps what was observed."""
+    if cluster_config.media_edge is None:
+        return False, None
+    record = _media_store_of(row)
+    if not isinstance(record, dict) or not record or "revoked_generation" in record:
+        return False, None
+    if (active is not None and row.cell_id not in active.cells
+            and memory.media_edge_confirmed == (active.generation, active.sha256())):
+        return False, {**record, "revoked_generation": active.generation, "set_sha256": active.sha256(),
+                       "observed_at": now.isoformat()}
+    return True, None
+
+
 def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
     """The credential version the edge admits for this cell; None when the cell holds no credential."""
     if active is None or _media_mode(cluster_config, row) not in MEDIA_KEYED:
@@ -1259,16 +1294,25 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
     return active.cells.get(row.cell_id)
 
 
-def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], now: datetime) -> ActiveSet | None:
+def _publish_media_edge_set(
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory
+) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is
-    to load, or None when the cluster would not say, in which case no keyed cell renders this pass.
-    An unchanged set writes nothing."""
+    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is to
+    load, or None when the cluster would not say, in which case no keyed cell renders this pass. An
+    unchanged set writes nothing."""
     try:
         current = cluster.read_media_edge_active_set()
         published = read_active_set(current)
-        planned = plan_active_set(published, cells, int(now.timestamp() * 1000))
+        if published.generation == 0:
+            # No readable published set: whatever the edge loaded is not ours, and a clock that went
+            # back would plan a generation the edge refuses. An unreadable edge leaves the clock to plan.
+            try:
+                memory.media_edge_foreign = max(memory.media_edge_foreign, cluster.media_edge_evidence(edge.url).loaded)
+            except Exception as error:  # noqa: BLE001 - the edge may be away; the settled check learns it later
+                logger.warning("cellctl could not seed the media edge generation: %s", _describe_error(error))
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign)
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
@@ -1303,23 +1347,27 @@ def _label_media_edge_namespaces(
 def _media_edge_settled(
     cluster: ClusterGateway, edge: MediaEdgeConfig, active: ActiveSet | None, memory: LoopMemory
 ) -> bool:
-    """Whether the edge has loaded the published set and drained every request of the one before.
+    """Whether the edge serves exactly the published set and has drained every request of the one before.
 
-    A revocation is done only when the edge says so. An edge that is down, behind or unreadable is
-    unsettled, and no failure counts as confirmation."""
+    A revocation is done only when the edge says so, and only about this set: a higher generation, another
+    digest or another bucket confirms nothing. An edge that is down, behind or unreadable is unsettled,
+    and no failure counts as confirmation."""
     if active is None:
         return False
-    if active.generation <= memory.media_edge_confirmed_generation:
+    if memory.media_edge_confirmed == (active.generation, active.sha256()):
         return True
     try:
-        reported = cluster.media_edge_generation(edge.url)
+        evidence = cluster.media_edge_evidence(edge.url)
     except Exception as error:  # noqa: BLE001 - unreadable is unsettled, not confirmed
         logger.error("cellctl could not read the media edge generation: %s", _describe_error(error))
         return False
-    if reported < active.generation:
-        return False
-    memory.media_edge_confirmed_generation = active.generation
-    return True
+    if evidence.matches(active, edge.bucket):
+        memory.media_edge_confirmed = (active.generation, active.sha256())
+        return True
+    if evidence.loaded >= active.generation and (evidence.loaded, evidence.set_sha256) != (active.generation, active.sha256()):
+        # The edge holds a set cellctl did not publish and will not take ours at this generation.
+        memory.media_edge_foreign = max(memory.media_edge_foreign, evidence.loaded)
+    return False
 
 
 async def reconcile_once(
@@ -1333,8 +1381,10 @@ async def reconcile_once(
     now: datetime | None = None,
     memory: LoopMemory | None = None,
     backup_listing=None,
+    media_listing=None,
 ) -> bool:
-    """One pass. `backup_listing` only lists a new cell's locked backups. Returns whether the next one
+    """One pass. `backup_listing` only lists a new cell's locked backups, and `media_listing` only the media
+    bucket's prefixes for the physical meter. Returns whether the next one
     is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
@@ -1390,9 +1440,9 @@ async def reconcile_once(
     media_unsettled = False
     if cluster_config.media_edge is not None:
         # D12: a draining cell keeps its entry although the edge no longer selects it.
-        media_active = _publish_media_edge_set(cluster, {
+        media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
-            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now)
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory)
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -1544,6 +1594,7 @@ async def reconcile_once(
             fast = True
 
     await _cleanup_alerts(cluster, cluster_config, memory, now)
+    await _media_physical_meter(cluster, cluster_config, rows, memory, media_listing, now)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1670,6 +1721,79 @@ async def _cleanup_alerts(
         # Without a delivery Secret the log line is the only notice, as for the other alerts.
         if memory.alert_delivered.get(alert) or cluster_config.alert_delivery_secret is None:
             memory.cleanup_pending.discard(cell_id)
+
+
+# A failed listing is tried again after this long: the meter is a report, and a provider outage
+# must not turn it into a listing on every pass.
+MEDIA_METER_RETRY = timedelta(minutes=5)
+# Failed listings in a row before the unknown-figure alert fires. Three, five minutes apart, outlast a
+# provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
+# switch off the hide and over-allowance alerts with no notice.
+MEDIA_METER_UNKNOWN_AFTER = 3
+
+
+async def _media_physical_meter(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, rows: list[CellRow], memory: LoopMemory,
+    listing, now: datetime,
+) -> None:
+    """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
+    shows. A hide marker alerts at once: the edge sends no hide request, so the edge key or another key hid
+    a name. So does a prefix above the cell's allowance times the configured headroom. An unknown figure
+    changes neither alert, since it is neither within the allowance nor clean, and a figure that stays
+    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. Without the list key each try counts
+    as a failed listing, since a missing key switches off both abuse alerts as a revoked one does. The figure
+    is the operator's; the owner's meter and the cell's record stay as they are."""
+    edge = cluster_config.media_edge
+    if edge is None:
+        return
+    metered = {row.cell_id for row in rows if _media_mode(cluster_config, row) is not None}
+    for row in rows:
+        if row.cell_id not in metered:
+            continue
+        retry_at = memory.media_meter_retry_at.get(row.cell_id)
+        listed_for_this_backup = (row.cell_id in memory.media_metered_for
+                                  and memory.media_metered_for[row.cell_id] == row.last_backup_at)
+        if listed_for_this_backup or (retry_at is not None and now < retry_at):
+            continue
+        # main.py logged the missing key once at startup, so this try adds no log line of its own.
+        figure = UNKNOWN if listing is None else await asyncio.to_thread(meter_prefix, listing, row.cell_id)
+        memory.media_physical[row.cell_id] = figure
+        if figure is UNKNOWN:
+            memory.media_meter_failures[row.cell_id] = memory.media_meter_failures.get(row.cell_id, 0) + 1
+            memory.media_meter_retry_at[row.cell_id] = now + MEDIA_METER_RETRY
+            # One failed listing ends the pass's metering: a provider that is down would otherwise cost
+            # one timeout per cell before this pass reconciles anything else.
+            break
+        memory.media_meter_retry_at.pop(row.cell_id, None)
+        memory.media_meter_failures.pop(row.cell_id, None)
+        memory.media_metered_for[row.cell_id] = row.last_backup_at
+        # Without a delivery Secret the log line is the only notice, so a hide entry logs as a warning.
+        logger.log(logging.WARNING if figure.hides else logging.INFO,
+                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s) and %d hide marker(s) in the bucket",
+                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes,
+                   figure.unfinished, figure.hides)
+    allowance = edge.store_policy.get("allowance_bytes")
+    for cell_id, figure in list(memory.media_physical.items()):
+        hide_alert, over_alert, unknown_alert = alerts.media_alerts(cell_id)
+        if cell_id not in metered:
+            # A cell that left the store (deleted) forgets its figure, and its allowance and unknown-figure
+            # alerts resolve. A hide alert stays: only a listing that shows no hide entry resolves it, and
+            # this cell is listed no more.
+            for alert in (over_alert, unknown_alert):
+                if memory.alert_delivered.get(alert):
+                    await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
+            del memory.media_physical[cell_id]
+            memory.media_metered_for.pop(cell_id, None)
+            memory.media_meter_retry_at.pop(cell_id, None)
+            memory.media_meter_failures.pop(cell_id, None)
+            continue
+        exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
+        stays_unknown = memory.media_meter_failures.get(cell_id, 0) >= MEDIA_METER_UNKNOWN_AFTER
+        for alert, firing in ((hide_alert, None if figure.hides is None else figure.hides > 0),
+                              (over_alert, exceeds), (unknown_alert, stays_unknown)):
+            # None is unknown: send nothing. A cell that never alerted needs no resolution either.
+            if firing or (firing is False and memory.alert_delivered.get(alert)):
+                await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
 
 
 async def _growth_alert(
@@ -2291,6 +2415,15 @@ async def _reconcile_row(
             observation, row, cluster, volume_provider, now, memory, storage=cluster_config.storage,
             backup_listing=backup_listing, staging=lambda: _staged_objects(cluster_config, secrets_config),
         )
+        revocation_pending, revocation = _media_revocation(cluster_config, row, media_active, memory, now)
+        if revocation is not None and revocation != _media_store_of(row):
+            custody = json.loads(row.custody_observation or "{}")
+            custody = custody if isinstance(custody, dict) else {}
+            custody[MEDIA_STORE_RECORD] = revocation
+            recorded = {"custody_observation": json.dumps(custody, sort_keys=True)}
+            await db.write_observed(connection, row.cell_id, recorded)
+            row = dataclass_replace(row, **recorded)
+        observation = dataclass_replace(observation, media_revocation_pending=revocation_pending)
         # Namespace, volume and staging absence bound every live content copy before expiry starts. A
         # cell's backup files are ciphertext that cellctl does not prove absent: a new cell's sit under a lock
         # nothing deletes, and the operator's clean-up empties an old cell's prefix. The object-version window

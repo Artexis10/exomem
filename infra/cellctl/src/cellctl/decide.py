@@ -1381,6 +1381,10 @@ def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:
     # staging key empties. Deleting a cell removes all of its data, so this comes first (D9).
     if not observation.staging_objects_absent_confirmed:
         return Decision(delete_staging_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
+    # The edge must first be shown to serve a set without the cell, so no upload lands after the operator
+    # starts the media clean-up. This only orders the alert; the clean-up's own grace authorizes the delete.
+    if observation.media_revocation_pending:
+        return Decision(row_updates={**hold_clear, "observed_state": "deleting"})
     # No backup object is deleted here, and no key: a new cell's bucket is locked, and the operator's
     # clean-up empties an old cell's prefix in the old bucket and deletes its key (D9).
     return Decision(
