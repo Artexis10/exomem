@@ -52,7 +52,7 @@ A Cloud export SHALL run in three steps: a pause, a pack and an upload. The paus
 
 The pack SHALL fetch each evicted original by its version ID through the media edge, decrypt it, and verify its size and SHA-256 against the plan before the archive completes. The pack SHALL have no public egress. It SHALL reach only the in-cluster peers that the cell's runtime reaches, the media edge among them, and the media edge SHALL admit no other export step. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch, an absent version or an unreadable object SHALL fail the export without publishing it as complete.
 
-An export SHALL NOT omit a file without saying so. Originals under Trash SHALL be members like live ones. A companion that the pause cannot read SHALL be copied as a member, and the export SHALL report the count of such companions as partial. An evicted original that the cell cannot reach SHALL fail the export with a named code.
+An export SHALL NOT omit a file without saying so. Originals under Trash SHALL be members like live ones. A companion that the pause cannot read SHALL be copied as a member. For an original behind such a companion whose bytes are not on the volume, the pause SHALL plan the version that the media ledger's evicted row holds, and a row that holds no readable version SHALL fail the export with a named code. An evicted original that the cell cannot reach SHALL fail the export with a named code. Two cases are accepted gaps: an unreadable companion under Trash over an evicted original, whose ledger row names the path before the deletion, and an original whose ledger row a restore did not bring back.
 
 The pause SHALL have its own deadline: its pod runs within 2 minutes, and then copies at least a configured floor rate. On a miss the export SHALL fail and release the hold, without retrying. The archive's limits, parts and deadline SHALL follow the planned archive bytes, not the cell size.
 
@@ -83,8 +83,8 @@ The pause SHALL have its own deadline: its pod runs within 2 minutes, and then c
 
 #### Scenario: A companion cannot be read
 
-- **WHEN** the pause meets a companion that it cannot parse
-- **THEN** the companion is in the archive and the export reports itself as partial with one unreadable companion
+- **WHEN** the pause meets a companion that it cannot parse, and the companion's original is evicted
+- **THEN** the companion is in the archive, and the archive holds the original byte-identical from the version that the media ledger's row holds
 
 #### Scenario: A retained store holds an evicted original
 
