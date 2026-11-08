@@ -160,11 +160,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="exomem cell-media-manifest")
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     args = parser.parse_args(argv)
+    status = 0
     try:
         manifest: Manifest | None = build(args.vault)
     except ManifestUnknown as unknown:
         print(f"the media manifest is unknown: {unknown}", file=sys.stderr)
         manifest = None
+    except Exception as error:  # noqa: BLE001 -- any fault still writes the unknown manifest, never an empty file
+        print(f"the media manifest is unknown: the census failed with {type(error).__name__}", file=sys.stderr)
+        manifest, status = None, 1
     sys.stdout.buffer.write(render(manifest))
     sys.stdout.buffer.flush()
-    return 0
+    return status
