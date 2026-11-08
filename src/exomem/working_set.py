@@ -1500,13 +1500,14 @@ def task_candidates(
                 exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
             )
         if not result.readiness.complete:
+            # A lexical index still catching up after a cutover or a write must not also silence the dense reading.
             missing.append({"role": "task_context", "reason": "lane_failed"})
-            continue
-        hits = result.value or []
-        if len(hits) > limit:
-            missing.append({"role": "task_context", "reason": "lane_truncated"})
-        for path, _score in hits[:limit]:
-            add(path, origin)
+        else:
+            hits = result.value or []
+            if len(hits) > limit:
+                missing.append({"role": "task_context", "reason": "lane_truncated"})
+            for path, _score in hits[:limit]:
+                add(path, origin)
         if budget_exhausted("working_set.task_context_vector"):
             missing.append({"role": "task_context", "reason": "budget"})
             break

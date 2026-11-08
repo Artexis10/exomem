@@ -60,6 +60,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **THEN** discovery ranks admitted pages by the dense reading of the resident recall matrix as well as by keyword, and supplies the page
 - **AND** a page enters through the dense reading only when one of its chunks clears the corpus-relative chance band over the admitted rows, so an unrelated turn gains no dense candidate
 - **AND** the dense reading never loads a model or a matrix on the request; while a service cannot run it (warming, or a matrix evicted after an idle gap, whose background reload the request starts), the keyword result stands and task context reports `partial`
+- **AND** while the keyword index lags behind the corpus, the dense reading still runs and its pages stand, and task context reports `partial`
 
 #### Scenario: A late deadline keeps what was found
 
