@@ -16,7 +16,6 @@ the menu is built from the writer's own page and the pages the writer may see.
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,16 +138,9 @@ def evaluate(
         prior_facts=prior_facts,
         current_facts=current,
     )
-    new_facts = [edge.fact for edge in added.edges]
-    # The census proves identity only for stable endpoints, so a relation inside a unit with no
-    # anchor is left out of its edges. Such a fact is new unless the page it replaces wrote it.
-    written_before = Counter(relation_census.fact_operand(fact) for fact in prior_facts)
-    for fact in added.unproven:
-        key = relation_census.fact_operand(fact)
-        if written_before[key]:
-            written_before[key] -= 1
-        else:
-            new_facts.append(fact)
+    # The census proves most new edges by stable identity; a relation inside a unit with no
+    # anchor it can only judge by what was written, and returns apart as `unproven`.
+    new_facts = [edge.fact for edge in added.edges] + list(added.unproven)
     # One answer settles every identical bullet, so the writer hears of each relation and target once.
     refused: dict[tuple[str, str], semantic_contract.RelationFact] = {}
     for fact in new_facts:

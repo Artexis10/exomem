@@ -231,6 +231,44 @@ def test_an_edit_that_leaves_a_legacy_generic_edge_untouched_commits(
     assert f"- relates_to [[{anchor}]]" in _page(vault, page)
 
 
+def test_an_edit_that_leaves_a_legacy_generic_unit_relation_untouched_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A unit-level generic relation from before the barrier must not lock the page."""
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    created = call(
+        "create_note",
+        {
+            "title": "Crane",
+            "note_type": "insight",
+            "content": (
+                "## Observations\n\n- [fact] Crane was settled.\n\n"
+                f"## Finding\n- relations: supports: [[{anchor}]]\n\nCrane lifts the load.\n"
+            ),
+            "sources": [_source(call, "Crane")],
+        },
+    )
+    page = created["path"]
+    legacy = _page(vault, page).replace(f"supports: [[{anchor}]]", f"relates_to: [[{anchor}]]")
+    (vault / page).write_text(legacy, encoding="utf-8")
+
+    edited = call(
+        "edit_note",
+        {
+            "path": page,
+            "why": "fix the wording",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Crane lifts the load.",
+                "new_string": "Crane lifts the whole load.",
+            },
+        },
+    )
+
+    assert edited["state"] == "committed", edited
+    assert f"relates_to: [[{anchor}]]" in _page(vault, page)
+
+
 def test_a_page_that_is_not_live_and_an_adoption_import_are_never_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
