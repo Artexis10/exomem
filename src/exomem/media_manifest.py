@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -19,8 +20,10 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_allowance, originals
+from . import originals, runtime_resources
+from .kbdir import kb_dirname
 from .media_jobs import job_store_path
+from .vault import parse_frontmatter, read_frontmatter_header
 
 VERSION = 1
 # The format's closed census values: only a complete census may release a name or decide its reach.
@@ -103,22 +106,54 @@ def _ledger(path: Path) -> tuple[frozenset[str], frozenset[str]]:
     return protected, released
 
 
+def _references(vault: Path) -> frozenset[tuple[str, str]]:
+    """Every stored reference that a companion under the Knowledge Base holds, Trash included.
+
+    The live census walks the held tree, which takes the writer lease and probes its root by writing to it. The
+    Job's clone is read-only and no other process writes it, so this walk reads the tree directly and follows no
+    link. It keeps a reference that the live walk would refuse as misplaced: a name kept is never a name lost.
+    """
+    references: set[tuple[str, str]] = set()
+    failed = 0
+    pending = [vault / kb_dirname()]
+    while pending:
+        try:
+            with os.scandir(pending.pop()) as listing:
+                entries = list(listing)
+        except OSError:
+            failed += 1
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                    continue
+                # Markdown is the companion's fixed vault format.
+                if not entry.is_file(follow_symlinks=False) or not entry.name.casefold().endswith(".md"):
+                    continue
+                with open(entry.path, "rb") as stream:
+                    header = read_frontmatter_header(stream, runtime_resources.SEMANTIC_SOURCE_MAX_BYTES)
+                fields = parse_frontmatter(header.decode("utf-8"), custody=True)[0]
+            except (OSError, ValueError):
+                failed += 1
+                continue
+            if "stored_object" in fields:
+                reference = originals.stored_reference(fields["stored_object"])
+                if reference is None:
+                    failed += 1
+                else:
+                    references.add((reference.object, reference.version))
+    if failed:  # A count only: the Job's log is no place for the owner's paths.
+        raise ManifestUnknown(f"{failed} companions could not be read")
+    return frozenset(references)
+
+
 def build(vault: Path) -> Manifest:
     """Read the vault's references to every store and its ledger. Raises `ManifestUnknown` when a read fails."""
     vault = Path(vault)
-    references: set[tuple[str, str]] = set()
-    unreadable: list[str] = []
-    try:
-        # Every store, not only the selected one: listing more references only protects more names.
-        for _path, _binary, reference in media_allowance.bound_references(
-                vault, None, unreadable=lambda path, _error: unreadable.append(path)):
-            references.add((reference.object, reference.version))
-    except media_allowance.UNREADABLE as error:
-        raise ManifestUnknown(f"the Knowledge Base walk failed: {type(error).__name__}") from error
-    if unreadable:  # A count only: the Job's log is no place for the owner's paths.
-        raise ManifestUnknown(f"{len(unreadable)} companions could not be read")
+    references = _references(vault)
     protected, released = _ledger(job_store_path(vault))
-    return Manifest(frozenset(references), protected, released)
+    return Manifest(references, protected, released)
 
 
 def main(argv: list[str] | None = None) -> int:

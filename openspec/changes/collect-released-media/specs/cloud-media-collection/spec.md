@@ -108,7 +108,7 @@ The cell SHALL keep an append-only release ledger. Before any reference to a sto
 
 ### Requirement: Each backup carries a media manifest
 
-Each backup snapshot SHALL contain a media manifest inside the restic snapshot. The cell password SHALL encrypt it, so that prune removes the manifest with its snapshot. The backup SHALL compute the manifest from the clone that it backs up, with the strict census of `add-cloud-media-store`. The manifest SHALL list the referenced (name, version) pairs, Trash included, the names under a protection record, and the released names. When the census is unknown, the manifest SHALL say so and SHALL NOT list a partial result as complete.
+Each backup snapshot SHALL contain a media manifest inside the restic snapshot. The cell password SHALL encrypt it, so that prune removes the manifest with its snapshot. The backup SHALL compute the manifest from the read-only clone that it backs up, as strictly as the census of `add-cloud-media-store`: a companion that it cannot read SHALL make the census unknown. The manifest SHALL list the referenced (name, version) pairs, Trash included, the names under a protection record, and the released names. When the census is unknown, the manifest SHALL say so and SHALL NOT list a partial result as complete.
 
 #### Scenario: A manifest is written
 

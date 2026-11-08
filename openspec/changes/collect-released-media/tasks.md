@@ -21,7 +21,7 @@
 
 ## 3. Manifest in the backup (D5)
 
-- [x] 3.1 Write the media manifest inside each snapshot in `exomem cell-backup`, from the clone and with the strict census of `add-cloud-media-store` task 4.5.1. Verify: the manifest lists live and Trash references, protected names and released names; an unknown census marks the manifest unknown.
+- [x] 3.1 Write the media manifest inside each snapshot in `exomem cell-backup`, from the read-only clone and as strictly as the census of `add-cloud-media-store` task 4.5.1. Verify: the manifest lists live and Trash references, protected names and released names on a read-only mount; an unknown census marks the manifest unknown.
 
 ## 4. Edge collector audience (D3)
 
