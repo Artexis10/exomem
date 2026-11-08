@@ -160,38 +160,63 @@ def write_withheld(access_rules, path):
             or relative.split("/", 1)[0].casefold() in {value.casefold() for value in access._APPEND_ONLY})
 
 
+@dataclass(frozen=True, slots=True)
+class PathInputs:
+    """The inputs of a row's decision that its policy path decides; ``decide`` and the rest read none of it."""
+    shown: bool  # The content floor: no access exclusion or tombstone covers the path.
+    write_withheld: bool  # The write floor.
+    scopes: tuple[str, ...]
+    capture: frozenset[str] | None  # The membership a connector capture folder holds a write to, if one covers it.
+
+
+def path_inputs(operation, subject, path, *, mutation) -> PathInputs:
+    """``PathInputs`` for ``subject`` placed at the policy path ``path``.
+
+    Only a write reads the capture membership. Raises one of ``connector_boundary.UNDECIDED`` when it
+    cannot be read.
+    """
+    basis = subject.basis
+    if path != basis.subject.path:
+        subject = replace(subject, basis=replace(basis, subject=replace(basis.subject, path=path)))
+    return PathInputs(
+        content_available(path, basis.identity, operation.access, operation.access_blocked, operation.tombstones),
+        write_withheld(operation.access, path),
+        operation.cache.scopes(subject, operation.policy),
+        connector_boundary.capture_membership(operation.root, path, operation.policy) if mutation else None)
+
+
 def policy_path_changes(operation, cid, path) -> tuple[str, ...]:
     """What moving every row of ``cid`` to the policy path ``path`` would change, by name; empty when nothing.
 
-    A row's decision reads its policy path only through the content floor (access exclusions and
-    tombstones), the write floor and its scope membership. The type's default audience, the standing
-    rules and grants and ``decide`` read none of it, so equal inputs give an equal decision for every
-    audience and purpose. Each input that differs is named. A changed membership counts even when no
-    standing rule names the scope, because an authorization session admits rows by scope.
+    A row's decision reads its policy path only through ``path_inputs``, so equal inputs give an equal
+    decision for every audience and purpose. Each input that differs is named. A changed membership
+    counts even when no standing rule names the scope, because an authorization session admits rows
+    by scope.
     """
     if operation.failed or operation.policy.blocked or operation.access_blocked:
         raise collections.CollectionError(
             "COLLECTION_CONVERSION_DISCLOSURE_UNKNOWN",
             "the governance policy cannot be read, so the rows' disclosure cannot be compared")
-    rules, compiled = operation.access, operation.policy
-
-    def inputs(basis, policy_path):
-        return (content_available(policy_path, basis.identity, rules, False, operation.tombstones),
-                write_withheld(rules, policy_path),
-                membership.evaluate_metadata(replace(basis.subject, path=policy_path), compiled))
-
     changes = set()
     for subject in iter_subjects(operation.conn, cid, operation.logical_vault_id, include_held=False):
         current = subject.basis.subject.path
         if subject.row_id is None or current == path:
             continue
-        (shown, withheld, scopes), (shown_after, withheld_after, scopes_after) = (
-            inputs(subject.basis, current), inputs(subject.basis, path))
-        changes.update(f"scope {scope}" for scope in scopes ^ scopes_after)
-        if shown != shown_after:
+        try:
+            before, after = (path_inputs(operation, subject, current, mutation=True),
+                             path_inputs(operation, subject, path, mutation=True))
+        except connector_boundary.UNDECIDED as error:
+            raise collections.CollectionError(
+                "COLLECTION_CONVERSION_DISCLOSURE_UNKNOWN",
+                f"the connector capture folders cannot be read, so the rows' disclosure cannot be compared: {error}",
+            ) from error
+        changes.update(f"scope {scope}" for scope in set(before.scopes) ^ set(after.scopes))
+        if before.shown != after.shown:
             changes.add(f"the access exclusion or tombstone that covers {current}")
-        if withheld != withheld_after:
+        if before.write_withheld != after.write_withheld:
             changes.add(f"the read-only access rule that covers {current}")
+        if before.capture != after.capture:
+            changes.add(f"the connector capture folder that covers {current}")
     return tuple(sorted(changes))
 
 
@@ -1140,13 +1165,15 @@ class OperationAuthorization:
         path = basis.subject.path
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
-        if not content_available(path, basis.identity, self.access, self.access_blocked, self.tombstones):
+        try:
+            inputs = path_inputs(self, subject, path, mutation=self.mutation)
+        except connector_boundary.UNDECIDED:
             return Decision(0)
-        if self.mutation and write_withheld(self.access, path):
+        if not inputs.shown or (self.mutation and inputs.write_withheld):
             return Decision(0)
-        scope_ids = self.cache.scopes(subject, self.policy)
+        scope_ids = inputs.scopes
         ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                   mutation=self.mutation, path=path)
+                                                   mutation=self.mutation, capture=inputs.capture)
         if ceiling.level == 0:
             return ceiling
         try:

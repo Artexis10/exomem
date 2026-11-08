@@ -2350,7 +2350,7 @@ def _validate_collection_create_for_profile(
 
     # The store's create receipt names the same paths: the manifest, its summary pages, then the source.
     would_create = [manifest.path, *summary.page_paths(manifest)]
-    warnings: list[dict[str, str]] = []
+    warnings = ignored_recipe_warnings(manifest)
     if scaffold and manifest.storage.strategy in {*collections.MARKDOWN_ROW_STORAGE, collections.SQLITE_STORAGE}:
         would_create.append(manifest.storage.source)
     elif scaffold and manifest.storage.strategy == "dataset":
@@ -2418,11 +2418,11 @@ def _validate_collection_revision_for_profile(
         snapshot,
         semantic_profile=semantic_profile,
     )
-    return {
+    return _with_warnings({
         "valid": True,
         "lifecycle_guards": lifecycle_guards(current, snapshot),
         "normalized_contract": _normalized_manifest_contract(proposed),
-    }
+    }, ignored_recipe_warnings(proposed))
 
 
 def revise_collection(
@@ -4529,10 +4529,11 @@ def _collect_representation_issues(
     """Judge representability against the collection's own storage strategy.
 
     Markdown-log rendering puts values into headings, notes and delimited child
-    rows, none of which can carry a line break. Markdown-item frontmatter can:
-    the writer's own quoting escapes one, and the round trip below proves it.
+    rows, none of which can carry a line break. An item row can: Markdown-item
+    frontmatter quotes one, which the round trip below proves, and a store row
+    keeps the value whole.
     """
-    line_breaks_allowed = manifest.storage.strategy == "markdown-items"
+    line_breaks_allowed = manifest.storage.item_rows
     already = {issue.field for issue in issues}
     for name, value in values.items():
         if name in already:
@@ -5204,7 +5205,13 @@ def _resumed_body(resumed: HeldCandidate | None, body: str | None) -> str:
     return stored if isinstance(stored, str) else ""
 
 
-def _with_warnings(result: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+def ignored_recipe_warnings(manifest: collections.CollectionManifest) -> list[dict[str, str]]:
+    """``collections.ignored_recipes_diagnostic`` in validate's warning shape; empty when there is none."""
+    diagnostic = collections.ignored_recipes_diagnostic(manifest)
+    return [] if diagnostic is None else [{"code": diagnostic.code, "message": diagnostic.reason}]
+
+
+def _with_warnings(result: dict[str, Any], warnings: list[Any]) -> dict[str, Any]:
     """Attach warnings only when there are any, so the ordinary shape is unchanged."""
     return {**result, "warnings": list(warnings)} if warnings else result
 

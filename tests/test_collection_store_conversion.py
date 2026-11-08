@@ -16,6 +16,10 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from record_presentation_fixtures import COLLECTION_PATH as OBSERVED
+from record_presentation_fixtures import ITEM_KEY as OBSERVATION
+from record_presentation_fixtures import manifest_text as observed_manifest
+from record_presentation_fixtures import values as observation
 from test_collection_store_migration import (  # noqa: F401 - the env fixture
     PLANNING,
     WORK,
@@ -23,13 +27,16 @@ from test_collection_store_migration import (  # noqa: F401 - the env fixture
     legacy_vault,
     migrate,
     start_service,
+    stop_writer,
 )
 from test_collection_store_s1_gate import _until
 from test_collection_store_service import OWNER, call, refused
 from test_collection_store_writer import CID, KEY, OTHER
+from granted_writer import grant_writer
 from test_governance_egress import SCOPE_ID, write_rule, write_scope
 
-from exomem import state_migration
+from exomem import records, state_migration
+from exomem import structured_collections as collections
 from exomem.collection_store import (
     capability,
     connection,
@@ -42,6 +49,9 @@ from exomem.collection_store import (
 from exomem.governance.principal import request_scope
 
 FLOOR = "collections-sqlite-only-v1"
+# The env fixture silences the due-state carrier; a case that reads the due-state projection restores it.
+DUE_STATE_CARRIER = records._due_state_carrier
+OBSERVED_ID = "44444444-4444-4444-8444-444444444444"
 PLAN = "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1"
 
 
@@ -76,18 +86,23 @@ def convert(root, collection):
         return conversion.convert(root, collection, why="cutover to summary storage")
 
 
-@pytest.fixture
-def served(env, monkeypatch):  # noqa: F811 - the imported fixture, by name
-    """A migrated vault under its running service, with one Planning row written in items mode."""
-    root = legacy_vault(env)
-    assert migrate(root, "apply") == 0
+def serve(root, monkeypatch):
+    """Start the service on a migrated vault, as the release that ships the cutover runs it."""
     # The cutover ships in a release that serves summary collections and runs edit-back.
     monkeypatch.setattr(capability, "RELEASED", frozenset(
         {capability.COLLECTIONS_MIGRATE_V1, capability.RECORDS_SUMMARY_V1, capability.COLLECTION_VIEWS_V1}))
     monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
     # A full census pass every few tenths of a second, so a new item view need not wait the production 60 s.
     monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 0.3)
-    service = start_service(root)
+    return start_service(root)
+
+
+@pytest.fixture
+def served(env, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """A migrated vault under its running service, with one Planning row written in items mode."""
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
     try:
         call(root, "plan_memory", action="add", collection=PLANNING, plan_id=PLAN,
              item={"title": "Publish the guide", "kind": "outcome", "status": "planned",
@@ -170,6 +185,41 @@ def test_conversion_refuses_when_a_rule_scoped_to_an_item_path_would_change_who_
     assert item_files(root, WORK)
 
 
+def test_an_update_to_a_converted_row_files_its_due_state_under_the_collection(served, monkeypatch):
+    """Defect: an update to a converted row files its due-state values under the old item path, while an
+    append and a full due-state pass file a summary row under its collection, so the row is listed twice."""
+    from exomem import due_state
+
+    monkeypatch.setattr(records, "_due_state_carrier", DUE_STATE_CARRIER)
+    root = served
+    convert(root, WORK)
+    with request_scope(OWNER):
+        due_state.reconcile(root)  # The projection the write keeps current.
+    work = call(root, "record_memory", action="query", collection=WORK)
+    updated = call(root, "record_memory", action="update", collection=WORK, item_key=KEY, changes={"count": 7},
+                   why="after conversion", expected_container_hash=work["snapshot"],
+                   expected_item_version=work["rows"][0]["item_version"])
+    assert updated["outcome"] == "committed", updated
+    filed = [item["path"] for item in due_state.load(root)["claims"][WORK]["items"] if item["key"] == KEY]
+    assert filed == [WORK]
+
+
+def test_conversion_refuses_when_a_connector_capture_folder_holds_the_items_but_not_the_collection(
+        served, tmp_path, monkeypatch):
+    """Defect: conversion moves a row's policy path out of a connector's capture folder, so the rule that a
+    captured page keeps exactly the membership its path gives stops applying to the connector's writes."""
+    root = served
+    (item,) = item_files(root, WORK)
+    grant_writer(root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                 capture_paths=[str(Path(item).parent)])
+    with pytest.raises(collections.CollectionError) as error:
+        convert(root, WORK)
+    assert error.value.code == "COLLECTION_CONVERSION_DISCLOSURE_CHANGE"
+    assert "capture" in str(error.value)
+    assert store(root, "SELECT view_mode FROM collections WHERE collection_id=?", CID) == [("items",)]
+    assert item_files(root, WORK)
+
+
 @pytest.mark.parametrize("cut", ["_archive", "_remove"])
 def test_a_conversion_cut_after_its_commit_resumes_without_repeating_finished_work(served, monkeypatch, cut):
     """Defect: a crash after the store commit leaves item files that nothing removes, removes a
@@ -236,3 +286,68 @@ def test_conversion_refuses_while_a_view_edit_is_unsettled(served, monkeypatch):
     edited.write_text(edited.read_text().replace("title: One", "title: Edited"))
     refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert edited.exists() and "title: Edited" in edited.read_text()
+
+
+def test_a_converted_collection_keeps_its_child_rows_and_their_declared_columns(env, monkeypatch):  # noqa: F811
+    """Defect: conversion drops the record_presentation tables, so after the move to SQLite a child-row
+    query or a saved view over a table field refuses, or returns child keys the table never declared."""
+    root = legacy_vault(env)
+    path = root / OBSERVED
+    path.parent.mkdir(parents=True)
+    path.write_text(observed_manifest().replace("record_presentation:\n", (
+        "views:\n  measured:\n    query:\n      expand_child: measurements\n      columns: [name, value]\n"
+        "record_presentation:\n"), 1))
+    (path.parent / "Items").mkdir()
+    # Each stored child row also carries a "private" key that the table does not declare.
+    records.append_record(root, collections.load_manifest(root, path), item=observation(child_count=3),
+                          item_key=OBSERVATION, why="seed one observation")
+    stop_writer()
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        def answers():
+            plain = call(root, "record_memory", action="query", collection=OBSERVED)
+            expanded = call(root, "record_memory", action="query", collection=OBSERVED, expand_children=True)
+            viewed = call(root, "record_memory", action="query", collection=OBSERVED, view="measured")
+            return plain["rows"], expanded["rows"], viewed["rows"]
+
+        _until(lambda: settled(root, OBSERVED_ID), 30)
+        before = answers()
+        receipt = convert(root, OBSERVED)
+        assert (receipt["outcome"], receipt["phase"]) == ("converted", "complete"), receipt
+        after = answers()
+    finally:
+        service.stop()
+    assert after == before
+    plain, expanded, viewed = after
+    assert [len(row["measurements"]) for row in plain] == [3]
+    assert [row["child_index"] for row in expanded] == [0, 1, 2]
+    assert [sorted(set(row) & {"name", "value", "unit", "private"}) for row in viewed] == [["name", "value"]] * 3
+    assert "not projected" not in json.dumps(after)
+
+
+def test_a_note_that_links_to_an_old_item_path_resolves_it_to_the_store_row(served):
+    """Defect: after conversion a note's link to an old item path reads as dangling: the note's write
+    warns that the link resolves to no file, the audit reports it, or the item's backlinks lose the note."""
+    root = served
+    (item,) = item_files(root, WORK)
+    convert(root, WORK)
+    target = item.removeprefix("Knowledge Base/").removesuffix(".md")
+    note = {"content": f"# Follow-up\n\n- [review state] The work in [[{target}]] is done.\n",
+            "title": "Follow-up", "slug": "follow-up", "suggestions": False}
+    draft = call(root, "remember", validate_only=True, **note)
+    saved = call(root, "remember", draft_id=draft["draft_id"], draft_hash=draft["draft_hash"],
+                 draft_token=draft["draft_token"], **note)
+    assert not [warning for warning in saved["warnings"] if target in warning], saved["warnings"]
+
+    # The note keeps the link in its full form, and following it reads the stored row.
+    content = call(root, "read_memory", path=saved["path"], include_raw=True)["content"]
+    assert f"[[{item.removesuffix('.md')}]]" in content
+    followed = call(root, "read_memory", path=item.removesuffix(".md"))
+    assert followed["store_row"]["record_id"] == KEY and followed["read_only"] is True
+
+    inbound = call(root, "connect_memory", operation="inbound-links", target=item)
+    assert [link["path"] for link in inbound["inbound"]] == [saved["path"]]
+    audit = call(root, "review_memory", mode="audit", categories=["broken_wikilink", "forward_reference"])
+    assert [finding for finding in audit["findings"] if finding["path"] == saved["path"]] == []
+    assert not (root / item).exists()

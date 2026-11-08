@@ -8622,6 +8622,14 @@ def _normalize_wikilink(
         if title_matches:
             return _selected(title_matches, "title")
 
+    # A path that a converted collection retired names its stored row. A strict
+    # caller needs a file, which that path no longer has.
+    if not strict and "/" in cleaned:
+        from .collection_store import aliases
+
+        if (retired := aliases.link_target(vault_root, cleaned)) is not None:
+            return _wikilink_path_key(retired) + anchor, None, None
+
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
     # directly without prefix manipulation:

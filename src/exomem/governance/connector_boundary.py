@@ -304,8 +304,13 @@ def require_global_observation(root: Path) -> None:
         raise ValueError("GOVERNANCE_OPERATION_UNAVAILABLE: global observation is unavailable")
 
 
+#: A connector input that cannot be read decides nothing; its caller withholds.
+UNDECIDED = (BoundaryUnavailable, membership.MembershipUnresolved, OSError)
+
+
 def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: policy.Policy,
-                   mutation: bool = False, path: str | None = None) -> Decision:
+                   mutation: bool = False, capture: frozenset[str] | None = None) -> Decision:
+    """The connector ceiling over ``scope_ids``; ``capture`` is the subject's ``capture_membership``."""
     try:
         scope_ids = frozenset(scope_ids)
         current = snapshot(root, compiled)
@@ -315,18 +320,26 @@ def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: pol
             ceiling = write_ceiling(root, who)
             if ceiling is not None and not _writable(ceiling, scope_ids):
                 return Decision(policy.DISCLOSURE_MIN)
-        if (current is not None and mutation and path is not None and _capture_destination(current, path)
-                and scope_ids != membership.evaluate_path_selectors(Path(root), path, compiled)):
-            # A capture page keeps exactly the membership its path gives.
+        if mutation and capture is not None and scope_ids != capture:
             return Decision(policy.DISCLOSURE_MIN)
         return Decision(policy.DISCLOSURE_MIN if denied.intersection(scope_ids) else policy.DISCLOSURE_MAX)
-    except (BoundaryUnavailable, membership.MembershipUnresolved, OSError):
+    except UNDECIDED:
         return Decision(policy.DISCLOSURE_MIN)
 
 
+def capture_membership(root: Path, path: str, compiled: policy.Policy) -> frozenset[str] | None:
+    """The membership a write to a subject at ``path`` must keep, or None outside every capture folder.
+
+    A capture page keeps exactly the membership its path gives. Raises one of ``UNDECIDED``.
+    """
+    current = snapshot(root, compiled)
+    if current is None or _capture_destination(current, path) is None:
+        return None
+    return frozenset(membership.evaluate_path_selectors(Path(root), path, compiled))
+
+
 #: An admission that cannot be decided withholds the path.
-_ADMISSION_REFUSALS = (BoundaryUnavailable, membership.MembershipUnresolved, OSError,
-                       reserved_paths.ReservedPathLeafError)
+_ADMISSION_REFUSALS = (*UNDECIDED, reserved_paths.ReservedPathLeafError)
 
 
 def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:

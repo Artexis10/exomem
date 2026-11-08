@@ -53,6 +53,7 @@ from . import (
     governance,
     index_migrations,
     log_view,
+    references,
     rollups,
     schema,
     summary,
@@ -2232,6 +2233,9 @@ class CollectionWriter:
                 outcome="committed",
                 audit_correlation=txn["transition_id"],
             )
+            # Stored with the receipt, so a replay and the served create report it too.
+            receipt = records._with_warnings(receipt, [
+                f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
             self._precommit(manifest)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()
@@ -2270,8 +2274,14 @@ class CollectionWriter:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values)
         if declared.validators and validate_graph:
-            plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
-            plans[key] = values
+            validators = [types.named_validator(name) for name in declared.validators]
+            plans = None
+            if all(validator.references() for validator in validators):
+                followed = [reference for validator in validators for reference in validator.references()]
+                plans = references.neighbourhood(self.connection, manifest.collection_id, followed, key, values)
+            if plans is None:
+                plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
+                plans[key] = values
             write = planning.HierarchyWrite(self.root, key, before)
             for name in declared.validators:
                 types.named_validator(name).validate(manifest, plans, write=write)
@@ -2524,9 +2534,24 @@ class CollectionWriter:
         )
 
     def _pending_summary(self, manifest, generation):
-        """The summary pages' pending basis (``_pending_basis``)."""
-        for path in summary.page_paths(manifest):
+        """The summary pages' pending basis (``_pending_basis``).
+
+        A summary page that the manifest no longer declares, such as a renamed or removed saved
+        view's, turns pending with no basis, so that reconcile retires it.
+        """
+        declared = summary.page_paths(manifest)
+        for path in declared:
             self._pending_basis(path, manifest.collection_id, "summary", generation)
+        # Every summary page lies in the storage source folder: a key range on the path reads only that folder.
+        folder = manifest.storage.source + "/"
+        for (path,) in self.connection.execute(
+                "SELECT path FROM projection_state WHERE path>=? AND path<? AND collection_id=? AND kind='summary'",
+                (folder, folder[:-1] + chr(ord("/") + 1), manifest.collection_id)).fetchall():
+            if path not in declared:
+                self._publication.pending = True
+                self._confirm_installed(path)
+                self._execute("UPDATE projection_state SET pending_row_version=NULL,pending_sha256=NULL,"
+                              "state='pending' WHERE path=?", (path,))
 
     def _pending_log(self, manifest, generation):
         """The log view's pending basis (``_pending_basis``); the projector renders the whole log."""
@@ -3294,7 +3319,7 @@ class CollectionWriter:
                 self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, path=before["view_path"] or manifest.path,
+        return self._item_carriers(result, manifest, path=row_source(manifest, before),
                                    key=key, values=final, previous=old_values)
 
     def rebaseline_collection(self, collection, *, expected_manifest_hash, expected_container_hash,
@@ -3410,10 +3435,12 @@ class CollectionWriter:
         with self.read_snapshot(mutation=True):
             row, current, declared = self._collection(collection)
             proposed, _mode, _plans, _metadata, _rows = self._prepare_revision(current, declared, manifest_text)
-            return {"valid": True,
-                    "lifecycle_guards": {"expected_manifest_hash": current.manifest_version.hash,
-                                         "expected_container_hash": self._container(row)},
-                    "normalized_contract": records._normalized_manifest_contract(proposed)}
+            return records._with_warnings(
+                {"valid": True,
+                 "lifecycle_guards": {"expected_manifest_hash": current.manifest_version.hash,
+                                      "expected_container_hash": self._container(row)},
+                 "normalized_contract": records._normalized_manifest_contract(proposed)},
+                records.ignored_recipe_warnings(proposed))
 
     def revise_collection(
         self,
@@ -3571,10 +3598,6 @@ class CollectionWriter:
             if not _renders_rows(current):
                 raise conversion.unsupported(current.storage.strategy, current.view_mode)
             files = self._conversion_files(current)
-            presentation = current.record_presentation
-            if presentation is not None and presentation.tables:
-                # Summary mode ignores the recipe, so its child-column allowlist would stop narrowing query rows.
-                raise conversion.disclosure_change(("the record_presentation table allowlist",))
             stored = self.connection.execute(
                 "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                 (cid, row["manifest_version"])).fetchone()[0]

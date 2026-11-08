@@ -76,6 +76,19 @@ def test_record_memory_create_makes_a_store_summary_collection_with_no_item_file
     assert FLOOR in state_migration.recorded_descriptor_ids(root)
 
 
+def test_a_sqlite_row_holds_the_line_break_that_a_markdown_items_row_holds(
+        service):  # noqa: F811 - the imported fixture, by name
+    """Defect: a sqlite collection refuses a line break in a string value that Markdown-items frontmatter
+    stored, so a row converted with a multi-line value can no longer be written."""
+    root = service.root
+    call(root, "record_memory", action="create", manifest_path=PATH, manifest_text=SQLITE, why="new readings")
+    appended = call(root, "record_memory", action="append", collection=READINGS,
+                    item={"title": "Morning\nsecond line", "count": 1}, item_key=FIRST, why="multi-line title")
+    assert appended["outcome"] == "committed", appended
+    rows = call(root, "record_memory", action="query", collection=READINGS)["rows"]
+    assert [row["title"] for row in rows] == ["Morning\nsecond line"]
+
+
 @pytest.mark.parametrize("text", [ITEMS, SUMMARY_ITEMS], ids=["items-mode", "summary-mode"])
 @pytest.mark.parametrize("action", ["validate", "create"])
 def test_a_new_markdown_items_collection_is_refused_and_writes_nothing(
@@ -210,6 +223,26 @@ def test_a_summary_manifest_that_still_carries_per_item_recipes_is_readable_and_
     assert manifest.ignored_recipes == ("item_filename", "item_presentation")
 
 
+def test_a_summary_manifest_that_carries_an_item_recipe_says_so_where_an_agent_reads_it(
+        service):  # noqa: F811 - the imported fixture, by name
+    """Defect: summary mode drops a manifest's item_filename without a word, so the agent that
+    wrote it believes the store names or renders rows by it."""
+    root = service.root
+    text = SQLITE.replace("item_schema:\n", "item_filename:\n  version: 1\n  fields: [title]\nitem_schema:\n")
+
+    def ignored(warnings):
+        return [warning for warning in warnings if "item_filename" in str(warning)]
+
+    validated = call(root, "record_memory", action="validate", manifest_path=PATH, manifest_text=text)
+    assert ignored(validated["warnings"]), validated
+    created = call(root, "record_memory", action="create", manifest_path=PATH, manifest_text=text, why="new readings")
+    assert ignored(created.get("warnings", [])), created
+    revision = call(root, "record_memory", action="validate", collection=READINGS, manifest_text=text)
+    assert ignored(revision.get("warnings", [])), revision
+    inspected = call(root, "record_memory", action="inspect", collection=READINGS)
+    assert ignored(inspected["diagnostics"]), inspected["diagnostics"]
+
+
 def test_plan_memory_create_by_a_caller_without_unrestricted_access_scaffolds_on_the_served_store(
         service):  # noqa: F811 - the imported fixture, by name
     """Defect: a served Planning create crashes on a closed database when its scaffold checks the
@@ -230,3 +263,91 @@ def test_plan_memory_create_by_a_caller_without_unrestricted_access_scaffolds_on
     assert inspected["contract"]["view_mode"] == "summary"
     # The scaffold added one saved view per planning horizon value.
     assert inspected["saved_views"]
+
+
+AREA = "b0b0b0b0-b0b0-4b0b-8b0b-b0b0b0b0b0b0"
+
+
+def plan(key):
+    return f"exomem://plan/{ROADMAP}/{key}"
+
+
+def archive(root, key, **changes):
+    query = call(root, "plan_memory", action="query", collection=ROADMAP, lifecycle="all")
+    current = next(row for row in query["rows"] if row["plan_id"] == key)
+    return call(root, "plan_memory", action="update", collection=ROADMAP, plan_id=key,
+                changes={"lifecycle": "archived", **changes}, why="close it out",
+                expected_container_hash=query["snapshot"], expected_item_version=current["item_version"])
+
+
+def test_a_planning_write_on_a_store_checks_its_hierarchy_without_reading_every_row(
+        service, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: a Planning write on a store reads every row of its collection to check the hierarchy,
+    so the cost of one write grows with the collection; or the bounded check lets an archive through
+    that leaves an active child or area member pointing at an archived item."""
+    from exomem.collection_store import typed_storage
+
+    root = service.root
+    call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH, manifest_text=ROADMAP_TEXT,
+         why="new roadmap")
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        _until(lambda: reader.execute("SELECT 1 FROM query_projection_mappings WHERE collection_id=? "
+                                      "AND state='ready'", (ROADMAP,)).fetchone() is not None, 30)
+
+    def every_row(*_):
+        raise AssertionError("the hierarchy check read every row of the collection")
+
+    monkeypatch.setattr(typed_storage, "collection_values", every_row)
+    call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=AREA,
+         item={"title": "Readers", "kind": "area"}, why="the area")
+    call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=OUTCOME,
+         item={"title": "Reach readers", "kind": "outcome", "status": "planned", "commitment": "committed",
+               "horizon": "quarter", "area": plan(AREA)}, why="the outcome")
+    added = call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=INITIATIVE,
+                 item={"title": "Write the guide", "kind": "initiative", "status": "planned",
+                       "commitment": "committed", "horizon": "quarter", "parent": plan(OUTCOME),
+                       "area": plan(AREA)}, why="the initiative")
+    assert added["outcome"] == "committed", added
+
+    # An active child and an active area member each keep their target from being archived.
+    refused(lambda: archive(root, OUTCOME, status="completed"), "INVALID_PLAN_RELATION")
+    refused(lambda: archive(root, AREA), "INVALID_PLAN_RELATION")
+    assert archive(root, INITIATIVE, status="completed")["outcome"] == "committed"
+    assert archive(root, OUTCOME, status="completed")["outcome"] == "committed"
+    assert archive(root, AREA)["outcome"] == "committed"
+
+
+def test_a_planning_hierarchy_query_on_a_store_reads_no_more_rows_than_the_plain_query(
+        service, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: a Planning hierarchy query on a store reads every row of its collection again for the
+    hierarchy and again for its sources, beyond the one read its plain query makes."""
+    from exomem.collection_store import reader
+
+    root = service.root
+    call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH, manifest_text=ROADMAP_TEXT,
+         why="new roadmap")
+    call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=OUTCOME,
+         item={"title": "Reach readers", "kind": "outcome", "status": "planned", "commitment": "committed",
+               "horizon": "quarter"}, why="the outcome")
+    call(root, "plan_memory", action="add", collection=ROADMAP, plan_id=INITIATIVE,
+         item={"title": "Write the guide", "kind": "initiative", "status": "planned", "commitment": "committed",
+               "horizon": "quarter", "parent": plan(OUTCOME)}, why="the initiative")
+    reads = []
+    whole_read = reader.StoreAdapter._read
+
+    def counted(adapter, manifest):
+        reads.append(manifest.collection_id)
+        return whole_read(adapter, manifest)
+
+    monkeypatch.setattr(reader.StoreAdapter, "_read", counted)
+    only = [{"column": "plan_id", "op": "eq", "value": OUTCOME}]
+    plain = call(root, "plan_memory", action="query", collection=ROADMAP, filters=only)
+    plain_reads, reads[:] = len(reads), []
+    tree = call(root, "plan_memory", action="query", collection=ROADMAP, filters=only,
+                hierarchy_mode="descendants")
+
+    assert [row["plan_id"] for row in plain["rows"]] == [OUTCOME]
+    assert tree["hierarchy"]["edges"] == [{"parent": OUTCOME, "child": INITIATIVE}]
+    assert [node["plan_id"] for node in tree["hierarchy"]["nodes"]] == sorted([OUTCOME, INITIATIVE])
+    assert {version["path"] for version in tree["source_versions"]} == {ROADMAP_PATH}
+    assert len(reads) == plain_reads

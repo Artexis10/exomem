@@ -151,7 +151,7 @@ def require_planning_profile(
         raise CollectionError(
             "PLANNING_PROFILE_REQUIRED", "Planning actions require a planning semantic profile"
         )
-    if manifest.storage.strategy not in ("markdown-items", collections.SQLITE_STORAGE):
+    if not manifest.storage.item_rows:
         raise CollectionError("INVALID_PLAN", "Planning requires sqlite or markdown-items storage")
     required_types = {
         "title": "string",
@@ -584,7 +584,8 @@ def query(
                 raise CollectionError(
                     "INVALID_PLAN_ARGUMENTS", "hierarchy cannot be combined with aggregate or CSV"
                 )
-            _validate_authorized_snapshot(
+            # The hierarchy and its sources reuse these rows, so a hierarchy reads no row again.
+            authorized = _validate_authorized_snapshot(
                 vault_root,
                 manifest,
                 adapter_authorize_path,
@@ -631,13 +632,11 @@ def query(
                     authorize_path=authorize_path,
                 )
             hierarchy = _hierarchy(
-                vault_root,
-                manifest,
+                authorized,
                 result.rows,
                 mode=hierarchy_mode,
                 depth=hierarchy_depth,
                 limit=hierarchy_limit,
-                authorize_path=adapter_authorize_path,
             )
             source_versions = list(result.source_versions)
             hierarchy_contributors = ()
@@ -647,16 +646,13 @@ def query(
                     for node in hierarchy["nodes"]
                     if isinstance(node, Mapping) and isinstance(node.get("plan_id"), str)
                 }
-                snapshot = record_formats.load_adapter(
-                    vault_root, manifest, authorize_path=adapter_authorize_path
-                ).read()
                 hierarchy_contributors = tuple((record.identity.key, record.source.hash)
-                                               for record in snapshot.records
+                                               for record in authorized
                                                if record.identity.key in hierarchy_ids)
                 known_paths = {version.path for version in source_versions}
                 source_versions.extend(
                     record.source
-                    for record in snapshot.records
+                    for record in authorized
                     if record.identity.key in hierarchy_ids and record.source.path not in known_paths
                 )
             projected = _project_query(
@@ -993,25 +989,21 @@ def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -
 
 
 def _hierarchy(
-    vault_root: Path,
-    manifest: collections.CollectionManifest,
+    authorized: tuple[record_formats.Record, ...],
     roots: list[dict[str, Any]],
     *,
     mode: str,
     depth: int,
     limit: int,
-    authorize_path: Callable[[str], bool] | None,
 ) -> dict[str, Any] | None:
+    """The hierarchy around `roots` among the `authorized` rows that the query itself read."""
     if mode == "none":
         return None
     if mode not in {"ancestors", "descendants"} or not 0 <= depth <= 8 or not 1 <= limit <= 500:
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "hierarchy controls are invalid")
-    snapshot = record_formats.load_adapter(
-        vault_root, manifest, authorize_path=authorize_path
-    ).read()
     rows = {
         record.identity.key: {**record.values, "plan_id": record.identity.key}
-        for record in snapshot.records
+        for record in authorized
     }
     root_ids = [row["plan_id"] for row in roots]
     truncated = len(root_ids) > limit
@@ -1699,6 +1691,11 @@ def _validate_relationships(
         )
         write = HierarchyWrite(vault_root, plan_id, stored)
     validate_hierarchy(manifest, plans, write=write)
+
+
+#: The fields through which a Planning item names another item of its collection. The hierarchy
+#: rules in `validate_hierarchy` follow only these, which the named validator declares.
+HIERARCHY_FIELDS = ("parent", "area")
 
 
 @dataclass(frozen=True, slots=True)

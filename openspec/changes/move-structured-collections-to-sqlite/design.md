@@ -1509,7 +1509,7 @@ Manifests declare `storage.strategy: sqlite`. A manifest that still declares `ma
 
 A summary row's governance subject is the collection path (§7). The conversion therefore refuses a collection when that change would alter any row's disclosure decision for any standing audience, and it names the scope. The owner adjusts the scope first; the conversion never widens or narrows access as a side effect.
 
-**Files leave last.** The item files move into a checksummed archive outside the active vault tree only after the store transaction commits. The archive is verified before the files are removed from the vault, so the files are never the only copy at any step.
+**Files leave last.** The item files move into a checksummed archive outside the active vault tree only after the store transaction commits. The archive is verified before the files are removed from the vault, so the files are never the only copy at any step. The archive on the state root is a machine-local recovery copy; the cutover backup covers portability.
 
 **Order and floor.** The cutover runs as one resumable, plan-bound operation:
 1. backup and inventory;

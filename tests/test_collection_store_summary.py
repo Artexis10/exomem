@@ -285,6 +285,26 @@ def test_summary_page_edit_is_held_and_rerendered_never_parsed(store):
     assert canonical(store) == before
 
 
+def test_a_renamed_saved_view_retires_its_old_summary_page(store):
+    """Defect: a saved view renamed in the manifest leaves its old summary page published and current, so
+    the vault keeps a page for a view that no longer exists."""
+    text = summary_text().replace("\n---\n", "\nviews:\n  recent:\n    query:\n      columns: [title, count]\n---\n")
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    _evidence(store.root)
+    store.reconcile_views()
+    store.reconcile_views()
+    (old,) = [path for path in pages(store) if "_view-" in path]
+    assert (store.root / old).exists()
+
+    renamed = text.replace("  recent:\n", "  latest:\n")
+    store.revise_collection(CID, manifest_text=renamed, why="rename the view", **guards(store))
+    store.reconcile_views()
+    store.reconcile_views()
+    (new,) = [path for path in pages(store) if "_view-" in path]
+    assert "latest" in new and (store.root / new).exists()
+    assert not (store.root / old).exists()
+
+
 ROUTES = ["revise-items", "revise-summary", "edit-back-items", "edit-back-summary"]
 
 

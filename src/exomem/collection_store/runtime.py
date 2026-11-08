@@ -1046,6 +1046,9 @@ def served_create(vault_root, arguments, facade_profile=None):
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
             facade_profile=facade_profile)
+        if (receipt := result.get("receipt")) and receipt.get("warnings"):
+            # The create's own warnings lead, where the tool result shows them.
+            result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}
         if result.get("status") == "pending":
             # Committed, but its replica publication did not finish: the store stays the
             # create's until this thread's create tick resumes it, so this request ends
