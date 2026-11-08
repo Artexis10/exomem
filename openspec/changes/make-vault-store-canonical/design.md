@@ -220,13 +220,13 @@ When the true original of content already filed as an original arrives, a govern
 
 **Result.** These are single-author weeks. About 11 to 13 weeks in total. The smallest local release, the first six stage-1 rows, is 7 to 8 weeks. Embeddings, Cloud, Windows and deletion bring stage 1 to 9.5 to 10.5 weeks; stage 2 adds 1.5 to 2.5. No cut of this table fits one month for one author.
 
-**Parallel schedule.** The smallest local release fits about four weeks of elapsed time with three parallel lanes:
+**Parallel schedule.** With parallel lanes, the smallest local release takes about four to five weeks of elapsed time:
 
-1. Week 1, one lane: the store schema, migration with both verifications, rollback exports, the ownership rule, and the availability and replica work. This fixes the table contract the later lanes share.
+1. Week 1, two lanes: the store schema, migration with both verifications, rollback exports and the ownership rule; and, beside it, the availability, replica and contract-amendment work. This fixes the table contract the later lanes share.
 2. Weeks 2 and 3, three lanes on separate files: the write path; every reader, built against a migrated store so it does not wait for the write path; the projector and importer, then embeddings keyed by store revision.
 3. Week 4: integration and acceptance on a real-vault copy and on a Windows runner.
 
-This schedule defers stage 2, file-mode deletion and Cloud cells until after the switch, and file mode remains the rollback path. Integration risk falls entirely in week 4, so any slip lands there. Store mode can stay behind a per-vault setting while a release ships in file mode, which separates the switch from the release.
+Four weeks holds only at the lower ends of the package estimates. At the upper ends the write-path and reader lanes fill their two weeks with no slack, and integration has no package of its own, so plan for five. This schedule defers stage 2, file-mode deletion and Cloud cells until after the switch, and file mode remains the rollback path. Any slip lands in the last week. Store mode can stay behind a per-vault setting while a release ships in file mode, which separates the switch from the release.
 
 ## Epistemics evaluation
 
