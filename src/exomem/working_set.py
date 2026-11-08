@@ -2488,10 +2488,9 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
 
     Records the skip on the budget itself (`note_skipped`), so it is safe to
     call at every boundary without special-casing: `RequestBudget.note_skipped`
-    dedupes by name, and every caller of this helper either returns or raises
-    immediately on `True`, so control flow never reaches a second boundary
-    once the budget is gone — the FIRST stage that could not be afforded is
-    the only one ever recorded.
+    dedupes by name. Most callers return or raise on `True`; task discovery's
+    later lanes each skip and continue, so one request can record up to one
+    skip per lane name.
     """
     budget = request_budget.current()
     needed = (
@@ -3214,28 +3213,39 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
 def _resident_vector_paths(
     vault_root: Path, text: str, allowed: AbstractSet[str], limit: int,
 ) -> tuple[list[str], str]:
-    """`(paths, state)`: the `allowed` pages whose stored recall chunks lie nearest `text`, best chunk first.
+    """`(paths, state)`: the `allowed` pages whose recall chunks clear the chance band for `text`, best first.
 
-    Reads only what is resident, as `related_pages` does: no matrix load, no encoder load, no wait. Only the
-    admitted `allowed` pages can be returned, and each page's rank depends on its own chunks alone, so a page
-    the caller may not see never changes the result. `state` is `ready`; `off` when this install runs without
-    embeddings, or the matrix or encoder is not resident outside a warm-up; or `lane_failed` when the dense
-    reading should run and cannot (still warming, or a resident matrix built by another encoder).
+    A page is listed only when one of its chunks clears the corpus-relative band (`chance_band.semantic_band`,
+    the rule `related_pages` uses) computed over the admitted rows alone: an unrelated turn lists nothing, and a
+    page the caller may not see neither appears nor moves the band. Reads the resident matrix and an encoder
+    already in memory. In a managed service a cold matrix starts the one background load and the lane reports
+    it did not run; it never loads on the request thread. `state` is `ready`; `off` when this install runs
+    without embeddings, has no resident matrix in this profile, or is a one-shot process with a cold matrix or
+    encoder; or `lane_failed` when the dense reading should run and cannot (cold or warming in a service, or a
+    matrix from another encoder).
     """
     import numpy as np
 
-    from . import embeddings, readiness
+    from . import embeddings, ranking_config, readiness, recall_space
 
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return [], "off"
+    managed = readiness.runtime_managed()
+    # A one-shot process never loads the encoder or the matrix, so cold is expected there; a service warms them.
+    cold = "lane_failed" if managed else "off"
     try:
-        # Cold is expected outside a warming service (a one-shot CLI call never loads the encoder), so it is
-        # reported only while the service warms; a resident matrix from another encoder is a fault.
-        cold = "lane_failed" if readiness.should_defer("embeddings") else "off"
         embedding_index = embeddings.peek_embedding_index(vault_root)
-        resident = embedding_index.resident_matrix() if embedding_index is not None else None
+        if embedding_index is None:
+            return [], cold
+        try:
+            resident = embedding_index.require_resident_matrix() if managed else embedding_index.resident_matrix()
+        except recall_space.CorpusMatrixCold:
+            return [], "lane_failed"
+        if resident is None:
+            # No sidecar yet, or the disk-scoring profile, which keeps no resident matrix to read.
+            return [], "off"
         fingerprint = embeddings.activation_fingerprint()
-        if resident is None or fingerprint is None:
+        if fingerprint is None:
             return [], cold
         identity = embedding_index.identity
         if identity is None or identity.fingerprint != fingerprint:
@@ -3244,18 +3254,34 @@ def _resident_vector_paths(
         if vector is None:
             return [], cold
         query = np.asarray(vector, dtype=np.float32).reshape(-1)
-        norm = float(np.linalg.norm(query))
-        if norm == 0.0 or resident.matrix.ndim != 2 or query.shape[0] != resident.matrix.shape[1]:
+        if resident.matrix.ndim != 2 or query.shape[0] != resident.matrix.shape[1] or not np.all(np.isfinite(query)):
             return [], "lane_failed"
-        similarities = resident.matrix @ (query / norm)
-        paths: list[str] = []
-        for row in np.argsort(-similarities):
-            path = resident.metadata[int(row)][0]
-            if path in allowed and path not in paths:
-                paths.append(path)
-                if len(paths) >= limit:
-                    break
-        return paths, "ready"
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0:
+            return [], "lane_failed"
+        stale = resident.stale_paths or ()
+        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
+        rows = np.fromiter(
+            (index for index, (path, _chunk) in enumerate(resident.metadata) if path in allowed and path not in stale),
+            dtype=np.int64,
+        )
+        if rows.size == 0:
+            return [], "ready"
+        similarities = resident.matrix[rows] @ (query / norm)
+        config = ranking_config.DEFAULT_RANKING
+        cleared = chance_band.semantic_band(
+            similarities,
+            alpha=float(config.working_set_semantic_alpha),
+            min_population=int(config.working_set_semantic_min_population),
+        )
+        if not cleared:
+            # No chunk clears the band, or too few admitted rows to calibrate one: the lane lists nothing.
+            return [], "ready"
+        best: dict[str, float] = {}
+        for position in cleared:
+            path = resident.metadata[int(rows[position])][0]
+            best[path] = max(float(similarities[position]), best.get(path, float("-inf")))
+        return sorted(best, key=lambda page: (-best[page], page))[:limit], "ready"
     except Exception:  # noqa: BLE001 - a failed dense reading leaves the keyword lanes standing
         log.debug("task-context dense reading unavailable", exc_info=True)
         return [], "lane_failed"
