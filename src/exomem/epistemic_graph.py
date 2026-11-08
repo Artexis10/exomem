@@ -10631,12 +10631,16 @@ def suggest_relations(
     reviews: dict[str, dict[str, str]] = {}
     if page is not None and proposed:
         try:
-            reviews, unsettled = relation_queue.open_reviews(vault_root, rel, candidates=proposed)
-        except (ValueError, OSError, sqlite3.Error):
-            # The cause is not echoed: an OS or database error can carry a filesystem path.
+            reviews, unsettled = relation_queue.open_reviews(
+                vault_root,
+                rel,
+                identities={relation_queue.candidate_identity(c) for c in proposed},
+            )
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            # The class name stands for the cause: an OS or database message can carry a path.
             warnings.append(
                 "relation review fields unavailable: the relation queue could not be read "
-                "for this page"
+                f"for this page ({type(exc).__name__})"
             )
         else:
             if unsettled:
@@ -14824,11 +14828,6 @@ def _ordered_matches(
     return ordered[:_STRUCTURAL_EVIDENCE_MATCHES]
 
 
-#: The `method` of a candidate that embedding proximity proposes. A closed token this module sets;
-#: the relation queue never derives such a candidate, so `relation_queue.open_reviews` reads it.
-EMBEDDING_METHOD = "embedding_proximity"
-
-
 def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, Any]]:
     """Optional embedding-proximity suggestions; empty when embeddings are off."""
     try:
@@ -14852,7 +14851,7 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
                 "from": self_path,
                 "to": target_path,
                 "relation_type": relation_registry.generic_relation_key(),
-                "method": EMBEDDING_METHOD,
+                "method": "embedding_proximity",
                 "evidence": {"cosine": round(float(score), 4)},
             }
         )

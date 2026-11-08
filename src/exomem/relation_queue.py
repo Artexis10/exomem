@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -977,17 +977,16 @@ def open_reviews(
     vault_root: Path,
     rel_path: str,
     *,
-    candidates: Sequence[dict[str, Any]],
+    identities: Collection[str],
 ) -> tuple[dict[str, dict[str, str]], set[str]]:
-    """The accept fields of the given candidates that the queue holds open for one page.
+    """The accept fields of the named candidates that the queue holds open for one page.
 
     Each candidate is resolved and judged as `accept` judges it, by the same functions, so a
-    field served here is one `accept` takes. `candidates` bounds the work to those that a caller
-    shows. Returns the fields by review id, and the ids the queue could not settle: the
-    reference authority moved, or the queue's own derivation did not return the candidate
-    (it lay beyond a generator's cap). An id in neither is a candidate the queue does not hold:
-    decided, already authored, no target page, or embedding proximity, which the queue never
-    derives. A graph that cannot answer at all raises.
+    field served here is one `accept` takes. `identities` bounds the work to the candidates that
+    a caller shows.
+    Returns the fields by review id, and the ids the queue could not settle: an id in neither
+    is a candidate the queue does not hold (decided, already authored, no target page, or a
+    method the queue does not derive). A graph that cannot answer at all raises.
     """
     _refuse_other_audiences(vault_root)
     vault_root = Path(vault_root)
@@ -1009,8 +1008,6 @@ def open_reviews(
         source_content_hash = _page_content_hash(page)
         open_fields: dict[str, dict[str, str]] = {}
         unsettled: set[str] = set()
-        identities = {candidate_identity(candidate) for candidate in candidates}
-        derived: set[str] = set()
         # One graph snapshot serves the generators and every candidate's reference lookup.
         for candidate in _page_candidates(
             vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD, snapshot=snapshot
@@ -1019,7 +1016,6 @@ def open_reviews(
             source = str(candidate.get("from") or page.rel_path)
             if identity not in identities or source != rel_path:
                 continue
-            derived.add(identity)
             if _is_placeholder_target(vault_root, str(candidate.get("to") or "")):
                 continue
             exact_refs = _hinted_candidate_refs(vault_root, candidate, snapshot=snapshot)
@@ -1043,15 +1039,6 @@ def open_reviews(
                     "fingerprint": enriched["fingerprint"],
                     "source_content_hash": source_content_hash,
                 }
-        for candidate in candidates:
-            identity = candidate_identity(candidate)
-            # The method token is a closed set that the generators fix: the queue's derivation
-            # leaves embedding proximity out by design, so its absence there says nothing.
-            if (
-                identity not in derived
-                and candidate.get("method") != epistemic_graph_module.EMBEDDING_METHOD
-            ):
-                unsettled.add(identity)
         return open_fields, unsettled
     finally:
         snapshot.close()

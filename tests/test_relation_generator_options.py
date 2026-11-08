@@ -379,39 +379,46 @@ def test_suggest_relations_does_not_echo_the_cause_when_the_queue_cannot_be_read
 
     assert any(c["to"] == organization for c in suggested["candidates"])
     assert any("review fields unavailable" in w for w in suggested["warnings"]), suggested
-    assert not any("/private" in w or "Permission" in w for w in suggested["warnings"])
+    assert any("(PermissionError)" in w for w in suggested["warnings"]), suggested["warnings"]
+    assert not any("/private" in w or "denied" in w for w in suggested["warnings"])
 
 
-def test_suggest_relations_warns_for_a_candidate_beyond_the_queues_generator_cap(
+def test_suggest_relations_does_not_warn_for_edges_the_page_already_authors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from exomem import relation_queue
-
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     person = _entity(call, "person", "Ada Marsh")["path"]
-    organizations = [
-        _entity(call, "organization", title)["path"] for title in ("Birch Works", "Cedar Works")
-    ]
+    organization = _entity(call, "organization", "Birch Works")["path"]
+    other = _entity(call, "organization", "Cedar Works")["path"]
     source = call(
         "capture_source",
         {"title": "Shared source", "source_kind": "session", "content": "Three pages cite this."},
     )["path"]
-    for page in (person, *organizations):
+    for page in (person, organization, other):
         _cite(vault, page, source)
     _rebuild(vault, monkeypatch)
-    # Two pages share the source, but the queue's shared-source generator now stops at one.
-    monkeypatch.setattr(relation_queue, "_MAX_GENERATED_PER_METHOD", 1)
+    accepted = _accept_suggested(
+        call, person, _suggested_candidate(call, person, organization), "member_of"
+    )
+    assert accepted["mutated"] is True, accepted
+    # The author also writes a generic edge to the other organization by hand.
+    page = vault / person
+    generic = f"- relates_to [[{other.removesuffix('.md')}]]"
+    text = page.read_text(encoding="utf-8").rstrip("\n")
+    page.write_text(f"{text}\n{generic}\n", encoding="utf-8")
+    _rebuild(vault, monkeypatch)
 
     suggested = call(
         "read_connections", {"operation": {"kind": "suggest-relations", "path": person}}
     )
 
-    shared = [c for c in suggested["candidates"] if c["method"] == "shared_sources"]
-    assert {c["to"] for c in shared} == set(organizations)
-    assert sorted("review" in c for c in shared) == [False, True], shared
-    assert any("1 candidate(s)" in w for w in suggested["warnings"]), suggested["warnings"]
-
+    # Both edges sit under `## Relations`, which the suggestion generators read as links and the
+    # queue leaves out as authored: a candidate the queue omits on purpose is not a failed lookup.
+    assert not [w for w in suggested["warnings"] if "review fields" in w], suggested["warnings"]
+    assert all(
+        "review" not in c for c in suggested["candidates"] if c["to"] in {organization, other}
+    )
 
 def test_suggest_relations_carries_the_fitting_relations_for_the_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -539,7 +546,7 @@ def test_a_candidate_that_offers_no_relation_refuses_a_named_one_and_says_to_acc
 
     assert refused["error"]["code"] == "VOCABULARY_APPLICATION_INVALID", refused
     assert "without requested_relation" in refused["error"]["remediation"]
-    assert "choose one of the offered" not in refused["error"]["remediation"]
+    assert "Choose one of the offered" not in refused["error"]["remediation"]
     assert (vault / pages[0]).read_bytes() == before
 
 

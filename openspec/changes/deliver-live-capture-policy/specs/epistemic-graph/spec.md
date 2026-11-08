@@ -31,10 +31,9 @@ candidate, the response SHALL add a warning and SHALL NOT let the missing
 
 #### Scenario: A failed queue lookup is visible
 - **WHEN** the relation graph is not current, or the queue cannot confirm a shown candidate
-- **THEN** the response adds a `warnings` entry that names the lookup and not its cause
+- **THEN** the response adds a `warnings` entry that names the lookup and the class of its failure, not its message
 - **AND** the candidates are still returned, without `review` for the unconfirmed ones
 
-#### Scenario: A candidate beyond the queue's generator cap is visible
-- **WHEN** a shown candidate lies beyond the cap of the queue's own derivation for its generator
-- **THEN** it carries no `review` and the response adds a `warnings` entry
-- **AND** an embedding-proximity candidate, which the queue never derives, adds no warning
+#### Scenario: A candidate the queue leaves out on purpose is not a failed lookup
+- **WHEN** a suggestion generator proposes a pair that the page already authors
+- **THEN** the candidate carries no `review` and the response adds no lookup warning
