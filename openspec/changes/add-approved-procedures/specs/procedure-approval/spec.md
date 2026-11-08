@@ -16,6 +16,7 @@ A Source, Evidence or Entity page SHALL never be eligible. Eligibility SHALL dep
 An approval SHALL live outside the page, in the approvals ledger. The ledger is a reserved, append-only, vault-canonical record, and only the `approve_procedure` operation SHALL write it. The operation SHALL take an action (`approve`, `revoke` or `quarantine`) and a stable memory ref. `expected_version` applies to `approve` and `revoke`. `quarantine` takes an optional ref and no `expected_version`. Every action SHALL be owner-only, so that a host can permission the tool apart from the write tools. These rules apply:
 
 - `approve` SHALL require `expected_version` and SHALL refuse before any write or move when it differs from the page's current version.
+- An `expected_version` that is not 64 lowercase hex characters SHALL be refused as invalid input before any read or write, with a message that names that shape. It SHALL NOT be reported as a page change.
 - `approve` SHALL refuse before any write or move when the page is not eligible.
 - `revoke` SHALL take the ref and MAY carry `expected_version`. When it does, `revoke` SHALL refuse before any write or move on a mismatch. `revoke` SHALL work for a retired or deleted page.
 - An `approve` or `revoke` SHALL run in this order: the guard checks above, then the quarantine step for its ref, then the repeat test.
@@ -23,7 +24,7 @@ An approval SHALL live outside the page, in the approvals ledger. The ledger is 
 
 Each entry SHALL record the stable ref, the version, the action, the principal, the client label that the server observed, the time and the entry id. A `revoke` records the version that it withdraws: its `expected_version`, or else the version of the latest `approve` entry. The server SHALL write an entry under the vault mutation boundary. A second session or client of the same host that opens the same vault SHALL see it.
 
-The command registry SHALL classify `approve_procedure` in row 4 of the credential matrix in `authorization-session-binding`, which is owner-only. A credential that the surface admits SHALL be verified before work and SHALL NOT replace owner authorization. The operation SHALL NOT be admitted on the Cloud surface in this change. Its MCP annotations SHALL be not read-only, not destructive and idempotent.
+The command registry SHALL classify `approve_procedure` in row 4 of the credential matrix in `authorization-session-binding`, which is owner-only. A credential that the surface admits SHALL be verified before work and SHALL NOT replace owner authorization. In this capability, the owner is the vault owner on a connection with unrestricted content access. An owner connection that a connector boundary limits SHALL be refused every action and the `procedure_approvals` listing, and every surface SHALL serve it as a caller that is not the owner. The operation SHALL NOT be admitted on the Cloud surface in this change. Its MCP annotations SHALL be not read-only, not destructive and idempotent.
 
 The result of `approve` SHALL show what changed in the page since the last version that was approved for that ref, taken from the page's retained history. When that version is not recoverable, the result SHALL say so. When no earlier approval exists, the result SHALL say that this is the first approval.
 
@@ -110,6 +111,8 @@ A page that is not eligible, including a retired or superseded page, SHALL read 
 - the `procedure_approvals` kind of `read_review`, which is owner-only;
 - the `approve_procedure` result.
 
+The owner's `read_memory` result SHALL carry `approval` only when the page's ref has at least one ledger entry, whatever its class or action. Any other caller's result SHALL carry `approval` only when the value is `approved`, so the field's presence never separates a stale or revoked page from one that nobody approved. A result without the field SHALL read `unapproved`. The decision SHALL NOT read the page's note type.
+
 A ref that has an unreadable entry SHALL read `unapproved`, and the page content SHALL stay readable. An entry that is foreign or tampered SHALL be ignored for the verdict and SHALL raise a finding. Each finding names its ref and SHALL reach the owner only, in the `procedure_approvals` listing and in the owner's `read_memory` diagnostics. A caller that is not the owner SHALL receive `unapproved` and no finding. One ref's entries SHALL NOT change another ref's verdict.
 
 #### Scenario: Every surface agrees on one verdict
@@ -117,10 +120,21 @@ A ref that has an unreadable entry SHALL read `unapproved`, and the page content
 - **THEN** the method item, the `read_memory` result and the `procedure_approvals` listing each report `approved` for the same version
 - **AND** after an edit, all three report `stale` to the owner
 
+#### Scenario: An ordinary note carries no approval field
+- **WHEN** a page whose ref has no ledger entry is read with `read_memory`
+- **THEN** the result carries no `approval` field
+- **AND** the owner's read of a page whose ref has a revoked, foreign or unreadable entry carries `approval` set to `unapproved`
+- **AND** another caller's read of that page carries no `approval` field
+
 #### Scenario: Restricted readers see two states
 - **WHEN** a reader that is not the owner reads or activates a page whose approval is stale
 - **THEN** every surface reports `unapproved`
 - **AND** no surface shows the entry's version, principal or client label to that reader
+
+#### Scenario: A fenced owner connection has no ledger power
+- **WHEN** the owner connects through a connector boundary that denies some scopes
+- **THEN** `approve`, `revoke`, `quarantine` and the `procedure_approvals` listing each refuse and change nothing
+- **AND** every surface serves that connection `approved` or `unapproved`, with no entry and no finding
 
 #### Scenario: A reader below full release sees no approval
 - **WHEN** a caller whose release of an approved page is below FULL reads or activates it
@@ -159,9 +173,9 @@ The owner SHALL create, edit and retire a procedure through the ordinary writers
 
 ### Requirement: The approvals ledger is authentic and crash-safe
 
-The ledger SHALL hold one file per entry under `_Approvals/<ref>/`, named by its entry id, so that the path names the ref and the entry. Each entry SHALL carry an HMAC over its canonical bytes, which cover every field except the MAC itself, including the schema version and the client label. The key SHALL be one per owner. The product SHALL generate it, keep it outside the vault in the state root with mode 0600, and serve it on no surface, listing or diagnostic. Nothing that rebuilds, resets, wipes or migrates machine-local state SHALL touch the key. A host that syncs a vault needs the same key, and the owner copies it by hand.
+The ledger SHALL hold one file per entry under `_Approvals/<ref>/`, named by its entry id, so that the path names the ref and the entry. Each entry SHALL carry an HMAC over its canonical bytes, which cover every field except the MAC itself, including the schema version and the client label. The key SHALL be one per vault state directory, which the state root keys by the vault's path. The product SHALL generate it, keep it outside the vault in that directory with mode 0600, and serve it on no surface, listing or diagnostic. Nothing that rebuilds, resets, wipes or migrates machine-local state SHALL touch the key. A host that syncs a vault needs the same key, and the owner copies it by hand. A vault that moves to another path on the same host gets a new key, so its entries read foreign until the owner approves each page again.
 
-The server SHALL write each entry to a temporary name in the same directory. It SHALL then rename the file into place in one step, so that a crash leaves the whole entry or none. A leftover temporary file SHALL never be an entry. The rename is the entry's receipt, and the operation SHALL keep no separate receipt.
+The server SHALL write each entry to a temporary name in the same directory. It SHALL then rename the file into place in one step, so that a crash leaves the whole entry or none. A leftover temporary file SHALL never be an entry. The rename is the entry's receipt, and the operation SHALL keep no separate receipt. A reader that runs while an entry is published, or after a crash in that window, SHALL fail closed: it sees the whole entry or none, and a file that it cannot read counts as unreadable for its own ref and reads `unapproved`, never `approved`.
 
 The latest entry for a ref SHALL be the verified entry with the greatest recorded UTC time, then the greatest entry id. The time comes from the host clock. The writer SHALL record a time later than every verified entry of that ref. A skew between hosts matters only when two hosts write one ref before their copies of the vault meet.
 
