@@ -105,17 +105,55 @@ def _stored_mode(vault_root: Path) -> str | None:
     return None if row is None else row[0]
 
 
+#: What ``status`` reports for a record it cannot read: never a zero, which would pass for an empty store.
+UNKNOWN = "unknown"
+#: The report's own field names for a store-mode vault: the figures that it adds to the mode and the gate.
+STORE_FIGURES = (
+    "revision",
+    "release",
+    "changed_at",
+    "pages",
+    "binaries",
+    "queued_projections",
+    "oldest_projection_age_seconds",
+    "held",
+    "held_by_kind",
+    "audit_rows",
+)
+
+
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
     A file-mode vault reports only the mode and the release gate. A crash window reports its own state. A
     store-mode vault adds the figures that an operator checks before a rollback: stored pages and binaries,
-    queued projections and held items.
+    queued projections with the age in seconds of the oldest one (None when nothing is queued), and held
+    items in total and by kind. A store that cannot be read gives "unknown", for the mode or for each
+    figure, with the error's name in ``unreadable``: an unreadable store never reports zeros. A damaged
+    state manifest raises instead, so that the command refuses and names it.
     """
     report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
-    current = state(vault_root)
+    if not state_migration.vault_store_recorded(vault_root):  # a damaged manifest raises: the command refuses
+        return {**report, "mode": FILE_MODE}
+    try:
+        current = state(vault_root)
+    except Exception as error:  # noqa: BLE001 - an unreadable store is reported as unknown, never as a mode
+        return {**report, "mode": UNKNOWN, "unreadable": _reason(error)}
     if current != STORE_MODE:
         return {**report, "mode": current}
+    try:
+        figures = _store_figures(vault_root)
+    except Exception as error:  # noqa: BLE001 - an unreadable store is reported as unknown, never as zeros
+        figures = {**dict.fromkeys(STORE_FIGURES, UNKNOWN), "unreadable": _reason(error)}
+    return {**report, "mode": STORE_MODE, **figures}
+
+
+def _reason(error: Exception) -> str:
+    """The error's own code, or its type: a name that never carries a path or a page's content."""
+    return str(getattr(error, "code", type(error).__name__))
+
+
+def _store_figures(vault_root: Path) -> dict:
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
     )
@@ -127,15 +165,23 @@ def status(vault_root: Path) -> dict:
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
         }
+        # The queue stamps whole seconds in UTC, which SQLite's own clock reads, so no format lives here.
+        (age,) = reader.execute(
+            "SELECT CAST(strftime('%s', 'now') AS INTEGER) "
+            "- CAST(strftime('%s', MIN(queued_at)) AS INTEGER) FROM store_projection_queue"
+        ).fetchone()
+        held_by_kind = dict(
+            reader.execute("SELECT kind, COUNT(*) FROM store_held GROUP BY kind").fetchall()
+        )
     return {
-        **report,
-        "mode": STORE_MODE,
         "revision": revision,
         "release": release,
         "changed_at": changed_at,
         "pages": counts["store_pages"],
         "binaries": counts["store_binaries"],
         "queued_projections": counts["store_projection_queue"],
+        "oldest_projection_age_seconds": None if age is None else max(age, 0),
         "held": counts["store_held"],
+        "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
     }
