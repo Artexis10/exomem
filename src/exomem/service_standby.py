@@ -935,8 +935,8 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
 def _warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
     """Build the method-unit statistics the promoted worker's first task context would build. Reads only.
 
-    Without this the first task context after a handoff builds them, which took 41 s on a vault of about
-    four thousand pages and 6 s on the next one. The standby becomes the serving process, so what it holds
+    Without this the first task context after a handoff builds them: on a live vault the first one after a
+    cutover spent 41 s in the method lane and the next one 6 s. The standby becomes the serving process, so what it holds
     in memory before promotion is what that request reuses. The post-promotion request-path warm cannot
     do it: its neutral turn raises no method query. Only over a proven live catalogue, because a detached
     build's rows are replaced at promotion and statistics over them would be built for nothing. Never
