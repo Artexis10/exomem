@@ -330,3 +330,29 @@ When no compatible Records collection exists, a proposed collection or schema ch
 - **WHEN** a local adoption receipt exists and a definite delivery event is eligible for an existing compatible Records collection
 - **THEN** the agent-initiated Record follows `proactive_capture`
 - **AND** absence of a compatible collection permits only a structural suggestion, not implicit schema creation
+
+### Requirement: Durable-baseline routing preserves action authority
+An agent-initiated concise compiled observation or compatible existing-collection Records capture SHALL be `proactive_capture` and SHALL obey its active disposition. A small additive guarded edit that adds one durable facet to a uniquely resolved Entity MAY use `proactive_capture` only when it does not create an Entity, accept a relation, restructure content, supersede, merge, move, or delete. A durable affiliation that requires accepting a relation that the server's relation queue suggested SHALL use `link_acceptance` and remain confirm-required; an affiliation edge that the owner's agent authors SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states. Additive Entity creation SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states, but baseline eligibility alone SHALL NOT decide it. Substantial Entity curation — merge, supersession, deletion — or any restructuring execution SHALL use `restructure_execution` and remain confirm-required. Off or advisory dispositions SHALL be honored and no baseline eligibility judgment grants standing delegation.
+
+#### Scenario: Compiled baseline obeys proactive-capture posture
+- **WHEN** an eligible baseline routes to one concise compiled observation and `proactive_capture` is silent, advisory, or off
+- **THEN** the agent respectively may capture silently, must surface advice before capture, or performs no agent-initiated write
+
+#### Scenario: Small Entity facet remains narrowly additive
+- **WHEN** an eligible baseline is one additive facet of exactly one resolved Entity and changes no structure or relation
+- **THEN** it may follow `proactive_capture`
+- **AND** any merge, supersede, move, delete, or substantial rewrite instead follows `restructure_execution`
+
+#### Scenario: Queue-suggested affiliation is confirmed
+- **WHEN** a durable membership is represented by accepting a relation that the relation queue suggested
+- **THEN** the action follows `link_acceptance` and requires exact confirmation
+
+#### Scenario: Owner-authored affiliation follows proactive capture
+- **WHEN** the owner's agent authors a membership edge between two resolved entities
+- **THEN** the action follows `proactive_capture` and needs no confirmation question
+
+#### Scenario: Entity creation is never implied by baseline capture
+- **WHEN** no Entity uniquely resolves or the proposed change is structural
+- **THEN** baseline eligibility does not authorize Entity creation or curation
+- **AND** a new Entity, when the identity itself warrants one, follows `proactive_capture` through resolve-before-create
+- **AND** any merge, supersession, deletion or other restructuring follows confirmed `restructure_execution`
