@@ -1237,11 +1237,8 @@ def test_the_census_flags_a_supersession_that_runs_backwards_in_time(
     assert _check(census, "supersedes_backwards") == expected  # CORE
 
 
-def test_the_census_does_not_date_check_an_extension_of_supersedes(tmp_path: Path) -> None:
-    """FLIPS 4: the date check reads the key `supersedes`, so `x.retires` is not checked.
-
-    After intended change 4 this is `(1, 1)`.
-    """
+def test_the_census_date_checks_an_extension_of_supersedes(tmp_path: Path) -> None:
+    """FLIPS 4: the date check reads the `replaces` behaviour, so `x.retires` is checked."""
     census = _census(
         tmp_path,
         {
@@ -1250,7 +1247,7 @@ def test_the_census_does_not_date_check_an_extension_of_supersedes(tmp_path: Pat
         },
     )
 
-    assert _check(census, "supersedes_backwards") == (0, 0)  # FLIPS 4
+    assert _check(census, "supersedes_backwards") == (1, 1)  # FLIPS 4
 
 
 def test_the_census_flags_a_contradiction_inside_one_supersession_chain(tmp_path: Path) -> None:
@@ -1265,11 +1262,8 @@ def test_the_census_flags_a_contradiction_inside_one_supersession_chain(tmp_path
     assert _check(census, "contradicts_within_chain") == (1, 1)  # CORE
 
 
-def test_the_census_builds_no_chain_from_an_extension_of_supersedes(tmp_path: Path) -> None:
-    """FLIPS 4: the chain reads the key `supersedes`; with `x.retires` the pair is not chained.
-
-    After intended change 4 this is `(1, 1)`.
-    """
+def test_the_census_builds_a_chain_from_an_extension_of_supersedes(tmp_path: Path) -> None:
+    """FLIPS 4: the chain reads the `replaces` behaviour; with `x.retires` the pair is chained."""
     census = _census(
         tmp_path,
         {
@@ -1278,7 +1272,7 @@ def test_the_census_builds_no_chain_from_an_extension_of_supersedes(tmp_path: Pa
         },
     )
 
-    assert _check(census, "contradicts_within_chain") == (1, 0)  # FLIPS 4
+    assert _check(census, "contradicts_within_chain") == (1, 1)  # FLIPS 4
 
 
 def test_the_census_does_not_check_an_extension_of_contradicts_inside_a_chain(

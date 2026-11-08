@@ -910,6 +910,7 @@ class _Row(NamedTuple):
     dst_anchor: str | None
     fragment: str | None  # how a `#fragment` target resolved; None for no fragment
     target_fragment: str | None  # the fragment as authored
+    behaviours: frozenset[str]  # what the relation does, read in its authoring page's registry
 
     @property
     def touches_other(self) -> bool:
@@ -1058,6 +1059,7 @@ class _Reader:
                 dst_anchor,
                 metadata.get("fragment_resolution"),
                 metadata.get("target_fragment"),
+                self.view.behaviours(edge),
             )
 
     def pair_checks(
@@ -1132,15 +1134,17 @@ class _Reader:
 
     def supersession_chains(self) -> _UnionFind:
         chain = _UnionFind()
+        # A stored core key or a candidate narrows the scan; an extension is stored as a
+        # candidate and read per page, so the served `replaces` behaviour decides.
+        replacing = sorted(relation_registry.core_registry().keys_with("replaces"))
         for src_path, dst_path, source_path in self.connection.execute(
             "SELECT s.path, d.path, e.source_path FROM graph_edges AS e "
             "JOIN graph_nodes AS s ON s.node_key = e.src_key "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
             "WHERE e.origin != 'wikilink' "
-            "AND (e.relation_type = 'supersedes' OR e.registry_status = ?) "
-            f"AND exomem_edge_relation({self._columns}) = 'supersedes' "
-            f"AND exomem_edge_status({self._columns}) != 'unregistered'",
-            (self._candidate,),
+            f"AND (e.relation_type IN ({','.join('?' * len(replacing))}) OR e.registry_status = ?) "
+            f"AND exomem_edge_behaves({self._columns}, 'replaces') = 1",
+            (*replacing, self._candidate),
         ):
             if (
                 src_path != dst_path
@@ -1476,7 +1480,7 @@ def _check_row(
         record("signature_mismatch", row.status == "scope_violation" or bool(outside))
     src_page, dst_page = row.src_page or "", row.dst_page or ""
     same_page = src_page == dst_page
-    if row.relation == "supersedes" and not same_page:
+    if "replaces" in row.behaviours and not same_page:
         newer = _origin_date(reader.pages[src_page].origin_date)
         older = _origin_date(reader.pages[dst_page].origin_date)
         if newer is not None and older is not None:
