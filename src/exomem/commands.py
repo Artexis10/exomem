@@ -1933,8 +1933,9 @@ def op_bootstrap(
                     f"{tools_text('review_memory', 'read')} has no expected_fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
                     f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, resolves with the real unit "
                     "fingerprint and parent hash. Its delta clears the finding without extra triage; "
-                    "a due fingerprint is not a unit fingerprint. One triage_memory(ref, action='dismiss', "
-                    "expected_fingerprint, why) records presentation disposition, not authored resolution. "
+                    "a due fingerprint is not a unit fingerprint. "
+                    f"One {call_text('triage_memory', {'ref': '<ref>', 'action': 'dismiss', 'expected_fingerprint': '<fingerprint>', 'why': '<code>: ...'})} "
+                    "records presentation disposition, not authored resolution. "
                     "Preserve existing mutation authority."
                 ),
                 "artifact_role_state_handling": (
@@ -1964,7 +1965,7 @@ def op_bootstrap(
                     else "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
                 ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
-                "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
+                "family_disposition": f"when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: {call_text('triage_memory', {'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': '<code>: ...'})}, or action 'off' or 'normal'. quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": (
                     f"A quiet family stays reviewable and audited; omission never proves nothing is due. {call_text('review_memory', {'mode': 'dispositions'})} lists registered families, quiet state, reasons and the delegation envelope."
                     if profile == "compact"

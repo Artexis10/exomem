@@ -137,9 +137,9 @@ from . import review_state as review_state_module
 from . import vault as vault_module
 from .collection_store import ownership
 from .collection_store.preview import canonical_read, selected_writer
-from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import (
     _mask_code_spans,
     content_hash,
