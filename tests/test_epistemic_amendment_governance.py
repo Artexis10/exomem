@@ -39,6 +39,9 @@ SEQUENCE_NINE_FAMILIES = ("f35", "f36", "f37")
 #: The squash commit on ``main`` that introduced the sequence-9 receipt (#2519),
 #: pinned by the founder at acknowledgment.
 SEQUENCE_NINE_ACKNOWLEDGED_REVISION = "69599c346c631a0722c56b1634eb862329a9f09b"
+#: The squash commit on ``main`` that introduced the sequence-10 receipt (#2527),
+#: pinned by the founder at acknowledgment.
+SEQUENCE_TEN_ACKNOWLEDGED_REVISION = "b9b00ab39ec7f562e74d174f8b82972e3a840170"
 SEQUENCE_SIX_ACKNOWLEDGED_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
 # The commit that recorded the founder acknowledgment of sequence 6 (#1232).
 SEQUENCE_SIX_RELEASE_REVISION = "3677c2e7cd6bf863f0a0149b21bc339adb35ad50"
@@ -702,21 +705,19 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert acknowledged_nine.acknowledgment_status == "acknowledged"
     assert acknowledged_nine.introduced_family_ids == SEQUENCE_NINE_FAMILIES
     assert acknowledged_nine.contract.repository_revision == SEQUENCE_NINE_ACKNOWLEDGED_REVISION
-    # Sequence 10 changes the arms, scale and judge of f35 to f37 and adds no family, so
-    # being pending withholds nothing new.
-    pending_ten = identity.amendments[9]
-    assert pending_ten.sequence == 10
-    assert pending_ten.acknowledgment_status == "pending"
-    assert pending_ten.introduced_family_ids == ()
-    assert pending_ten.contract.repository_revision == pending_ten.receipt.introduction_revision
-    assert identity.effective.sha256 == pending_ten.contract.sha256
+    # Sequence 10 changes the arms, scale and judge of f35 to f37 and adds no family.
+    acknowledged_ten = identity.amendments[9]
+    assert acknowledged_ten.sequence == 10
+    assert acknowledged_ten.acknowledgment_status == "acknowledged"
+    assert acknowledged_ten.introduced_family_ids == ()
+    assert acknowledged_ten.contract.repository_revision == SEQUENCE_TEN_ACKNOWLEDGED_REVISION
+    assert identity.effective.sha256 == acknowledged_ten.contract.sha256
     assert identity.pending_amendments == (
         pending_two,
         pending_four,
         pending_five,
         pending_seven,
         pending_eight,
-        pending_ten,
     )
     assert identity.withheld_family_ids == frozenset(
         SEQUENCE_TWO_FAMILIES
