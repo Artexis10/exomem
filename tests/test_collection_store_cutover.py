@@ -12,6 +12,7 @@ the cutover, never from the cutover's own report.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -52,7 +53,18 @@ from exomem import __main__ as cli
 from exomem import commands, record_formats, records, state_migration
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import admission, capability, connection, conversion, edit_back, runtime, summary
+from exomem.collection_store import (
+    admission,
+    capability,
+    connection,
+    conversion,
+    edit_back,
+    references,
+    runtime,
+    summary,
+    typed_storage,
+    types,
+)
 from exomem.collection_store import cutover as collections_cutover
 from exomem.governance.principal import request_scope
 
@@ -84,8 +96,8 @@ def contents(root, path):
     # A derived collection's rows answer only a collection query.
     query = {"query": {"version": 1, "page": {"limit": 50}}} if path == SAMPLES_PATH else {}
     found = call(root, tool, action="query", collection=path, **query)
-    return sorted((json.dumps({name: value for name, value in row.items() if name not in REPRESENTATION},
-                              sort_keys=True) for row in found["rows"]))
+    return sorted(json.dumps({name: value for name, value in row.items() if name not in REPRESENTATION},
+                              sort_keys=True) for row in found["rows"])
 
 
 def tree(root):
@@ -113,44 +125,51 @@ def apply(root, plan_id, backup):
 
 
 def vault_with_every_shape(folder, monkeypatch):
-    """The production shapes before the cutover, with the service stopped as the runbook leaves it."""
-    root = legacy_vault(folder)
-    # The cutover refuses a log collection (its own test); this vault holds none.
-    shutil.rmtree((root / X3).parent)
-    assert migrate(root, "apply") == 0
-    # A Records collection that a release before the cutover still created in files.
-    records.create_collection(root, KEPT_PATH, manifest_text().replace(CID, KEPT).replace("title: Work", "title: Kept"),
-                              why="kept in files", scaffold=True)
-    monkeypatch.setattr(capability, "RELEASED", RELEASED)
-    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
-    # A full census pass every few tenths of a second, so a new item view need not wait the production 60 s.
-    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 0.3)
-    service = start_service(root)
-    try:
-        call(root, "plan_memory", action="add", collection=PLANNING, plan_id=OUTCOME,
-             item={"title": "Publish the guide", "kind": "outcome", "status": "planned",
-                   "commitment": "committed", "horizon": "quarter"}, why="a parent")
-        call(root, "plan_memory", action="add", collection=PLANNING, plan_id=INITIATIVE,
-             item={"title": "Draft the outline", "kind": "initiative", "status": "planned",
-                   "commitment": "committed", "horizon": "quarter", "parent": f"exomem://plan/{OTHER}/{OUTCOME}"}, why="a child")
-        call(root, "record_memory", action="append", collection=KEPT_PATH, item={"title": "Stamped", "count": 1},
-             why="one kept row")
-        [item] = (root / KEPT_PATH).parent.glob("Items/*.md")
-        # The stamp an ID backfill writes: the vault's note identity, outside the item schema.
-        item.write_text(item.read_text().replace("---\n", "---\nexomem_id: 0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e\n", 1))
-        with monkeypatch.context() as older:
-            older.setattr(records, "require_store_storage", lambda manifest: None)
-            call(root, "record_memory", action="create", manifest_path=SAMPLES_PATH, manifest_text=OLD_DERIVED_TEXT,
-                 why="derived samples")
-        job = imported(root, collection=DERIVED, mode="start", source_ref=_preserve(root, _archive(DAYS))["path"],
-                       format="json-document", members="samples/*", mapping=SAMPLES)
-        _until(lambda: imported(root, collection=DERIVED, mode="status", continuation=job["continuation"])["state"]
-               == "complete", 30)
-        _until(lambda: all(settled(root, cid) for cid in (CID, OTHER, LEDGER_ID, DERIVED))
-               and len(item_files(root, PLANNING)) == 2, 30)
-    finally:
-        service.stop()
-    return root
+    """The production shapes before the cutover, with the service stopped as the runbook leaves it.
+
+    A release before the reference indexes built its query projections: the hierarchy rule followed
+    no reference then, so no projection indexes the fields a Planning write follows.
+    """
+    real = types.named_validator
+    with monkeypatch.context() as release:
+        release.setattr(types, "named_validator", lambda name: dataclasses.replace(real(name), references=tuple))
+        root = legacy_vault(folder)
+        # The cutover refuses a log collection (its own test); this vault holds none.
+        shutil.rmtree((root / X3).parent)
+        assert migrate(root, "apply") == 0
+        # A Records collection that a release before the cutover still created in files.
+        records.create_collection(root, KEPT_PATH, manifest_text().replace(CID, KEPT).replace("title: Work", "title: Kept"),
+                                  why="kept in files", scaffold=True)
+        monkeypatch.setattr(capability, "RELEASED", RELEASED)
+        monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
+        # A full census pass every few tenths of a second, so a new item view need not wait the production 60 s.
+        monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 0.3)
+        service = start_service(root)
+        try:
+            call(root, "plan_memory", action="add", collection=PLANNING, plan_id=OUTCOME,
+                 item={"title": "Publish the guide", "kind": "outcome", "status": "planned",
+                       "commitment": "committed", "horizon": "quarter"}, why="a parent")
+            call(root, "plan_memory", action="add", collection=PLANNING, plan_id=INITIATIVE,
+                 item={"title": "Draft the outline", "kind": "initiative", "status": "planned",
+                       "commitment": "committed", "horizon": "quarter", "parent": f"exomem://plan/{OTHER}/{OUTCOME}"}, why="a child")
+            call(root, "record_memory", action="append", collection=KEPT_PATH, item={"title": "Stamped", "count": 1},
+                 why="one kept row")
+            [item] = (root / KEPT_PATH).parent.glob("Items/*.md")
+            # The stamp an ID backfill writes: the vault's note identity, outside the item schema.
+            item.write_text(item.read_text().replace("---\n", "---\nexomem_id: 0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e\n", 1))
+            with monkeypatch.context() as older:
+                older.setattr(records, "require_store_storage", lambda manifest: None)
+                call(root, "record_memory", action="create", manifest_path=SAMPLES_PATH, manifest_text=OLD_DERIVED_TEXT,
+                     why="derived samples")
+            job = imported(root, collection=DERIVED, mode="start", source_ref=_preserve(root, _archive(DAYS))["path"],
+                           format="json-document", members="samples/*", mapping=SAMPLES)
+            _until(lambda: imported(root, collection=DERIVED, mode="status", continuation=job["continuation"])["state"]
+                   == "complete", 30)
+            _until(lambda: all(settled(root, cid) for cid in (CID, OTHER, LEDGER_ID, DERIVED))
+                   and len(item_files(root, PLANNING)) == 2, 30)
+        finally:
+            service.stop()
+        return root
 
 
 def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every_row(
@@ -186,7 +205,7 @@ def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every
     assert hashlib.sha256(backup.read_bytes()).hexdigest() == receipt["backup"]["sha256"]
     done = {row["path"]: row for row in receipt["collections"]}
     assert set(done) == {*CONVERTED, SAMPLES_PATH}
-    assert all(row["parity"]["status"] == "held" for row in done.values()), done
+    assert all(row["parity"]["status"] == "held" and row["projection"] == "ready" for row in done.values()), done
     for path in CONVERTED:
         assert item_files(root, path) == {}
         archive = Path(done[path]["archive"])
@@ -196,6 +215,12 @@ def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every
                 for entry in files[path]} == files[path]
     assert done[SAMPLES_PATH]["archive"] is None
     assert FLOOR in state_migration.recorded_descriptor_ids(root)
+    # Before the service starts, a Planning write finds the items that name a parent by index, not by
+    # reading every row.
+    followed = types.named_validator("planning.hierarchy.v1").references()
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        [(_, parent)] = typed_storage.keyed_values(reader, OTHER, [OUTCOME])
+        assert set(references.neighbourhood(reader, OTHER, followed, OUTCOME, parent) or ()) == {OUTCOME, INITIATIVE}
 
     # A second run of the same plan repeats nothing.
     store_bytes = connection.store_path(root).read_bytes()
@@ -243,8 +268,6 @@ def backup_file(tmp_path):
     return folder / "before-cutover.sqlite"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="packet 3a removes the conversion's refusal of a presentation table")
 def test_a_records_collection_with_a_presentation_table_converts_and_keeps_its_child_rows(
         env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
     """Defect: the cutover refuses a Records collection whose presentation renders a table field, or
@@ -280,11 +303,11 @@ def test_a_records_collection_with_a_presentation_table_converts_and_keeps_its_c
         service.stop()
 
 
-def test_a_cutover_cut_at_two_points_resumes_from_its_record_and_repeats_nothing(
+def test_a_cutover_cut_after_any_step_resumes_from_its_record_and_repeats_nothing(
         env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
-    """Defect: a cutover cut after its migration, or after one collection's conversion committed,
-    migrates or converts again, breaks parity on the resumed collection, or leaves item files that
-    nothing removes."""
+    """Defect: a cutover cut after its migration, after one collection's conversion committed, or
+    while that collection's query index builds, migrates or converts again, breaks parity on the
+    resumed collection, leaves item files that nothing removes, or forgets where they went."""
     root = vault_with_every_shape(env, monkeypatch)
     files = {path: item_files(root, path) for path in CONVERTED}
     assert cutover(root, "--dry-run") == 0
@@ -310,12 +333,23 @@ def test_a_cutover_cut_at_two_points_resumes_from_its_record_and_repeats_nothing
             apply(root, plan_id, backup)
     assert view_mode(root, OTHER) == "summary" and item_files(root, PLANNING) == files[PLANNING]
 
+    # Cut 3: Planning's files left the vault, and its query index had not published.
+    with monkeypatch.context() as cut:
+        cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
+        cut.setattr(collections_cutover, "_publish_projection", crash)
+        with pytest.raises(SystemExit):
+            apply(root, plan_id, backup)
+    assert item_files(root, PLANNING) == {}
+
     with monkeypatch.context() as cut:
         cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
         assert apply(root, plan_id, backup) == 0, capsys.readouterr().err
     receipt = printed(capsys)
     done = {row["path"]: row for row in receipt["collections"]}
-    assert all(row["parity"]["status"] == "held" for row in done.values()), done
+    assert all(row["parity"]["status"] == "held" and row["projection"] == "ready" for row in done.values()), done
+    archive = Path(done[PLANNING]["archive"]) / "files"
+    assert {entry: hashlib.sha256((archive / entry).read_bytes()).hexdigest()
+            for entry in files[PLANNING]} == files[PLANNING]
     # The resumed conversion added its one revise event; no step ran twice.
     assert done[PLANNING]["parity"]["audit_events"]["after"] == done[PLANNING]["parity"]["audit_events"]["before"] + 1
     assert {path: item_files(root, path) for path in CONVERTED} == {path: {} for path in CONVERTED}
@@ -437,8 +471,6 @@ def test_a_parity_failure_stops_the_cutover_at_that_collection_and_leaves_later_
     assert {path: item_files(root, path) for path in CONVERTED} == {path: {} for path in CONVERTED}
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="packet 3a lets a sqlite collection keep the line breaks its rows hold")
 def test_after_the_cutover_writes_on_both_types_write_no_item_file(
         env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
     """Defect: after the cutover an update, upsert, transition, archive or restore on a converted

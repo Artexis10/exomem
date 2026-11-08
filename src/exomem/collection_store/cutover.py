@@ -9,7 +9,10 @@ The apply runs offline, with the service stopped, as the owner's migrate and exp
    private proof import of its files, which is the import the migration makes.
 2. It migrates the file collections through the existing migration (``admission.migrate_route``).
 3. It converts each markdown-items collection (``conversion``). A summary-mode one has no item
-   files, so only its storage strategy changes.
+   files, so only its storage strategy changes. Each conversion's revise begins the query projection
+   of the collection's declaration, and the apply publishes it before the next collection, as the
+   service's backfill would. A Planning write then finds the items that name a parent by index
+   (``references.neighbourhood``) from the first request.
 
 After each step it checks parity against the measures of step 1: row count, key set, payload
 hashes and audit event count. A conversion checks them inside its own transaction, so a failure
@@ -30,7 +33,18 @@ from pathlib import Path
 from .. import records, state_paths, writer_lease
 from .. import structured_collections as collections
 from ..maintenance_jobs import plan_identity, require_current_plan
-from . import admission, capability, connection, conversion, derived_rows, governance, inventory, ownership, preflight
+from . import (
+    admission,
+    capability,
+    connection,
+    conversion,
+    derived_rows,
+    governance,
+    index_migrations,
+    inventory,
+    ownership,
+    preflight,
+)
 from . import summary as summary_module
 from .connection import CollectionStoreError
 
@@ -39,6 +53,8 @@ MODE = "collections-cutover"
 MIGRATE, CONVERT, REWRITE = "migrate", "convert", "rewrite_strategy"
 BACKED_UP, MIGRATED, COMPLETE = "backed_up", "migrated", "complete"
 MEASURES = ("rows", "keys", "payload_hashes", "audit_events")
+#: The states of a published or failed query projection mapping (``index_migrations``).
+READY, FAILED = "ready", "failed"
 #: The strategy the cutover cannot convert; a member of ``structured_collections.SUPPORTED_STORAGE``.
 MARKDOWN_LOG = "markdown-log"
 LOG_UNSUPPORTED = "COLLECTIONS_CUTOVER_LOG_UNSUPPORTED"
@@ -323,7 +339,7 @@ def _begin(root, sealed, staging, plan_id, why, destination):
                     "converting": row["conversion"] is not None,
                     "baseline": measure(staging if MIGRATE in row["steps"] else snapshot, row["collection_id"]),
                     "done": False, "parity": None, "archive": None, "archived": None, "removed": None,
-                    "not_removed": None}
+                    "not_removed": None, "projection": None}
                    for row in sealed["collections"] if row["steps"]]
     run = {"version": 1, "mode": MODE, "plan_id": plan_id, "why": why, "phase": BACKED_UP,
            "started_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "backup": backup,
@@ -354,11 +370,33 @@ def _migrate(root, run):
     _write(root, run)
 
 
+def _building(root, cid):
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        # A building candidate is always the newest attempt, so the newest unready state names it.
+        return index_migrations.unready_state(reader, cid) == "building"
+
+
+def _publish_projection(root, writer, cid):
+    """Backfill the projection that ``cid``'s conversion began until it publishes; its final state.
+
+    FAILED when the build fails a stored value: the old projection stays, and a Planning write reads every row.
+    """
+    from . import runtime
+    from .preview import _mutate
+
+    state = READY  # Nothing building: the conversion found the projection of its declaration current.
+    while _building(root, cid):
+        published, _ = _mutate(root, writer.backfill_derived, cid, limit=runtime.BACKFILL_BATCH_ROWS, rollup=False)
+        # A batch that neither publishes nor leaves the candidate building has failed it.
+        state = READY if published else FAILED
+    return state
+
+
 def _convert_all(root, run):
     """Convert each collection the plan converts, in the owner's offline session, recording each one done."""
     from ..governance import principal
     from .export import _files_as
-    from .preview import preview_store
+    from .preview import bound_writer, preview_store
 
     def work(session, manager, fence_client):
         # Archiving many item files can outlast one lease; the offline owner stops renewal at its close.
@@ -373,22 +411,28 @@ def _convert_all(root, run):
             for entry in run["collections"]:
                 if entry["done"]:
                     continue
-                result = conversion._convert(root, entry["collection_id"], run["why"], check=(
-                    lambda conn, cid, entry=entry: _parity(entry, measure(conn, cid), added=0)))
-                # The conversion's own revise event, unless it committed before the backup. A run cut
-                # after this commit finds the collection converted, with that one event.
-                parity = _parity(entry, _store_measures(root, entry["collection_id"]),
-                                 added=0 if entry["converting"] else 1)
-                entry.update(done=True, parity=parity, archive=result.get("archive"),
-                             archived=result.get("archived", 0), removed=result.get("removed", 0),
-                             not_removed=result.get("not_removed", []))
+                if entry["parity"] is None:
+                    result = conversion._convert(root, entry["collection_id"], run["why"], check=(
+                        lambda conn, cid, entry=entry: _parity(entry, measure(conn, cid), added=0)))
+                    # The conversion's own revise event, unless it committed before the backup. A run cut
+                    # after this commit finds the collection converted, with that one event.
+                    parity = _parity(entry, _store_measures(root, entry["collection_id"]),
+                                     added=0 if entry["converting"] else 1)
+                    # Recorded before the projection build, so a run cut during it keeps what was archived.
+                    entry.update(parity=parity, archive=result.get("archive"), archived=result.get("archived", 0),
+                                 removed=result.get("removed", 0), not_removed=result.get("not_removed", []))
+                    _write(root, run)
+                entry.update(done=True, projection=_publish_projection(root, bound_writer(root), entry["collection_id"]))
                 _write(root, run)
         return {"status": "converted"}
 
     admission._offline_owner(root, "cutover", work)
     run["phase"] = COMPLETE
     moved = len(run["collections"])
+    failed = [entry["path"] for entry in run["collections"] if entry["projection"] == FAILED]
     run["outcome"] = (f"Moved {moved} collection(s) to SQLite-only storage; parity held for every one. "
+                      + (f"The query index of {', '.join(failed)} failed to build; a revise of the collection's "
+                         "declaration builds it again. " if failed else "")
                       + (f"The backup is {run['backup']['path']}." if run["backup"]["status"] == "verified"
                          else "No backup was taken: " + run["backup"]["reason"] + "."))
     _write(root, run)
