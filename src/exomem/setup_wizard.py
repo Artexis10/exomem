@@ -36,6 +36,7 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .governance.principal import library_scope
 from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
@@ -598,9 +599,9 @@ def _offer_learning_instruction(
         for name, _client, _path in targets:
             report(name, "[skipped: --no-learning-instruction]")
         return
-    # Read the level inside the vault's scope, so a level the user saved through
-    # the agent (for example coding: off) counts, not only the machine setting.
-    with prominence.request_scope(vault_root):
+    # Setup is the owner-local CLI: read the level as the owner inside the vault's
+    # scope, so a level saved through the agent (for example coding: off) counts.
+    with library_scope(), prominence.request_scope(vault_root):
         level = prominence.resolve_context(prominence.CODING_CONTEXT)["level"]
     if not any(rule["proactive_permitted"] for rule in prominence.capture_gate(level).values()):
         for name, _client, _path in targets:

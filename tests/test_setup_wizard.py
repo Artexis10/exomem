@@ -949,6 +949,38 @@ def test_scripted_setup_writes_no_instruction_file_unless_the_flag_asks(
     assert "add --learning-instruction" in summary
 
 
+def test_a_level_saved_through_the_agent_keeps_setup_from_offering_the_instruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user who told their agent "coding: off" asked Exomem to save only on request.
+    Setup reads the vault's saved level as the owner, so it must not offer the
+    instruction that asks for unprompted saves.
+    """
+    from exomem import prominence_preferences
+    from exomem.governance.principal import library_scope
+
+    monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    first, _ = _setup(vault, home, Recorder(), learning_instruction=False)
+    assert first == 0
+    with library_scope():
+        revision = prominence_preferences.inspect(vault)["revision"]
+        prominence_preferences.set_preference(vault, "off", revision, context="coding")
+
+    def answer(prompt: str = "") -> str:
+        if prompt.startswith("Packs"):
+            return ""
+        if "_access.yaml" in prompt or prompt.startswith("Skill already installed"):
+            return "n"
+        pytest.fail(f"unexpected prompt: {prompt}")
+
+    code, out = _setup(vault, home, Recorder(), yes=False, input_fn=answer)
+
+    assert code == 0
+    assert not (home / "CLAUDE.md").exists()
+    assert "learning: [skipped: prominence is off" in out
+
+
 def test_light_prominence_never_offers_the_learning_instruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
