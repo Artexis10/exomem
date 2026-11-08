@@ -45,7 +45,7 @@ A **stable probe** asks for a fact from an early session that never changes. Eac
 
 Before each session, every arm's workspace resets to that session's scripted files. The actor's own edits from earlier sessions are gone. The reset is a condition all arms share, as the controls requirement asks.
 
-The case check refuses a probe whose own task or session files contain its key value, an accepted phrasing or its trap. A paraphrased leak passes that check, so the development gate catches it: arm N without history solves the probe.
+The case check refuses a probe whose own task or session files contain its key value, an accepted phrasing or its trap, case-folded. A string under four characters, such as a port or a count, is matched as a whole token, and a hit warns instead of refusing, because short values recur innocently. A paraphrased leak passes that check, so the development gate catches it: arm N without history solves the probe.
 
 ### Probes do not feed each other
 
@@ -63,7 +63,7 @@ Provider-side behaviour moved within hours on 2026-11-08, so arms that run at di
 2. It waits until every arm has finished session k and its probes.
 3. Then it starts session k+1.
 
-An infrastructure fault, such as a provider error, gets the declared retries. If a session still fails, that project's window is invalid for every arm, and the report lists it with its error. Product failures, such as an exhausted task budget or a wrong action, stay scored, as the denominator requirement asks.
+An infrastructure fault, such as a provider error, gets the declared retries. If a session still fails, that project's window is invalid for every arm, and the report lists it with its error. The runner replays that project once in a new window, at least six hours after the other. If the replay also fails, the decision reads incomplete. Product failures, such as an exhausted task budget or a wrong action, stay scored, as the denominator requirement asks.
 
 A decision run plays the whole schedule twice, in two windows that start at least six hours apart.
 
@@ -77,8 +77,8 @@ The judge sees an opaque id, the probe task, the key (value, accepted phrasings,
 
 The judge decides correctness. That keeps a correct answer in other words from scoring as wrong.
 
-- **Cross-check:** when a probe names a structured answer field, such as `config/deploy.yaml` at `staging.approvals`, the harness reads it with a parser and compares it with the key value. The report lists every disagreement with the judge. In the dev round, the list drives key repairs. In the held-out run, it is description only.
-- **Re-judging:** a fresh judge call re-judges a 20% sample. If agreement on `correct` is below 90%, the run reads incomplete until a judge from another model family resolves the disagreements.
+- **Cross-check:** when a probe names a structured answer field, such as `config/deploy.yaml` at `staging.approvals`, the harness reads it with a parser and compares it with the key value. The report lists every disagreement with the judge. In the dev round, the list drives key repairs. In the held-out run, it is description only. The current case set names no such field, so the first harness builds no cross-check and the report says so.
+- **Re-judging:** a fresh call of the same judge re-judges a 20% sample. If agreement on `correct` is below 90%, the run reads incomplete. In the dev round, the rubric is repaired. A held-out run has no tiebreaker, because only the frozen decision judge's verdicts are decision evidence. A judge from another family may re-judge a sample as description.
 - **Model:** Opus at the sequence-10 judge setting.
 
 ### Development gates
@@ -89,6 +89,8 @@ The dev round runs the dev project with all four arms in one window. Two gates r
 - **Memory needed:** arm N from the main dev run, without that text, must fail at least 80% of probes. The author repairs or drops each probe it passes.
 
 The report lists both rates and each probe removed. A repaired probe is checked again before the split freezes.
+
+The gates run on the dev project only. Held-out probes are never gated or dropped after a run, because that would choose cases by their results. The dev round's repair rate is the expected share of flawed held-out probes, and the report states it.
 
 ### Statistics
 

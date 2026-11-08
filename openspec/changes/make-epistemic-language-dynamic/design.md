@@ -32,7 +32,9 @@ Behaviours sit on relations, not families, because today's sets are keyed both w
 | `replaces` | The target is no longer the current view. | `kind == "supersedes"` tests | supersedes |
 | `orders` | The source comes before the target in time. | new | precedes, follows |
 
-Slice 2 starts with an inventory of every branch on a relation key or family value in `src/exomem`. Each branch maps to a behaviour above, or to a new behaviour added with its code, or is named as debt. A before-and-after test over a fixture vault compares lift proposals, membership answers, prediction and question audits, resolution, activation counts and role review.
+`presentation_role` stays renderer metadata: it tells a viewer how to draw an edge. Behaviours decide what code does with the edge. `supersedes` carries both, for those two different reasons.
+
+Slice 2 starts with an inventory of every branch on a relation key or family value in `src/exomem`. Known so far beyond the table: further `supersedes` tests in `relation_census.py` and `sensed_model.py`, `derived_from` in `dreamer_families.py`, and `links_to` in `governance/projection_runtime.py`. Each branch maps to a behaviour above, or to a new behaviour added with its code, or is named as debt. A before-and-after test over a fixture vault compares lift proposals, membership answers, prediction and question audits, resolution, activation counts and role review for core relations. Extensions change on purpose: an extension of `supports` or `derived_from` now gains its parent's behaviour in the audit and activation, which today match on the extension key and miss it. The fixture holds one such extension with its expected new result.
 
 ### Kind traits are a separate closed set
 
@@ -53,11 +55,11 @@ The 27 built-in kinds in `semantic_blocks.py` move into the shipped pack. `defin
 
 ### Verdicts are state
 
-Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
+Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. An experiment page's `outcome:` shares the verdict vocabulary today through one constant, so it follows the registry too: a vault-added verdict is a valid outcome. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
 
 ### Epistemic dimensions
 
-A dimension entry has a key, labels, a description, its members and its display behaviours. Members are relation families, unit kinds and governed metadata keys. One member may sit in several dimensions, because a word can answer more than one question.
+A dimension entry has a key, labels, a description, its members and its display behaviours. Members are relation families, unit kinds and governed metadata keys. One member may sit in several dimensions, because a word can answer more than one question. A unit belongs to a dimension when its kind is a member, when it carries a member key, or when it is an endpoint of an edge whose family is a member.
 
 **Every dimension gets the generic operations:** retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it. No code names a particular dimension.
 
@@ -66,9 +68,11 @@ A dimension entry has a key, labels, a description, its members and its display 
 - `lead_with_current`: put current members before replaced ones, and mark the replaced ones;
 - `show_origin`: show beside each member where it came from and whose it is;
 - `flag_open`: mark members that have no closing verdict or answer as open;
-- `order_in_time`: present members in time order.
+- `order_in_time`: present members in time order, read from `orders` edges and `occurred_at`. It is the only rule that orders events.
 
-Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. A dimension change takes effect only after a reviewed registry save, as every registry change does.
+A display behaviour applies only within its own dimension's group. When a request groups by several dimensions, a unit that belongs to more than one appears in full once and as a ref in the other groups, so orders cannot conflict.
+
+Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. When the budget is short, a replaced unit becomes a ref, as context activation already allows. A dimension change takes effect only after a reviewed registry save, as every registry change does.
 
 The shipped dimensions:
 
@@ -77,15 +81,15 @@ The shipped dimensions:
 | `currency` | Is it still current? | supersession | `lead_with_current` |
 | `correction` | Was it corrected? | contradiction, testing, `verdict` | none |
 | `provenance` | Where did it come from? | derivation, evidence, citation, observation | `show_origin` |
-| `attribution` | Whose is it? | `asserted_by`, kind belief | `show_origin` |
-| `kind` | What kind of statement is it? | every kind, `mood`, `inference_mode` | none |
+| `attribution` | Whose is it? | `asserted_by`, `credence_holder` | `show_origin` |
+| `kind` | What kind of statement is it? | every kind, `modality`, `inference_mode` | none |
 | `argument` | What is the case for and against? | support, contradiction | none |
 | `dependency` | What does it rest on? | dependency, causality, blocking, implementation, mitigation, use, production | none |
 | `entities` | What and whom is it about? | entity, membership, kinship, affiliation, ownership, operation, supply, location, composition | none |
 | `identity` | Is it the same thing? | duplication, specialization | none |
 | `scope` | Where does it hold? | refinement | none |
-| `uncertainty` | How sure are we? | question, answer, resolution, assessment, kinds hypothesis, assumption, prediction, open_question and risk, `check_by` | `flag_open` |
-| `order` | When did it happen? | order, kind timeline_event, `at` | `order_in_time` |
+| `uncertainty` | How sure are we? | question, answer, resolution, assessment, kinds belief, hypothesis, assumption, prediction, open_question and risk, `check_by`, `credence` | `flag_open` |
+| `order` | When did it happen? | order, kind timeline_event, `occurred_at` | `order_in_time` |
 
 The generic families mention, link and relation belong to no dimension.
 
@@ -93,15 +97,17 @@ The generic families mention, link and relation belong to no dimension.
 
 The owner chose this shape on 2026-11-08: belief levels, plus numbers only with a source. The owner added that Exomem must not arbitrate belief.
 
-1. A belief is a unit of the new kind `belief`. Its governed keys are `holder` (an entity), `belief` (the value) and `basis` (free text).
+1. A belief is a unit of the new kind `belief`. It states the belief in prose, so it is never an empty unit. Its governed keys are `credence_holder` (a plain name or a link to an entity page), `credence` (the value) and `credence_basis` (free text).
 2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`.
 3. The value is a key or label of the belief-level registry (speculative, plausible, likely and near-certain by default), or a probability from 0 to 1.
 4. Every belief names a holder. A probability also needs a basis, and the basis can be anything the holder gives, including intuition.
 5. Exomem keeps the stated value as written. A label resolves to its level key for matching, but the stored text is unchanged, and a probability is never rounded.
 6. Several holders' beliefs about one claim sit side by side, and none replaces another.
-7. Calibration reads a probability against the assessed prediction's `check_by` and verdict.
+7. A `credence`, `credence_holder` or `credence_basis` row on another kind is an error that shows the belief-unit form. The likely misuse is `- credence: 0.8` on a claim.
 
-`holder` names whose belief it is. `asserted_by` names whose claim a unit is. They are different keys, because the two questions differ: a vendor asserts an uptime figure, and the team believes it is likely wrong.
+A later change can score calibration from a probability, the assessed prediction's `check_by` and its verdict. This change only keeps the data that needs.
+
+`credence_holder` names whose belief it is. `asserted_by` names whose claim a unit is. They are different keys, because the two questions differ: a vendor asserts an uptime figure, and the team believes it is likely wrong.
 
 Exomem writes no belief in this change. A later change that computes one must label it derived and must not replace a holder's belief.
 
@@ -109,13 +115,15 @@ The rejected alternatives were levels only, which keeps the old rule but gives u
 
 ### New governed metadata keys
 
-- `asserted_by` names an entity. Context presents a unit with it as that party's claim.
-- `mood` takes a mood-registry key: is, should, must, may. Retrieval and context never merge units whose moods differ.
-- `at` is a date or a date and time on a `timeline_event`.
-- `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series. The names are long so that they do not collide with ordinary rows such as `- value:`.
+- `asserted_by` is a plain name or a link to an entity page. Context presents a unit with it as that party's claim.
+- `modality` takes a modality-registry key: is, should, must, may. Retrieval and context never merge units whose modalities differ.
+- `occurred_at` is a date or a date and time on a `timeline_event`.
+- `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series.
+
+Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `basis` and `mood` are common words in existing notes, and `credence`, `occurred_at` and `modality` are not.
 - `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
 
-Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release.
+Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
 ### Multilingual labels
 
@@ -126,4 +134,5 @@ Each registry entry carries `labels: {language: text}`. Keys stay language-neutr
 - **A behaviour change hides in a data migration.** The shipped pack must reproduce today's sets exactly. The before-and-after fixture test guards each cutover.
 - **Agents misuse the new words.** Each slice proves on real models that an agent picks the right word for realistic and hostile inputs.
 - **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
+- **Display annotations add noise.** `flag_open` marks every risk and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
 - **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.

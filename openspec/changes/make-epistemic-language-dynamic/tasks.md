@@ -15,13 +15,13 @@
 
 - [ ] 3.1 Inventory every branch on a kind key. Map each to a trait or name it as debt.
 - [ ] 3.2 Move the built-in kinds into the shipped pack with their traits. Replace the kind branches with trait reads, and prove identical output on a fixture vault.
-- [ ] 3.3 Move the verdicts into a registry with labels. Update the verdict remediation and bootstrap's taught verdicts.
+- [ ] 3.3 Move the verdicts into a registry with labels. Update the verdict remediation, bootstrap's taught verdicts and the experiment `outcome:` check.
 
 ## 4. Belief and the new keys
 
-- [ ] 4.1 Add the `belief` kind, the belief-level registry, the `holder`, `belief` and `basis` keys and the `assesses` relation, with validation that names the missing key.
-- [ ] 4.2 Add `asserted_by` and `mood`, with context that presents attributed claims and keeps moods apart.
-- [ ] 4.3 Add `at`, the three quantity keys and `inference_mode` with its registry.
+- [ ] 4.1 Add the `belief` kind, the belief-level registry, the `credence`, `credence_holder` and `credence_basis` keys and the `assesses` relation, with validation that names the missing key and points misplaced rows to the belief form.
+- [ ] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
+- [ ] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
 - [ ] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
 
 ## 5. Dimensions
@@ -29,10 +29,11 @@
 - [ ] 5.1 Add the dimension registry with the 12 shipped dimensions and their members.
 - [ ] 5.2 Add filtering in retrieval, grouping in the context compiler, and queues in reviews and reports, for any dimension.
 - [ ] 5.3 Add the closed display-behaviour set, and prove that no display behaviour hides a unit or changes its standing.
+- [ ] 5.4 Check on real models that the display annotations help an agent rather than add noise.
 
 ## 6. Language and teaching
 
-- [ ] 6.1 Add labels per language to the kind, verdict, mood, belief-level, inference-mode and dimension registries, and parse labels as aliases.
+- [ ] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases.
 - [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic.
 
 ## 7. Proof and delivery

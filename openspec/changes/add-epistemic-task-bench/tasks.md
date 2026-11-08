@@ -11,7 +11,7 @@
 ## 3. Harness
 
 - [ ] 3.1 Add the `epistemic` suite to `membench outcome`: lockstep scheduling, workspace reset per session, probes from a memory copy, and the case check.
-- [ ] 3.2 Add the judge schema with the behaviours, the parser cross-check and the 20% re-judge.
+- [ ] 3.2 Add the judge schema with the behaviours and the 20% re-judge. Add the parser cross-check once a case names a structured answer field.
 - [ ] 3.3 Add the report: the paired probe bootstrap within projects, the three decisions, and the description rows that the design lists.
 
 ## 4. Dev round
