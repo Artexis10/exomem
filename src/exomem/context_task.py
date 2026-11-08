@@ -317,14 +317,15 @@ def compile_context(
             discovered, missing = working_set.task_candidates(
                 root, catalogue=catalogue, caller=caller, turn=turn,
                 focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
-                index_token=index_token, projections=sources,
+                index_token=index_token, projections=sources, timings=timings,
             )
         block["missing"] = missing
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         for candidate in discovered:
-            source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            with find_types.timing_span(timings, "working_set.task_context_projection"):
+                source = project_source(root, candidate["source_ref"], caller, cache=sources)
             if source is None:
                 block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
                 continue
