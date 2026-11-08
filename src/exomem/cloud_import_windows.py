@@ -502,15 +502,15 @@ class _Run:
                                            "the file call failed before the cell's answer arrived")
             return FilingReply.of(reply)
 
-        result = await call()
-        if result.state == CALL_ERROR and result.code in _REPEAT_ONCE:
-            result = await call()
+        reply = await call()
+        if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+            reply = await call()
         waits = 0
-        while result.state == CALL_ERROR and result.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:
+        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
             await self.sleep(self.poll)
-            result = await call()
+            reply = await call()
             waits += 1
-        return result
+        return reply
 
     def _say_stop(self, import_id: str, reply: FilingReply) -> None:
         """Say why filing a window stopped, once for each code: the cell's code and reason, and what frees space."""
@@ -532,34 +532,34 @@ class _Run:
             same = 0
             while self.filing and import_id in self.unfiled:
                 try:
-                    result = await self._file_call(import_id)
+                    reply = await self._file_call(import_id)
                 except FilingUnavailable:
                     self.filing = False
                     self.refusal = ("The cell refused the file call, so it does not file an upload in one call yet. "
                                     "The staged windows wait for your assistant to file them.")
                     self.progress.say(self.refusal)
                     return moved
-                if result.state == CALL_ERROR:
+                if reply.state == CALL_ERROR:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
                     # The cell refused the call, or the call failed on the way: the window keeps its continuation for the
                     # next pass, or for a rerun after this one ends.
-                    self._say_stop(import_id, result)
+                    self._say_stop(import_id, reply)
                     break
                 previous = self.marks.get(import_id)
-                counted = previous is None or result.counts != previous[0]
+                counted = previous is None or reply.counts != previous[0]
                 moved = moved or counted
-                same = 0 if counted or result.position != previous[1] else same + 1
-                self.marks[import_id] = (result.counts, result.position)
-                self.unfiled[import_id] = result.continuation
-                if result.state == DONE:
+                same = 0 if counted or reply.position != previous[1] else same + 1
+                self.marks[import_id] = (reply.counts, reply.position)
+                self.unfiled[import_id] = reply.continuation
+                if reply.state == DONE:
                     del self.unfiled[import_id]
                     self.stopped.pop(import_id, None)
-                    self.finished_windows[import_id] = result
+                    self.finished_windows[import_id] = reply
                     moved = True
-                    self.progress.say(f"Filed window {self._number(import_id)}: {result.count('filed'):,} files filed, "
-                                      f"{result.count('failed'):,} failed.")
-                elif result.state == STOPPED:
-                    self._say_stop(import_id, result)
-                    if result.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
+                    self.progress.say(f"Filed window {self._number(import_id)}: {reply.count('filed'):,} files filed, "
+                                      f"{reply.count('failed'):,} failed.")
+                elif reply.state == STOPPED:
+                    self._say_stop(import_id, reply)
+                    if reply.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
                         del self.unfiled[import_id]
                     break
                 else:
