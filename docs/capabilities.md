@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 36
-- Tier 1 commands: 31
+- Product commands: 37
+- Tier 1 commands: 32
 - Tier 2 commands: 5
-- Public MCP tools: 39
-- REST commands: 33
-- CLI commands: 33
+- Public MCP tools: 40
+- REST commands: 34
+- CLI commands: 34
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -40,6 +40,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 
 | MCP tool | Operations | Execution commands |
 | --- | --- | --- |
+| approve_procedure | approve, revoke, quarantine | approve_procedure |
 | bootstrap | settings, writer-status, instructions | configure_memory, coordination_status, bootstrap |
 | browse_memory | overview, folder-list, files, trash-list, propose-reclassification, validate-create, validate-append | browse_memory, manage_memory_file |
 | capture_source | Direct inputs | capture_source |
@@ -70,7 +71,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | read_memory | page, graph, dataset | read_memory, viewer_map, query_dataset |
 | read_plans | inspect, validate, query, history | plan_memory |
 | read_records | describe, inspect, validate, query, history, import | record_memory |
-| read_review | attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, write-advisory-result, vocabulary, item-context | review_memory, review_item_context |
+| read_review | attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, plan-progress, write-advisory-result, procedure_approvals, vocabulary, item-context | review_memory, review_item_context |
 | read_schema | inspect, preview, history, infer, validate, diff, validate-document, inventory, resolve, resolve-entity-type, propose-relation, census | schema_memory |
 | recall_context | Direct inputs | activate_context |
 | record_episode | record, input, prepare, disposition, resume | episode_memory |
@@ -113,6 +114,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings, rebuild_graph, detail, legacy_sample_limit, collection, apply, plan_id, source_snapshot, why, curation_action, run_id, plan, refs, paths, review_ref, hydration_recheck, expected_plan_fingerprint, vocabulary_ref, vocabulary_fingerprint, exclude_groups, acknowledge_skipped, cursor, response_detail | Maintain vault health; several modes write. |
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, why, include_model_suggestions, context, date_from, date_to, continuation, limit, query, requested_type, vocabulary_ref, vocabulary_fingerprint, detail, version, registry_scope, response_detail | Infer, validate, diff, or save governed memory schemas and workflow contracts. |
 | govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, session_action, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, backfill_action, companion_input, vocabulary_request_id, raw_release, response_detail | Manage opt-in confidential access policy. |
+| approve_procedure | 1 | MCP, REST, CLI | write | no | - | - | action*, ref, expected_version, response_detail | Approve, revoke or quarantine the owner's approval of a procedure page. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, source_kind, domain, reason, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, semantic_transition_token, relation_disposition, relation_review_hash, relation_review_reason, promotion_reason, response_detail | Manage files when typed tools do not fit. |
 | record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, expand_child, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, expected_manifest_hash, acknowledged_gap_codes, body, delivery, changes, expected_item_version, refresh_presentation, held, hold, rows, source, on_reject, import_request, query, response_detail | Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence. |
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, response_detail | Manage intent; record_memory holds outcomes. |
