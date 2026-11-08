@@ -198,16 +198,40 @@ def test_content_that_is_not_an_image_format_never_reaches_another_decoder(serve
     assert "IMAGE_UNDECODABLE" in refused
 
 
-def test_an_image_too_large_to_decode_names_the_download(served):
-    """A small file can declare a huge canvas; the header is checked before pixels are read."""
-    from PIL import Image
+def test_an_image_too_large_to_decode_names_the_download(served, monkeypatch):
+    """A small file can declare a huge canvas; it is refused before any pixel is decoded."""
+    from PIL import Image, ImageFile
 
     mcp, client = served
     out = io.BytesIO()
-    Image.new("L", (8000, 6000)).save(out, format="PNG")
+    Image.new("L", (9000, 6000)).save(out, format="PNG")
     path = _upload(client, "IMG_0006.png", out.getvalue(), "image/png")
+    decoded = []
+    load = ImageFile.ImageFile.load
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda image: decoded.append(image.size) or load(image))
 
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 
     assert "IMAGE_TOO_LARGE" in refused
+    assert (9000, 6000) not in decoded, "the canvas was decoded before the size check"
     assert "transfer_artifact operation=download" in refused
+
+
+def test_a_black_and_white_scan_keeps_its_thin_lines_when_downscaled(served):
+    """Bilevel scans shrink by nearest neighbour unless converted first, dropping strokes."""
+    from PIL import Image, ImageDraw
+
+    mcp, client = served
+    scan = Image.new("1", (3136, 400), 1)
+    draw = ImageDraw.Draw(scan)
+    for x in range(0, 3136, 2):
+        draw.line([(x, 0), (x, 399)], fill=0)
+    out = io.BytesIO()
+    scan.save(out, format="PNG")
+    path = _upload(client, "IMG_0007.png", out.getvalue(), "image/png")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    seen = Image.open(io.BytesIO(base64.b64decode(result.content[1].data))).convert("L")
+    # Half the columns are black, so the shrunk image is mid grey, not blank white.
+    assert 64 < sum(seen.getdata()) / (seen.size[0] * seen.size[1]) < 192

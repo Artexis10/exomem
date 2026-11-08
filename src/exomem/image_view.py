@@ -24,9 +24,10 @@ MAX_MAX_SIDE = 2048
 _JPEG_QUALITY = 85
 # A larger original is read into memory to decode; past this, the person downloads it instead.
 MAX_ORIGINAL_BYTES = 128 * 1024 * 1024
-# Decoded pixels, after JPEG's reduced-scale decode. 40 MP of RGBA is 160 MB in the serving
-# process; a 50 MP camera JPEG decodes at a quarter scale and passes, a 13,000 px PNG does not.
-MAX_DECODE_PIXELS = 40_000_000
+# Decoded pixels, after JPEG's reduced-scale decode. 50 MP covers 48 MP phone HEIF photos
+# (about 150 MB as RGB in the serving process); a 50 MP camera JPEG decodes at a quarter
+# scale, and a 13,000 px PNG is refused.
+MAX_DECODE_PIXELS = 50_000_000
 # One decode at a time bounds the memory that concurrent image reads can take.
 _DECODE = threading.Lock()
 # EXIF tags fixed by the EXIF specification, not by any vault vocabulary.
@@ -95,17 +96,23 @@ def _render(data: bytes, suffix: str, max_side: int) -> tuple[tuple[int, int], t
     from PIL import Image, ImageOps
 
     with image_codecs.open_image(io.BytesIO(data), suffix=suffix) as opened:
-        original = opened.size
-        if opened.getexif().get(_ORIENTATION) in _QUARTER_TURNS:
-            original = (original[1], original[0])
-        taken_at = _taken_at(opened)
         # JPEG decodes directly at a reduced scale; other formats ignore the draft request.
         opened.draft("RGB", (max_side, max_side))
-        # The header names the decode size, so a huge image is refused before any pixel is read.
+        # The header names the decode size. Check it before anything that loads pixels:
+        # Pillow decodes a whole PNG to read EXIF that follows the image data.
         if opened.size[0] * opened.size[1] > MAX_DECODE_PIXELS:
             raise _TooLarge
+        exif = opened.getexif()
+        original = opened.size if exif.get(_ORIENTATION) not in _QUARTER_TURNS else opened.size[::-1]
+        taken_at = _taken_at(opened)
         image = ImageOps.exif_transpose(opened)
-        # Shrink first, so mode conversions copy the small image, never the full one.
+        # Pillow shrinks bilevel and palette images by nearest neighbour, which drops thin
+        # strokes in scans; give them a mode that LANCZOS resamples.
+        if image.mode == "1":
+            image = image.convert("L")
+        elif image.mode == "P":
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        # Shrink before the remaining conversions, so they copy the small image.
         image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         image = _rgb(image)
         out = io.BytesIO()

@@ -2,8 +2,8 @@
 
 - [x] 1.1 Add `kind: "image"` to `read_media`, returning stored images as MCP image content through the original-download custody and release checks
 - [x] 1.2 Refuse undecodable formats, oversized images and Cloud cells with an error that names the download route
-- [x] 1.4 Decode only the registry's image formats, outside the shared recovery slots, one image at a time
 - [x] 1.3 Test that an agent receives an upright, downscaled photo and that the stored original is unchanged
+- [x] 1.4 Decode only the registry's image formats, outside the shared recovery slots, one image at a time
 
 ## 2. Short download links
 
