@@ -226,6 +226,37 @@ def test_an_edge_between_two_entities_is_an_entry_and_one_from_a_note_is_not(
     assert subject["introduction"]["source_ref"] == subject["source_ref"]
 
 
+def test_serving_open_edge_notices_builds_the_vault_link_index_once(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every open edge notice re-proves its edge on each recall. Each proof built its own link index, a walk
+    of every page, so a few open edges made one recall take minutes on a large vault."""
+    from exomem import vault as vault_module
+
+    _as(monkeypatch, "session-a")
+    target = _create_entity(vault, "Tidal Ledger")
+    sources = [_create_entity(vault, name) for name in ("Harbour Reconciliation", "Quay Audit")]
+    for source in sources:
+        _add_relation(vault, source, f"- supports [[{target.removesuffix('.md')}]]")
+    # A later edit gives the edge a retained state to prove as well as the current page.
+    _add_relation(vault, sources[0], f"- supports [[{sources[1].removesuffix('.md')}]]")
+    assert len([row for row in _ledger(vault) if row["kind"] == "edge"]) >= 2
+
+    _as(monkeypatch, "session-b")
+    builds: list[Path] = []
+    original = vault_module.WikilinkResolver.__init__
+
+    def counting(self, *args, **kwargs):
+        builds.append(args[0] if args else None)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.WikilinkResolver, "__init__", counting)
+    served = promotions.served_rows(vault)
+
+    assert served, "the open notices are still served"
+    assert len(builds) == 1
+
+
 def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
