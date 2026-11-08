@@ -12,10 +12,12 @@ resource "b2_bucket" "cloud_media" {
     is_file_lock_enabled = false
   }
 
-  # D7 keeps every completed version; only abandoned multipart uploads expire.
+  # Nothing hides a version by age. collect-released-media D2: a version that a hold condemned, or that a
+  # newer upload superseded, is deleted after the grace; until then a rescue restores it.
   lifecycle_rules {
     file_name_prefix                                       = ""
     days_from_starting_to_canceling_unfinished_large_files = var.cloud_media_unfinished_upload_days
+    days_from_hiding_to_deleting                           = var.cloud_media_condemned_days
   }
 
   lifecycle {

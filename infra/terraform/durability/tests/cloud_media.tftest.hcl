@@ -40,6 +40,7 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
   variables {
     cloud_media_enabled                = true
     cloud_media_unfinished_upload_days = 7
+    cloud_media_condemned_days         = 30
   }
 
   override_resource {
@@ -59,9 +60,9 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
       one(b2_bucket.cloud_media[0].lifecycle_rules).file_name_prefix == "" &&
       one(b2_bucket.cloud_media[0].lifecycle_rules).days_from_starting_to_canceling_unfinished_large_files == 7 &&
       coalesce(one(b2_bucket.cloud_media[0].lifecycle_rules).days_from_uploading_to_hiding, 0) == 0 &&
-      coalesce(one(b2_bucket.cloud_media[0].lifecycle_rules).days_from_hiding_to_deleting, 0) == 0
+      one(b2_bucket.cloud_media[0].lifecycle_rules).days_from_hiding_to_deleting == 30
     )
-    error_message = "Media must use a separate private bucket that expires only unfinished uploads, without hiding or deleting completed versions."
+    error_message = "Media must use a separate private bucket whose one rule hides nothing by age and deletes a hidden or superseded version only after the chosen grace."
   }
 
   assert {
@@ -93,4 +94,25 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
     )
     error_message = "No service holds deleteFiles on the media bucket; the operator deletes with a short-lived key."
   }
+}
+
+run "the_media_bucket_needs_a_chosen_grace" {
+  command = plan
+
+  variables {
+    cloud_media_enabled = true
+  }
+
+  expect_failures = [var.cloud_media_condemned_days]
+}
+
+run "a_grace_of_zero_days_is_refused" {
+  command = plan
+
+  variables {
+    cloud_media_enabled        = true
+    cloud_media_condemned_days = 0
+  }
+
+  expect_failures = [var.cloud_media_condemned_days]
 }

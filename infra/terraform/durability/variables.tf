@@ -54,6 +54,25 @@ variable "cloud_media_unfinished_upload_days" {
   }
 }
 
+variable "cloud_media_condemned_days" {
+  description = "Days that a hidden or superseded media version stays restorable before the media bucket deletes it. The grace must exceed the key watcher's interval plus the operator's response time."
+  type        = number
+  default     = null
+
+  # collect-released-media D2: the grace has no default, so the media bucket's rule never deletes on a value
+  # that nobody chose. A stack without the media bucket needs none. A false refusal delays an apply until
+  # the operator chooses the grace.
+  validation {
+    condition = (
+      var.cloud_media_condemned_days == null ? !var.cloud_media_enabled : (
+        var.cloud_media_condemned_days >= 1 &&
+        floor(var.cloud_media_condemned_days) == var.cloud_media_condemned_days
+      )
+    )
+    error_message = "cloud_media_condemned_days must be a positive whole number of days while cloud_media_enabled is true. It has no default: choose the grace in the runbook."
+  }
+}
+
 variable "access_record_enabled" {
   description = "Prepare the retained access record. Does not establish live privacy claims."
   type        = bool
