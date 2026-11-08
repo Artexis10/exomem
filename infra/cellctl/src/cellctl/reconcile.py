@@ -1740,10 +1740,11 @@ async def _media_physical_meter(
     shows. A hide marker alerts at once: the edge sends no hide request, so the edge key or another key hid
     a name. So does a prefix above the cell's allowance times the configured headroom. An unknown figure
     changes neither alert, since it is neither within the allowance nor clean, and a figure that stays
-    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. The figure is the operator's; the
-    owner's meter and the cell's record stay as they are."""
+    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. Without the list key each try counts
+    as a failed listing, since a missing key switches off both abuse alerts as a revoked one does. The figure
+    is the operator's; the owner's meter and the cell's record stay as they are."""
     edge = cluster_config.media_edge
-    if edge is None or listing is None:
+    if edge is None:
         return
     metered = {row.cell_id for row in rows if _media_mode(cluster_config, row) is not None}
     for row in rows:
@@ -1754,7 +1755,8 @@ async def _media_physical_meter(
                                   and memory.media_metered_for[row.cell_id] == row.last_backup_at)
         if listed_for_this_backup or (retry_at is not None and now < retry_at):
             continue
-        figure = await asyncio.to_thread(meter_prefix, listing, row.cell_id)
+        # main.py logged the missing key once at startup, so this try adds no log line of its own.
+        figure = UNKNOWN if listing is None else await asyncio.to_thread(meter_prefix, listing, row.cell_id)
         memory.media_physical[row.cell_id] = figure
         if figure is UNKNOWN:
             memory.media_meter_failures[row.cell_id] = memory.media_meter_failures.get(row.cell_id, 0) + 1

@@ -95,9 +95,10 @@ Three platform alerts name the cell and no content:
 - `media-over-allowance-<cell_id>` fires when the prefix holds more than the allowance times
   `mediaEdge.physicalHeadroom`. Kept versions count in full until the follow-on change destroys them, so a
   cell that rewrites its originals grows this figure without growing the owner's.
-- `media-meter-unknown-<cell_id>` fires when three listings in a row fail. While it fires, the other two
-  alerts cannot fire for that cell. Check that Secret `exomem-cloud-media-list` holds the key that Terraform
-  created, and that the provider is up. cellctl logs each failed listing with the error type.
+- `media-meter-unknown-<cell_id>` fires when three listings in a row fail, or after three tries without the
+  list key. While it fires, the other two alerts cannot fire for that cell. Check that Secret
+  `exomem-cloud-media-list` holds the key that Terraform created, and that the provider is up. cellctl logs
+  each failed listing with the error type.
 
 Each alert resolves on the next listing that shows its cause gone. The allowance and unknown alerts also resolve
 when the cell is deleted or leaves the store. The hide alert does not: no later listing shows that the hide entry
@@ -106,8 +107,8 @@ fired: it fires again at the next listing, but it does not resolve one that was 
 Resolve that one at the receiver.
 
 Without the list key, cellctl still starts. It logs once at startup that the media list key is missing, and it
-meters no cell, so none of the three alerts can fire. Create the Secret and restart cellctl as in
-"Upgrade a release that has the edge on".
+meters no cell. Each try counts as a failed listing, so `media-meter-unknown` fires for each media cell after
+three tries. Create the Secret and restart cellctl as in "Upgrade a release that has the edge on".
 
 ## Upgrade a release that has the edge on
 

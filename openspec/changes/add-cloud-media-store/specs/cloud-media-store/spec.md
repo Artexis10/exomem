@@ -440,7 +440,7 @@ The operator's physical meter SHALL count provider ciphertext bytes separately.
 Once per backup hold, cellctl SHALL list each cell's media prefix with its list-only key, sum the content lengths of the upload versions while it pages, and count unfinished large files.
 It SHALL raise an alert for any hide entry, and for a prefix whose bytes exceed the cell's allowance times a configured headroom factor. Only a listing that shows no hide entry SHALL resolve the hide alert.
 A failed listing page SHALL report the physical figure as unknown, never as zero, and SHALL NOT change the owner figure. A figure that stays unknown for three listings in a row SHALL raise an alert.
-cellctl SHALL start without the list key, and SHALL then log that every physical figure is unknown.
+cellctl SHALL start without the list key, SHALL then log that every physical figure is unknown, and SHALL count each try as a failed listing.
 
 The owner meter SHALL require complete canonical reference custody, including Trash, and SHALL report unknown when that custody is incomplete.
 It SHALL exclude registry-owned private state without reusing recall exclusions.

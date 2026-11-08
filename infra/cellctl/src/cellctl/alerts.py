@@ -68,7 +68,7 @@ RECALL_LAG_ALERT = "cell-recall-lagging"
 # itself, since cellctl cannot see the provider's key listing.
 CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"
 # add-cloud-media-store D10: a media prefix holds a hide marker, more bytes than the cell's allowance
-# times the configured headroom, or a physical figure that several listings in a row could not read. The
+# times the configured headroom, or a physical figure that several tries in a row could not read. The
 # edge sends no hide request, but its key's writeFiles permits one, so a hide means the edge key or another
 # key hid a name. The names carry the cell id as above.
 MEDIA_HIDE_ALERT = "media-hide-entry"

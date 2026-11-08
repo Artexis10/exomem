@@ -367,7 +367,7 @@ Once per backup hold, cellctl lists each cell's prefix with its list-only key (D
 - a prefix's bytes exceed the cell's allowance times the configured headroom factor;
 - the figure stays unknown for three listings in a row, five minutes apart. One failure alerts nothing, because a provider blip is normal. A revoked or wrong list key fails every listing, and without this alert it would switch off the other two with no notice.
 
-cellctl starts without the list key, because the meter is a report and not a gate. It then logs once that every physical figure is unknown and meters nothing. The runbook's upgrade step creates the key's Secret.
+cellctl starts without the list key, because the meter is a report and not a gate. It then logs once that every physical figure is unknown and meters nothing, and each try counts as a failed listing toward the unknown-figure alert. The runbook's upgrade step creates the key's Secret.
 
 Publication of the physical figure to Home needs Substrate columns and stays out of this change. The headroom factor is configuration, not a constant in code.
 

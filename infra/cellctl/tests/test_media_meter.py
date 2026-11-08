@@ -155,6 +155,22 @@ async def test_a_figure_unknown_for_three_listings_in_a_row_alerts_and_a_good_li
         await fleet.close()
 
 
+async def test_a_missing_list_key_counts_as_a_failed_listing_and_alerts_after_three_tries(cell_db, sent) -> None:
+    # A missing key switches off both abuse alerts just as a revoked one does, so it must not stay quiet.
+    fleet = await _fleet(cell_db, CANARY)
+    _alerting(fleet)
+    try:
+        fleet.media_listing = None
+        await fleet.run(NOW)
+        await fleet.run(NOW + 5 * MINUTE)
+        assert sent == []
+
+        await fleet.run(NOW + 10 * MINUTE)
+        assert (sent, fleet.memory.media_physical[CANARY]) == ([(UNKNOWN_ALERT, True)], media_meter.UNKNOWN)
+    finally:
+        await fleet.close()
+
+
 async def test_one_failed_listing_ends_the_passs_metering_so_a_provider_outage_costs_one_timeout(cell_db, sent) -> None:
     fleet = await _fleet(cell_db, CANARY, OTHER, cell_ids=(CANARY, OTHER))
     try:
