@@ -1342,16 +1342,39 @@ def test_the_census_counts_a_plain_link_as_no_typed_page(tmp_path: Path) -> None
     assert census["metrics"]["by_status"]["core_specific"] == 1  # CORE
 
 
-def test_the_census_counts_an_extension_of_links_to_as_a_typed_page(tmp_path: Path) -> None:
-    """FLIPS 6: the typed test excludes the key `links_to` only.
-
-    After intended change 6 `x.see_also` is a plain link through its parent and
-    the typed page count is 0.
-    """
+def test_the_census_counts_an_extension_of_links_to_as_a_plain_link(tmp_path: Path) -> None:
+    """FLIPS 6: the typed test reads the `plain_link` behaviour, so `x.see_also` is a plain link."""
     census = _census(tmp_path, {"a": (_row("x.see_also", "b"), {}), "b": ("The other page.", {})})
 
-    assert census["metrics"]["typed_coverage"]["pages"] == 1  # FLIPS 6
+    assert census["metrics"]["typed_coverage"]["pages"] == 0  # FLIPS 6
     assert census["metrics"]["by_status"]["extension"] == 1  # CORE
+
+
+def test_the_census_sample_skips_an_extension_of_links_to(tmp_path: Path) -> None:
+    """FLIPS 6: the sample skips a plain link through the `plain_link` behaviour."""
+    _census(
+        tmp_path,
+        {
+            "a": (_row("x.see_also", "b"), {}),
+            "b": ("The other page.", {}),
+            "c": (_row("supports", "d"), {}),
+            "d": ("The last page.", {}),
+        },
+    )
+
+    drawn = relation_census.sample(tmp_path / "census", keep=None)
+
+    assert {item["relation"] for item in drawn["items"]} == {"supports"}  # FLIPS 6
+
+
+def test_the_census_pair_check_skips_an_extension_of_links_to(tmp_path: Path) -> None:
+    """FLIPS 6: two plain links the other way round are no directed-both-ways pair."""
+    census = _census(
+        tmp_path,
+        {"a": (_row("x.see_also", "b"), {}), "b": (_row("x.see_also", "a"), {})},
+    )
+
+    assert _check(census, "directed_both_ways") == (0, 0)  # FLIPS 6
 
 
 # ---------------------------------------------------------------------------

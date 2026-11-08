@@ -498,8 +498,14 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
 
     # The edges a writer authored as a relation (a `## Relations` bullet or a semantic
     # relation), never a body wikilink; the log must name each edge's relation to class it.
-    link_key = relation_registry.link_relation_key()
+    core = relation_registry.core_registry()
     authored = [edge for edge in edges if edge.get("origin") in _AUTHORED_ORIGINS]
+
+    def plain_link(edge: dict) -> bool:
+        # Core meanings are shared; an extension reads through its authoring page's registry.
+        relation = edge["relation"]
+        registry = core if relation in core.core else reader.view.registry_for(edge["source_path"])
+        return "plain_link" in registry.behaviours_of(relation)
 
     def names_relation(edge: dict) -> bool:
         return isinstance(edge.get("relation"), str)
@@ -579,9 +585,9 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "raw_generic_share": generic_share(edges),
         # Of the relation edges writers authored: a specific relation, and a plain link.
         "specific_share": share(
-            authored, lambda edge: not edge["generic"] and edge["relation"] != link_key, names_relation
+            authored, lambda edge: not edge["generic"] and not plain_link(edge), names_relation
         ),
-        "plain_link_share": share(authored, lambda edge: edge["relation"] == link_key, names_relation),
+        "plain_link_share": share(authored, plain_link, names_relation),
         "endpoint_classes": classes,
         "unreasoned_generic_edges": metric(
             sum(
@@ -930,14 +936,15 @@ _ROWS_SQL = (
 _POPULATION_SQL = (
     "FROM (SELECT e.src_key, e.dst_key, "
     "exomem_edge_relation({columns}) AS relation_type, "
-    "exomem_edge_status({columns}) AS registry_status "
+    "exomem_edge_status({columns}) AS registry_status, "
+    "exomem_edge_behaves({columns}, 'plain_link') AS plain_link "
     "FROM graph_edges AS e "
     "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
     "AND exomem_census_eligible(e.source_path)) AS e {{join}}"
     "JOIN graph_nodes AS s ON s.node_key = e.src_key "
     "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
     "WHERE e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
-    "AND e.relation_type != 'links_to' AND s.path != d.path "
+    "AND e.plain_link = 0 AND s.path != d.path "
     "AND exomem_census_admitted(s.path) AND exomem_census_admitted(d.path)"
 )
 
@@ -1255,7 +1262,7 @@ def _census_payload(
         typed = (
             row.relation is not None
             and row.status != "unregistered"
-            and row.relation != relation_registry.link_relation_key()
+            and "plain_link" not in row.behaviours
             and row.origin != "wikilink"
         )
         if row.touches_other:
@@ -1580,7 +1587,8 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, generic_key, relation_registry.link_relation_key())
+                or row.relation in (None, generic_key)
+                or "plain_link" in row.behaviours
                 or row.status == "unregistered"
             ):
                 continue
