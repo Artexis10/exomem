@@ -1080,20 +1080,19 @@ def test_custody_is_applied_only_after_the_batch_revalidates(
     _warm(vault, warm_managed_cell)
 
     calls = {"n": 0}
-    real_revalidate = recall_policy.RecallBatch.revalidate
 
-    def failing_last_revalidate(self, root):  # noqa: ANN001
+    def drifted_at_the_final_check(self, root):  # noqa: ANN001
         calls["n"] += 1
-        if calls["n"] >= 3:
-            return False
-        return real_revalidate(self, root)
+        return frozenset({_ALPHA})
 
-    monkeypatch.setattr(recall_policy.RecallBatch, "revalidate", failing_last_revalidate)
+    monkeypatch.setattr(
+        recall_policy.RecallBatch, "drifted_identities", drifted_at_the_final_check
+    )
     freshness.reset_custody_telemetry()
 
     report = index_sync.upsert_after_write(vault, [vault / _ALPHA])
 
-    assert calls["n"] >= 3, "the final revalidate was never reached"
+    assert calls["n"] == 1, "the final check was never reached"
     assert report.reconcile_required, f"a stale batch reported success: {report.as_dict()}"
     assert freshness.last_custody_report() is None, (
         "custody was taken for a batch that did not commit"
