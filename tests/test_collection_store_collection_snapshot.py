@@ -7,9 +7,12 @@ import time
 from contextlib import closing
 
 import pytest
+from s1_export_fixture import iter_exercises
+from test_collection_rollups import DAILY, exercise, load, manifest
 from test_collection_store_snapshot import genesis  # noqa: F401 - fixture
+from test_collection_store_summary import guards
 from test_collection_store_typed_storage import create, migrate
-from test_collection_store_writer import CID
+from test_collection_store_writer import CID, manifest_path
 from test_records_bulk_upsert import EVIDENCE
 
 from exomem.collection_store import connection, schema, snapshot
@@ -75,12 +78,23 @@ def test_the_copy_holds_every_collection_row_and_none_of_store_modes(live, tmp_p
             if source[name].startswith("CREATE TABLE") and name not in (*schema.VAULT_STORE_TABLES, "sqlite_sequence"):
                 assert _rows(copy, name) == _rows(live.connection, name), name
         assert live.connection.execute("SELECT count(*) FROM items").fetchone()[0] == 3
-        # The copy rebuilds AUTOINCREMENT counters from its rows: only a table that the copy leaves empty may use one.
-        assert {name for (name,) in live.connection.execute("SELECT name FROM sqlite_sequence")} <= set(schema.VAULT_STORE_TABLES)
         assert [copy.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
                 for name in schema.VAULT_STORE_TABLES] == [0] * len(schema.VAULT_STORE_TABLES)
         assert [live.connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0] > 0
                 for name, _insert, _args in STORE_MODE_ROWS] == [True] * len(STORE_MODE_ROWS)
+
+
+def test_the_copy_keeps_an_autoincrement_counter_past_the_rows_it_numbered(live, tmp_path):
+    """Defect: a copy derives its counters from its rows, so an adopted store reissues the id of a dropped rollup."""
+    weekly = {**DAILY, "bucket": "week"}
+    live.create_collection(manifest_path(), manifest(rollups={"daily": DAILY, "weekly": weekly}), why="create", scaffold=False)
+    load(live, [exercise(record) for record in iter_exercises(6)])
+    live.revise_collection(CID, manifest_text=manifest(rollups={"daily": DAILY}), why="drop weekly", **guards(live))
+    counter = "SELECT seq FROM sqlite_sequence WHERE name = 'rollup_definitions'"
+    assert live.connection.execute("SELECT max(rollup_id) FROM rollup_definitions").fetchone() == (1,)
+    assert live.connection.execute(counter).fetchone() == (2,)  # the dropped rollup keeps the id it held
+    with _stage(live.root, tmp_path) as artifact, closing(sqlite3.connect(artifact.path)) as copy:
+        assert copy.execute(counter).fetchone() == (2,)
 
 
 def test_a_virtual_table_that_store_mode_does_not_own_refuses_the_copy(live, tmp_path):

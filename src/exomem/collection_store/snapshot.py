@@ -176,35 +176,6 @@ def migrate_copy(path: Path, check: Callable[[], None] = lambda: None) -> None:
         ) from error
 
 
-@contextmanager
-def _paced(destination: sqlite3.Connection, paced_check: Callable[[], None]) -> Iterator[None]:
-    """Run SQL under the caller's checks.
-
-    A check that stops the SQL (deadline, cancellation, custody, fencing) is re-raised as itself,
-    whatever error type the caller's check uses; it says nothing about the copy.
-    """
-    interruption = None
-
-    def progress() -> int:
-        nonlocal interruption
-        try:
-            paced_check()
-        except BaseException as error:  # noqa: BLE001 - SQLite would discard it
-            interruption = error
-            return 1
-        return 0
-
-    destination.set_progress_handler(progress, 1000)
-    try:
-        yield
-    except (connection.CollectionStoreError, sqlite3.DatabaseError) as error:
-        if interruption is not None:
-            raise interruption from error.__cause__
-        raise
-    finally:
-        destination.set_progress_handler(None, 0)
-
-
 def _backup_fill(source_path: Path, *, preserve_schema: bool):
     """The whole-file copy: SQLite's online backup of the store, as backup and Cloud portability need it."""
 
@@ -231,7 +202,8 @@ def _collection_fill(source_path: Path):
     The copy is made in one read transaction over the attached live store. Each table the live store
     holds is created and, unless it is one of ``schema.VAULT_STORE_TABLES``, filled with every row. The
     lexical and graph objects that a migration copied in (named by ``store_mode_objects``) are left out
-    whole. Indexes and triggers follow the rows, so no trigger fires on the copy.
+    whole. The AUTOINCREMENT counters of the copied tables carry over. Indexes and triggers follow the
+    rows, so no trigger fires on the copy.
     """
 
     def fill(destination: sqlite3.Connection, check: Callable[[], None], paced_check: Callable[[], None]) -> None:
@@ -240,7 +212,7 @@ def _collection_fill(source_path: Path):
         # An expression index reads its operands' metadata from the copy's own tables, so it binds to "main".
         register_native_operands(destination, databases={FileRole.STORE: "main"})
         destination.execute("ATTACH DATABASE ? AS live", (f"{Path(source_path).resolve().as_uri()}?mode=ro",))
-        with _paced(destination, paced_check):
+        with connection.checked_sql(destination, paced_check):
             destination.execute("BEGIN")
             # The first read pins one snapshot of the live store for everything below.
             found = int(destination.execute(
@@ -283,6 +255,12 @@ def _collection_fill(source_path: Path):
                 listed = ", ".join(names)
                 destination.execute(f"INSERT INTO main.{_quoted(name)}({listed}) SELECT {listed} FROM live.{_quoted(name)}")
                 check()
+            # An AUTOINCREMENT counter outlives the rows it numbered (a dropped rollup keeps its id), so a copy that
+            # derived it from its rows would reissue an id. The counters of the tables left empty stay out with them.
+            destination.execute("DELETE FROM main.sqlite_sequence")
+            destination.execute(
+                f"INSERT INTO main.sqlite_sequence(name, seq) SELECT name, seq FROM live.sqlite_sequence "
+                f"WHERE name IN ({', '.join('?' * len(copied))})", copied)
             for sql in indexes.values():
                 destination.execute(sql)
             for sqls in by_kind.values():
@@ -393,7 +371,8 @@ def _staged_copy(
     It runs at every phase boundary, and at most every ``_RECHECK_SECONDS`` within a
     phase. A passed deadline raises ``TimeoutError`` (COLLECTION_SNAPSHOT_DEADLINE),
     never COLLECTION_SNAPSHOT_INVALID.
-    The calling worker thread owns the source reader and closes it after backup.
+    ``fill`` opens and closes whatever it reads the live store through: a reader for the backup, an attached
+    database for the collection copy. This function owns only the scratch database's connection.
     ``attaches_source`` opens the scratch database as a URI, so that the fill can attach the source read-only.
     Publication passes ``cleanup=False`` because its durable intent owns scratch;
     context exit then closes handles and leaves retirement to witnessed recovery.
@@ -456,7 +435,7 @@ def _staged_copy(
                     check()
                     fill(destination, check, paced_check)
                     check()
-                    with _paced(destination, paced_check):
+                    with connection.checked_sql(destination, paced_check):
                         version = schema.schema_version(destination) if preserve_schema else None
                         metadata = _validate(destination, check, version=version)
                 check()
