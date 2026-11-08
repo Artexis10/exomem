@@ -49,19 +49,30 @@ function relationName(entry, fallback) {
 // The server supplies the generic relation; where it names none, the row says so rather than naming one.
 const UNNAMED_RELATION = "unnamed relation";
 
-// What a candidate can be written as. Fitting relations (`options`) replace the generic one;
-// without them the candidate's own relation is the key, and a candidate naming none is not writable.
+// The server's last resort when no specific relation fits: link the pages without naming how.
+const PLAIN_LINK_TEXT = "plain link (no specific relation)";
+
+// What a candidate can be written as. Fitting relations (`options`) replace the generic one, and
+// the server's plain link (`plain_link`) comes last. Without either, the candidate's own relation
+// is the key, and a candidate naming none is not writable.
 function relationChoices(candidates) {
   return candidates.flatMap((candidate) => {
     const options = Array.isArray(candidate.options) ? candidate.options : [];
-    if (options.length) {
-      return options.map((option) => ({
+    const choices = options.map((option) => ({
+      candidate,
+      key: option.key,
+      text: option.label || option.key,
+      description: option.description || "",
+    }));
+    if (candidate.plain_link) {
+      choices.push({
         candidate,
-        key: option.key,
-        text: option.label || option.key,
-        description: option.description || "",
-      }));
+        key: candidate.plain_link,
+        text: PLAIN_LINK_TEXT,
+        description: "Links the two pages without naming how they relate. Use it only when no relation above fits.",
+      });
     }
+    if (choices.length) return choices;
     return [{candidate, key: candidate.relation_type || "", text: relationName(candidate, UNNAMED_RELATION), description: ""}];
   });
 }

@@ -5758,7 +5758,8 @@ def _disposition_finding(
             ("Add a qualifying typed relation. " + relation_review_stable_id_remediation())
             if existing and page.identity_kind == "path"
             else (
-                "Add a qualifying typed relation, or re-issue the same "
+                "Link a related page: a specific relation, or a plain link (links_to) when the "
+                "pages only share a subject. Only when no page relates, re-issue the same "
                 f"{'edit' if existing else 'creation'} with "
                 "relation_disposition=\"reviewed_none\" and relation_review_reason."
             )

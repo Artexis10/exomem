@@ -2780,7 +2780,8 @@ def test_remediation_offers_a_relation_or_one_call_reviewed_none(tmp_path: Path)
     )
 
     finding = next(f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE")
-    assert finding.remediation.startswith("Add a qualifying typed relation")
+    # A page that shares a subject is linked, not declared unrelated: the plain link comes first.
+    assert finding.remediation.index("links_to") < finding.remediation.index("reviewed_none")
     assert 'relation_disposition="reviewed_none"' in finding.remediation
     assert "relation_review_reason" in finding.remediation
     assert "Retriggers" not in finding.remediation

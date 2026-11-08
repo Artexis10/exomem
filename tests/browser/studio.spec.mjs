@@ -227,6 +227,22 @@ test("a suggestion with fitting relations is written as the chosen one, never th
   expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- operates [[Knowledge Base/Entities/Organizations/Birch Works]]");
 });
 
+test("a queue item offers the plain link last and writes it as a plain link", async ({page}) => {
+  const calls = [];
+  const options = [{key: "owns", label: "owns", description: "The subject owns the object.", parent: null}];
+  const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: null, relation_label: null, bullet: null, options, plain_link: "links_to"}]};
+  await connectRelations(page, calls, {queueResponses: [relationQueue({groups: [group]})]});
+  await page.getByRole("button", {name: /Choose relation/}).click();
+  const choices = page.getByRole("dialog").getByRole("combobox");
+  const labels = await choices.locator("option").allTextContents();
+  expect(labels.at(-1)).toContain("plain link (no specific relation)");
+  await choices.selectOption({label: "plain link (no specific relation) → Knowledge Base/Notes/Insights/target-two.md"});
+  await page.getByLabel("Audit reason").fill("No specific relation fits");
+  await page.getByRole("button", {name: "Confirm governed edit"}).click();
+  await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
+  expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- links_to [[Knowledge Base/Notes/Insights/target-two]]");
+});
+
 test("a queue item with fitting relations is written as the chosen one through an audited edit", async ({page}) => {
   const calls = [];
   const options = [{key: "owns", label: "owns", description: "The subject owns the object.", parent: null}, {key: "operates", label: "operates", description: "", parent: null}];

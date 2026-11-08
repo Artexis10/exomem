@@ -129,6 +129,10 @@ counterpart — a provenance link, a supersession, any typed relation — satisf
 the rule as written and needs no extra argument, so connected material passes
 for free and only disconnected material needs the explicit disposition.
 
+A page that shares its subject with an existing page is not unrelated, even when no
+specific relation holds. Give it a plain link (`- links_to [[...]]`), which satisfies
+the rule; a later measurement or a sibling note on the same topic is the usual case.
+
 To commit an unrelated page, send `relation_disposition="reviewed_none"` and a
 `relation_review_reason` naming why nothing qualified with the creation itself;
 that one call commits and records the decision. Committing without them refuses

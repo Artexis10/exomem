@@ -392,9 +392,12 @@ under the vault root with no prefix guessing:
 
 Use semantic-block metadata such as
 `- relations: evidenced_by: [[Source]], contradicts: [[Earlier Finding]]` when
-the edge belongs to a specific claim, finding, or piece of evidence. Ordinary
-inline wikilinks remain useful generic `links_to` connections. Never turn a
-semantic suggestion into a typed relation without reviewing its meaning.
+the edge belongs to a specific claim, finding, or piece of evidence. An inline
+wikilink is only a plain link. When the note uses the page it links — the evidence
+it rests on, the decision it backs, a person who took part, the plan it carries
+out — also write that relation under `## Relations`. Keep the inline link alone
+only when the two pages just share a subject. Never turn a semantic suggestion
+into a typed relation without reviewing its meaning.
 
 **Relation labels are governed; categories and tags are not.** Categories are open
 vocabulary — invent one whenever it fits. Relation labels come from a registry, so
@@ -488,7 +491,9 @@ Read-only recall and review follow the live retrieval policy.
   hash. The decision then binds the page, not its bytes: later edits ask nothing
   while the page stays unconnected, and an edit that removes its last connection
   is still refused. The alternative is a typed `## Relations` entry
-  (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
+  (`- supports [[...]]`), or a plain link (`- links_to [[...]]`) when the page only
+  shares its subject with another page; use `reviewed_none` only when no page relates.
+  Dataview `supports:: [[...]]` is not relation syntax.
   A `GENERIC_RELATION_REFUSED` refusal takes no disposition: repeat the call with one of
   its listed specific relations, a proposed relation type, or a plain link
   (see [mutation-results](mutation-results.md)).
