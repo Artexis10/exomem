@@ -429,21 +429,21 @@ class GraphNeighbor:
     """One typed edge touching a find-lane seed, resolved to file endpoints.
 
     `direction` is relative to the seed: "outbound" when the seed is the edge
-    source, "inbound" when the seed is the edge destination. `family` is the
-    relation registry family ("" for unregistered relations).
+    source, "inbound" when the seed is the edge destination. `plain_link` says
+    the relation carries the `plain_link` behaviour.
     """
 
     seed_rel: str
     other_rel: str
     relation_type: str | None
     direction: str
-    family: str
+    plain_link: bool
     relation_label: str | None = None
 
     @property
     def typed(self) -> bool:
-        """A registered relation outside the plain-link family; it ranks before plain links."""
-        return bool(self.relation_type and self.family and self.family != "link")
+        """A registered relation that is not a plain link; it ranks before plain links."""
+        return bool(self.relation_type) and not self.plain_link
 
 
 @dataclass(frozen=True)
@@ -8639,7 +8639,9 @@ class EpistemicGraphIndex:
                                 other_rel=other_path,
                                 relation_type=relation_type,
                                 direction=direction,
-                                family=definition.family if definition else "",
+                                plain_link="plain_link" in authored.behaviours_of(
+                                    str(relation_type or "")
+                                ),
                                 relation_label=(
                                     relation_registry.display_label(authored, definition.key)
                                     if definition
@@ -9201,9 +9203,14 @@ class EpistemicGraphIndex:
             generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
+            sources_field, sources_relation = _declared_sources_binding()
+            sources_labels = sorted(_labels_of(view, [sources_relation]))
             authored_json = json.dumps(
                 [
-                    [source, target, relation, origin]
+                    [
+                        source, target, relation, origin,
+                        _core_relation(selected_registries[source], relation),
+                    ]
                     for source, relations in authored_pages.items()
                     for target, relation, origin in sorted(relations)
                 ]
@@ -9275,9 +9282,10 @@ class EpistemicGraphIndex:
                 str(row[2]): _path_for_node_key(conn, str(row[2])) for row in resolution_rows
             }
             authored_cte = (
-                "authored(source_path, dst_page_key, relation_type, origin) AS ("
+                "authored(source_path, dst_page_key, relation_type, origin, core_relation) AS ("
                 "SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), "
-                "json_extract(value, '$[2]'), json_extract(value, '$[3]') FROM json_each(?))"
+                "json_extract(value, '$[2]'), json_extract(value, '$[3]'), "
+                "json_extract(value, '$[4]') FROM json_each(?))"
             )
             frontmatter_rows = conn.execute(
                 f"WITH {authored_cte}, ranked AS (SELECT e.source_path, "
@@ -9290,7 +9298,7 @@ class EpistemicGraphIndex:
                 "EXISTS (SELECT 1 FROM graph_edges p "
                 "WHERE p.origin = 'markdown_relation' "
                 "AND p.src_key = ('file:' || e.source_path) "
-                "AND p.dst_page_key = e.dst_key AND p.raw_relation = 'derived_from') "
+                f"AND p.dst_page_key = e.dst_key AND p.raw_relation IN ({_marks(sources_labels)})) "
                 "AS authored_match, "
                 "ROW_NUMBER() OVER (PARTITION BY e.source_path ORDER BY "
                 "COALESCE(CAST(json_extract(e.review_evidence, "
@@ -9301,11 +9309,11 @@ class EpistemicGraphIndex:
                 "FROM graph_edges e LEFT JOIN graph_nodes d "
                 "ON d.node_key = e.dst_key AND d.kind = 'file' "
                 f"WHERE e.source_path IN ({placeholders}) AND e.origin = 'frontmatter' "
-                "AND e.source_anchor = 'sources' AND e.relation_type = 'derived_from' "
+                "AND e.source_anchor = ? AND e.relation_type = ? "
                 "AND NOT EXISTS (SELECT 1 FROM authored p "
                 "WHERE p.source_path = e.source_path "
                 "AND p.dst_page_key = e.dst_key AND p.origin = 'markdown_relation' "
-                "AND p.relation_type = 'derived_from')) "
+                "AND p.core_relation = ?)) "
                 "SELECT source_path, target_path, exomem_id, "
                 "CASE WHEN exomem_id IS NULL THEN 0 ELSE "
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
@@ -9313,7 +9321,11 @@ class EpistemicGraphIndex:
                 "authored_match, source_total "
                 "FROM ranked WHERE source_rank <= ? "
                 "ORDER BY source_path, source_rank, target_path LIMIT ?",
-                (authored_json, *selected, per_source_cap, branch_cap + 1),
+                (
+                    authored_json, *sources_labels, *selected,
+                    sources_field, sources_relation, sources_relation,
+                    per_source_cap, branch_cap + 1,
+                ),
             ).fetchall()
             shared_source_rows = conn.execute(
                 f"WITH {authored_cte}, ranked AS (SELECT e1.source_path, "
@@ -9332,10 +9344,10 @@ class EpistemicGraphIndex:
                 "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
                 "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
                 f"WHERE e1.source_path IN ({placeholders}) "
-                "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
-                "AND e1.relation_type = 'derived_from' "
-                "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
-                "AND e2.relation_type = 'derived_from' "
+                "AND e1.origin = 'frontmatter' AND e1.source_anchor = ? "
+                "AND e1.relation_type = ? "
+                "AND e2.origin = 'frontmatter' AND e2.source_anchor = ? "
+                "AND e2.relation_type = ? "
                 "AND e2.source_path <> e1.source_path "
                 "AND NOT EXISTS (SELECT 1 FROM authored p "
                 "WHERE p.source_path = e1.source_path "
@@ -9347,7 +9359,11 @@ class EpistemicGraphIndex:
                 "AND ids.exomem_id = ranked.exomem_id) END, authored_match, source_total "
                 "FROM ranked WHERE source_rank <= ? "
                 "ORDER BY source_path, target_path, dst_key LIMIT ?",
-                (authored_json, generic, *selected, generic, per_source_cap, branch_cap + 1),
+                (
+                    authored_json, generic, *selected,
+                    sources_field, sources_relation, sources_field, sources_relation,
+                    generic, per_source_cap, branch_cap + 1,
+                ),
             ).fetchall()
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
@@ -9463,13 +9479,14 @@ class EpistemicGraphIndex:
                 authored_match,
                 _source_total,
             ) = row
-            definition = selected_registries.setdefault(
+            lift_registry = selected_registries.setdefault(
                 str(source), relation_registry.core_registry()
-            ).definition(str(relation_type or ""))
+            )
+            definition = lift_registry.definition(str(relation_type or ""))
             authored_relation = relation_registry.normalize_relation(str(raw_relation or ""))
             if (
                 definition is None
-                or definition.family not in _LIFT_RELATION_FAMILIES
+                or "lifts" not in lift_registry.behaviours_of(definition.key)
                 or not _is_writable_relation_label(authored_relation)
             ):
                 continue
@@ -14251,16 +14268,30 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
     return candidates
 
 
+#: The governed frontmatter field a page declares its Sources in. The registry binds it to the
+#: relation, so code names the field and reads the relation from the binding.
+_SOURCES_FIELD = "sources"
+
+
+def _declared_sources_binding() -> tuple[str, str]:
+    """(field, relation) for the Sources a page declares in its frontmatter."""
+    binding = relation_registry.core_registry().frontmatter_relation(_SOURCES_FIELD)
+    if binding is None:
+        raise RuntimeError(f"shipped relations pack binds no frontmatter field {_SOURCES_FIELD!r}")
+    return _SOURCES_FIELD, binding.relation
+
+
 def _frontmatter_source_candidates(page) -> list[dict[str, Any]]:
+    field, relation = _declared_sources_binding()
     return [
         {
             "from": page.rel_path,
             "to": _with_md(target),
-            "relation_type": "derived_from",
+            "relation_type": relation,
             "method": "frontmatter_sources",
-            "evidence": {"source_path": page.rel_path, "field": "sources"},
+            "evidence": {"source_path": page.rel_path, "field": field},
         }
-        for target in _frontmatter_links(page.frontmatter.get("sources"))
+        for target in _frontmatter_links(page.frontmatter.get(field))
     ]
 
 
@@ -14271,14 +14302,27 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
         return []
     try:
         src_key = _file_key(rel_path)
-        rows = conn.execute(
-            "SELECT e2.src_key, e1.dst_key FROM graph_edges e1 "
-            "JOIN graph_edges e2 ON e1.dst_key = e2.dst_key "
-            "WHERE e1.src_key = ? AND e1.relation_type = 'derived_from' "
-            "AND e2.relation_type = 'derived_from' AND e2.src_key != ? "
-            "ORDER BY e2.src_key LIMIT 10",
-            (src_key, src_key),
+        view = GraphView(vault_root, conn)
+        _field, relation = _declared_sources_binding()
+        labels = sorted(_labels_of(view, [relation]))
+        # Every edge that states the Sources relation, whatever its origin. An extension of it
+        # is stored by its raw label, so the label list finds it and the authoring page's own
+        # registry decides what it means.
+        stated = conn.execute(
+            f"SELECT {EDGE_COLUMNS} FROM graph_edges e WHERE e.src_key LIKE 'file:%' "
+            f"AND (e.relation_type = ? OR e.raw_relation IN ({_marks(labels)})) "
+            "AND e.dst_key IN (SELECT dst_key FROM graph_edges WHERE src_key = ?)",
+            (relation, *labels, src_key),
         ).fetchall()
+        view.prefetch(str(row[10]) for row in stated)
+        stating = [edge for edge in map(view.edge, map(_edge_row_to_dict, stated))
+                   if edge is not None and _is_relation(edge, relation)]
+        mine = [str(edge["dst_key"]) for edge in stating if edge["src_key"] == src_key]
+        rows = sorted(
+            (str(edge["src_key"]), shared) for edge in stating
+            if edge["src_key"] != src_key
+            for shared in mine if shared == edge["dst_key"]
+        )[:10]
     finally:
         conn.close()
     out: list[dict[str, Any]] = []
@@ -14295,32 +14339,10 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
     return out
 
 
-#: Relation families the unit-relation lift may promote to a page-level
-#: proposal.  Causality is deliberately absent: `causes`/`caused_by` are the
-#: family where promoting one unit's claim to the whole page would assert a
-#: mechanism between the *pages* that the author never wrote.
-_LIFT_RELATION_FAMILIES: frozenset[str] = frozenset(
-    {
-        "answer",
-        "resolution",
-        "question",
-        "support",
-        "contradiction",
-        "refinement",
-        "evidence",
-        "duplication",
-    }
-)
-
-#: Registry statuses a lift may promote.  The allowlist above is by *family*,
-#: and a family can admit a deprecated (or scope-violating, or unregistered)
-#: extension kind — we must never propose a bullet the writer will reject.
+#: Registry statuses a lift may promote.  The `lifts` behaviour reaches an extension through
+#: its core parent, and an extension can be deprecated (or scope-violating, or unregistered)
+#: — we must never propose a bullet the writer will reject.
 _LIFT_REGISTRY_STATUSES: tuple[str, ...] = ("core", "alias", "extension")
-
-#: The resolution graph: unit-level relation kinds that answer or close a
-#: question.  Result-adjacency is defined over these, NOT over a `result` block
-#: kind — "both pages hold a result unit" fires on nearly every compiled note.
-_RESOLUTION_RELATION_TYPES: tuple[str, ...] = ("answers", "resolves")
 
 #: Row cap per structural query.  The bound lives in the sidecar, not in
 #: Python, so a corpus with hundreds of matches never materializes more.
@@ -14467,7 +14489,7 @@ def _unit_relation_lift_candidates(
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for _source, dst_key, raw_relation, relation_type, source_anchor, unit_ref in rows:
         definition = registry.definition(str(relation_type or ""))
-        if definition is None or definition.family not in _LIFT_RELATION_FAMILIES:
+        if definition is None or "lifts" not in registry.behaviours_of(definition.key):
             continue
         authored = relation_registry.normalize_relation(str(raw_relation or ""))
         if not authored or not _is_writable_relation_label(authored):
@@ -14750,14 +14772,34 @@ def _unit_relation_rows(
     return rows
 
 
-def _resolution_labels(view: GraphView) -> frozenset[str]:
-    """Raw labels any admitted instance resolves to a resolution relation."""
+def _labels_of(view: GraphView, keys: list[str]) -> frozenset[str]:
+    """Raw labels any admitted instance resolves to one of the core relations `keys`."""
     core = relation_registry.core_registry()
-    plan = traversal_profiles.relation_query_plan(core, list(_RESOLUTION_RELATION_TYPES))
+    plan = traversal_profiles.relation_query_plan(core, keys)
     admitted = view.interpretations.admitted_instances()
     return _relation_labels(
         plan, core, (snapshots["relations"].typed for _instance, snapshots in admitted)
     )
+
+
+def _resolution_labels(view: GraphView) -> frozenset[str]:
+    """Raw labels any admitted instance resolves to a relation that settles its target.
+
+    Result-adjacency is defined over the `settles` relations, NOT over a `result` block kind:
+    "both pages hold a result unit" fires on nearly every compiled note.
+    """
+    return _labels_of(view, sorted(relation_registry.core_registry().keys_with("settles")))
+
+
+def _is_relation(edge: dict[str, Any], relation: str) -> bool:
+    """True when the served edge is the core `relation` or an extension of it."""
+    return relation in (edge.get("relation_type"), edge.get("parent_relation"))
+
+
+def _core_relation(registry: relation_registry.RelationRegistry, key: str) -> str:
+    """The core relation `key` stands for: itself, or the parent of an extension."""
+    definition = registry.definition(key)
+    return (definition.parent or key) if definition is not None else key
 
 
 def _question_label_clause(view: GraphView) -> tuple[str, list[str]]:
@@ -14924,6 +14966,12 @@ def _question_matches(
     return matches
 
 
+def _settles(view: GraphView, edge: dict[str, Any]) -> bool:
+    """True when the edge's relation settles its target, read through the authoring page."""
+    registry = view.registry_for(str(edge["source_path"]))
+    return "settles" in registry.behaviours_of(str(edge["relation_type"]))
+
+
 def _resolution_matches(
     conn: sqlite3.Connection,
     view: GraphView,
@@ -14942,16 +14990,14 @@ def _resolution_matches(
     labels = _resolution_labels(view)
     if unit_relations is None:
         unit_relations = _unit_relation_rows(conn, view, sources=sources, labels=labels)
-    mine = [
-        edge for edge in unit_relations if edge["relation_type"] in _RESOLUTION_RELATION_TYPES
-    ]
+    mine = [edge for edge in unit_relations if _settles(view, edge)]
     if not mine:
         return []
     theirs = [
         edge for edge in _unit_relation_rows(
             conn, view, labels=labels, target_pages={edge["dst_page_key"] for edge in mine},
         )
-        if edge["relation_type"] in _RESOLUTION_RELATION_TYPES
+        if _settles(view, edge)
     ]
     authored = authored or {}
     generic = relation_registry.generic_relation_key()

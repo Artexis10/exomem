@@ -7,8 +7,9 @@ conversion must keep every "core" assertion green and flip exactly the
 assertions tagged with its own intended-change number (1-12, as numbered in the
 change's design.md). A flip is a one-line edit of the tagged value.
 
-Tags: `# CORE` assertions must never change. `# FLIPS <n>` assertions record
-today's value and change when intended change `<n>` lands.
+Tags: `# CORE` assertions must never change. `# FLIPS <n>` assertions recorded
+the value before intended change `<n>` and hold the new value once the commit
+that converts the reader has landed.
 """
 
 from __future__ import annotations
@@ -457,23 +458,26 @@ def test_a_unit_relation_lifts_when_its_family_is_a_lift_family(fixture_vault: P
 def test_a_grandfathered_extension_lifts_by_its_saved_family(fixture_vault: Path) -> None:
     """FLIPS 9: `x.leans_on` has parent `relates_to` and saved family `support`.
 
-    Today the saved family decides, so it lifts. After intended change 9 it
-    follows its parent `relates_to`, which has no `lifts`, and this is absent.
+    The saved family used to decide, so it lifted. It now follows its parent
+    `relates_to`, which has no `lifts`, so it does not.
     """
     build_graph(fixture_vault)
 
     relations = [r for r, _t in _suggested(fixture_vault, "lift-d", "unit_relation_lift")]
 
-    assert "x.leans_on" in relations  # FLIPS 9
+    assert "x.leans_on" not in relations  # FLIPS 9
     assert "x.retires" not in relations  # CORE: a supersession is never lifted
 
 
 def test_two_pages_that_answer_one_target_are_proposed_as_related(fixture_vault: Path) -> None:
     build_graph(fixture_vault)
 
-    assert _suggested(fixture_vault, "res-a", "shared_resolution_target") == [  # CORE
-        ("relates_to", "res-b")
-    ]
+    # `res-c` states `x.closes`; FLIPS 3 owns it, so the core pair is read without it.
+    assert [
+        item
+        for item in _suggested(fixture_vault, "res-a", "shared_resolution_target")
+        if item != ("relates_to", "res-c")
+    ] == [("relates_to", "res-b")]  # CORE
     assert _suggested(fixture_vault, "rr-1", "shared_resolution_target") == [  # CORE
         ("relates_to", "rr-2")
     ]
@@ -482,15 +486,17 @@ def test_two_pages_that_answer_one_target_are_proposed_as_related(fixture_vault:
 def test_an_extension_of_resolves_does_not_feed_shared_resolution_candidates(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 3: `x.closes` (parent `resolves`) is not in the key set today.
+    """FLIPS 3: `x.closes` (parent `resolves`) was not in the key set.
 
-    After intended change 3 it feeds the candidates, so `res-c` is proposed
-    beside `res-a` and `res-b`.
+    It now feeds the candidates, so `res-c` is proposed beside `res-a` and `res-b`.
     """
     build_graph(fixture_vault)
 
-    assert _suggested(fixture_vault, "res-c", "shared_resolution_target") == []  # FLIPS 3
-    assert ("relates_to", "res-c") not in _suggested(  # FLIPS 3
+    assert _suggested(fixture_vault, "res-c", "shared_resolution_target") == [  # FLIPS 3
+        ("relates_to", "res-a"),
+        ("relates_to", "res-b"),
+    ]
+    assert ("relates_to", "res-c") in _suggested(  # FLIPS 3
         fixture_vault, "res-a", "shared_resolution_target"
     )
 
@@ -509,9 +515,12 @@ def test_frontmatter_sources_and_shared_sources_are_proposed(fixture_vault: Path
     assert _suggested(fixture_vault, "fs-a", "frontmatter_sources") == [  # CORE
         ("derived_from", "src-doc")
     ]
-    assert _suggested(fixture_vault, "fs-a", "shared_sources") == [  # CORE
-        ("relates_to", "fs-b")
-    ]
+    # `fs-c` states `x.based_on`; FLIPS 8 owns it, so the core pair is read without it.
+    assert [
+        item
+        for item in _suggested(fixture_vault, "fs-a", "shared_sources")
+        if item != ("relates_to", "fs-c")
+    ] == [("relates_to", "fs-b")]  # CORE
 
 
 def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
@@ -519,13 +528,16 @@ def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
 ) -> None:
     """FLIPS 8: `fs-c` states `x.based_on` the same Source as `fs-a` and `fs-b`.
 
-    Today the shared-source query reads the key `derived_from` only, so `fs-c`
-    seeds nothing. After intended change 8 it is proposed beside them.
+    The shared-source query used to read the key `derived_from` only, so `fs-c`
+    seeded nothing. It is now proposed beside them.
     """
     build_graph(fixture_vault)
 
-    assert _suggested(fixture_vault, "fs-c", "shared_sources") == []  # FLIPS 8
-    assert ("relates_to", "fs-c") not in _suggested(  # FLIPS 8
+    assert _suggested(fixture_vault, "fs-c", "shared_sources") == [  # FLIPS 8
+        ("relates_to", "fs-a"),
+        ("relates_to", "fs-b"),
+    ]
+    assert ("relates_to", "fs-c") in _suggested(  # FLIPS 8
         fixture_vault, "fs-a", "shared_sources"
     )
 
@@ -552,9 +564,12 @@ def test_the_review_batch_carries_the_lift_and_source_rows(fixture_vault: Path) 
         ("frontmatter_sources", "derived_from", "src-doc"),
         ("shared_sources", "relates_to", "fs-b"),
     ]
-    assert rows["res-c"] == [("unit_relation_lift", "x.closes", "res-target")]  # FLIPS 3
+    assert rows["res-c"] == [  # FLIPS 3
+        ("shared_resolution_target", "relates_to", "res-a"),
+        ("shared_resolution_target", "relates_to", "res-b"),
+        ("unit_relation_lift", "x.closes", "res-target"),
+    ]
     assert rows["lift-d"] == [  # FLIPS 9
-        ("unit_relation_lift", "x.leans_on", "lift-target"),
         ("unit_relation_lift", "x.qualifies", "lift-target"),
     ]
 
@@ -655,15 +670,15 @@ def test_hydration_counts_an_extension_of_derived_from_as_a_content_link(
 # Plain links and typed edges: neighbours, referent ranking, projected graph
 # ---------------------------------------------------------------------------
 
-# What each relation on `nb-seed` reaches today, as (relation, family, typed).
+# What each relation on `nb-seed` reaches, as (relation, typed).
 NEIGHBOURS = {
-    "nb-links": ("links_to", "link", False),
-    "nb-supports": ("supports", "support", True),
-    "nb-see-also": ("x.see_also", "link", False),
-    "nb-backs": ("x.backs", "support", True),
-    "nb-unregistered": (None, "", False),
-    "nb-leans": ("x.leans_on", "support", True),
-    "nb-about": ("about_entity", "entity", True),
+    "nb-links": ("links_to", False),
+    "nb-supports": ("supports", True),
+    "nb-see-also": ("x.see_also", False),
+    "nb-backs": ("x.backs", True),
+    "nb-unregistered": (None, False),
+    "nb-leans": ("x.leans_on", True),
+    "nb-about": ("about_entity", True),
 }
 
 
@@ -674,7 +689,7 @@ def test_a_neighbour_is_typed_unless_its_edge_is_a_plain_or_unregistered_link(
     index = build_graph(fixture_vault)
 
     neighbours = {
-        _short(n.other_rel): (n.relation_type, n.family, n.typed)
+        _short(n.other_rel): (n.relation_type, n.typed)
         for n in index.neighbors_for([f"{KB}/nb-seed.md"])
     }
 
