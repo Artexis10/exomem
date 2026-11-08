@@ -1756,10 +1756,11 @@ async def _media_physical_meter(
     listing, now: datetime,
 ) -> None:
     """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
-    shows. A hide marker alerts at once: the edge sends no hide request, so the edge key or another key hid
-    a name. So does a prefix above the cell's allowance times the configured headroom. An unknown figure
-    changes neither alert, since it is neither within the allowance nor clean, and a figure that stays
-    unknown for MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. Without the list key each try counts
+    shows. A prefix above the cell's allowance times the configured headroom alerts. An unknown figure
+    changes no alert, since it is not within the allowance, and a figure that stays unknown for
+    MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. collect-released-media D4: a hide raises no
+    alert, since every owner deletion ends in one; the log lists the hidden names, and the out-of-cluster
+    watcher alerts on a burst. Without the list key each try counts
     as a failed listing, since a missing key switches off both abuse alerts as a revoked one does. The figure
     is the operator's; the owner's meter and the cell's record stay as they are."""
     edge = cluster_config.media_edge
@@ -1786,18 +1787,19 @@ async def _media_physical_meter(
         memory.media_meter_retry_at.pop(row.cell_id, None)
         memory.media_meter_failures.pop(row.cell_id, None)
         memory.media_metered_for[row.cell_id] = row.last_backup_at
-        # Without a delivery Secret the log line is the only notice, so a hide entry logs as a warning.
-        logger.log(logging.WARNING if figure.hides else logging.INFO,
-                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s) and %d hide marker(s) in the bucket",
-                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes,
-                   figure.unfinished, figure.hides)
+        # A repeated name loses its older version once the lifecycle rule applies, so a count that is not
+        # zero, or not known, logs as a warning: the operator re-offloads those originals first.
+        logger.log(logging.INFO if figure.repeated == 0 else logging.WARNING,
+                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s), %s name(s) with more than one "
+                   "upload version and %d hidden name(s) in the bucket%s",
+                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes, figure.unfinished,
+                   "an unknown number of" if figure.repeated is None else figure.repeated, len(figure.hidden or ()),
+                   f": {', '.join(figure.hidden)}" if figure.hidden else "")
     allowance = edge.store_policy.get("allowance_bytes")
     for cell_id, figure in list(memory.media_physical.items()):
-        hide_alert, over_alert, unknown_alert = alerts.media_alerts(cell_id)
+        over_alert, unknown_alert = alerts.media_alerts(cell_id)
         if cell_id not in metered:
-            # A cell that left the store (deleted) forgets its figure, and its allowance and unknown-figure
-            # alerts resolve. A hide alert stays: only a listing that shows no hide entry resolves it, and
-            # this cell is listed no more.
+            # A cell that left the store (deleted) forgets its figure, and its alerts resolve.
             for alert in (over_alert, unknown_alert):
                 if memory.alert_delivered.get(alert):
                     await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
@@ -1808,8 +1810,7 @@ async def _media_physical_meter(
             continue
         exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
         stays_unknown = memory.media_meter_failures.get(cell_id, 0) >= MEDIA_METER_UNKNOWN_AFTER
-        for alert, firing in ((hide_alert, None if figure.hides is None else figure.hides > 0),
-                              (over_alert, exceeds), (unknown_alert, stays_unknown)):
+        for alert, firing in ((over_alert, exceeds), (unknown_alert, stays_unknown)):
             # None is unknown: send nothing. A cell that never alerted needs no resolution either.
             if firing or (firing is False and memory.alert_delivered.get(alert)):
                 await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
