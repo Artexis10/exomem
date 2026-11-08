@@ -57,6 +57,14 @@ EXPECTED_TABLES = {
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
+    "store_mode",
+    "store_mode_objects",
+    "store_pages",
+    "store_binaries",
+    "store_manifest",
+    "store_projection_queue",
+    "store_held",
+    "store_audit",
 }
 APPEND_ONLY = (
     "txns",
@@ -253,6 +261,31 @@ def test_append_only_tables_abort_update_and_delete(
     assert conn.execute(f"SELECT * FROM {table}").fetchall() == before  # noqa: S608
 
 
+def test_store_audit_rows_cannot_be_changed_deleted_or_replaced(store: connection.WriterConnection) -> None:
+    """Defect: a rollback, a repair or a stray writer rewrites the audit trail that store mode exports and keeps."""
+    with store.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at)"
+            " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, 'first', '2026-11-08T00:00:00Z')",
+            (H,),
+        )
+    conn = store.connection
+    before = conn.execute("SELECT * FROM store_audit").fetchall()
+    assert len(before) == 1
+
+    statements = (
+        "UPDATE store_audit SET reason = 'rewritten'",
+        "DELETE FROM store_audit",
+        "INSERT OR REPLACE INTO store_audit(seq, revision, operation, origin, at)"
+        " VALUES (1, 2, 'delete', 'agent', '2026-11-08T00:00:01Z')",
+    )
+    for statement in statements:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"), store.transaction() as tx:
+            tx.execute(statement)
+
+    assert conn.execute("SELECT * FROM store_audit").fetchall() == before
+
+
 def test_item_rows_are_never_deleted(store: connection.WriterConnection) -> None:
     _populated(store)
     with pytest.raises(sqlite3.IntegrityError, match="never deleted"), store.transaction() as tx:
@@ -382,7 +415,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 14
+    assert schema.SCHEMA_VERSION == 15
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -486,7 +519,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["14", "9"])
+@pytest.mark.parametrize("revision", ["15", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -501,12 +534,34 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 14
+        assert schema.schema_version(store.connection) == 15
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 14
+            assert schema.schema_version(reader) == 15
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("14",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("15",)]
+
+
+def test_a_schema_14_store_gains_the_empty_store_mode_tables_and_keeps_its_rows(tmp_path, monkeypatch):
+    """Defect: the schema 15 revision works on a new store only, so every existing store fails to open or loses rows."""
+    path = tmp_path / "collections.sqlite"
+    with monkeypatch.context() as earlier:
+        earlier.setattr(schema, "SCHEMA_VERSION", 14)
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            _populated(writer)
+            assert schema.schema_version(writer.connection) == 14
+            rows = writer.connection.execute("SELECT * FROM items").fetchall()
+            assert not writer.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'store_pages'").fetchone()
+
+    with connection.open_writer(path, lease_check=_allow) as writer:
+        conn = writer.connection
+        assert schema.schema_version(conn) == 15
+        assert conn.execute("SELECT * FROM items").fetchall() == rows
+        strict = dict(conn.execute("SELECT name, strict FROM pragma_table_list WHERE schema='main'").fetchall())
+        for name in schema.VAULT_STORE_TABLES:
+            assert strict[name] == 1
+            assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == 0  # noqa: S608 - fixed names
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -520,7 +575,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("14",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("15",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 
