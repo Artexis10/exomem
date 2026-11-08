@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -761,23 +761,59 @@ def forget_original(vault: Path, path: str | Path) -> None:
     with _guard(vault, "media_store_forget_original"):
         if original_state(vault, path) != snapshot:
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the deletion binding changed")
+        _release_name(MediaJobStore(vault), snapshot.reference.object)
         _publish_reference(vault, snapshot, None)
 
 
-def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> None:
+def _durable(store: MediaJobStore, statement: str, parameters: tuple[object, ...]) -> None:
+    """One statement, committed with a full sync: a crash-consistent clone taken after it holds the row."""
     conn = store._connect()
     try:
-        # D9 requires FULL before BEGIN: NORMAL can omit this record from a clone.
+        # D9 requires FULL before BEGIN: NORMAL can omit this commit from a clone.
         conn.execute("PRAGMA synchronous=FULL")
         with conn:
-            # One record per object covers every retried attempt for this original.
-            conn.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) "
-                         "SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
-                         "WHERE binary_rel = ? AND object = ?)",
-                         (uuid.uuid4().hex, store._relative(snapshot.path), name, time.time(),
-                          store._relative(snapshot.path), name))
+            conn.execute(statement, parameters)
     finally:
         conn.close()
+
+
+def _release_name(store: MediaJobStore, name: str) -> None:
+    """collect-released-media D5: record that a reference to `name` is about to retire.
+
+    The caller commits this before it removes the reference, so a crash between the two keeps the reference. A
+    released name is only a candidate: a hold condemns it once no retained backup references or protects it.
+    """
+    _durable(store, "INSERT INTO media_releases(object) VALUES (?)", (name,))
+
+
+def _upload_name(store: MediaJobStore, snapshot: OriginalSnapshot) -> str:
+    """collect-released-media D1: the name minted for this original's open record, or a fresh random one.
+
+    A retry after a lost reply reuses the record's name, which keeps the edge's nonce recovery and serial-write
+    hold. A name that a sidecar may carry is sealed (`_seal`) and never receives another upload.
+    """
+    conn = store._connect(readonly=True)
+    try:
+        row = conn.execute("SELECT object FROM media_protections WHERE binary_rel = ? AND uploadable = 1 "
+                           "ORDER BY created_at LIMIT 1", (store._relative(snapshot.path),)).fetchone()
+    finally:
+        conn.close()
+    return str(row["object"]) if row is not None else secrets.token_hex(32)
+
+
+def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str, *, uploadable: bool) -> None:
+    # One record per object covers every retried attempt for this original.
+    relative = store._relative(snapshot.path)
+    _durable(store, "INSERT INTO media_protections(token, binary_rel, object, created_at, uploadable) "
+                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
+                    "WHERE binary_rel = ? AND object = ?)",
+             (uuid.uuid4().hex, relative, name, time.time(), int(uploadable), relative, name))
+
+
+def _seal(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> None:
+    """Before a sidecar can carry `name`, take it out of upload reuse; the record keeps protecting it."""
+    _durable(store, "UPDATE media_protections SET uploadable = 0 WHERE binary_rel = ? AND object = ?",
+             (store._relative(snapshot.path), name))
 
 
 def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStoreError, ciphertext_size: int | None) -> None:
@@ -972,6 +1008,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             with _guard(vault, "media_store_absent_version"):
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+                _release_name(ledger, snapshot.reference.object)
                 _publish_reference(vault, snapshot, None)
             snapshot = original_state(vault, path)
         if snapshot.state != "local":
@@ -983,10 +1020,6 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
             return None
         decision, reuse = _offload_admission(vault, snapshot, usage=census())
         _require_allowance(ledger, snapshot, decision.code)
-        name_key = Path(str(config["name_key_path"])).read_bytes()
-        if len(name_key) < 32:
-            raise ValueError("the media name key requires at least 32 bytes")
-        name = hmac.new(name_key, bytes.fromhex(snapshot.binary_sha256), hashlib.sha256).hexdigest()
         key_version = str(config["key_version"])
         if reuse is not None and not _confirmed(backend, reuse.reference):
             reuse = None
@@ -1006,7 +1039,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                     usage=census(),
                 )
                 _require_allowance(ledger, snapshot, decision.code)
-                _protect(ledger, snapshot, reuse.reference.object if reuse is not None else name)
+                name = reuse.reference.object if reuse is not None else _upload_name(ledger, snapshot)
+                _protect(ledger, snapshot, name, uploadable=reuse is None)
             if reuse is not None:
                 reference = reuse.reference
                 assert reference is not None
@@ -1050,6 +1084,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None) -> Stor
                 if batch is not None:
                     # Charged before the write: a failed write leaves the batch over-counting, never under.
                     batch.charge(ledger, snapshot, reference)
+                _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
                 _finish_reference(ledger, original_state(vault, path), source)
         return reference
