@@ -19,6 +19,7 @@ from pathlib import Path
 
 import httpx2
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from . import adoption_run, import_selection, import_stage, media_capacity
 from .cell_init import _ensure_private_directory
@@ -50,10 +51,16 @@ WAIT_POLL_SECONDS = 30
 WAIT_LIMIT_SECONDS = 7200
 LIST_LIMIT = 50
 GIB = 1 << 30
+# Filing a window to its end gives up on a window whose replies move no count this many times in a row.
+FILING_STALL_CALLS = 5
 
 OFFLOADABLE, RESIDENT, TEXT = media_capacity.OFFLOADABLE, media_capacity.RESIDENT, media_capacity.TEXT
 # D12 order: offloadable artifacts, resident artifacts, then text, each in path order.
 _CLASS_ORDER = {OFFLOADABLE: 0, RESIDENT: 1, TEXT: 2}
+
+
+class FilingUnavailable(Exception):
+    """The cell does not file in one call (an older cell refuses `file`), so the staged windows wait for an assistant."""
 
 
 class Cell:
@@ -65,6 +72,10 @@ class Cell:
 
     async def acknowledge(self, import_id: str, paths: list[str]) -> dict:
         raise NotImplementedError
+
+    async def file(self, path: str, *, collection: str | None = None, continuation: str | None = None) -> dict:
+        """One `file` call on a staged window; a cell that cannot file in one call raises FilingUnavailable."""
+        raise FilingUnavailable
 
 
 class McpCell(Cell):
@@ -97,6 +108,14 @@ class McpCell(Cell):
 
     async def acknowledge(self, import_id: str, paths: list[str]) -> dict:
         return await self._call({"action": "acknowledge", "import_id": import_id, "paths": paths})
+
+    async def file(self, path: str, *, collection: str | None = None, continuation: str | None = None) -> dict:
+        arguments = {"action": "file", "path": path, "collection": collection, "continuation": continuation}
+        try:
+            return await self._call({key: value for key, value in arguments.items() if value is not None})
+        except ToolError as error:
+            # A `file` call that runs reports its own failure in its reply; a refusal before that is a cell that lacks the action.
+            raise FilingUnavailable from error
 
 
 @dataclass(frozen=True)
@@ -175,6 +194,32 @@ class Reading:
         figures = (self.budget, self.reachable, self.pinned)
         return sorted({figure.why for figure in figures if figure.bytes is None and figure.why}
                       | ({self.bounds_why} if self.bounds is None else set()))
+
+
+@dataclass(frozen=True)
+class FilingReply:
+    """A `file` reply, as far as the CLI reads it: where filing stands, the counts, and what only the person can do."""
+
+    state: str
+    continuation: str | None
+    counts: tuple[int, int, int, int]
+    code: str | None
+    needs: frozenset[str]
+
+    @classmethod
+    def of(cls, reply: dict) -> FilingReply:
+        """A reply that does not read as the cell's `file` contract is a cell that does not file in the way this CLI knows."""
+        progress, stop = reply.get("progress"), reply.get("stop")
+        names = ("filed", "failed", "remaining", "pages_done")
+        # nosemgrep: ep-word-membership -- the closed states of the cell's `file` reply.
+        if reply.get("filing") not in ("working", "stopped", "done") or not isinstance(progress, dict) or any(
+                type(progress.get(name)) is not int for name in names):
+            raise FilingUnavailable
+        person = reply.get("person") if isinstance(reply.get("person"), list) else []
+        return cls(reply["filing"], reply.get("continuation") if isinstance(reply.get("continuation"), str) else None,
+                   tuple(progress[name] for name in names),
+                   safe_code(stop.get("code")) if isinstance(stop, dict) else None,
+                   frozenset(item["need"] for item in person if isinstance(item, dict) and isinstance(item.get("need"), str)))
 
 
 @dataclass
@@ -324,10 +369,19 @@ class _Run:
     """One series: its record, the cell and the Cloud API. A run keeps the state that its steps share."""
 
     def __init__(self, series: Series, record: Path, source: Path, config: CloudImportClientConfig, *, cell: Cell, api,
-                 uploads, limits: dict | None, progress: Progress, poll_seconds: float, sleep, clock, on_landed=None):
+                 uploads, limits: dict | None, progress: Progress, poll_seconds: float, sleep, clock, on_landed=None,
+                 file: bool = False, collection: str | None = None):
         self.series, self.record, self.source, self.config = series, record, source, config
         self.cell, self.api, self.uploads, self.limits, self.progress = cell, api, uploads, limits, progress
         self.sleep, self.clock, self.on_landed = sleep, clock, on_landed
+        # Filing: the CLI files each landed window through the cell's `file`. `unfiled` maps a landed window's import ID to
+        # the continuation of its last `file` reply; `counts` and `stopped` keep the last counts and the stop code of a window.
+        self.filing, self.collection = file, collection
+        self.unfiled: dict[str, str | None] = {}
+        self.counts: dict[str, tuple[int, int, int, int]] = {}
+        self.stopped: dict[str, str | None] = {}
+        self.finished_windows: dict[str, tuple[int, int, int, int]] = {}
+        self.refusal: str | None = None
         # No wait outlasts a demand's renewal interval, so a waiting sender renews its demand in time.
         self.poll = min(poll_seconds, DEMAND_RENEWAL_SECONDS)
         self.shown: str | None = None
@@ -358,7 +412,73 @@ class _Run:
         self.say_once(f"Waiting: {reason}")
         if self.clock() - since >= WAIT_LIMIT_SECONDS:
             raise self.stop("WAIT_TIMED_OUT", f"the series waited {WAIT_LIMIT_SECONDS // 3600} hours and created no window; last reason: {reason}")
+        if await self.file_windows():  # Filing moved, so room may have opened: read the budget again before sleeping.
+            return
         await self.sleep(self.poll)
+
+    # -- filing
+
+    def _number(self, import_id: str) -> int:
+        return 1 + next((n for n, window in enumerate(self.series.windows) if import_id in window.ids()), -1)
+
+    def seed_unfiled(self, reading: Reading) -> None:
+        """Windows of this series that the cell holds landed with members left to file: a rerun carries on filing them."""
+        mine = {import_id for window in self.series.windows for import_id in window.ids()}
+        for record in reading.windows:
+            if record.get("import_id") in mine and record.get("state") == import_stage.WINDOW_LANDED \
+                    and (record.get("unfiled") or {}).get("count") != 0:
+                self.unfiled.setdefault(record["import_id"], None)
+
+    async def file_windows(self, *, to_the_end: bool = False) -> bool:
+        """Call the cell's `file` on each landed window, once while the series waits and until it stops at the end.
+
+        Filing frees room on the cell, so a waiting series files before it sleeps. A stopped window keeps its
+        continuation, and the next call carries on from it. Returns whether any window's counts moved.
+        """
+        moved = False
+        for import_id in list(self.unfiled):
+            same = 0
+            while self.filing and import_id in self.unfiled:
+                try:
+                    reply = FilingReply.of(await self.cell.file(
+                        f"{import_stage.STAGE_DIR}/{import_id}", collection=self.collection, continuation=self.unfiled[import_id]))
+                except FilingUnavailable:
+                    self.filing = False
+                    self.refusal = ("The cell refused the file call, so it does not file an upload in one call yet. "
+                                    "The staged windows wait for your assistant to file them.")
+                    self.progress.say(self.refusal)
+                    return moved
+                changed = reply.counts != self.counts.get(import_id)
+                moved = moved or changed
+                same = 0 if changed else same + 1
+                self.counts[import_id] = reply.counts
+                self.unfiled[import_id] = reply.continuation
+                if reply.state == "done":
+                    del self.unfiled[import_id]
+                    self.stopped.pop(import_id, None)
+                    self.finished_windows[import_id] = reply.counts
+                    moved = True
+                    self.progress.say(f"Filed window {self._number(import_id)}: {reply.counts[0]:,} files filed, "
+                                      f"{reply.counts[1]:,} failed.")
+                elif reply.state == "stopped":
+                    if self.stopped.get(import_id) != (reply.code or ""):
+                        self.progress.say(f"Filing window {self._number(import_id)} stopped ({reply.code or 'no code'})."
+                                          + (" Free space on the cell, then run the command again to carry on."
+                                             if "free_space" in reply.needs else ""))
+                    self.stopped[import_id] = reply.code or ""
+                    if reply.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
+                        del self.unfiled[import_id]
+                    break
+                else:
+                    self.stopped.pop(import_id, None)
+                    if not to_the_end:
+                        break
+                    if same >= FILING_STALL_CALLS:
+                        self.stopped[import_id] = "FILING_STALLED"
+                        del self.unfiled[import_id]
+                        self.progress.say(f"Filing window {self._number(import_id)} made no progress in {same} calls; "
+                                          "it stays staged on the cell.")
+        return moved
 
     # -- one window
 
@@ -555,6 +675,8 @@ class _Run:
         shutil.rmtree(self.record.parent / window.dir, ignore_errors=True)
         if self.on_landed is not None and window.state == "landed":
             await self.on_landed(window)
+        if self.filing and window.import_id not in self.finished_windows:
+            self.unfiled.setdefault(window.import_id, None)
         window.state = "settled"
         self.series.write(self.record)
 
@@ -573,6 +695,8 @@ class _Run:
     async def drive(self) -> dict:
         reading = await self.read()
         await self.reconcile(reading)
+        if self.filing:
+            self.seed_unfiled(reading)
         since = self.clock()
         while pool := self.unplanned():
             reading = await self.read()
@@ -697,19 +821,28 @@ class _Run:
         return True
 
     async def finish(self) -> dict:
+        await self.file_windows(to_the_end=True)
         final = await self.cell.status()
         keep = Reading.of(final).keep_source
         if self.series.skipped:
             cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
             keep = {"keep": True, "message": f"{cell_says} {len(self.series.skipped):,} files were not sent."}
+        waiting = sorted(set(self.unfiled) | set(self.stopped))
         if keep is None or keep.get("keep"):
-            self.progress.say("The upload is done and filing continues. " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
+            # The cell did not take every window to the end of filing when this run filed, so it says what is left.
+            lead = "The upload is done." if self.filing and not waiting else "The upload is done and filing continues."
+            self.progress.say(lead + " " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
         else:
-            self.progress.say("Every member is filed and discarded, so you no longer need to keep the source folder.")
+            self.progress.say("Every member is filed" + ("" if self.filing else " and discarded") + ", so you no longer need to keep the source folder.")
         landed = [window for window in self.series.windows if window.state != "open"]
-        return {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
-                "import_ids": [window.import_id for window in landed], "keep_source": keep,
-                "not_sent": list(self.series.skipped)}
+        result = {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
+                  "import_ids": [window.import_id for window in landed], "keep_source": keep,
+                  "not_sent": list(self.series.skipped)}
+        if self.filing or self.refusal:
+            counts = self.finished_windows.values()
+            result["filing"] = {"filed": sum(c[0] for c in counts), "failed": sum(c[1] for c in counts),
+                                "windows_done": len(self.finished_windows), "windows_waiting": len(waiting)}
+        return result
 
 
 def _holds_cell(row: dict) -> bool:
@@ -782,14 +915,18 @@ def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,
                         include_hidden: bool = False, use_gitignore: bool = True, progress: Progress | None = None,
                         poll_seconds: float = WAIT_POLL_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
-                        resend_residual: bool = False) -> dict:
-    """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring."""
+                        resend_residual: bool = False, file: bool = False, collection: str | None = None) -> dict:
+    """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring.
+
+    `file` also files each landed window through the cell's `file`, while the series waits and at its end; a cell that
+    refuses `file` leaves the windows staged, as before. The CLI turns it on by default. It never discards.
+    """
     progress, source, checkpoint = progress or Progress(), source.resolve(), checkpoint.resolve()
     where, held = _Where(WINDOWS), []
     try:
         return await _import_folder(source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=include_hidden,
                                     use_gitignore=use_gitignore, progress=progress, poll_seconds=poll_seconds, sleep=sleep,
-                                    clock=clock, resend=resend_residual, held=held)
+                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection)
     except Stopped:
         raise
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
@@ -802,7 +939,7 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
 
 
 async def _import_folder(source, config, checkpoint, *, cell, api, uploads, include_hidden, use_gitignore, progress,
-                         poll_seconds, sleep, clock, resend, held) -> dict:
+                         poll_seconds, sleep, clock, resend, held, file, collection) -> dict:
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
@@ -823,7 +960,7 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     limits = response.json().get("limits")
     options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
     settings = {"cell": cell, "api": api, "uploads": uploads, "limits": limits, "progress": progress,
-                "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock}
+                "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock, "file": file, "collection": collection}
     if resend:
         return await _resend(source, config, checkpoint, record, series, options, settings, held)
     run = _Run(series, record, source, config, **settings) if series is not None else None

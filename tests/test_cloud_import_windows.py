@@ -20,7 +20,7 @@ import pytest
 from exomem import import_stage
 from exomem.cli_progress import Progress
 from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError
-from exomem.cloud_import_windows import Cell, import_folder
+from exomem.cloud_import_windows import Cell, FilingUnavailable, import_folder
 
 CONFIG = CloudImportClientConfig("https://cloud.example/mcp", "https://cloud.example")
 needs_age = pytest.mark.skipif(
@@ -30,6 +30,7 @@ pytestmark = needs_age
 # The classification inputs of the synthetic cell: an artifact of 800 bytes is offloadable, one of 3000 is resident.
 HYDRATION, VOLUME = 2000, 1_000_000
 BIG = 10**9
+FILED = {"filing": "done", "progress": {"filed": 3, "failed": 0, "remaining": 0, "pages_done": 1}, "person": []}
 
 
 class FakeCell(Cell):
@@ -52,6 +53,22 @@ class FakeCell(Cell):
         self.largest: int = 960
         self.inline: int = 4 << 20
         self.before_reply = lambda call: None
+        # `file`: the calls it received, what an older cell does, and the replies a test scripts (the last one repeats).
+        self.filed: list[tuple[str, str | None, str | None]] = []
+        self.refuses_file = False
+        self.file_replies: list[dict] = []
+        self.room_after_filing = BIG
+
+    async def file(self, path, *, collection=None, continuation=None) -> dict:
+        if self.refuses_file:
+            raise FilingUnavailable
+        import_id = path.removeprefix("_Imports/")
+        self.filed.append((import_id, collection, continuation))
+        reply = self.file_replies[min(len(self.filed), len(self.file_replies)) - 1] if self.file_replies else FILED
+        if reply["filing"] == "done":  # The staged copies are filed and removed: their room is free and nothing is left to file.
+            self.windows[import_id] = {**self.windows[import_id], "unfiled": {"count": 0}}
+            self.budget = self.room_after_filing
+        return reply
 
     async def status(self, *, series_id=None, next_window_bytes=None, after=None) -> dict:
         call = {"at": self.rig.now, "series_id": series_id, "next_window_bytes": next_window_bytes, "number": len(self.calls)}
@@ -1402,3 +1419,72 @@ def test_a_series_record_whose_window_folder_is_not_the_clis_own_stops_the_run_a
 
     assert record.exists() and list(rig.tmp.glob("checkpoint/window-*/archive.age"))
     assert stop.value.code == "SERIES_RECORD_DAMAGED" and NOT_IN_EXOMEM in stop.value.message
+
+
+# -- Filing each landed window
+
+
+def _staged_copies_hold_the_room_until_filed(rig: Rig, room: int = 2000) -> None:
+    """Each landed window leaves the cell without room for the next, until the cell files it."""
+    rig.cell.budget = rig.cell.reachable = rig.cell.room_after_filing = room
+    landed = rig.cell.landed
+
+    def landed_without_room(import_id, count):
+        landed(import_id, count)
+        rig.cell.budget = 100  # Its reachable budget is unchanged: the room comes back when the cell files the window.
+
+    rig.cell.landed = landed_without_room
+
+
+def test_filing_a_landed_window_while_the_series_waits_makes_room_for_the_next_window(rig):
+    """Catches a CLI that waits for room that only filing can free, until its wait limit stops the series."""
+    nine(rig)
+    _staged_copies_hold_the_room_until_filed(rig)
+
+    result = rig.run(file=True, collection="Field Notes")
+
+    assert rig.cloud.all_sent() == sorted(f"a{n:02}.bin" for n in range(1, 10))
+    assert len(rig.cell.filed) == len(rig.cloud.completed) >= 3
+    assert {call[:2] for call in rig.cell.filed} == {(import_id, "Field Notes") for import_id in rig.cloud.completed}
+    assert result["filing"]["windows_waiting"] == 0 and result["filing"]["filed"] == 3 * len(rig.cloud.completed)
+    assert "no longer need to keep the source folder" in rig.said()
+
+
+def test_without_filing_the_same_series_waits_for_room_until_its_wait_limit(rig):
+    """Catches a `--no-file` run that files, which would delete the person's choice to upload only."""
+    nine(rig)
+    _staged_copies_hold_the_room_until_filed(rig)
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run(file=False)
+
+    assert stop.value.code == "WAIT_TIMED_OUT" and rig.cell.filed == []
+
+
+def test_an_older_cell_that_refuses_file_keeps_todays_behaviour_and_says_so(rig):
+    """Catches an upload that fails, or goes silent, on a cell that has no `file` yet."""
+    rig.files(a01__bin=800)
+    rig.cell.refuses_file = True
+
+    result = rig.run(file=True)
+
+    assert rig.cloud.all_sent() == ["a01.bin"] and result["filing"]["windows_done"] == 0
+    assert "refused the file call" in rig.said()
+    assert "The upload is done and filing continues." in rig.said()
+
+
+def test_a_window_that_stops_for_space_is_filed_again_from_its_continuation_on_the_next_poll(rig):
+    """Catches a stopped window that the CLI forgets, or one that it restarts from the beginning."""
+    nine(rig)
+    _staged_copies_hold_the_room_until_filed(rig)
+    stopped = {"filing": "stopped", "continuation": "run-1:file-0001-ab", "stop": {"code": "INSUFFICIENT_SPACE"},
+               "progress": {"filed": 1, "failed": 0, "remaining": 2, "pages_done": 0},
+               "person": [{"need": "free_space", "text": "Free space."}]}
+    rig.cell.file_replies = [stopped, FILED]
+
+    result = rig.run(file=True)
+
+    first, second = rig.cell.filed[:2]
+    assert first[2] is None and second[:1] == first[:1] and second[2] == "run-1:file-0001-ab"
+    assert result["filing"]["windows_waiting"] == 0
+    assert "INSUFFICIENT_SPACE" in rig.said() and "Free space on the cell" in rig.said()
