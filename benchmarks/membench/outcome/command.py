@@ -456,8 +456,6 @@ def summary(report: dict) -> list[str]:
         lines.append(f"decision: {decision['status']}")
         if "run_indexes_played" in decision:
             lines.append(f"  run indexes played: {decision['run_indexes_played']}")
-        if decision.get("next_ordering"):
-            lines.append(f"  {decision['next_ordering']}")
         why = decision.get("why") or []
         lines += [f"  {reason}" for reason in ([why] if isinstance(why, str) else why)]
         lines += [
@@ -524,20 +522,27 @@ def _cmd_report(args: argparse.Namespace) -> int:
         if args.suite != "clbench"
         else None
     )
+    if args.rejudge_sample and args.rejudge_sample == spec.backend:
+        raise refuse(
+            f"--rejudge-sample is a second judge, and {spec.backend} is this report's own: "
+            f"name the other backend"
+        )
     if spec and stored["split"] == "heldout" and (spec.backend, spec.model) != DECISION_JUDGE:
         raise refuse(
             f"a held-out {args.suite} report is judged by {DECISION_JUDGE[1]} on {DECISION_JUDGE[0]}: "
             f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
         )
     built = report_suite(args.suite, [args.run_id], spec, jobs=args.jobs)
-    if args.rejudge_sample:
-        built["rejudge_sample"] = rejudge_sample(
-            args.suite, args.run_id, spec, JudgeSpec.of(args.rejudge_sample), args.jobs
-        )
     built["run"] = {k: stored.get(k) for k in ("model", "effort", "arms", "seeds", "gate")}
     stamped = gate.stamp(built, stored)
     target = run_dir / (f"report-{spec.backend}.json" if spec else "report.json")
     target.write_text(json.dumps(stamped, indent=2))
+    if args.rejudge_sample:
+        # The primary report is already on disk: the optional sample cannot cost it, and never changes it.
+        stamped["rejudge_sample"] = rejudge_sample(
+            args.suite, args.run_id, spec, JudgeSpec.of(args.rejudge_sample), args.jobs
+        )
+        target.write_text(json.dumps(stamped, indent=2))
     print(f"{stamped['label']} ({stamped['evidence']} evidence, {stamped['split']} split)")
     print("\n".join(summary(stamped)))
     print(f"report: {target}")

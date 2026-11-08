@@ -11,7 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from epistemic.amendments import require_family_released
-from protocol.contracts import ContractIdentityError, working_amendment_receipts
+from protocol.contracts import (
+    AmendmentAcknowledgmentPendingError,
+    ContractIdentityError,
+    working_amendment_receipts,
+)
 
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import DECISION_JUDGE
@@ -42,6 +46,9 @@ REQUIRED = {
     "lab": ("cases/lab/heldout.json",),
     "planted": ("cases/planted/heldout.jsonl", "cases/planted/distractors.jsonl"),
 }
+#: The amendment sequence this harness implements: it reads the decisions by that amendment's arms,
+#: scale and judge, so no run is a decision until that receipt is acknowledged.
+HARNESS_AMENDMENT = 10
 LABEL = "internal diagnostic"
 
 
@@ -71,12 +78,25 @@ def frozen_digests(suite: str, repo_root: Path = REPO_ROOT) -> dict[str, str]:
     return frozen
 
 
+def harness_released(repo_root: Path = REPO_ROOT) -> bool:
+    """Whether the amendment this harness implements is acknowledged. Receipts that cannot be read say no."""
+    try:
+        receipts = working_amendment_receipts(repo_root)
+    except (ContractIdentityError, OSError):
+        return False
+    return any(
+        receipt.sequence == HARNESS_AMENDMENT and receipt.acknowledgment_status == "acknowledged"
+        for receipt in receipts
+    )
+
+
 def heldout_gate(
     suite: str, root: Path = RUN_ROOT, repo_root: Path = REPO_ROOT
 ) -> dict[str, object]:
     """Refuse a held-out run unless its family is released and its inputs match the receipt.
 
-    Raises ``AmendmentAcknowledgmentPendingError`` while the amendment is unacknowledged,
+    Raises ``AmendmentAcknowledgmentPendingError`` while the family's amendment or the harness's
+    amendment (``HARNESS_AMENDMENT``) is unacknowledged,
     and ``HeldoutGateError`` for a missing or changed input, or a product checkout with uncommitted
     changes: a decision run names a revision, and a dirty checkout is not one. Returns the verified digests.
     """
@@ -85,6 +105,11 @@ def heldout_gate(
             f"the product checkout at {repo_root} has uncommitted changes; a decision run needs a clean checkout"
         )
     require_family_released(FAMILIES[suite], repo_root=repo_root)
+    if not harness_released(repo_root):
+        raise AmendmentAcknowledgmentPendingError(
+            f"amendment sequence {HARNESS_AMENDMENT} founder acknowledgment is pending; "
+            f"this harness implements it, so a held-out {suite} run is not a decision until then"
+        )
     verified: dict[str, str] = {}
     for relative, expected in sorted(frozen_digests(suite, repo_root).items()):
         path = root / relative
@@ -99,12 +124,12 @@ def heldout_gate(
     return {"family": FAMILIES[suite], "verified_sha256": verified}
 
 
-def evidence_of(report: dict, stored: dict) -> str:
+def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
     """What a report is worth, from what the run recorded: ``instrument``, ``void``, ``incomplete`` or ``decision``.
 
     A decision report is a gated held-out run whose actor and judge are the frozen ones and whose
-    decision no harness fault voided and nothing leaves incomplete. Anything else is instrument
-    evidence, whatever the split says.
+    decision no harness fault voided and nothing leaves incomplete, while the harness's amendment is
+    acknowledged. Anything else is instrument evidence, whatever the split says.
     """
     if stored["split"] != "heldout" or not stored.get("gate"):
         return "instrument"
@@ -116,7 +141,9 @@ def evidence_of(report: dict, stored: dict) -> str:
     if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
         return "instrument"
     status = report.get("decision", {}).get("status")
-    return status if status in ("void", "incomplete") else "decision"
+    if status in ("void", "incomplete"):
+        return status
+    return "decision" if harness_released(repo_root) else "instrument"
 
 
 def stamp(report: dict, stored: dict) -> dict:

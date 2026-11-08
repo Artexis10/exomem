@@ -55,8 +55,8 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
 - **dev** is the default. It is instrument evidence for building and tuning. A dev run never calls
   the gate. Its report says `"evidence": "instrument"`.
 - **heldout** is a decision run (`--split heldout`). Before its first session it requires the
-  family's amendment to be acknowledged, and every held-out input file to match the digest the
-  amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
+  family's amendment and amendment sequence 10, which this harness implements, to be acknowledged,
+  and every held-out input file to match the digest the amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
   The Exomem checkout must have no uncommitted changes either. Any failure is a one-line refusal. The run refuses any `--model` or `--effort` other than the
   frozen actor (`claude-sonnet-5-5` at `high`). The report of LAB or planted refuses any judge
   other than `claude-opus-5-5` on Claude, which is the actor's own model family, so those
@@ -64,8 +64,9 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
   `"evidence": "decision"`. A CL-Bench decision plays `N`, `F`, `PP` and `P`; it refuses `E`
   and `EH`, which are ablations. It runs upstream's `default` schedule at seed 42 and plays
   `run_index` 1 by default. When a decision interval contains its bound (0 for "helps" and
-  "beats", -0.05 for "not worse"), the report says that the protocol calls for the next ordering.
-  Add it with the same run id: `--seeds 1,2`, then `--seeds 1,2,3`. The orderings come in that
+  "beats", -0.05 for "not worse"), the decision is incomplete and the report says that the protocol
+  calls for the next ordering; the figures stay in the report. It is complete once the three
+  orderings have run, or no interval holds its bound. Add an ordering with the same run id: `--seeds 1,2`, then `--seeds 1,2,3`. The orderings come in that
   order only, so `--seeds 2` alone is refused, and a finished cell is not replayed. Run index 4 is
   allowed once, as the replacement for one voided run. The report states the run indexes played.
   The decision reads `PP - N` and `PP - F`. The pairs `P - N` and `P - F` are the product gap and
@@ -105,7 +106,9 @@ checked.
    than 2 struck units.
 6. A held-out report says the decision is incomplete, and decides nothing, while a judgement has
    failed, a unit is missing or a scheduled CL-Bench cell has not finished. It names each one.
-   Run the same command again, with the same run id. The judge retries failed items. A resume
+   A CL-Bench decision is also incomplete while a decision interval holds its bound and an ordering
+   is left to play. It names the next ordering; add it with `--seeds`.
+   For the other causes, run the same command again, with the same run id. The judge retries failed items. A resume
    must match the run it continues: `outcome.json` records the product revision, whether the
    checkout had changes, and the CLI version (`claude --version`). A call that differs in any of
    them refuses before it starts a session. Use a new run id, or restore the checkout and CLI.
@@ -138,7 +141,8 @@ Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -
    Add `--rejudge-sample codex` to LAB or planted to re-judge a seeded random 20% of the items
    with `gpt-6.1-sol`. It writes its own files (`judge-codex-sample/`) and adds a `rejudge_sample`
    block with the agreement to the report. The block is description only and never changes a
-   decision. It spends Codex quota, so run it only when Codex has room.
+   decision. The command writes the report first and the sample after it, and refuses the report's
+   own judge backend. It spends Codex quota, so run it only when Codex has room.
 4. The product under test is this checkout. Each arm manifest records `exomem --version`, the
    checkout's commit, the CLI version, the requested and reported model, the tools served and the
    MCP config digest.

@@ -296,8 +296,8 @@ def contains(interval: list[float] | None, bound: float) -> bool | None:
 def decision(pairs: dict, runs: dict, arms: dict[str, dict]) -> dict:
     """PREREGISTRATION §7, sequence 10: the sequence-9 rules read PP; each reads the lower bound and every run's mean.
 
-    ``None`` means unknown. A rule whose interval contains its bound calls for the next ordering while
-    one is left to play.
+    ``None`` means unknown. The decision stays incomplete while a rule's interval contains its bound and
+    an ordering is left to play: it is complete once the orderings run out or no interval holds its bound.
     """
     played = {"run_indexes_played": runs["played"]}
     if runs["decision_void"]:
@@ -334,17 +334,14 @@ def decision(pairs: dict, runs: dict, arms: dict[str, dict]) -> dict:
     }
     undecided = [name for name, rule in rules.items() if rule["interval_contains_bound"]]
     left = [i for i in HELDOUT_RUN_INDEXES if i not in runs["played"]]
-    return {
-        "status": "complete",
-        **played,
-        **rules,
-        "next_ordering": (
+    if undecided and left:
+        # The figures stay in the report, but a one-ordering result with an interval on its bound decides nothing yet.
+        why = (
             f"the protocol calls for run_index {left[0]}: the interval of "
             f"{', '.join(undecided)} contains its bound"
-            if undecided and left
-            else None
-        ),
-    }
+        )
+        return {"status": "incomplete", "why": [why], **played, **rules}
+    return {"status": "complete", **played, **rules}
 
 
 def build(

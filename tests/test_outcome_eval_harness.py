@@ -17,13 +17,19 @@ from types import SimpleNamespace
 
 import pytest
 from epistemic.journeys.f27_replay import PLUGIN_DIR, AgentEnvelope
-from membench.outcome import command
+from membench.outcome import command, gate
 from membench.outcome.clbench import report as clbench_report
 from membench.outcome.clbench.run import ARMS, CellSpec, ClaudeActor, QuestionLog, run_cell
 from membench.outcome.clbench.run import UPSTREAM as CLBENCH_UPSTREAM
-from membench.outcome.command import clbench_indexes, rejudge_sample, run_suite, write_record
+from membench.outcome.command import (
+    clbench_indexes,
+    rejudge_sample,
+    require_orderings_in_order,
+    run_suite,
+    write_record,
+)
 from membench.outcome.faults import LimitRejected, init_faults
-from membench.outcome.isolation import child_env, mcp_server, server_pins
+from membench.outcome.isolation import ACTOR_EFFORT, ACTOR_MODEL, child_env, mcp_server, server_pins
 from membench.outcome.judging import Judge, JudgeSpec
 from membench.outcome.lab import judge as lab_judge
 from membench.outcome.lab import run as lab_run
@@ -36,6 +42,7 @@ from membench.outcome.planted import judge as planted_judge
 from membench.outcome.planted.answer import answer_actor, answer_all
 from membench.outcome.stats import paired_interval
 from membench.outcome.workspace import head_of, pin
+from protocol.contracts import CONTRACTS_DIR, AmendmentAcknowledgmentPendingError
 
 # What the operator's real service and vault would put in the environment of a shell that runs the harness.
 LIVE_ENV = {
@@ -384,16 +391,18 @@ def test_a_held_out_f35_run_refuses_the_ablations_and_an_ordering_out_of_order()
     for seeds in ([2], [1, 3], [2, 3]):
         with pytest.raises(SystemExit, match="adds orderings in order"):
             run_suite("clbench", "refused", split="heldout", seeds=seeds)
+    for seeds in ([1], [1, 2], [1, 2, 3], [1, 4], [4]):
+        require_orderings_in_order(seeds)
     # The deciding run plays one ordering; the others are added in order, and 4 stays the replacement.
     assert clbench_indexes("heldout", None) == (1,)
     assert clbench_indexes("heldout", [1, 2]) == (1, 2)
     assert clbench_indexes("heldout", [1, 2, 3]) == (1, 2, 3)
 
 
-def test_the_decision_reads_pp_and_calls_for_the_next_ordering_while_an_interval_holds_its_bound(
+def test_the_decision_reads_pp_and_stays_incomplete_while_an_interval_holds_its_bound(
     tmp_path,
 ):
-    """An interval that holds 0 cannot decide on one ordering, so the report says what the protocol does next."""
+    """An interval that holds 0 cannot decide on one ordering: the report keeps its figures and names the next ordering."""
     questions = [str(i) for i in range(1, 9)]
     split = {q: float(i % 2) for i, q in enumerate(questions)}
     pairs = [("PP", "N"), ("PP", "F"), ("P", "N"), ("P", "F")]
@@ -411,13 +420,69 @@ def test_the_decision_reads_pp_and_calls_for_the_next_ordering_while_an_interval
     decision = built["decision"]
     assert built["pairs"]["P-N"]["role"] == "product gap, description only"
     assert decision["run_indexes_played"] == [1]
+    assert decision["status"] == "incomplete", (
+        "one ordering with an interval on its bound decides nothing"
+    )
+    assert decision["why"][0].startswith("the protocol calls for run_index 2")
     assert decision["helps"]["result"] is False, "the rule reads PP-N, not the gain of P"
-    assert decision["next_ordering"].startswith("the protocol calls for run_index 2")
+    assert decision["helps"]["interval_contains_bound"] is True
 
     play([2, 3])
     built = clbench_report.build(tmp_path, pairs, scheduled=[1, 2, 3], heldout=True)
+    assert built["decision"]["status"] == "complete", "the orderings have run out"
     assert built["decision"]["run_indexes_played"] == [1, 2, 3]
-    assert built["decision"]["next_ordering"] is None
+
+
+def receipts_repo(tmp_path: Path, *, sequence_ten_acknowledged: bool) -> Path:
+    """A repository root holding the real amendment receipts, with sequence 10 left pending or acknowledged."""
+    source = Path(__file__).resolve().parents[1] / CONTRACTS_DIR
+    contracts = tmp_path / CONTRACTS_DIR
+    contracts.mkdir(parents=True)
+    for receipt in source.glob("amendment-*.v1.json"):
+        shutil.copy(receipt, contracts / receipt.name)
+    ten = contracts / "amendment-2026-11-outcome-scale-judge.v1.json"
+    nine = json.loads((contracts / "amendment-2026-11-outcome-evals.v1.json").read_text())
+    body = json.loads(ten.read_text())
+    for field in ("ratifier", "acknowledged_on", "repository_revision"):
+        body[field] = nine[field] if sequence_ten_acknowledged else None
+    ten.write_text(json.dumps(body))
+    return tmp_path
+
+
+def test_a_held_out_gate_refuses_until_the_harness_amendment_is_acknowledged(tmp_path, monkeypatch):
+    """The harness reads decisions by sequence 10; a run before its acknowledgment would be stamped as a decision."""
+    monkeypatch.setattr(gate, "checkout_state", lambda root: {"product_dirty": False})
+    pending = receipts_repo(tmp_path / "pending", sequence_ten_acknowledged=False)
+    with pytest.raises(AmendmentAcknowledgmentPendingError, match="sequence 10"):
+        gate.heldout_gate("lab", root=tmp_path, repo_root=pending)
+    acknowledged = receipts_repo(tmp_path / "acknowledged", sequence_ten_acknowledged=True)
+    with pytest.raises(
+        gate.HeldoutGateError, match="is missing"
+    ):  # past the amendment, on to the inputs
+        gate.heldout_gate("lab", root=tmp_path, repo_root=acknowledged)
+
+
+def test_only_an_opus_judged_report_under_an_acknowledged_amendment_is_decision_evidence(tmp_path):
+    """The decision judge and the amendment decide what a held-out report is worth, not its split alone."""
+    stored = {
+        "split": "heldout",
+        "gate": {"family": "f36"},
+        "model": ACTOR_MODEL,
+        "effort": ACTOR_EFFORT,
+    }
+
+    def report(backend: str) -> dict:
+        return {
+            "actor": {"model_reported": [ACTOR_MODEL]},
+            "judge": JudgeSpec.of(backend).record(),
+            "decision": {"status": "complete"},
+        }
+
+    pending = receipts_repo(tmp_path / "pending", sequence_ten_acknowledged=False)
+    acknowledged = receipts_repo(tmp_path / "acknowledged", sequence_ten_acknowledged=True)
+    assert gate.evidence_of(report("claude"), stored, acknowledged) == "decision"
+    assert gate.evidence_of(report("codex"), stored, acknowledged) == "instrument"
+    assert gate.evidence_of(report("claude"), stored, pending) == "instrument"
 
 
 VERDICT = {
@@ -550,6 +615,19 @@ def test_a_rejudge_sample_keeps_its_own_files_and_leaves_the_decision_alone(tmp_
     assert (run / "judge-codex-sample" / "judge" / "verdicts.jsonl").exists()
     assert (judge_run / "judge" / "verdicts.jsonl").read_text() == verdicts
     assert planted_judge.score(judge_run, [("E", "P")], heldout=True)["decision"] == decision
+
+    own = SimpleNamespace(
+        suite="planted",
+        run_id="r1",
+        rejudge_sample="claude",
+        judge="claude",
+        judge_model=None,
+        judge_effort=None,
+        judge_exe=None,
+        jobs=1,
+    )
+    with pytest.raises(SystemExit, match="second judge"):
+        command._cmd_report(own)
 
 
 def write_arm(run: Path, arm: str, body: str, *, status: str = "active") -> None:
