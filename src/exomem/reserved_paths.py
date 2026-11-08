@@ -856,7 +856,10 @@ _COMMAND_PATH_ROLES = MappingProxyType(
             ("restore_path", "recovery-destination", "path"),
         ),
         "query_dataset": _roles(("path", "dataset", "path")),
-        "read_media": _roles(("path", "media-source", "path")),
+        "read_media": _roles(
+            ("path", "media-source", "path"),
+            ("paths", "media-source", "path-list"),
+        ),
     }
 )
 

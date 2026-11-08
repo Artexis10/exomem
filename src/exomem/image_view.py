@@ -1,0 +1,142 @@
+"""Show governed still images to the model as image content.
+
+An agent that can only find an image's metadata cannot inspect the photo. This
+module reads each requested original through the same custody and full-disclosure
+release checks as an original download (`artifact_recovery.stage`), then returns
+a downscaled JPEG the model can look at. The stored original is never changed.
+"""
+
+from __future__ import annotations
+
+import io
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+from . import artifact_recovery, image_codecs, media_types, reserved_paths
+
+# One call shows a small comparison set; each image costs the model image tokens.
+MAX_IMAGES = 6
+# Long side in pixels: 1568 is the size vision models read without further downscaling.
+DEFAULT_MAX_SIDE = 1568
+MIN_MAX_SIDE = 256
+MAX_MAX_SIDE = 2048
+_JPEG_QUALITY = 85
+# A larger original is read into memory to decode; past this, the person downloads it instead.
+MAX_ORIGINAL_BYTES = 128 * 1024 * 1024
+# EXIF tags fixed by the EXIF specification, not by any vault vocabulary.
+_EXIF_IFD = 0x8769
+_DATE_TIME_ORIGINAL = 0x9003
+_DATE_TIME = 0x0132
+_ORIENTATION = 0x0112
+# Orientation values 5 to 8 rotate the image a quarter turn, so width and height swap.
+_QUARTER_TURNS = frozenset({5, 6, 7, 8})
+
+
+class ImageViewError(ValueError):
+    def __init__(self, code: str, reason: str):
+        super().__init__(f"{code}: {reason}")
+        self.code = code
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class ShownImage:
+    path: str
+    file_name: str
+    original_pixels: tuple[int, int]
+    shown_pixels: tuple[int, int]
+    taken_at: str | None
+    jpeg: bytes
+
+
+def clamp_side(max_side: int | None) -> int:
+    if max_side is None:
+        return DEFAULT_MAX_SIDE
+    return max(MIN_MAX_SIDE, min(MAX_MAX_SIDE, int(max_side)))
+
+
+def _taken_at(image) -> str | None:
+    """The camera's capture time as EXIF records it (local time, no zone), or None."""
+    try:
+        exif = image.getexif()
+        value = exif.get_ifd(_EXIF_IFD).get(_DATE_TIME_ORIGINAL) or exif.get(_DATE_TIME)
+    except Exception:  # noqa: BLE001 -- a malformed EXIF block only loses the optional date.
+        return None
+    if not isinstance(value, str) or len(value) < 19:
+        return None
+    # EXIF writes "YYYY:MM:DD HH:MM:SS"; show it as an ISO-like local timestamp.
+    date, _, time = value.strip("\x00 ").partition(" ")
+    return f"{date.replace(':', '-')}T{time}" if time else None
+
+
+def _render(source: Path | BinaryIO, suffix: str, max_side: int) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes]:
+    from PIL import Image, ImageOps
+
+    with image_codecs.open_image(source, suffix=suffix) as opened:
+        original = opened.size
+        if opened.getexif().get(_ORIENTATION) in _QUARTER_TURNS:
+            original = (original[1], original[0])
+        taken_at = _taken_at(opened)
+        # JPEG decodes directly at a reduced scale; other formats ignore the draft request.
+        opened.draft("RGB", (max_side, max_side))
+        image = ImageOps.exif_transpose(opened)
+        if image.mode == "P" and "transparency" in image.info:
+            image = image.convert("RGBA")
+        if "A" in image.getbands():
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, (0, 0), rgba.getchannel("A"))
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
+        return original, image.size, taken_at, out.getvalue()
+
+
+def show(vault_root: Path, selected: list[str], *, max_side: int | None = None) -> list[ShownImage]:
+    """Return each selected image, in order, or raise for the first one that cannot be shown."""
+    if not selected:
+        raise ImageViewError("MEDIA_PATH_REQUIRED", "give the path of the image to show")
+    if len(selected) > MAX_IMAGES:
+        raise ImageViewError("TOO_MANY_IMAGES", f"show at most {MAX_IMAGES} images per call; split the paths")
+    side = clamp_side(max_side)
+    from dataclasses import replace
+
+    from .governance.principal import effective_principal
+
+    who = replace(effective_principal(), administrative_ingress=False)
+    shown = []
+    for path in selected:
+        with artifact_recovery.stage(vault_root, path, who) as (copied, descriptor):
+            original_path = descriptor["path"]
+            suffix = Path(original_path).suffix.lower()
+            kind = media_types.media_type_for(original_path)
+            if kind == "video":
+                raise ImageViewError("NOT_AN_IMAGE", f"{path} is a video; read it with read_media kind=video")
+            if kind != "image":
+                raise ImageViewError(
+                    "IMAGE_FORMAT_UNSUPPORTED",
+                    f"{path} ({suffix or 'no extension'}) cannot be shown as an image; "
+                    "download the original with transfer_artifact operation=download",
+                )
+            if copied.size > MAX_ORIGINAL_BYTES:
+                raise ImageViewError(
+                    "IMAGE_TOO_LARGE",
+                    f"{path} is too large to show; download the original with transfer_artifact operation=download",
+                )
+            if copied.private_path is not None:
+                source: Path | BinaryIO = copied.private_path
+            else:
+                # The held handle is the verified original; read_held refuses bytes read across a change.
+                source = io.BytesIO(reserved_paths.read_held(copied, 0, copied.size))
+            try:
+                original, size, taken_at, jpeg = _render(source, suffix, side)
+            except ImportError as error:
+                raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
+            except (OSError, ValueError) as error:
+                raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error
+            shown.append(ShownImage(original_path, descriptor["file_name"], original, size, taken_at, jpeg))
+    return shown
