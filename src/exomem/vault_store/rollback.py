@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .. import epistemic_graph, lexstore, state_migration, vault
+from .. import epistemic_graph, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
 from . import migrate, mode, projection
@@ -335,7 +335,11 @@ def _finish(
         report["vacuum"] = f"failed: {type(error).__name__}"
     timings["vacuum_s"] = time.perf_counter() - started
     started = time.perf_counter()
-    report["sidecars"] = {"lexical": _rebuild_lexical(root), "graph": _rebuild_graph(root)}
+    report["sidecars"] = {
+        "lexical": _rebuild_lexical(root),
+        "graph": _rebuild_graph(root),
+        "references": _rebuild_references(root),
+    }
     timings["rebuild_s"] = time.perf_counter() - started
     return {**report, "timings": {name: round(seconds, 2) for name, seconds in timings.items()}}
 
@@ -362,3 +366,11 @@ def _rebuild_graph(root: Path) -> str:
     except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
         return f"pending: {type(error).__name__}"
     return "disabled" if built.get("disabled") else "rebuilt"
+
+
+def _rebuild_references(root: Path) -> str:
+    try:
+        memory_refs.ReferenceIndex(root).rebuild_all()
+    except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
+        return f"pending: {type(error).__name__}"
+    return "rebuilt"
