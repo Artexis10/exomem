@@ -14,31 +14,48 @@ today's value and change when intended change `<n>` lands.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from pathlib import Path
 
 import pytest
 import test_governance_projected_runtime_lanes as projection_lanes
+from test_working_set_carry import CARRY_PAGE, SLED_ANCHOR, _seed_carry_pages
+from test_working_set_index import _seed_planning, _seed_structure
 
 from exomem import (
     activation,
     artifact_role_state,
     audit,
     claims,
+    commands,
     context_catalogue,
     contradiction_stance,
     dreamer_families,
     epistemic_graph,
+    find,
+    freshness,
+    lexstore,
     referent_resolution,
     referent_runtime,
     relation_census,
     relation_registry,
+    request_budget,
     semantic_contract,
+    semantic_index,
     semantic_units,
     sensed_model,
     traversal_profiles,
+    unit_corrections,
+    working_set,
     working_set_currency,
+    working_set_index,
+    working_set_runtime,
+)
+from exomem import (
+    vault as vault_module,
 )
 from exomem.governance import principal, projected_graph, projection_runtime, projections
+from exomem.governance.principal import owner_principal, request_scope
 
 KB = "Knowledge Base/Notes/Insights"
 ENTITIES = "Knowledge Base/Entities/Organizations"
@@ -1514,3 +1531,238 @@ def test_a_claim_unit_is_the_page_claim_and_a_finding_unit_is_not() -> None:
     assert "A finding body." not in (
         claims.extract_claim_text("Title", body.split("## Claim")[0]) or ""
     )  # CORE
+
+
+# ---------------------------------------------------------------------------
+# Unit corrections: which edges into a unit surface their source beside it
+# ---------------------------------------------------------------------------
+
+# Relations a source unit points at one target unit, to see which surface as a
+# correction. The first eight are corrective today; the rest are not.
+CORRECTING = (
+    "contradicts",
+    "refines",
+    "supports",
+    "supersedes",
+    "resolves",
+    "answers",
+    "x.backs",
+    "x.leans_on",
+)
+NOT_CORRECTING = (
+    "relates_to",
+    "links_to",
+    "causes",
+    "evidenced_by",
+    "derived_from",
+    "x.see_also",
+    "frobnicates",
+)
+
+
+def _anchor(relation: str) -> str:
+    return relation.replace(".", "-").replace("_", "-")
+
+
+def _corrections(vault: Path) -> dict[str, str]:
+    """For each relation, the one unit it corrects when its source is discovered."""
+    relations = (*CORRECTING, *NOT_CORRECTING)
+    target = f"{KB}/corr-target.md"
+    _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+    for rel, ident, units in (
+        (
+            target,
+            1,
+            "".join(
+                _unit("Claim", f"t-{_anchor(r)}", text=f"Target claim for {r}.") for r in relations
+            ),
+        ),
+        (
+            f"{KB}/corr-source.md",
+            2,
+            "".join(
+                _unit(
+                    "Claim",
+                    f"s-{_anchor(r)}",
+                    f"{r}: [[{target.removesuffix('.md')}#t-{_anchor(r)}]]",
+                    f"Source claim for {r}.",
+                )
+                for r in relations
+            ),
+        ),
+    ):
+        _write(
+            vault,
+            rel,
+            f"---\ntype: insight\nstatus: active\ntitle: {Path(rel).stem}\n"
+            f"exomem_id: {uuid.UUID(int=ident)}\n---\n# {Path(rel).stem}\n\n{units}",
+        )
+    # The live checkpoints a discovery reads, as a published graph leaves them.
+    freshness.seed(
+        vault,
+        "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)),
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    find.evict_resolver_caches(vault)
+    index.rebuild_all()
+    find.recall_resolver_snapshot(
+        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
+    )
+    document = semantic_index.current_parent_index_state(vault, target).document
+    refs = {r: document.resolve_fragment(f"t-{_anchor(r)}").unit.unit_ref for r in relations}
+    found = unit_corrections.discover(vault, list(refs.values()), accept=lambda _row: True)
+    assert found["status"] == "available"
+    by_ref = {ref: relation for relation, ref in refs.items()}
+    return {by_ref[unit["corrects"]]: unit["relation"] for unit in found["units"]}
+
+
+def test_an_edge_into_a_unit_surfaces_its_source_when_its_relation_corrects(
+    tmp_path: Path,
+) -> None:
+    corrections = _corrections(tmp_path / "vault")
+
+    for relation in (
+        "contradicts",
+        "refines",
+        "supports",
+        "supersedes",
+        "resolves",
+        "answers",
+        "x.backs",
+    ):
+        assert corrections[relation] == relation  # CORE
+    for relation in NOT_CORRECTING:
+        assert relation not in corrections  # CORE
+
+
+def test_a_grandfathered_extension_corrects_by_its_saved_family(tmp_path: Path) -> None:
+    """FLIPS 9: `x.leans_on` is saved in family `support`, so it corrects today.
+
+    After intended change 9 it follows its parent `relates_to` and is absent.
+    """
+    assert "x.leans_on" in _corrections(tmp_path / "vault")  # FLIPS 9
+
+
+def _pins_its_target(root: Path, relation: str) -> bool:
+    """Whether an episode-style unit update that names one target accepts that relation.
+
+    A corrective relation records the exact target it corrects, so the guard
+    expects that fingerprint. Any other relation pins no target, and the same
+    fingerprint is refused.
+    """
+    page = f"{KB}/guard.md"
+    _write(root, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+    _write(
+        root,
+        page,
+        f"---\ntype: insight\nstatus: active\ntitle: guard\nexomem_id: {uuid.UUID(int=7)}\n"
+        "updated: 2026-07-15\n---\n# guard\n\n"
+        + _unit("Claim", "old", text="The probe uses the old interval.")
+        + _unit("Claim", "new", text="The probe uses the calibrated interval."),
+    )
+    with request_scope(owner_principal(surface="mcp")):
+        old, new = semantic_index.current_parent_index_state(root, page).document.units
+        try:
+            commands.op_observe_memory(
+                root,
+                path=page,
+                operation="update",
+                unit_ref=new.unit_ref,
+                expected_fingerprint=new.fingerprint,
+                expected_hash=vault_module.content_hash((root / page).read_bytes().decode("utf-8")),
+                kind="claim",
+                category=new.category,
+                content=new.content,
+                relations=[{"kind": relation, "target": "[[#old]]"}],
+                target_fingerprints={old.unit_ref: old.fingerprint},
+            )
+        except ValueError as error:
+            assert "STALE_UNIT_TARGET" in str(error)
+            return False
+        return True
+
+
+@pytest.mark.parametrize(
+    ("relation", "pins"),
+    [
+        ("contradicts", True),  # CORE
+        ("answers", True),  # CORE
+        ("x.backs", True),  # CORE
+        ("relates_to", False),  # CORE
+        ("links_to", False),  # CORE
+        ("evidenced_by", False),  # CORE
+        ("x.see_also", False),  # CORE
+    ],
+)
+def test_an_episode_correction_pins_the_exact_target_of_a_corrective_relation_only(
+    tmp_path: Path, relation: str, pins: bool
+) -> None:
+    assert _pins_its_target(tmp_path / "vault", relation) is pins
+
+
+def test_an_episode_correction_pins_the_target_of_a_grandfathered_extension(
+    tmp_path: Path,
+) -> None:
+    """FLIPS 9: `x.leans_on` is a corrective family by its saved family today.
+
+    After intended change 9 it follows its parent `relates_to` and pins nothing,
+    so this returns False.
+    """
+    assert _pins_its_target(tmp_path / "vault", "x.leans_on") is True  # FLIPS 9
+
+
+def test_a_possessive_turn_carries_only_claims_that_name_the_subject_by_about_entity(
+    vault: Path,
+) -> None:
+    """Working-set admission reads the subject relation of each claim.
+
+    A turn that asks about "Cargo Sled's quillon vantry constraint" admits a
+    claim of an unrelated research note only when the claim says `about_entity`
+    on the sled. Four claims differ only in the relation word; the page names
+    no sled, so the relation alone decides.
+
+    FLIPS 7: the `x.concerns` extension and its alias `concerns` do not admit
+    today, because admission matches the key `about_entity`. After intended
+    change 7 both admit, and the unregistered word still does not.
+    """
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _seed_carry_pages(vault)
+    _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+    gauges = (
+        ("core", "about_entity", "blue"),
+        ("extension", "x.concerns", "amber"),
+        ("alias", "concerns", "green"),
+        ("unregistered", "x.unknown", "red"),
+    )
+    claims = "".join(
+        f"## Claim\n- category: constraint\n- id: {name}\n"
+        f"- relations: {word}: [[{SLED_ANCHOR}]]\n\n"
+        f"The quillon vantry constraint uses the {gauge} gauge.\n\n"
+        for name, word, gauge in gauges
+    )
+    _write(
+        vault,
+        CARRY_PAGE,
+        "---\ntype: research-note\nstatus: active\n---\n# Workshop notes\n\n" + claims,
+    )
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    token = request_budget.set_current(None)
+    try:
+        packet = working_set.compile_packet(
+            vault, turn="Explain Cargo Sled's quillon vantry constraint.", max_chars=6000
+        )
+    finally:
+        request_budget.reset_current(token)
+
+    carried = {
+        gauge
+        for unit in packet["units"]
+        if unit["provenance"]["path"] == CARRY_PAGE
+        for _name, _word, gauge in gauges
+        if f"{gauge} gauge" in unit["text"]
+    }
+    assert carried == {"blue"}  # CORE for blue; FLIPS 7 adds amber and green
