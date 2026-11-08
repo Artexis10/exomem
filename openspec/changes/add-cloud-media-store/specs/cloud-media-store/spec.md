@@ -437,9 +437,10 @@ Each cell SHALL have a media allowance, separate from its volume size, set as a 
 The owner allowance SHALL count original plaintext bytes, including versions referenced by sidecars in trash until trash is emptied.
 Multiple live or trash references to one version SHALL count once.
 The operator's physical meter SHALL count provider ciphertext bytes separately.
-Once per backup hold, cellctl SHALL list each cell's media prefix with its list-only key, sum the content lengths of the upload versions, and count unfinished large files.
-It SHALL raise an alert for any hide entry, and for a prefix whose bytes exceed the cell's allowance times a configured headroom factor.
-A failed listing page SHALL report the physical figure as unknown, never as zero, and SHALL NOT change the owner figure.
+Once per backup hold, cellctl SHALL list each cell's media prefix with its list-only key, sum the content lengths of the upload versions while it pages, and count unfinished large files.
+It SHALL raise an alert for any hide entry, and for a prefix whose bytes exceed the cell's allowance times a configured headroom factor. Only a listing that shows no hide entry SHALL resolve the hide alert.
+A failed listing page SHALL report the physical figure as unknown, never as zero, and SHALL NOT change the owner figure. A figure that stays unknown for three listings in a row SHALL raise an alert.
+cellctl SHALL start without the list key, and SHALL then log that every physical figure is unknown.
 
 The owner meter SHALL require complete canonical reference custody, including Trash, and SHALL report unknown when that custody is incomplete.
 It SHALL exclude registry-owned private state without reusing recall exclusions.

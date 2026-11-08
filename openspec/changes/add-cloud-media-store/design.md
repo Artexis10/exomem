@@ -362,10 +362,12 @@ Each cell has a media allowance, separate from its volume size. It is a configur
 
 #### The physical meter (decision 2026-11-06)
 
-Once per backup hold, cellctl lists each cell's prefix with its list-only key (D7). It sums `contentLength` over the upload versions and counts unfinished large files. It raises an alert in three cases:
-- any hide entry appears. The edge cannot hide, so a hide means a key or a person outside the design. `collect-released-media` (D4) withdraws this alert, because its collection hides released names;
+Once per backup hold, cellctl lists each cell's prefix with its list-only key (D7). It sums `contentLength` over the upload versions while it pages, so it holds one page in memory and not the prefix. It also counts unfinished large files. A failed listing makes the figure unknown, never 0, and does not change the owner's figure. cellctl raises an alert in three cases:
+- any hide entry appears. The edge sends no hide request, but its key's `writeFiles` capability permits one. So a hide means that the edge key or another key hid a name, and the operator checks both: the edge and the key watcher. Only a listing that shows no hide entry resolves this alert, so it stays when the cell is deleted. `collect-released-media` (D4) withdraws this alert, because its collection hides released names;
 - a prefix's bytes exceed the cell's allowance times the configured headroom factor;
-- a listing page fails. This is a failed reading, so the figure is unknown and never 0, and it does not change the owner's figure.
+- the figure stays unknown for three listings in a row, five minutes apart. One failure alerts nothing, because a provider blip is normal. A revoked or wrong list key fails every listing, and without this alert it would switch off the other two with no notice.
+
+cellctl starts without the list key, because the meter is a report and not a gate. It then logs once that every physical figure is unknown and meters nothing. The runbook's upgrade step creates the key's Secret.
 
 Publication of the physical figure to Home needs Substrate columns and stays out of this change. The headroom factor is configuration, not a constant in code.
 

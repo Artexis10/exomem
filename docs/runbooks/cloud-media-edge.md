@@ -81,19 +81,49 @@ the canary reads and writes media through the edge.
 After each backup of a cell that has a media store, cellctl lists that cell's prefix
 `cells/<cell>/` in the media bucket with the list key. It logs the bytes of all upload versions, the count of
 unfinished large files and the count of hide entries. The figure is the operator's. It is not the owner's allowance,
-and a failed listing leaves it unknown, never 0.
+and a failed listing leaves it unknown, never 0. cellctl retries a failed listing after five minutes.
 
-Two platform alerts name the cell and no content:
+Three platform alerts name the cell and no content:
 
-- `media-hide-entry-<cell_id>` fires on any hide entry. The edge cannot write one, so a credential other than
-  the edge's touched the bucket. Check the key watcher, then the provider's event log.
+- `media-hide-entry-<cell_id>` fires on any hide entry. The edge sends no hide request, but its key's
+  `writeFiles` capability permits one. So either the edge key or another key hid a name. Check both:
+  1. Read the edge's image: `kubectl -n exomem-cloud get deployment exomem-media-edge -o jsonpath='{.spec.template.spec.containers[0].image}'`
+     Expect the reviewed digest that `artifactBroker.image` names.
+  2. Read the edge's log for errors around the listing: `kubectl -n exomem-cloud logs deployment/exomem-media-edge`
+  3. Read the key watcher's last run. Expect no key that its pinned set does not list.
+  4. If none of these explains the hide, read the provider's event log for the bucket.
 - `media-over-allowance-<cell_id>` fires when the prefix holds more than the allowance times
   `mediaEdge.physicalHeadroom`. Kept versions count in full until the follow-on change destroys them, so a
   cell that rewrites its originals grows this figure without growing the owner's.
+- `media-meter-unknown-<cell_id>` fires when three listings in a row fail. While it fires, the other two
+  alerts cannot fire for that cell. Check that Secret `exomem-cloud-media-list` holds the key that Terraform
+  created, and that the provider is up. cellctl logs each failed listing with the error type.
 
-Both alerts resolve on the next listing that shows neither, and when the cell is deleted. A restart of cellctl
-forgets that an alert fired: it fires again at the next listing, but it does not resolve one that was
-fixed during the restart. Resolve that one at the receiver.
+Each alert resolves on the next listing that shows its cause gone. The allowance and unknown alerts also resolve
+when the cell is deleted or leaves the store. The hide alert does not: no later listing shows that the hide entry
+is gone, so resolve it at the receiver after you have checked it. A restart of cellctl forgets that an alert
+fired: it fires again at the next listing, but it does not resolve one that was fixed during the restart.
+Resolve that one at the receiver.
+
+Without the list key, cellctl still starts. It logs once at startup that the media list key is missing, and it
+meters no cell, so none of the three alerts can fire. Create the Secret and restart cellctl as in
+"Upgrade a release that has the edge on".
+
+## Upgrade a release that has the edge on
+
+A release with the physical meter gives cellctl a second key for the media bucket. cellctl starts without it,
+but it then meters nothing. Do these steps once, for the first such upgrade.
+
+1. Apply the durability root and pin the new key, as "Pin the media keys" in `cloud-key-custody.md` says.
+2. Create the list-key Secret as in step 6 of "Create the Secrets".
+3. Set `mediaEdge.bucketId` in the private values file. The chart refuses an edge-on render without it.
+4. Deploy the chart with the command in step 2 of "Undo".
+5. If you created the Secret after the deploy, restart cellctl so that it reads the key:
+   `kubectl -n exomem-cloud rollout restart deployment/cellctl`
+6. Read cellctl's startup log: `kubectl -n exomem-cloud logs deployment/cellctl | grep "media list key"`
+   Expect no output.
+
+Expected result: after the next backup of each media cell, cellctl logs `holds <n> media byte(s)` for it.
 
 ## Replace one cell's credential
 
