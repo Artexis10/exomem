@@ -302,8 +302,10 @@ def _run_phase(args: argparse.Namespace) -> int:
         cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
         if str(uuid.UUID(args.export_id)) != args.export_id or args.max_bytes <= 0:
             raise ExportRefused(EXPORT_FAILED)
-        # The pause measures the cell volume, the pack and the upload their staging claim.
-        usage = filesystem_use(args.vault.parent if args.phase == steps.PAUSE else args.staging)
+        # The pause measures the cell volume. The pack and the upload measure their staging claim through
+        # the spool, because the upload mounts only that directory of the claim.
+        usage = filesystem_use(args.vault.parent if args.phase == steps.PAUSE
+                               else args.staging / steps.EXPORT_DIR / steps.SPOOL_NAME)
         principal = RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="cloud-export",
                                      issuer_family=f"cloud-cell:{cell_id}")
         if args.phase == steps.PAUSE:
