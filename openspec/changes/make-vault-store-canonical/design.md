@@ -93,6 +93,8 @@ Pages join the database that already holds collections, rather than a new file. 
 
 The writer parses the incoming bytes with today's derivation (`find._parse_page`, `semantic_index.current_parent_index_state`, `epistemic_graph._structural_edges_for_page`, the lexical `_insert_page` row builder) before the transaction. It then runs one `BEGIN IMMEDIATE`. The transaction writes the files' bytes, deletes and inserts the lexical and graph rows, writes one audit row and one projection intent per file, and bumps the store revision. The write acknowledges after commit with `synchronous=FULL`. When a new title makes links on other pages resolve, the transaction also rewrites those pages' graph rows. A binary file the write preserves is written and made durable on disk before the transaction that records its path and hash commits, so a kill can leave an unreferenced file but never a reference to a missing one.
 
+Two kinds of derived state stay outside that transaction. The registry and access-policy state that the schema overlay's pages define is re-derived by a background job after the commit that changes those pages. The store reports a visible `rebuilding` state until the job finishes, as file mode rebuilds the graph today, and the write does not wait for it. The governance catalog, due state, claims and embeddings are sidecars that refresh after the commit. A kill between the commit and a sidecar refresh leaves the sidecar behind the store, never the store behind a sidecar, and the next refresh closes the gap from the store's bytes.
+
 In the spike, derivation took 391 ms and the transaction 1.23 s at p50 on the real-vault copy, including a re-index of the 1.3 MB `log.md` that almost every write rewrites.
 
 ### D3. Readers read the store
