@@ -14,12 +14,13 @@ import json
 import stat
 import sys
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from epistemic.journeys.f27_replay import AgentEnvelope
-from membench.outcome import command
+from membench.outcome import command, record
 from membench.outcome.epistemic import cases, layout, report
 from membench.outcome.epistemic import judge as epistemic_judge
 from membench.outcome.epistemic import run as epistemic_run
@@ -264,6 +265,8 @@ def scratch(tmp_path, monkeypatch):
 def use_fake_cli(monkeypatch, cli: Path) -> None:
     envelope = AgentEnvelope(executable=cli, version="0.0-test")
     monkeypatch.setattr(epistemic_run, "discover_agent_envelope", lambda: envelope)
+    # The run record reads the CLI version too; CI runners have no `claude` on PATH.
+    monkeypatch.setattr(record, "discover_agent_envelope", lambda: envelope)
 
 
 def play(run_id: str, **options) -> Path:
@@ -702,12 +705,13 @@ def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():
 
 
 def window_state(project, window, hour, status="complete"):
-    """The ``state.json`` of one project window that started ``hour`` hours after a fixed morning."""
+    """The ``state.json`` of one project window that started ``hour`` hours after a fixed midnight."""
+    started = datetime(2026, 11, 8, tzinfo=UTC) + timedelta(hours=hour)
     return {
         "project": project,
         "window": window,
         "status": status,
-        "started_at": f"2026-11-08T{hour:02d}:00:00+00:00",
+        "started_at": started.isoformat(),
     }
 
 
