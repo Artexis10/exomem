@@ -38,23 +38,26 @@ UNKNOWN = PhysicalFigure(bytes=None, unfinished=None, hides=None)
 
 
 def meter_prefix(listing: ObjectStorage, cell_id: str) -> PhysicalFigure:
-    """The figure for `cell_id`, or UNKNOWN when any page fails. The listing is all or nothing: it
-    raises on a malformed or missing page, and a partial sum would understate the bucket."""
+    """The figure for `cell_id`, or UNKNOWN when any page fails. It sums while it pages, so a prefix of
+    millions of versions holds one page in memory, not the listing. The figure is all or nothing: the
+    listing raises on a malformed or missing page, and a partial sum would understate the bucket."""
+    total, sized, unfinished, hides = 0, True, 0, 0
     try:
-        versions = listing.list_object_versions(cell_object_prefix(cell_id))
+        for version in listing.iter_object_versions(cell_object_prefix(cell_id)):
+            if version.action == UPLOAD:
+                # An upload without a reported size makes the sum unknown; 0 would understate the bucket.
+                sized = sized and version.size is not None
+                total += version.size or 0
+            elif version.action == START:
+                unfinished += 1
+            elif version.action == HIDE:
+                hides += 1
     except Exception as error:  # noqa: BLE001 - a failed page makes the whole figure unknown
         # The type only: a provider message could carry an identifier.
         logger.error("cellctl: the media listing of cell %s failed (%s); its physical figure is unknown",
                      cell_id, type(error).__name__)
         return UNKNOWN
-    uploads = [version for version in versions if version.action == UPLOAD]
-    # An upload without a reported size makes the sum unknown; counting it as 0 would understate the bucket.
-    sized = all(version.size is not None for version in uploads)
-    return PhysicalFigure(
-        bytes=sum(version.size for version in uploads if version.size is not None) if sized else None,
-        unfinished=sum(1 for version in versions if version.action == START),
-        hides=sum(1 for version in versions if version.action == HIDE),
-    )
+    return PhysicalFigure(bytes=total if sized else None, unfinished=unfinished, hides=hides)
 
 
 def over_allowance(figure: PhysicalFigure, allowance_bytes: int | None, headroom: float | None) -> bool | None:

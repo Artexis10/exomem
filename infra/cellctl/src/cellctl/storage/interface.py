@@ -7,6 +7,7 @@ Protocols, never on the concrete client.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -63,6 +64,11 @@ class ObjectStorage(Protocol):
         key's prefix restriction is what protects a backup/restore Job, which
         authenticates as that key, not as cellctl.
         """
+        ...
+
+    def iter_object_versions(self, prefix: str) -> Iterator[ObjectVersion]:
+        """`list_object_versions` one page at a time, for a caller that only sums: it holds one page
+        in memory, not the whole prefix. A failed page raises after the earlier pages were yielded."""
         ...
 
 
