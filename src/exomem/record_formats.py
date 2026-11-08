@@ -523,13 +523,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
             compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
-            # A record item is a vault note, so ID backfill may stamp the note's own identity on it.
-            # That key belongs to the vault, not to the item schema, unless the schema declares it.
-            note_identity = (
-                {memory_refs.ID_FIELD}
-                if memory_refs.ID_FIELD not in self.manifest.schema.fields
-                else set()
-            )
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
@@ -540,7 +533,6 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     profile.item_id_property,
                     "schema_version",
                     *compatibility_envelope,
-                    *note_identity,
                 }
             }
             self._validate_values(values)

@@ -223,27 +223,6 @@ def test_markdown_item_inspection_reports_undeclared_manual_frontmatter_field(
     assert item.read_bytes() == before
 
 
-def test_a_record_item_stamped_with_its_note_identity_stays_readable(tmp_path: Path) -> None:
-    # ID backfill stamps every vault note, record items included; the collection must still read.
-    fixture = copy_vehicle_maintenance_fixture(tmp_path)
-    manifest = _manifest(tmp_path, fixture)
-    item = fixture / "Events/released/2026-06-01-oil.md"
-    item.write_text(
-        item.read_text(encoding="utf-8").replace(
-            "schema_version: 1\n",
-            "schema_version: 1\nexomem_id: 0b5a3f4e-6c1d-4e2a-9f80-1d2c3b4a5e6f\n",
-        ),
-        encoding="utf-8",
-    )
-
-    inspected = record_formats.inspect_collection(tmp_path, manifest)
-    parsed = record_formats.load_adapter(tmp_path, manifest).read()
-
-    assert inspected.diagnostics == ()
-    assert len(parsed.records) == 3
-    assert all("exomem_id" not in record.values for record in parsed.records)
-
-
 def test_markdown_log_inspection_rejects_undeclared_descriptor_default(tmp_path: Path) -> None:
     fixture = copy_x3_fixture(tmp_path)
     manifest_path = fixture / "_collection.md"
