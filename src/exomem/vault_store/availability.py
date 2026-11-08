@@ -9,11 +9,15 @@ which reads the manifest first and never opens the store of a file-mode vault.
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import closing
 from pathlib import Path
 
+from .. import state_migration
 from ..collection_store import connection, schema
 from . import mode
+
+log = logging.getLogger(__name__)
 
 MULTI_HOST = "VAULT_STORE_MULTI_HOST"
 NOT_SERVED = "VAULT_STORE_NOT_SERVED"
@@ -48,9 +52,13 @@ def require_servable(vault_root: Path) -> None:
 
     It prevents a service from answering reads out of Markdown that the store has replaced. A false
     refusal needs a store-mode vault on a build that cannot serve it, and the owner's way out is the
-    rollback this message names.
+    rollback this message names. A file-mode vault starts, and the crash state that ``marker_inconsistency``
+    names is logged on the way: it is reachable after a crash, so it warns and never refuses.
     """
     if not mode.store_mode_active(vault_root):
+        inconsistency = marker_inconsistency(vault_root)
+        if inconsistency is not None:
+            log.warning("%s", inconsistency)
         return
     from .. import writer_lease
 
@@ -59,6 +67,24 @@ def require_servable(vault_root: Path) -> None:
         NOT_SERVED,
         f"this vault's pages live in the collection store and this build cannot serve them yet: run {ROLLBACK} "
         "to return them to files, or start a build that serves store mode")
+
+
+def marker_inconsistency(vault_root: Path) -> str | None:
+    """Name the crash state in which the manifest records store mode but the store does not hold it.
+
+    Activation records the manifest id before its store commit and rollback drops it after its own, so
+    a crash between the two leaves the id beside no store file, no ``store_mode`` row or a row that
+    says file. ``store_mode_active`` reads that as file mode, and rerunning the activation or the
+    rollback settles it, so this reports and never refuses. A vault without the id never opens its store.
+    """
+    recorded = state_migration.recorded_descriptor_ids(vault_root)
+    if recorded is None or state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
+        return None
+    if mode.store_mode_active(vault_root):
+        return None
+    return (f"The vault state manifest records {state_migration.VAULT_STORE_COMPATIBILITY_ID} but the collection "
+            f"store does not hold store mode, as an interrupted activation or rollback leaves it: this vault "
+            f"serves its pages from files, and {ROLLBACK} settles the records")
 
 
 def write_refusal(vault_root: Path):

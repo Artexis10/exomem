@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands, server_runtime, state_migration
+from exomem import commands, doctor, server_runtime, state_migration
 from exomem.cli_ops import OpError
 from exomem.collection_store import admission, connection, migration, preflight, schema
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability
+from exomem.vault_store import availability, mode
 
 AT = "2026-11-08T00:00:00Z"
 LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_CLOUD_CELL")
@@ -44,6 +45,15 @@ def _record_divergence(vault, reason):
         with writer.transaction() as tx:
             tx.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)",
                        (schema.META_REPLICA_DIVERGENCE, json.dumps({"reason": reason})))
+
+
+def _record_id_only(vault):
+    state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
+
+
+def _create_store_without_mode_row(vault):
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True):
+        pass
 
 
 def _vault_bytes(vault):
@@ -82,6 +92,8 @@ def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     availability.require_servable(vault)
     assert availability.write_refusal(vault) is None
+    assert availability.marker_inconsistency(vault) is None
+    assert doctor._check_vault_store_records(vault) is None
 
 
 def test_a_write_to_a_diverged_store_mode_vault_refuses_with_the_stores_code_and_changes_no_markdown(
@@ -131,3 +143,39 @@ def test_a_staged_migration_with_pending_collections_refuses_in_store_mode(store
     with pytest.raises(CollectionStoreError) as refused:
         migration._stage(store_mode_vault)
     assert refused.value.code == availability.PAGES_AT_RISK
+
+
+def test_a_store_mode_check_that_cannot_read_the_manifest_refuses_and_changes_no_markdown(
+        store_mode_vault, monkeypatch):
+    """Defect: an unreadable manifest passes for file mode, so a write lands in Markdown the store owns."""
+    def unreadable(vault_root):
+        raise state_migration.StateMigrationManifestError(vault_root, "the manifest cannot be read")
+
+    monkeypatch.setattr(mode, "store_mode_active", unreadable)
+    before = _vault_bytes(store_mode_vault)
+    with pytest.raises(state_migration.StateMigrationManifestError):
+        commands.op_remember(store_mode_vault, title="Pump note", status="draft",
+                             content="## Observations\n\n- [finding] The pump holds pressure.\n",
+                             summary="A pump finding for the test rig.")
+    assert _vault_bytes(store_mode_vault) == before
+    with pytest.raises(state_migration.StateMigrationManifestError):
+        availability.require_servable(store_mode_vault)
+
+
+@pytest.mark.parametrize("store_exists", [False, True], ids=["no store file", "store without a store_mode row"])
+def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_refusing(
+        vault, monkeypatch, caplog, store_exists):
+    """Defect: a crash between the two records leaves a vault that nothing names, or one that refuses to serve."""
+    for name in LEASE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    _record_id_only(vault)
+    if store_exists:
+        _create_store_without_mode_row(vault)
+    with caplog.at_level(logging.WARNING, logger=availability.log.name):
+        availability.require_servable(vault)
+    assert [record.getMessage() for record in caplog.records] == [availability.marker_inconsistency(vault)]
+    assert "exomem store-mode rollback" in caplog.text
+    assert availability.write_refusal(vault) is None
+    check = doctor._check_vault_store_records(vault)
+    assert (check.status, check.message) == ("warn", availability.marker_inconsistency(vault))
+    assert "exomem store-mode rollback" in check.remediation

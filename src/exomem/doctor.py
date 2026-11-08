@@ -990,6 +990,25 @@ def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
     return _check("collection_store", "pass", f"This vault has store collections. {connection.UNSUPPORTED_WRITERS}")
 
 
+def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
+    """Warn when the manifest records store mode but the store does not hold it (OpenSpec make-vault-store-canonical).
+
+    A crash during activation or rollback leaves this state. The vault serves from files, so the check
+    warns and never fails. A vault that records no store mode has nothing to report.
+    """
+    if vault_root is None or not vault_root.is_dir():
+        return None
+    from .vault_store import availability
+
+    try:
+        inconsistency = availability.marker_inconsistency(vault_root)
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        return _check("vault_store_records", "warn", f"The store-mode records could not be read: {error}")
+    if inconsistency is None:
+        return None
+    return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")
+
+
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     """graph_sync epoch health: whether the derived graph is servable.
 
@@ -3925,6 +3944,9 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     collection_store = _check_collection_store(vault_root)
     if collection_store is not None:
         checks.append(collection_store)
+    vault_store_records = _check_vault_store_records(vault_root)
+    if vault_store_records is not None:
+        checks.append(vault_store_records)
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
         checks.append(runtime_processes)
