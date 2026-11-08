@@ -29,7 +29,7 @@
 
 ## 5. cellctl and chart (D3)
 
-- [x] 5.1 Sign collector credentials and render them only into the backup Job. Add backup Job egress to the edge port with its admission rule. Make the edge-off check refuse while `collectors` is not empty. Verify: render tests prove that the two credentials are never placed in the other workload.
+- [x] 5.1 Sign collector credentials for the cells on `mediaEdge.collectCells` and render them only into the backup Job. Add backup Job egress to the edge port with its admission rule. Make the edge-off check refuse while `collectors` is not empty. Verify: render tests prove that the two credentials are never placed in the other workload.
 
 ## 6. Collector pass in the Job (D5)
 

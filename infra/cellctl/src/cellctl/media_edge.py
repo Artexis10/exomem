@@ -300,6 +300,9 @@ class MediaEdgeConfig:
     cell_ids: tuple[str, ...] = ()
     # The fleet switch: every cell, including each created later. The list stays as the canary.
     all_cells: bool = False
+    # collect-released-media D3: the cells whose backups condemn the media they released. A list, not a
+    # switch, so one test cell collects first; taking a cell off stops its collection.
+    collect_cell_ids: tuple[str, ...] = ()
     # Raise a cell's number to replace its credential and revoke the old one.
     credential_epochs: Mapping[str, int] = field(default_factory=dict)
     # Eviction and hydration settings the runtime reads beside the keys.
@@ -318,13 +321,14 @@ class MediaEdgeConfig:
             raise ValueError("the media edge needs the name of its bucket")
         if type(self.max_object_bytes) is not int or self.max_object_bytes <= 0:
             raise ValueError("the media edge object bound must be a positive whole number of bytes")
-        if (
-            not isinstance(self.cell_ids, tuple)
-            or len(self.cell_ids) > MAX_SELECTED_CELLS
-            or len(set(self.cell_ids)) != len(self.cell_ids)
-            or not all(isinstance(cell, str) and CELL_ID_RE.fullmatch(cell) for cell in self.cell_ids)
-        ):
-            raise ValueError("the media edge selection needs at most 1024 unique base32 cell IDs")
+        for what, cells in (("selection", self.cell_ids), ("collect list", self.collect_cell_ids)):
+            if (
+                not isinstance(cells, tuple)
+                or len(cells) > MAX_SELECTED_CELLS
+                or len(set(cells)) != len(cells)
+                or not all(isinstance(cell, str) and CELL_ID_RE.fullmatch(cell) for cell in cells)
+            ):
+                raise ValueError(f"the media edge {what} needs at most 1024 unique base32 cell IDs")
         if self.physical_headroom is not None and not (
             type(self.physical_headroom) in (int, float) and math.isfinite(self.physical_headroom)
             and self.physical_headroom >= 1
@@ -342,6 +346,9 @@ class MediaEdgeConfig:
 
     def selects(self, cell_id: str) -> bool:
         return self.all_cells or cell_id in self.cell_ids
+
+    def collects(self, cell_id: str) -> bool:
+        return cell_id in self.collect_cell_ids
 
     def epoch(self, cell_id: str) -> int:
         return self.credential_epochs.get(cell_id, 0)

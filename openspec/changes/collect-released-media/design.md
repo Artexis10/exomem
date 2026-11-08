@@ -59,12 +59,12 @@ The edge gains one operation, `condemn`, which hides a name. The backup Job call
 
 - **Audience.** `cellctl` signs a collector credential with the audience `exomem-media-edge-collector`. The runtime audience stays `exomem-media-edge`. The edge refuses `condemn` for a runtime credential. It refuses every other operation for a collector credential.
 - **Prefix.** The edge derives the prefix from the credential's cell ID, as for runtime credentials. A collector credential can condemn only names under its own cell's prefix.
-- **Active set.** The active set that `cellctl` publishes gains a `collectors` map. A retained cell, one whose store is turned off but whose store identity still exists, keeps its collector entry. Its backups continue to collect.
+- **Active set.** The active set that `cellctl` publishes gains a `collectors` map. A cell gets an entry only while the chart's `mediaEdge.collectCells` list names it and it holds a store. The list, not a switch, lets one test cell collect first. A retained cell on the list, one whose store is turned off but whose store identity still exists, keeps its entry, so its backups continue to collect. A cell taken off the list loses its entry and stops.
 - **Idempotence.** `condemn` hides a name only when a HEAD by name still shows the name. A repeated call hides nothing.
 - **HEAD status.** HEAD gains a `condemned` status. A version is condemned when it exists while its name is hidden, or when the name's current version differs from it.
 - **cellctl.** `cellctl` stays list-only. It signs credentials and lists. It has no new key capability.
 
-Placement: `cellctl` renders the collector credential only into the backup Job. The runtime never mounts it. The backup Job gains egress to the edge's address and port, and an admission rule for that peer. The edge-off check refuses while `collectors` is non-empty, so a turn-off cannot silently stop collection for a retained cell.
+Placement: `cellctl` renders the collector credential only into the backup Job. The runtime never mounts it. The backup Job gains egress to the edge's address and port, and an admission rule for that peer. The edge-off check refuses while `collectors` is non-empty, so a turn-off cannot silently stop collection for a retained cell. The operator empties `mediaEdge.collectCells` first.
 
 ### D4. Detection and rescue
 
@@ -83,7 +83,7 @@ Reachability decides each deletion. Three records carry it:
 
 1. **Release ledger.** A new append-only table in the cell. Before any reference to a stored name retires, the cell commits a release row for it with a full sync. The retiring paths are `forget_original`, the drop of an absent version, a replacement, an emptied Trash and an abandoned protection record. A crash between the release and the unreference keeps the reference. A missed release only leaks storage.
 2. **Media manifest.** Each backup snapshot contains a manifest, inside the restic snapshot. It is encrypted with the cell password, and prune removes it with its snapshot. The backup computes it from the clone that restic backs up. The clone is mounted read-only, and the census walk of `add-cloud-media-store` task 4.5.1 needs a writable root, so the manifest reads the frozen tree directly. It is as strict as that census: any companion that it cannot read makes it unknown. It lists the referenced (name, version) pairs, Trash included, the names under a protection record and the released names. If the census is unknown, the manifest says so.
-3. **Candidates.** After the backup and the prune both succeed, the Job reads every retained snapshot's manifest. A candidate is a name in the newest manifest's released names (`released_newest`) that no retained manifest references or protects. If any retained snapshot has a missing or unknown manifest, the Job condemns nothing for the cell. The Job calls `condemn` for each candidate.
+3. **Candidates.** After the backup and the prune both succeed, the Job reads every retained snapshot's manifest. A candidate is a name in the newest manifest's released names (`released_newest`) that no retained manifest references or protects. If any retained snapshot has a missing or unknown manifest, the Job condemns nothing for the cell. The Job calls `condemn` for each candidate. A refusal for one name skips that name; an outage or a refused credential stops the pass. The Job adds a result line to its termination message: the outcome, a reason token and the counts, never a name. `cellctl` logs it when the hold ends, because the Job's pod is gone before anyone reads its log.
 
 No clock enters this. A candidate depends on which snapshots restic retains, and on nothing else.
 
@@ -107,13 +107,14 @@ The canary cell may use the media store before this change ships. The fleet swit
 The operator carries these steps:
 1. Choose the grace period N and the hide budget.
 2. Authorize the disposable-bucket check of task 1 with sandbox credentials.
-3. Before the lifecycle rule applies, confirm that the canary shows zero names with more than one upload version. Otherwise re-offload those originals first.
-4. Apply the durability stack from a saved plan.
-5. In the same window, update `KEY_WATCHER_PINNED_SET` by read-modify-write of its live value. Coordinate with `contain-cloud-controller-compromise` first, because that change owns the watcher's pinned set.
-6. Deploy the cell image, the edge, `cellctl` and the chart as one release, because the manifest, the credential and the operation depend on each other.
+3. Deploy the edge, `cellctl` and the chart as one release with an empty `mediaEdge.collectCells`, then the cell image. The edge rolls first, because a new cell treats a HEAD without a status as an outage.
+4. Before the lifecycle rule applies, confirm that the canary shows zero names with more than one upload version. Otherwise re-offload those originals first.
+5. Apply the durability stack from a saved plan.
+6. In the same window, update `KEY_WATCHER_PINNED_SET` by read-modify-write of its live value. Coordinate with `contain-cloud-controller-compromise` first, because that change owns the watcher's pinned set.
 7. Confirm that the out-of-cluster cleanup key has `deleteFiles` on the media bucket, for rescue.
+8. Add the canary to `mediaEdge.collectCells`. No hide exists before the rule, so no timing constraint applies.
 
-The undo is the grace period (D4). Removing a cell's collector entry stops all collection for that cell.
+The undo is the grace period (D4). Taking a cell off `mediaEdge.collectCells` stops all collection for that cell.
 
 ## Residuals
 

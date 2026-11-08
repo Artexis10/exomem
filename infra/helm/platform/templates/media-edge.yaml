@@ -7,10 +7,11 @@ set until their record shows no evicted original, so an upgrade that turns the
 edge off reads the live set and refuses while it lists any cell. A set that
 exists but cannot be read refuses too: it proves nothing drained.
 
-collect-released-media D3: the set also lists the collectors, the cells whose
-backup Jobs condemn their released media through the edge, a retained cell
-included. With the edge off that collection would stop without a word, so the
-check refuses while any collector is listed, or while the list cannot be read.
+collect-released-media D3: the set also lists the collectors, the cells on
+mediaEdge.collectCells whose backup Jobs condemn their released media through
+the edge, a retained cell included. With the edge off that collection would
+stop without a word, so the check refuses while any collector is listed, or
+while the list cannot be read. Emptying mediaEdge.collectCells first stops it.
 
 `lookup` returns nothing in `helm template`, in a client-side dry run and in
 `helm rollback`, so those three skip this check.
@@ -25,7 +26,7 @@ check refuses while any collector is listed, or while the list cannot be read.
 {{- else if and (hasKey $set "collectors") (not (kindIs "map" $set.collectors)) }}
 {{- fail "mediaEdge.enabled=false: the collectors of the media edge active set cannot be read, so no backup is known to have stopped collecting. Turn the edge on until cellctl publishes it again (runbook: Turn the edge off)" }}
 {{- else if $set.collectors }}
-{{- fail (printf "mediaEdge.enabled=false: the media edge active set still lists the collectors %s, whose backups condemn released media through the edge. Keep the edge on while any cell holds a media store (runbook: Turn the edge off)" (keys $set.collectors | sortAlpha | join ", ")) }}
+{{- fail (printf "mediaEdge.enabled=false: the media edge active set still lists the collectors %s, whose backups condemn released media through the edge. Take each cell off mediaEdge.collectCells with the edge on, and turn the edge off once the set lists no collector (runbook: Turn the edge off)" (keys $set.collectors | sortAlpha | join ", ")) }}
 {{- end }}
 {{- end }}
 {{- end }}

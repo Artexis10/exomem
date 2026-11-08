@@ -44,7 +44,7 @@ The media bucket SHALL carry one bucket-wide lifecycle rule. The rule SHALL dele
 
 The media edge SHALL offer one more operation, `condemn`, which hides a name. It SHALL accept `condemn` only from a collector credential, which `cellctl` signs with the audience `exomem-media-edge-collector`. It SHALL refuse `condemn` from a runtime credential. It SHALL refuse every other operation from a collector credential. It SHALL derive the prefix from the credential's cell ID, so that a collector credential condemns only under its own cell's prefix. It SHALL hide a name only when a HEAD by name still shows the name, so that a repeated `condemn` hides nothing. The edge SHALL still offer no list or delete route. HEAD by name SHALL report the status `condemned` in two cases. One case is a version that exists while its name is hidden. The other is a version whose name has a different current version.
 
-The active set that `cellctl` publishes SHALL carry a `collectors` map. A cell whose store is turned off but whose store identity still exists SHALL keep its collector entry. `cellctl` SHALL hold no capability to hide or delete.
+The active set that `cellctl` publishes SHALL carry a `collectors` map, with an entry only for a cell that the chart's `mediaEdge.collectCells` list names and that holds a store. A listed cell whose store is turned off but whose store identity still exists SHALL keep its collector entry. A cell taken off the list SHALL lose its entry and its collector credential. `cellctl` SHALL hold no capability to hide or delete.
 
 #### Scenario: A runtime credential asks to condemn
 
@@ -55,6 +55,11 @@ The active set that `cellctl` publishes SHALL carry a `collectors` map. A cell w
 
 - **WHEN** a collector credential calls `condemn` for a name that exists only under another cell's prefix
 - **THEN** the edge resolves the name under the credential's own prefix and hides nothing
+
+#### Scenario: The operator takes a cell off the collect list
+
+- **WHEN** the operator removes a collecting cell from `mediaEdge.collectCells`
+- **THEN** the next published set has no collector entry for the cell, and its backup Job holds no collector credential
 
 #### Scenario: A name is condemned twice
 

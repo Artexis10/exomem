@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -14,7 +15,18 @@ from cellctl.manifests import MEDIA_COLLECTOR_CREDENTIAL_KEY, MEDIA_CREDENTIAL_K
 from cellctl.state import MediaCollection
 
 from .test_local_storage import SNAPSHOT_ID, _run_backup_job
-from .test_media_edge import CANARY, NOW, NOW_MS, URL, _delete, _fleet, _report, _spec, _turn_off
+from .test_media_edge import (
+    CANARY,
+    NOW,
+    NOW_MS,
+    OTHER,
+    URL,
+    _delete,
+    _fleet,
+    _report,
+    _spec,
+    _turn_off,
+)
 from .test_reconcile import FakeClusterGateway, _observed_from_applied, _pass, _seed_cell
 
 RUNTIME_KEYS = {MEDIA_CREDENTIAL_KEY, manifests.MEDIA_IDENTITY_KEY, manifests.MEDIA_NAME_KEY_KEY}
@@ -32,7 +44,7 @@ def test_an_epoch_bump_revokes_the_collector_credential_with_the_runtime_one() -
 
 async def test_a_retained_cell_keeps_collecting_and_a_deleted_one_stops(cell_db) -> None:
     """A turned-off store's backups must keep condemning what the cell released, without its runtime credential."""
-    fleet = await _fleet(cell_db, CANARY)
+    fleet = await _fleet(cell_db, CANARY, collect_cell_ids=(CANARY,))
     try:
         await fleet.run()
         served = fleet.cluster.secret(CANARY)
@@ -57,6 +69,25 @@ async def test_a_retained_cell_keeps_collecting_and_a_deleted_one_stops(cell_db)
         await _delete(fleet, CANARY, NOW + timedelta(minutes=10))
         await fleet.run(NOW + timedelta(minutes=15))
         assert "collectors" not in fleet.cluster.published()
+    finally:
+        await fleet.close()
+
+
+async def test_only_a_cell_on_the_collect_list_collects_and_taking_it_off_stops_it(cell_db) -> None:
+    """The operator's one stop for collection, which the edge-off check waits on: a cell off the list holds none."""
+    fleet = await _fleet(cell_db, CANARY, OTHER, cell_ids=(CANARY, OTHER), collect_cell_ids=(CANARY,))
+    try:
+        await fleet.run()
+        assert fleet.cluster.published()["collectors"].keys() == {CANARY}
+        assert MEDIA_COLLECTOR_CREDENTIAL_KEY not in fleet.cluster.secret(OTHER)
+
+        fleet.config = dataclasses.replace(fleet.config, media_edge=dataclasses.replace(
+            fleet.config.media_edge, collect_cell_ids=()))
+        await fleet.run(NOW + timedelta(minutes=5))
+
+        assert "collectors" not in fleet.cluster.published()
+        assert MEDIA_COLLECTOR_CREDENTIAL_KEY not in fleet.cluster.secret(CANARY)
+        assert CANARY in fleet.cluster.published()["cells"]
     finally:
         await fleet.close()
 

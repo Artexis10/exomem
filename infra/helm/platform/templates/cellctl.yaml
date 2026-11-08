@@ -334,6 +334,8 @@ spec:
               value: {{ .Values.mediaEdge.bucket | quote }}
             - name: CELLCTL_MEDIA_EDGE_CELL_IDS
               value: {{ .Values.mediaEdge.cellIds | toJson | quote }}
+            - name: CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS
+              value: {{ .Values.mediaEdge.collectCells | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS
               value: {{ .Values.mediaEdge.credentialEpochs | toJson | quote }}
             - name: CELLCTL_MEDIA_EDGE_STORE_POLICY

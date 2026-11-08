@@ -13,7 +13,7 @@ On 2026-11-06 the operator chose to build collection before any cell other than 
 - **A narrow `condemn` operation.** The backup Job asks the media edge to hide a name. It uses its own collector credential, which no other workload holds. `cellctl` stays list-only.
 - **A release ledger and a manifest per backup.** The cell commits a release row before a reference retires. Each backup snapshot carries a media manifest. After backup and prune, a name is a candidate only when it is released and no retained manifest names it.
 - **Detection and rescue.** `cellctl` reports hidden names for each cell. The out-of-cluster key watcher alerts when hide markers exceed a budget. Within the grace period, the operator rescues a name by deleting its hide marker.
-- **Default off, soft fail.** The collector pass runs only for a cell with a collector entry. With a missing or unknown manifest, it condemns nothing. A missed release only leaks storage.
+- **Default off, soft fail.** The collector pass runs only for a cell with a collector entry, which only a cell on the chart's `mediaEdge.collectCells` list gets. With a missing or unknown manifest, it condemns nothing. A missed release only leaks storage.
 
 No server-side model is added. No clock decides a deletion.
 

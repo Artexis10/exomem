@@ -1297,9 +1297,11 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
 
 
 def _media_collects(cluster_config: ClusterConfig, row: CellRow) -> bool:
-    """collect-released-media D3: every cell with a store collects while the edge is on, a retained one too,
-    so its backups keep condemning the names that it released. A deleted cell has no store, so it stops."""
-    return cluster_config.media_edge is not None and _media_mode(cluster_config, row) is not None
+    """collect-released-media D3: a cell on the edge's collect list collects while it holds a store, a retained
+    one too, so its backups keep condemning the names that it released. A deleted cell has no store, and a cell
+    taken off the list loses its collector entry, so both stop; an empty list lets the edge turn off."""
+    edge = cluster_config.media_edge
+    return edge is not None and edge.collects(row.cell_id) and _media_mode(cluster_config, row) is not None
 
 
 def _media_collector_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
