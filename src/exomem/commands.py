@@ -11371,6 +11371,7 @@ def op_maintain_memory(
         "collections-store",
         "collections-store-adopt-local",
         "collections-store-export",
+        "collections-cutover",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -11419,6 +11420,8 @@ def op_maintain_memory(
     maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
     writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
+    collections-cutover only previews the move of every collection to SQLite-only storage;
+    the owner applies its plan_id with `exomem collections cutover` on the host.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -11756,6 +11759,15 @@ def op_maintain_memory(
             )
         # The service answering this refuses an apply; the offline CLI applies it.
         return store_admission.export_route(vault_root, plan_id=plan_id, why=why)
+    if mode == "collections-cutover":
+        from .collection_store import cutover as store_cutover
+
+        if store_preview_arguments_invalid() or apply is not None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-cutover previews without arguments; the owner applies its "
+                "plan_id on the host with `exomem collections cutover --plan-id`, the service stopped"
+            )
+        return store_cutover.preview(vault_root)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -11826,7 +11838,8 @@ def op_maintain_memory(
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
-        "maintenance-job-cancel, collections-store-adopt-local, or collections-store-export"
+        "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
+        "collections-store-export, or collections-cutover"
     )
 
 

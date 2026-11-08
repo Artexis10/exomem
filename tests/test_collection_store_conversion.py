@@ -236,3 +236,44 @@ def test_conversion_refuses_while_a_view_edit_is_unsettled(served, monkeypatch):
     edited.write_text(edited.read_text().replace("title: One", "title: Edited"))
     refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert edited.exists() and "title: Edited" in edited.read_text()
+
+
+def test_conversion_refuses_while_an_edit_to_the_manifest_view_is_unsettled(served, monkeypatch):
+    """Defect: conversion republishes the manifest view over an owner's edit that edit-back has not
+    yet applied or held, so the edit is lost; a revise refuses in the same state."""
+    root = served
+    monkeypatch.setattr(edit_back, "FULL_PASS_SECONDS", 3600)
+    time.sleep(1)
+    manifest = root / WORK
+    edited = manifest.read_text() + "\nA note the owner added outside the store.\n"
+    manifest.write_text(edited)
+    refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
+    assert store(root, "SELECT view_mode FROM collections WHERE collection_id=?", CID) == [("items",)]
+    assert manifest.read_text() == edited and item_files(root, WORK)
+
+
+@pytest.mark.parametrize("change", ["changed", "missing"])
+def test_a_resumed_conversion_names_each_item_file_it_did_not_remove(served, monkeypatch, change):
+    """Defect: an item file edited or deleted between the conversion's commit and its archive is left
+    out of the receipt, so the owner reads every file as archived and removed when one stays in the
+    vault or never reached the archive."""
+    root = served
+    (item,) = item_files(root, WORK)
+    real = conversion._archive
+
+    def crash(*args, **kwargs):
+        raise SystemExit("injected crash")
+
+    monkeypatch.setattr(conversion, "_archive", crash)
+    with pytest.raises(SystemExit):
+        convert(root, WORK)
+    monkeypatch.setattr(conversion, "_archive", real)
+    edited = root / item
+    if change == "changed":
+        edited.write_text(edited.read_text().replace("title: One", "title: Edited"))
+    else:
+        edited.unlink()
+    receipt = convert(root, WORK)
+    assert (receipt["phase"], receipt["removed"], receipt["not_removed"]) == (
+        "complete", 0, [{"path": item, "reason": change}]), receipt
+    assert edited.exists() == (change == "changed")

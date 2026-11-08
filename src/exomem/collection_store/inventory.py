@@ -4,7 +4,8 @@ OpenSpec move-structured-collections-to-sqlite C0.1. The collections-store prefl
 answers for the file collections; this module adds one row for each collection in the
 vault's store, read from the store itself, and pages the merged list by manifest path.
 A row holds identities, counts, statuses and codes, never row values. A count that is
-unknown or does not apply is ``None``, never 0.
+unknown or does not apply is ``None``, never 0. ``conversion`` names the phase of a summary
+conversion that stopped after its commit (``collections cutover`` resumes it), else ``None``.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 
 from .. import structured_collections as collections
-from . import connection, derived_rows, types
+from . import connection, conversion, derived_rows, types
 
 #: Rows per response, so that a vault with many collections never makes one huge result.
 PAGE_SIZE = 100
@@ -68,6 +69,8 @@ def _store_row(root, conn, collection_id, path, failure, *, routed, stored) -> d
     row.update(type=type_name, view_mode=view_mode, legacy_audit_status=audit, item_views=views, held=held,
                # A derived collection's rows live beside the store; its import log holds their count.
                rows=derived_rows.logged(conn, collection_id)[1] if derived else items)
+    if (pending := conversion.record(conn, collection_id)) is not None:
+        row["conversion"] = pending["phase"]
     try:
         manifest = collections.parse_manifest_bytes(root, path, text.encode())
     except collections.CollectionError as error:
@@ -101,7 +104,8 @@ def _file_row(found) -> dict:
 def _empty(collection_id, path, authority) -> dict:
     return {"collection_id": collection_id, "path": path, "authority": authority, "type": None,
             "semantic_profile": None, "storage_strategy": None, "view_mode": None, "rows": None,
-            "item_views": None, "legacy_audit_status": None, "held": None, "stamped_items": None, "blocker": None}
+            "item_views": None, "legacy_audit_status": None, "held": None, "stamped_items": None, "conversion": None,
+            "blocker": None}
 
 
 def _cursor(position) -> str:

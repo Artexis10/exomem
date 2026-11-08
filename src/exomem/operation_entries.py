@@ -797,7 +797,9 @@ def _maintenance_rows():
 
     rows = [_row("audit", "check_memory", ("categories", "detail", "legacy_sample_limit")),
             # The store preflight is read-only and checks the whole vault; cursor pages its inventory.
-            _row("collections-store", "check_memory", ("cursor",))]
+            _row("collections-store", "check_memory", ("cursor",)),
+            # The cutover previews here and takes no argument; the owner applies its plan_id with the CLI.
+            _row("collections-cutover", "check_memory", ())]
     for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
                                                 ("backfill-ids", "dry_run", True, ()),
                                                 ("reconcile", "dry_run", False, ("rebuild_graph",))):

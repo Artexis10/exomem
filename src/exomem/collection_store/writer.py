@@ -3524,10 +3524,11 @@ class CollectionWriter:
         return receipt
 
     def conversion_state(self, collection):
-        """The collection id, view mode and pending conversion record (``conversion``) of one collection."""
+        """The collection id, storage strategy, view mode and pending conversion record (``conversion``)."""
         with self.read_snapshot(mutation=True):
-            row, _manifest, _declared = self._collection(collection)
-            return row["collection_id"], row["view_mode"], conversion.record(self.connection, row["collection_id"])
+            row, manifest, _declared = self._collection(collection)
+            return (row["collection_id"], manifest.storage.strategy, row["view_mode"],
+                    conversion.record(self.connection, row["collection_id"]))
 
     def advance_conversion(self, cid, value):
         """Record the phase a conversion reached, or clear its record once the vault holds no item file."""
@@ -3536,29 +3537,34 @@ class CollectionWriter:
             conversion.put(self._execute, cid, value)
 
     def _conversion_files(self, current):
-        """The published item files a conversion archives, refused while any view work is unsettled."""
+        """The published item files a conversion archives, refused while any view work is unsettled.
+
+        The preflight is revise's: the manifest view, every item view and every held view, so an
+        edit made outside the store stops the conversion as it stops a revise.
+        """
         cid = current.collection_id
-        if (self._publication.pending or summary.publication_outstanding(self.connection, cid)
-                or self.connection.execute("SELECT 1 FROM held_candidates WHERE collection_id=? "
-                                           "AND kind='view-correction' LIMIT 1", (cid,)).fetchone()):
+        paths = sorted(path for (path,) in self.connection.execute(
+            "SELECT path FROM projection_state WHERE collection_id=? AND kind='item'", (cid,)))
+        self._preflight_views([current.path, *paths, *(path for (path,) in self.connection.execute(
+            "SELECT view_path FROM held_candidates WHERE collection_id=? AND view_path IS NOT NULL", (cid,)))])
+        if self._publication.pending or conversion.unsettled(self.connection, cid):
             raise conversion.outstanding("a view of the collection is unpublished or a view correction is held")
-        published = dict(self.connection.execute(
-            "SELECT path,published_sha256 FROM projection_state WHERE collection_id=? AND kind='item'", (cid,)))
-        for path, raw in conversion.read_files(self.root, sorted(published)).items():
-            # A file edit that edit-back has not yet applied or held would leave with the file.
-            if raw is None or hashlib.sha256(raw).hexdigest() != published[path]:
-                raise conversion.outstanding(f"{path} differs from the view the store published")
+        # After the preflight, which may narrow a view's published digest to the bytes it found.
+        published = conversion.published_views(self.connection, cid, ("item",))
+        if (edited := conversion.first_edited(self.root, published)) is not None:
+            raise conversion.outstanding(f"{edited} differs from the view the store published")
         return published
 
     def convert_to_summary(self, collection, *, why, before_commit):
-        """Convert a populated items-mode collection to summary mode in one transaction (design §17).
+        """Convert a populated markdown-items collection to SQLite-only storage in one transaction (design §17).
 
         The new manifest version names ``storage.strategy: sqlite`` and ``view_mode: summary``. Rows
         keep their keys, values, payload hashes, versions and audit, and the item projection state
         retires. Each row's former view path stays in ``items.view_path`` as its retired alias, so an
         old path still finds its row (C2.4) without a schema change: every reader of that column
         renders, publishes, watches and governs a summary row by the collection, never by the alias.
-        The conversion record that the archive and the removal resume from commits here too.
+        The conversion record that the archive and the removal resume from commits here too. A
+        collection already in summary mode has no item views, so only its storage strategy changes.
         """
         records._validate_why(why)
         with self._mutation():
@@ -3568,7 +3574,7 @@ class CollectionWriter:
                 return replay
             row, current, declared = self._collection(collection)
             cid = current.collection_id
-            if not _renders_rows(current):
+            if not conversion.convertible(current):
                 raise conversion.unsupported(current.storage.strategy, current.view_mode)
             files = self._conversion_files(current)
             presentation = current.record_presentation

@@ -196,6 +196,10 @@ The report separates vault setup in `coordinator` and, when needed, a vault-leve
 
 Previews the return of a migrated vault's store collections to file-canonical files. It is owner-only and writes nothing. For each collection it reports whether the store wrote it, and any blocker: a collection the store created, one over a file-mode bound, a value with no file form, or a view changed by hand. The vault verdict is `exportable`, `blocked`, `export_pending` or `nothing_to_export`. Applying the preview's `plan_id` with a `why` is the owner's offline step, `exomem collections export --plan-id ID --why REASON`, with the service stopped; the service refuses the apply.
 
+### collections-cutover
+
+Previews the move of every structured collection to SQLite-only storage. It is owner-only and writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every blocker with its fix, and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step, `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, with the service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and resumes after a crash when run again.
+
 ### Sidecar collapse (`fix`)
 
 `fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.
