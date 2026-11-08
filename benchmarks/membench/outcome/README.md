@@ -1,6 +1,6 @@
 # Outcome evaluations
 
-These three suites ask one question: does Exomem change what an agent gets done? Each plays a
+These suites ask one question: does Exomem change what an agent gets done? Each plays a
 Claude Code actor on the operator's subscription against a task whose score does not depend on
 Exomem. Every figure they produce is an **internal diagnostic**. The actor is not the suites' own
 protocol, so no number here may be quoted as a CL-Bench or LAB result.
@@ -31,6 +31,14 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
   its correction. Arm `E` records the correction as Exomem governance. Arm `P` holds the same pages
   without it. A blind judge reads each answer against the case key. The suite answers whether
   governance keeps the agent from trusting the stale value.
+- **epistemic** is the epistemic task bench (family f38, dev only until its amendment registers
+  it). The actor works through a scripted project of several sessions, and probes then ask what
+  the memory should now hold. Arm `N` has no memory. Arm `F` keeps a `memory/` folder and gets the
+  product's learning instruction, pointed at the folder. Arm `P` is Exomem as its users get it:
+  the plugin, the skills, the hooks, the instruction block and the learning instruction. Arm `E`
+  is an ablation: Exomem over MCP alone, with no instruction. No arm gets a per-task memory
+  sentence. The suite answers whether Exomem beats a folder on facts that change, and whether it
+  helps at all.
 
 The plugin arms (`PP`, `P`, `EH`, `WP`, `WG`) run the plugin's hooks with no service credential. The
 hooks keep their state inside the arm directory. The report records the characters the hooks
@@ -38,6 +46,66 @@ injected, and any tool the CLI refused for want of permission. Each CL-Bench que
 LAB session starts with a fresh hook home, so a hook's cooldown from an earlier question cannot
 silence its nudge. A plugin arm may read the plugin directory, so a skill can read its own
 reference files, and nothing else outside its workspace.
+
+## The epistemic suite
+
+The cases are three projects, `project-a`, `project-b` and `project-c`, with `SPLIT.json` beside
+them. They sit under `cases/epistemic/` in the run root and never go in the repository.
+`SPLIT.json` names the `dev` and `heldout` projects and the SHA-256 of each project file. A run
+refuses a project file that differs from its digest.
+
+A project is a list of sessions (a task and its files) and a list of probes. A probe belongs to
+one session and carries a task, files, and a key: the value, the accepted phrasings, a rubric, the
+behaviours it scores and the trap. A probe of the dimension `stable` asks for a fact that never
+changes. Every other probe is a change probe and names its `change_id`.
+
+How a window plays:
+
+1. The command plays one project in lockstep. Every arm starts session `k` together. Session
+   `k + 1` starts only after every arm finished session `k` and its probes.
+2. Before each session the workspace holds only that session's scripted files. Arm `F` keeps its
+   `memory/` folder. Arms `P` and `E` keep their vault and state.
+3. After an arm's main task, each probe of that session runs as its own `claude -p` call. It
+   starts from a snapshot of the memory taken after the main task. The harness restores the
+   snapshot after every probe, so a probe never writes into memory that a later call reads.
+4. A harness fault that survives its retries invalidates that project's window for every arm. The
+   project stops and `state.json` records the error. A product failure (a timeout, a wrong
+   answer) stays scored.
+
+Run one window with `membench outcome run epistemic --split dev --run-id r1 --window 1`. The
+window number can be any whole number from 1. `--project project-b` plays one project, for example
+to replay an invalid window in a new window number. Run `--history full --arms N` to play the
+solvable gate: arm `N` answers each probe with the scripted tasks and files of sessions 1 to the
+probe's session in its prompt, under a neutral header. This gate runs on the dev split only.
+
+Before any run the case check compares every authored key string (the value, each accepted
+phrasing and the trap) with the probe's task, the probe's files and its session's files. A string
+of four or more characters refuses the case set when it appears there, case-folded. A shorter
+string matches whole tokens only and gives a warning in the run record, not a refusal. The check
+reads no meaning: it finds copied strings, and the solvable and memory-needed gates find
+paraphrases.
+
+`membench outcome report epistemic --run-id r1` judges every answer blind and writes the report.
+The judge sees an opaque id, the probe task, the key, the answer and a diff of the files that the
+call changed. It does not see the arm or the memory tool calls. A seeded 20% of the items are
+judged twice. If the two judgements agree on `correct` in less than 90% of the items, the report
+reads `incomplete: judge agreement X`. No other judge breaks that tie. No parser cross-check ran:
+no probe declares a structured answer field, and the report says so.
+
+The score of a probe for an arm is the mean of `correct` over the project's counted windows. A
+project counts its first two valid windows. The pairs `P-F`, `P-N` and `E-P` use change probes
+only. Each reports the mean difference and a 95% percentile bootstrap interval over probes,
+resampled inside each project (10,000 draws, the seed is in the report). A decision reads a
+held-out run only, and only when every project has two valid windows that start at least 6 hours
+apart. The decision then reads `beats folder` when the lower bound of `P-F` is above 0, `helps`
+when the lower bound of `P-N` is above 0, and `no worse than folder` when the lower bound of `P-F`
+is above the not-worse bound. In any other case the report only describes, and `decision.why`
+says why. A project with fewer than two valid windows makes the decision `incomplete` and names
+the project. A dev run adds two gates: arm `N` with the whole history solves at least 90% of the
+probes, and arm `N` without it fails at least 80%. Each gate lists the probes that fail it.
+
+A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
+can pass it.
 
 ## Where data and evidence live
 

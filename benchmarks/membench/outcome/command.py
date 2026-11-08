@@ -22,7 +22,7 @@ from .isolation import ACTOR_EFFORT, ACTOR_MODEL
 from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows, write_sample
 from .workspace import RUN_ROOT, require_pinned_checkout
 
-SUITES = ("clbench", "lab", "planted")
+SUITES = ("clbench", "lab", "planted", "epistemic")
 PLANTED_ARMS = ("E", "P")
 #: The comparisons each suite reports when both arms ran: (treatment, baseline).
 PAIRS = {
@@ -41,6 +41,7 @@ PAIRS = {
     ),
     "lab": ("WP-S", "W-S", "WP-W"),
     "planted": ("E-P",),
+    "epistemic": ("P-F", "P-N", "E-P"),
 }
 SPLITS = ("dev", "heldout", "panel")
 #: CL-Bench's decision schedule: upstream's default schedule at seed 42. Development rounds and the
@@ -62,6 +63,8 @@ def suite_arms(suite: str) -> tuple[str, ...]:
         from .clbench.run import ARMS
     elif suite == "lab":
         from .lab.run import ARMS
+    elif suite == "epistemic":
+        from .epistemic.run import EPISTEMIC_ARMS as ARMS
     else:
         return PLANTED_ARMS
     return tuple(ARMS)
@@ -101,6 +104,11 @@ def passed_gate(suite: str, split: str) -> dict | None:
     """The held-out gate's verdict for a decision run; a dev run is never gated."""
     if split != "heldout":
         return None
+    if suite not in gate.FAMILIES:
+        raise refuse(
+            f"held-out {suite} run: {suite} is not registered in the preregistration, so no gate "
+            "can pass it. Run the dev split until its amendment registers it"
+        )
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     if suite in ("clbench", "lab"):
@@ -127,6 +135,12 @@ def write_record(run_dir: Path, entry: dict) -> dict:
             **have,
             "arms": [a for a in order if a in {*have["arms"], *entry["arms"]}],
             "seeds": sorted({*(have["seeds"] or []), *(entry["seeds"] or [])}) or None,
+            # f38 plays one project per call under --project: its case checks add up like its arms.
+            **(
+                {"case_check": {**have.get("case_check", {}), **entry["case_check"]}}
+                if "case_check" in entry
+                else {}
+            ),
         }
     path.write_text(json.dumps(entry, indent=2))
     return entry
@@ -265,6 +279,34 @@ def run_planted(run_dir, split, arms, jobs, limit, model, effort) -> None:
     run_pool(jobs, [partial(answer_all, cases, run_dir / arm, model, effort) for arm in arms])
 
 
+def require_epistemic_options(
+    split: str, arms: list[str], seeds, limit, window: int, history: str | None
+) -> None:
+    """The f38 options that have one meaning: windows are numbered from 1, and the solvable gate is arm N on dev."""
+    if split == "panel":
+        raise refuse("the release panel has no epistemic suite")
+    if seeds or limit:
+        raise refuse("--seeds and --limit do not apply to epistemic: a run plays whole projects")
+    if window < 1:
+        raise refuse(f"--window takes a number from 1, not {window}")
+    if history and (arms != ["N"] or split != "dev"):
+        raise refuse(
+            "--history full is the solvable gate: arm N on the dev split, so add --arms N and keep --split dev"
+        )
+
+
+def run_epistemic(
+    run_dir: Path, split: str, arms, jobs, window, history, projects, model, effort
+) -> None:
+    from .epistemic import run as epistemic_run
+
+    played = epistemic_run.Window(run_dir, RUN_ROOT, window, split, model, effort, None)
+    if history:
+        epistemic_run.play_history(played, projects, jobs)
+    else:
+        epistemic_run.play_window(played, projects, arms, jobs)
+
+
 def run_suite(
     suite: str,
     run_id: str,
@@ -276,8 +318,13 @@ def run_suite(
     limit: int | None = None,
     model: str = ACTOR_MODEL,
     effort: str = ACTOR_EFFORT,
+    window: int | None = None,
+    project: str | None = None,
+    history: str | None = None,
 ) -> Path:
     """Play ``suite``'s arms on ``split``. A held-out run passes the gate before any session starts."""
+    if suite != "epistemic" and (window or project or history):
+        raise refuse("--window, --project and --history belong to the epistemic suite")
     if split not in SPLITS:
         raise refuse(f"--split takes {', '.join(SPLITS)}, not {split!r}")
     if split == "heldout" and (model, effort) != (ACTOR_MODEL, ACTOR_EFFORT):
@@ -303,7 +350,16 @@ def run_suite(
         require_orderings_in_order(seeds)
     if limit and split != "dev":
         raise refuse("--limit is for dev runs; a decision run plays the whole split")
+    projects = None
+    if suite == "epistemic":
+        window = window or 1
+        require_epistemic_options(split, arms, seeds, limit, window, history)
     verdict = passed_gate(suite, split)
+    if suite == "epistemic":
+        # The case check runs before the record or any session: a refused case set leaves no run behind.
+        from .epistemic.cases import load_split
+
+        projects = load_split(RUN_ROOT, split, project)
     indexes = (
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
@@ -322,12 +378,17 @@ def run_suite(
             "gate": verdict,
             **record.checkout_state(),
             "cli": record.cli_version(),
+            **(
+                {"case_check": {n: check for n, (_, check) in projects.items()}} if projects else {}
+            ),
         },
     )
     if suite == "clbench":
         run_clbench(run_dir, split, arms, seeds, jobs, limit, model, effort)
     elif suite == "lab":
         run_lab_suite(run_dir, split, arms, jobs, limit, model, effort)
+    elif suite == "epistemic":
+        run_epistemic(run_dir, split, arms, jobs, window, history, projects, model, effort)
     else:
         run_planted(run_dir, split, arms, jobs, limit, model, effort)
     return run_dir
@@ -342,6 +403,26 @@ def present(pairs: tuple[str, ...], arms) -> list[tuple[str, str]]:
     """The suite's comparisons whose two arms both ran."""
     split = [tuple(p.split("-", 1)) for p in pairs]
     return [(a, b) for a, b in split if a in arms and b in arms]
+
+
+def epistemic_report(run_dir: Path, stored: dict, spec, wanted, arms, jobs: int) -> dict:
+    """Judge an f38 run's answers, then build its report from every project of the split it played."""
+    from .epistemic import cases, judge, report
+
+    if spec is None:
+        raise refuse("epistemic needs a judge: add --judge claude or --judge codex")
+    projects = cases.load_split(RUN_ROOT, stored["split"])
+    judge_run = run_dir / f"judge-{spec.backend}"
+    judge.items(run_dir, projects, judge_run, arms)
+    judge.judge(judge_run, spec, REJUDGE_FRACTION, jobs)
+    return {
+        "suite": "epistemic",
+        "run_id": run_dir.name,
+        "judge_family": spec.family,
+        **report.build(
+            run_dir, projects, judge_run, wanted, arms, heldout=stored["split"] == "heldout"
+        ),
+    }
 
 
 def report_suite(
@@ -369,6 +450,8 @@ def report_suite(
         built = report.build(
             run_dir, wanted, scheduled=stored.get("seeds"), heldout=heldout, arms=have
         )
+    elif suite == "epistemic":
+        built = epistemic_report(run_dir, stored, spec, wanted, have, jobs)
     else:
         if spec is None:
             raise refuse(f"{suite} needs a judge: add --judge claude or --judge codex")
@@ -409,6 +492,8 @@ def rejudge_sample(suite: str, run_id: str, primary: JudgeSpec, spec: JudgeSpec,
     """
     if suite == "lab":
         from .lab import judge
+    elif suite == "epistemic":
+        from .epistemic import judge
     else:
         from .planted import judge
     run_dir = runs_dir() / run_id
@@ -428,6 +513,10 @@ def rejudge_sample(suite: str, run_id: str, primary: JudgeSpec, spec: JudgeSpec,
 def summary(report: dict) -> list[str]:
     """One line per paired measure and per arm's units, then the decision when the report has one."""
     lines = []
+    if report.get("suite") == "epistemic":
+        from .epistemic.report import summary_lines
+
+        lines += summary_lines(report)
     for pair, body in report["pairs"].items():
         measures = {"": body} if "mean_difference" in body else body
         for name, m in measures.items():
@@ -501,6 +590,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             limit=args.limit,
             model=args.model,
             effort=args.effort,
+            window=args.window,
+            project=args.project,
+            history=args.history,
         )
     print(
         f"{args.suite} {args.split} run in {run_dir}; next: membench outcome report {args.suite} --run-id {args.run_id}"
@@ -594,6 +686,21 @@ def register(sub) -> None:
     p_run.add_argument("--jobs", type=int, default=1, help="parallel cells, tasks or arms")
     p_run.add_argument(
         "--limit", type=int, help="dev only: play the first N questions, tasks or cases"
+    )
+    p_run.add_argument(
+        "--window",
+        type=int,
+        help="epistemic only: the window number to play into (default 1). A decision reads two windows "
+        "of every project at least 6 hours apart",
+    )
+    p_run.add_argument(
+        "--project",
+        help="epistemic only: play this one project of the split, for example to replay an invalid window in a new --window",
+    )
+    p_run.add_argument(
+        "--history",
+        choices=("full",),
+        help="epistemic dev only: the solvable gate. Arm N answers each probe with the whole history in its prompt",
     )
     _model_args(p_run)
     p_run.set_defaults(func=_cmd_run)

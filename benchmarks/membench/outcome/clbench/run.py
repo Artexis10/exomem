@@ -502,14 +502,17 @@ class ClaudeActor:
             append_system_prompt_file=self.block if self.spec.shipped else None,
             plugin_dir=PLUGIN_DIR if self.spec.plugin else None,
         )
-        protected = [UPSTREAM, self.arm_dir / "vault", self.arm_dir / "exomem-state"]
         argv += [
             "--effort",
             self.effort,
             "--disallowedTools",
-            ",".join(f"Read(/{p}/**)" for p in protected),
+            ",".join(f"Read(/{p}/**)" for p in self.protected()),
         ]
         return argv
+
+    def protected(self) -> list[Path]:
+        """Paths the actor must not read: the upstream checkout and the arm's own memory."""
+        return [UPSTREAM, self.arm_dir / "vault", self.arm_dir / "exomem-state"]
 
     def prompt(self, pending: str | None, turn: dict) -> str:
         """Upstream's Claude-system prompt shape: feedback, question, schema, and the memory instruction when the arm has one."""
