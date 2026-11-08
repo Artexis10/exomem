@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from test_upload_endpoint import _ASGIClient
 
-from exomem import server, server_transfer
+from exomem import commands, download_links, server, server_transfer
 
 # Runs in CI's frame-codecs step, the job that installs the pixel decoders.
 pytestmark = pytest.mark.frame_codecs
@@ -49,6 +49,8 @@ def served(vault, monkeypatch, tmp_path):
     monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "private-authority")
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://archive.example")
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    # This test process stands in for the HTTP worker that answers /download.
+    monkeypatch.setattr(download_links, "_serving", True)
     mcp = server.build_server(require_auth=False)
     return mcp, _ASGIClient(mcp.http_app())
 
@@ -77,8 +79,8 @@ def test_agent_sees_a_preserved_photo_upright_and_downscaled(served, vault):
 
     mcp, client = served
     # Stored landscape, shot in portrait: EXIF orientation 6 turns it a quarter turn.
-    original = _photo(3000, 2000, orientation=6, taken="2023:04:08 18:58:04")
-    path = _upload(client, "20230408_185804.jpg", original, "image/jpeg")
+    original = _photo(3000, 2000, orientation=6, taken="2021:06:15 09:30:00")
+    path = _upload(client, "IMG_0001.jpg", original, "image/jpeg")
 
     result = _call(mcp, {"kind": "image", "path": path})
 
@@ -86,8 +88,8 @@ def test_agent_sees_a_preserved_photo_upright_and_downscaled(served, vault):
     assert meta["outcome"].startswith("Showing 1 image below")
     [shown] = meta["images"]
     assert shown["path"] == path
-    assert shown["file_name"] == "20230408_185804.jpg"
-    assert shown["taken_at"] == "2023-04-08T18:58:04"
+    assert shown["file_name"] == "IMG_0001.jpg"
+    assert shown["taken_at"] == "2021-06-15T09:30:00"
     assert shown["original_pixels"] == [2000, 3000]
     assert max(shown["shown_pixels"]) == 1568
     [text, image_block] = result.content
@@ -114,7 +116,7 @@ def test_agent_compares_photos_in_one_call(served):
 
 def test_a_raw_photo_names_the_download_instead(served):
     mcp, client = served
-    path = _upload(client, "20251117_155233.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
+    path = _upload(client, "IMG_0002.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
 
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 
@@ -124,7 +126,6 @@ def test_a_raw_photo_names_the_download_instead(served):
 
 def test_download_link_is_short_and_serves_the_exact_original(served, vault):
     """The incident: a 2,116-character link was copied wrong and the download failed."""
-    from exomem import commands
     from exomem.governance.principal import owner_principal, request_scope
 
     mcp, client = served
@@ -135,12 +136,78 @@ def test_download_link_is_short_and_serves_the_exact_original(served, vault):
 
     assert handoff["preferred_delivery"] == "https"
     url = handoff["deliveries"]["https"]["url"]
-    assert len(url) < 80, url
+    grant = parse_qs(urlsplit(url).query)["grant"][0]
+    assert len(grant) == 22, url
     downloaded = client.get(url)
     assert downloaded.status_code == 200, downloaded.text
     assert downloaded.content == original
 
-    grant = parse_qs(urlsplit(url).query)["grant"][0]
     stale = client.get(url.replace(grant, ("A" if grant[0] != "A" else "B") + grant[1:]))
     assert stale.status_code == 404
     assert stale.json()["code"] == "DOWNLOAD_LINK_EXPIRED"
+
+
+def test_a_full_signed_grant_still_downloads_from_a_process_without_short_links(served, vault, monkeypatch):
+    """Links minted before this change, or by a stdio process, carry the whole grant."""
+    from exomem.governance.principal import owner_principal, request_scope
+
+    _mcp, client = served
+    original = _photo(400, 300)
+    path = _upload(client, "IMG_0003.jpg", original, "image/jpeg")
+    monkeypatch.setattr(download_links, "_serving", False)
+    with request_scope(owner_principal(surface="mcp")):
+        handoff = commands.op_transfer_artifact(vault, operation="download", artifact=path)
+
+    url = handoff["deliveries"]["https"]["url"]
+    assert len(parse_qs(urlsplit(url).query)["grant"][0]) > 500
+    downloaded = client.get(url)
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == original
+
+
+def test_a_caller_below_full_disclosure_cannot_see_the_image(served, vault):
+    """The image read must refuse wherever the original download refuses."""
+    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+
+    from exomem.governance.principal import request_scope
+
+    _mcp, client = served
+    path = _upload(client, "IMG_0004.jpg", _photo(400, 300), "image/jpeg")
+    write_scope(vault, paths=path.removeprefix("Knowledge Base/"))
+    write_rule(vault, ceiling=5)
+    _reset_governance_caches()
+
+    with request_scope(_external()), pytest.raises(ValueError, match="ORIGINAL_UNAVAILABLE"):
+        commands.op_read_media(vault, media="image", path=path)
+
+    write_rule(vault, ceiling=6)
+    _reset_governance_caches()
+    with request_scope(_external()):
+        shown = commands.op_read_media(vault, media="image", path=path)
+    assert shown.structured_content["images"][0]["file_name"] == "IMG_0004.jpg"
+
+
+def test_content_that_is_not_an_image_format_never_reaches_another_decoder(served):
+    """A .jpg holding PostScript must not start Ghostscript in the serving process."""
+    mcp, client = served
+    postscript = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\nshowpage\n"
+    path = _upload(client, "IMG_0005.jpg", postscript, "image/jpeg")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_UNDECODABLE" in refused
+
+
+def test_an_image_too_large_to_decode_names_the_download(served):
+    """A small file can declare a huge canvas; the header is checked before pixels are read."""
+    from PIL import Image
+
+    mcp, client = served
+    out = io.BytesIO()
+    Image.new("L", (8000, 6000)).save(out, format="PNG")
+    path = _upload(client, "IMG_0006.png", out.getvalue(), "image/png")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_TOO_LARGE" in refused
+    assert "transfer_artifact operation=download" in refused

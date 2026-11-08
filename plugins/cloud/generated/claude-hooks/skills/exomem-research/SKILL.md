@@ -2,7 +2,7 @@
 name: exomem-research
 description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: 042f8819efadfc4d21f576f774c7e05c74ccd4a053f03b996a40477c85129cfe
+  skill_contract: b1bad0cbe569a778cfe642a2cf1f3d217747853552286519928b2cab629bfdc3
   version: "0.1.0"
 ---
 

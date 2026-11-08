@@ -194,8 +194,9 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   call `read_media(operation={"kind": "image", "path": ...})` with the image or its
   Source page, or `"paths": [...]` for up to six images to compare. Each comes back
   INLINE as an upright, downscaled JPEG image block with its file name and EXIF
-  capture time; the stored original is unchanged. A camera raw file such as DNG
-  cannot be shown: recover it with `transfer_artifact` download instead.
+  capture time; the stored original is unchanged. A camera raw file such as DNG,
+  or an image too large to decode, cannot be shown: recover it with `transfer_artifact`
+  download instead. Personal servers show images; Exomem Cloud does not yet.
 - **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
   `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns

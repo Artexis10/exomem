@@ -22,4 +22,15 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None):
         except ImportError as error:
             raise ImportError("HEIC decoding requires pillow-heif; install exomem[image-codecs]") from error
         register_heif_opener(decode_threads=1)
-    return Image.open(path)
+    # Pillow chooses a decoder by sniffing content, and some (EPS) run external programs. Only
+    # the decoders of the registry's image extensions may run, whatever the file claims to be.
+    return Image.open(path, formats=_image_formats())
+
+
+def _image_formats() -> list[str]:
+    from PIL import Image
+
+    from .media_types import IMAGE_EXTS
+
+    registered = Image.registered_extensions()
+    return sorted({registered[ext] for ext in IMAGE_EXTS if ext in registered})

@@ -9,9 +9,9 @@ a downscaled JPEG the model can look at. The stored original is never changed.
 from __future__ import annotations
 
 import io
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from . import artifact_recovery, image_codecs, media_types, reserved_paths
 
@@ -24,6 +24,11 @@ MAX_MAX_SIDE = 2048
 _JPEG_QUALITY = 85
 # A larger original is read into memory to decode; past this, the person downloads it instead.
 MAX_ORIGINAL_BYTES = 128 * 1024 * 1024
+# Decoded pixels, after JPEG's reduced-scale decode. 40 MP of RGBA is 160 MB in the serving
+# process; a 50 MP camera JPEG decodes at a quarter scale and passes, a 13,000 px PNG does not.
+MAX_DECODE_PIXELS = 40_000_000
+# One decode at a time bounds the memory that concurrent image reads can take.
+_DECODE = threading.Lock()
 # EXIF tags fixed by the EXIF specification, not by any vault vocabulary.
 _EXIF_IFD = 0x8769
 _DATE_TIME_ORIGINAL = 0x9003
@@ -58,42 +63,62 @@ def clamp_side(max_side: int | None) -> int:
 
 def _taken_at(image) -> str | None:
     """The camera's capture time as EXIF records it (local time, no zone), or None."""
+    from datetime import datetime
+
     try:
         exif = image.getexif()
         value = exif.get_ifd(_EXIF_IFD).get(_DATE_TIME_ORIGINAL) or exif.get(_DATE_TIME)
-    except Exception:  # noqa: BLE001 -- a malformed EXIF block only loses the optional date.
+        # EXIF writes "YYYY:MM:DD HH:MM:SS"; its "unknown" value of blanks and colons fails to parse.
+        return datetime.strptime(str(value).strip("\x00 "), "%Y:%m:%d %H:%M:%S").isoformat()
+    except Exception:  # noqa: BLE001 -- a missing or malformed EXIF date only loses the optional date.
         return None
-    if not isinstance(value, str) or len(value) < 19:
-        return None
-    # EXIF writes "YYYY:MM:DD HH:MM:SS"; show it as an ISO-like local timestamp.
-    date, _, time = value.strip("\x00 ").partition(" ")
-    return f"{date.replace(':', '-')}T{time}" if time else None
 
 
-def _render(source: Path | BinaryIO, suffix: str, max_side: int) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes]:
+def _rgb(image):
+    """Convert any decoded mode to RGB for JPEG, flattening transparency onto white."""
+    from PIL import Image
+
+    if image.mode == "P" and "transparency" in image.info:
+        image = image.convert("RGBA")
+    if "A" in image.getbands():
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, (0, 0), rgba.getchannel("A"))
+        return background
+    if image.mode.startswith("I"):
+        # 16-bit and 32-bit integer greyscale: scale to 8 bits, or every pixel clips to white.
+        return image.convert("I").point(lambda value: value / 256).convert("L").convert("RGB")
+    return image if image.mode == "RGB" else image.convert("RGB")
+
+
+def _render(data: bytes, suffix: str, max_side: int) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes]:
     from PIL import Image, ImageOps
 
-    with image_codecs.open_image(source, suffix=suffix) as opened:
+    with image_codecs.open_image(io.BytesIO(data), suffix=suffix) as opened:
         original = opened.size
         if opened.getexif().get(_ORIENTATION) in _QUARTER_TURNS:
             original = (original[1], original[0])
         taken_at = _taken_at(opened)
         # JPEG decodes directly at a reduced scale; other formats ignore the draft request.
         opened.draft("RGB", (max_side, max_side))
+        # The header names the decode size, so a huge image is refused before any pixel is read.
+        if opened.size[0] * opened.size[1] > MAX_DECODE_PIXELS:
+            raise _TooLarge
         image = ImageOps.exif_transpose(opened)
-        if image.mode == "P" and "transparency" in image.info:
-            image = image.convert("RGBA")
-        if "A" in image.getbands():
-            rgba = image.convert("RGBA")
-            background = Image.new("RGB", rgba.size, (255, 255, 255))
-            background.paste(rgba, (0, 0), rgba.getchannel("A"))
-            image = background
-        elif image.mode != "RGB":
-            image = image.convert("RGB")
+        # Shrink first, so mode conversions copy the small image, never the full one.
         image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        image = _rgb(image)
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
         return original, image.size, taken_at, out.getvalue()
+
+
+class _TooLarge(Exception):
+    pass
+
+
+def _download_instead(path: str) -> str:
+    return f"{path} is too large to show; download the original with transfer_artifact operation=download"
 
 
 def show(vault_root: Path, selected: list[str], *, max_side: int | None = None) -> list[ShownImage]:
@@ -103,13 +128,10 @@ def show(vault_root: Path, selected: list[str], *, max_side: int | None = None) 
     if len(selected) > MAX_IMAGES:
         raise ImageViewError("TOO_MANY_IMAGES", f"show at most {MAX_IMAGES} images per call; split the paths")
     side = clamp_side(max_side)
-    from dataclasses import replace
-
-    from .governance.principal import effective_principal
-
-    who = replace(effective_principal(), administrative_ingress=False)
+    who = artifact_recovery.delegated_principal()
     shown = []
     for path in selected:
+        # The recovery slot covers the verified read only; downloads share the two slots.
         with artifact_recovery.stage(vault_root, path, who) as (copied, descriptor):
             original_path = descriptor["path"]
             suffix = Path(original_path).suffix.lower()
@@ -123,20 +145,21 @@ def show(vault_root: Path, selected: list[str], *, max_side: int | None = None) 
                     "download the original with transfer_artifact operation=download",
                 )
             if copied.size > MAX_ORIGINAL_BYTES:
-                raise ImageViewError(
-                    "IMAGE_TOO_LARGE",
-                    f"{path} is too large to show; download the original with transfer_artifact operation=download",
-                )
-            if copied.private_path is not None:
-                source: Path | BinaryIO = copied.private_path
-            else:
-                # The held handle is the verified original; read_held refuses bytes read across a change.
-                source = io.BytesIO(reserved_paths.read_held(copied, 0, copied.size))
-            try:
-                original, size, taken_at, jpeg = _render(source, suffix, side)
-            except ImportError as error:
-                raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
-            except (OSError, ValueError) as error:
-                raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error
-            shown.append(ShownImage(original_path, descriptor["file_name"], original, size, taken_at, jpeg))
+                raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path))
+            # `stage` hands over a held handle; read_held refuses bytes read across a change.
+            data = reserved_paths.read_held(copied, 0, copied.size)
+        from PIL import Image
+
+        try:
+            with _DECODE:
+                original, size, taken_at, jpeg = _render(data, suffix, side)
+        except ImportError as error:
+            raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
+        except (_TooLarge, Image.DecompressionBombError) as error:
+            raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path)) from error
+        except (OSError, ValueError) as error:
+            raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error
+        finally:
+            del data
+        shown.append(ShownImage(original_path, descriptor["file_name"], original, size, taken_at, jpeg))
     return shown

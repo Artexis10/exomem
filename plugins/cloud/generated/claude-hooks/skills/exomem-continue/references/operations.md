@@ -666,12 +666,13 @@ need confirmed `restructure_execution`. An independently authored edge follows t
 ## download
 
 **Goal:** Recover the exact stored original after its external source disappears.
-Notes and exports use their separate read and export paths.
+Notes and exports use their separate read and export paths. To look at a stored
+image, use `read_media` kind `image`; it needs no download.
 
 ### Procedure
 1. Call `transfer_artifact(operation="download", artifact="<stored artifact or custody page>")` to receive the available delivery paths.
-2. If the client supports MCP blobs, read `deliveries.native_resource.uri` to receive the bounded original.
-3. Otherwise, open `deliveries.https.url` in a browser to download the original without a hidden header.
+2. Give the person `deliveries.https.url`; it is a short link that downloads the original in any browser.
+3. If the client supports MCP blobs, `deliveries.native_resource.uri` returns the bounded original to the agent instead.
 4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
 5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
 

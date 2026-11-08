@@ -9696,6 +9696,13 @@ def op_read_media(
         max_side: Longest side px, 256-2048.
     """
     if media == "image":
+        from . import cloud_cell
+
+        if cloud_cell.cloud_mode_enabled():
+            raise ValueError(
+                "IMAGE_VIEW_UNAVAILABLE: Exomem Cloud does not show images yet; "
+                "download the original with `exomem cloud download`"
+            )
         return _show_images(vault_root, path=path, paths=paths, max_side=max_side)
     if path is None or paths is not None:
         raise ValueError("MEDIA_PATH_REQUIRED: a video read takes one `path`")
@@ -14947,6 +14954,13 @@ def _cloud_frames_selected() -> bool:
     )
 
 
+#: One operation of a served command withheld from a Cloud cell, keyed (command, action), with why.
+#: Lifted when a cell decodes images in an owned child under the media brakes, as frames are.
+CLOUD_WITHHELD_ACTIONS = MappingProxyType({
+    ("read_media", "image"): "Images decode in the serving process, and a cell runs no decode child for them yet.",
+})
+
+
 def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
     """The exclusions in force on a cell, with or without gateway upload handoffs."""
     return tuple(
@@ -14978,6 +14992,8 @@ def product_commands_for(
         and (cloud or not c.cloud_only)
         and c.name not in excluded
     )
+    if cloud:
+        selected = tuple(_without_cloud_withheld_actions(command) for command in selected)
     if surface not in {"mcp", "rest"}:
         return selected
     from .writer_lease import remote_admitted_maintenance_modes
@@ -14990,6 +15006,18 @@ def product_commands_for(
         for rendering in command.renderings
         if any(variant.effect == "read" or variant.action in admitted for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
+
+
+def _without_cloud_withheld_actions(command: Command) -> Command:
+    if not any(name == command.name for name, _action in CLOUD_WITHHELD_ACTIONS):
+        return command
+    return replace(command, renderings=tuple(
+        replace(rendering, variants=tuple(
+            variant for variant in rendering.variants
+            if (command.name, variant.action) not in CLOUD_WITHHELD_ACTIONS
+        ))
+        for rendering in command.renderings
+    ))
 
 
 def validate_product_registry() -> dict:

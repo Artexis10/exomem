@@ -871,8 +871,6 @@ def register_transfer_routes(
     """Register /upload and /download routes and return their config."""
     config = load_transfer_config()
     artifact_recovery.install_log_redaction()
-    # This process answers /download, so the short links it mints resolve here.
-    download_links.serve()
 
     def _upload_lane(request: Request) -> str:
         """The lane a request's upload capability is bound to.
@@ -1450,11 +1448,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             if len(grants) != 1 or "path" in request.query_params:
                 return JSONResponse({"code": "ORIGINAL_UNAVAILABLE", "reason": "original recovery is unavailable"},
                     status_code=404, headers=_RECOVERY_HEADERS)
-            if download_links.expand(grants[0]) is None:
+            grant = download_links.expand(grants[0])
+            if grant is None:
                 return JSONResponse({"code": "DOWNLOAD_LINK_EXPIRED",
                     "reason": "this download link has expired or the server restarted; ask the agent for a fresh link"},
                     status_code=404, headers=_RECOVERY_HEADERS)
-            return _OriginalDownloadResponse(vault_root, grants[0])
+            return _OriginalDownloadResponse(vault_root, grant)
         response = await _download_legacy(request)
         for key, value in _RECOVERY_HEADERS.items():
             response.headers[key] = value
