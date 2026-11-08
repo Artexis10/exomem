@@ -5911,7 +5911,9 @@ class EpistemicGraphIndex:
         try:
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return "no_rows"
-            vault_module.read_bytes_without_pinning(path).decode("utf-8")
+            vault_module.read_bytes_without_pinning(
+                path, vault_root=self.vault_root
+            ).decode("utf-8")
         except UnicodeDecodeError:
             return "undecodable"
         except OSError:
@@ -6209,7 +6211,9 @@ class EpistemicGraphIndex:
             if not recall_policy.is_recall_candidate(self.vault_root, path):
                 return False
             try:
-                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(
+                    path, vault_root=self.vault_root
+                ).decode("utf-8")
                 current = _source_signature(path, raw)
             except (OSError, UnicodeDecodeError):
                 return False
@@ -6306,7 +6310,9 @@ class EpistemicGraphIndex:
         for rel in foreground_priority.yielding_in_bulk(sorted(expected_membership)):
             path = self.vault_root / rel
             try:
-                raw_bytes = vault_module.read_bytes_without_pinning(path)
+                raw_bytes = vault_module.read_bytes_without_pinning(
+                    path, vault_root=self.vault_root
+                )
                 raw = raw_bytes.decode("utf-8")
                 source_signature = _source_signature(path, raw)
                 source_mtime = path.stat().st_mtime
@@ -7769,7 +7775,9 @@ class EpistemicGraphIndex:
                 )
                 if indexed:
                     try:
-                        raw = vault_module.read_bytes_without_pinning(path)
+                        raw = vault_module.read_bytes_without_pinning(
+                            path, vault_root=self.vault_root
+                        )
                     except OSError:
                         return None
                     page = find_module._parse_page(
@@ -7925,7 +7933,9 @@ class EpistemicGraphIndex:
             if rel is None or rel in targets:
                 continue
             try:
-                raw = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                raw = vault_module.read_bytes_without_pinning(
+                    path, vault_root=self.vault_root
+                ).decode("utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
             for match in vault_module.find_body_wikilinks(raw):
@@ -11499,7 +11509,9 @@ def _checkpoint_binding_refusal(
                 (
                     rel,
                     vault_module.content_hash(
-                        vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                        vault_module.read_bytes_without_pinning(
+                            path, vault_root=vault_root
+                        ).decode("utf-8")
                     ),
                 )
             )
@@ -12009,7 +12021,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     for md in find_module._walk_md(kb):
         try:
             rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            raw = vault_module.read_bytes_without_pinning(md).decode("utf-8")
+            raw = vault_module.read_bytes_without_pinning(md, vault_root=vault_root).decode("utf-8")
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         disk_paths.add(rel)
@@ -13224,7 +13236,9 @@ def _current_page_unit(
     if _records_suppressed_path(vault_root, rel) or not _recall_path_allowed(vault_root, rel):
         return unanswered("missing", "suppressed_record_parent")
     try:
-        source = vault_module.read_bytes_without_pinning(path).decode("utf-8")
+        source = vault_module.read_bytes_without_pinning(
+            path, vault_root=vault_root
+        ).decode("utf-8")
     except FileNotFoundError:
         return unanswered("missing", "missing_parent")
     except (OSError, UnicodeError):
@@ -13941,7 +13955,9 @@ class GraphView:
                 self._check()
                 raw = (
                     prepared.source if prepared is not None
-                    else vault_module.read_bytes_without_pinning(path).decode("utf-8")
+                    else vault_module.read_bytes_without_pinning(
+                        path, vault_root=self.vault_root
+                    ).decode("utf-8")
                 )
                 page = find_module._parse_page(
                     path, path.stat().st_mtime, self.vault_root,

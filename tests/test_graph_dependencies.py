@@ -72,9 +72,9 @@ def test_topology_lookup_does_not_read_unrelated_bodies(
     read: list[str] = []
     real_read = epistemic_graph.vault_module.read_bytes_without_pinning
 
-    def record(path: Path) -> bytes:
+    def record(path: Path, **kwargs: Path) -> bytes:
         read.append(str(path.relative_to(vault)))
-        return real_read(path)
+        return real_read(path, **kwargs)
 
     monkeypatch.setattr(epistemic_graph.vault_module, "read_bytes_without_pinning", record)
     index = EpistemicGraphIndex(vault)

@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
@@ -1040,6 +1040,54 @@ def _migrate_to_15(conn: sqlite3.Connection) -> None:
 
 
 _TRIGGERS_V15 = _append_only_triggers("store_audit")
+
+
+def _migrate_to_16(conn: sqlite3.Connection) -> None:
+    """Give the store-mode read path what it needs: a page mtime and two covering indexes.
+
+    ``store_pages.mtime_ns`` is the modification time of the projected file, so a page read answers
+    the same stat as a file read. It starts from the projection manifest's value.
+    ``store_pages_meta`` lets a metadata read (path, revision, hash, size, mtime, frontmatter) skip
+    the page body, ``store_audit_by_path`` lets an audit read by path skip the whole trail, and
+    ``store_binaries_by_sha`` lets a read by hash find the binaries that hold those bytes.
+    The projection queue gains the ``move`` operation, which names the file's old path in
+    ``from_path``, so a rename is one intent, and the audit trail gains the same column for a move's
+    new-path row. Every vault keeps its rows.
+    """
+    conn.execute("ALTER TABLE store_pages ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE store_pages SET mtime_ns = COALESCE("
+        "(SELECT mtime_ns FROM store_manifest WHERE store_manifest.path = store_pages.path), 0)"
+    )
+    conn.execute(
+        "CREATE INDEX store_pages_meta ON "
+        "store_pages(path, revision, sha256, size, mtime_ns, frontmatter_json)"
+    )
+    conn.execute("CREATE INDEX store_audit_by_path ON store_audit(path, revision)")
+    # "Which paths hold these bytes" is a seek: vault-wide dedup of identical binary originals asks it.
+    conn.execute("CREATE INDEX store_binaries_by_sha ON store_binaries(sha256)")
+    # A move's row at its new path names the old path; every other row leaves it NULL. The append-only
+    # triggers belong to the table, so they survive the added column.
+    conn.execute("ALTER TABLE store_audit ADD COLUMN from_path TEXT")
+    # SQLite cannot widen a CHECK in place, so the queue is rebuilt and its rows carried over.
+    conn.execute("ALTER TABLE store_projection_queue RENAME TO store_projection_queue_v15")
+    conn.execute("DROP INDEX store_projection_queue_by_age")
+    # The operation column is a closed set that this schema fixes: the projector writes, deletes or
+    # renames a file. Only a rename has an old path.
+    conn.execute("""CREATE TABLE store_projection_queue(
+      path TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('write', 'delete', 'move')),
+      from_path TEXT,
+      queued_at TEXT NOT NULL,
+      CHECK((operation = 'move') = (from_path IS NOT NULL))
+    ) STRICT""")
+    conn.execute(
+        "INSERT INTO store_projection_queue(path, revision, operation, queued_at) "
+        "SELECT path, revision, operation, queued_at FROM store_projection_queue_v15"
+    )
+    conn.execute("DROP TABLE store_projection_queue_v15")
+    conn.execute("CREATE INDEX store_projection_queue_by_age ON store_projection_queue(queued_at)")
 
 
 _MIGRATION_PATH = Path(__file__).with_name("migrations")

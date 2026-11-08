@@ -203,7 +203,8 @@ class GenericFileSnapshot:
     """Bytes and metadata read from the exact retained generic leaf."""
 
     data: bytes
-    identity: held_fs.StableIdentity
+    #: The file's device, inode and link count; None for a page that the vault's store holds.
+    identity: held_fs.StableIdentity | None
     mtime: float
     #: (size, mtime_ns, ctime_ns) from the same handle after the read, or None when the producer has no handle.
     generation: tuple[int, int, int] | None = None
@@ -1435,14 +1436,39 @@ def read_generic_bytes(
     macOS-origin NFD name and its NFKC form are different names, and only the
     walked one exists. Classification is unchanged -- it still reads the NFKC,
     case-folded form -- so a reserved name is refused under any spelling.
+
+    A page that the vault's store owns is read from the store, with no identity and no generation.
+    A reserved or unsafe spelling is refused first, on either path.
     """
 
+    stored = _read_stored_generic(vault_root, value, physical=physical)
+    if stored is not None:
+        return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
             vault_root, value, identities=current, physical=physical
         )
+
+
+def _read_stored_generic(
+    vault_root: Path, value: object, *, physical: bool
+) -> GenericFileSnapshot | None:
+    """The stored page as a snapshot when the store serves ``value``, else None: read the file.
+
+    A page that the store serves but lacks fails as a missing file does.
+    """
+    from .vault_store import read
+
+    parent, leaf = _leaf_spelling(value, physical=physical)
+    try:
+        page = read.owned_page(Path(vault_root), leaf if parent == "." else f"{parent}/{leaf}")
+    except FileNotFoundError as error:
+        raise ReservedPathLeafError("MISSING") from error
+    if page is None:
+        return None
+    return GenericFileSnapshot(page.body, None, page.meta.mtime_ns / 1e9)
 
 
 def _read_generic_bytes_held(
