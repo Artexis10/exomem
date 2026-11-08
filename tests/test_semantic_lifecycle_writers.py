@@ -2618,6 +2618,59 @@ def test_a_validated_commit_that_recorded_a_decision_replays_exactly(tmp_path: P
     assert replay.mutated is False
 
 
+def test_an_interrupted_validated_edit_that_recorded_its_decision_resumes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crash window after the decision file and the slot, before the page.
+
+    The retry finds the decision the first attempt recorded, so the page already reads as
+    satisfied. It must still send that decision, or its rebuilt slot differs from the
+    stored one and the page is refused for good.
+    """
+
+    class Crash(BaseException):
+        pass
+
+    page = _write_page_needing_review(tmp_path, _source(_semantic_body("Alpha")))
+    when = dt.date(2026, 7, 15)
+    semantic = edit_module.edit(
+        tmp_path, path=_PAGE, why="reword", old_string="Alpha", new_string="Beta", today=when,
+        validate_only=True,
+    ).semantic
+    request = dict(
+        path=_PAGE, why="reword", old_string="Alpha", new_string="Beta", today=when,
+        semantic_transition_token=semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=semantic["relation_review_hash"],
+        relation_review_reason="Nothing in the vault fits",
+    )
+    real = vault.batch_atomic_write
+
+    def die_after_the_decision_and_slot(writes, **kwargs):
+        planned = list(writes)
+        if any(Path(item.path).resolve() == page.resolve() for item in planned):
+            lifecycle = [item for item in planned if Path(item.path).parent.name == _ID]
+            real(lifecycle, vault_root=kwargs.get("vault_root"))
+            raise Crash
+        return real(writes, **kwargs)
+
+    with monkeypatch.context() as crashing:
+        crashing.setattr(vault, "batch_atomic_write", die_after_the_decision_and_slot)
+        with pytest.raises(Crash):
+            edit_module.edit(tmp_path, **request)
+    assert "Beta" not in page.read_text(encoding="utf-8")
+    assert len(_decision_files(tmp_path)) == 1
+
+    edit_module.edit(tmp_path, **request)
+    edit_module.edit(
+        tmp_path, path=_PAGE, why="reword", old_string="Beta", new_string="Gamma",
+        today=dt.date(2026, 7, 16),
+    )
+
+    assert "Gamma" in page.read_text(encoding="utf-8")
+    assert len(_decision_files(tmp_path)) == 1
+
+
 def test_an_out_of_band_disconnection_leaves_the_older_decision_in_force_and_audit_says_so(
     tmp_path: Path,
 ) -> None:

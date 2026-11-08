@@ -291,6 +291,7 @@ After an ordinary publication failure, rollback SHALL restore only exact unchang
 - **WHEN** a process stops after preparing the decision, transition slot, or deterministic auxiliaries and an exact retry repeats the same bound transition
 - **THEN** the writer adopts the prepared slot, commits the resulting primary last, and rejects token, reason, content, path, or auxiliary drift
 - **AND** when the page held a carried decision before the interrupted edit, the exact retry commits without asking for relation review
+- **AND** when the interrupted validated edit recorded a decision, the exact retry commits and the page keeps that one decision file
 
 #### Scenario: Committed replay is mutation-free
 - **WHEN** an exact retry finds that the current primary already matches the prepared transition's after state

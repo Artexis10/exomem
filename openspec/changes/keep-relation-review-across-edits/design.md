@@ -62,4 +62,8 @@ Any byte change, including the server's own `updated:` stamp, voids it.
 - An out-of-band edit to a page whose only decision is a lifecycle decision costs one more
   handshake, because the committed slot no longer matches the page. A page whose decision
   is its creation receipt is not affected.
+- A reviewed-none request on a page whose decision is already in force records nothing, and
+  the result does not say that a new reason was dropped; the earlier reason stays. Creation
+  reports ignored review fields, but five existing-page writers each build their own
+  result, so reporting it for one would make them disagree. Left as follow-up work.
 - The move writer's own carry is now redundant. Removing it is follow-up work.

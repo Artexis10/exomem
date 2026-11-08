@@ -2335,12 +2335,9 @@ def _preflight_existing(
             if disposition is not None and not disposition.satisfied:
                 after_review = review_requested
                 result = evaluate_with(after_review)
-            elif not (
-                committed_replay
-                and replayed_decision_reference == requested_decision.reference
-            ):
-                # A replay re-presents a transition that already recorded this decision, so
-                # it keeps the decision that transition's slot names.
+            elif replayed_decision_reference != requested_decision.reference:
+                # A retry of a transition whose slot already names this decision (pending after
+                # a crash, or committed) keeps it, so the rebuilt slot equals the stored one.
                 requested_decision = None
     with mutation_timing_span(timings, "preflight.validity_token"):
         census_token = _capture_validity_stamp(

@@ -59,3 +59,6 @@
 - [x] 5.5 Move two curation proposal tests to the contract as built. They asserted that any
   byte change re-asks a saved review; they now assert that an edit removing the page's last
   connection needs a review at proposal. Evidence: `tests/test_curation_plan_dependencies.py`.
+- [x] 5.6 Keep the decision a crashed validated edit recorded when its exact retry finds
+  the page already satisfied by it, so the rebuilt slot equals the stored one. Evidence:
+  `tests/test_semantic_lifecycle_writers.py` interrupted validated-edit case.
