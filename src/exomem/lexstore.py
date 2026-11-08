@@ -10448,6 +10448,13 @@ class LexicalStore:
                         kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
                 if parent is not None:
                     kept_parents[path] = parent
+            # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
+            # parents this build did not read. Each is used again only at its own revision; a deleted or
+            # renamed page's entry stays until the byte bound drops the base.
+            for path, parent in held.items():
+                if path not in revisions:
+                    kept_parents[path] = parent
+                    kept_bytes += sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in parent.units)
             entry = _AdmittedStatisticsEntry(
                 current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
                 MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),

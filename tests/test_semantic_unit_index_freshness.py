@@ -215,6 +215,42 @@ def test_rewriting_one_note_interprets_only_that_parent_and_ranks_as_a_fresh_sto
     assert {parent for parent, _anchor, _score in cold} == parents
 
 
+def test_a_narrower_admitted_set_between_writes_does_not_cost_the_full_set_its_parents(tmp_path: Path) -> None:
+    """Callers with different views alternate on one service; a narrow request must not empty the shared base."""
+    import uuid
+
+    def write(name: str, content: str) -> str:
+        path = tmp_path / "Knowledge Base/Notes" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\nexomem_id: {uuid.uuid5(uuid.NAMESPACE_URL, name)}\n---\n# {name}\n\n{content}\n",
+            encoding="utf-8",
+        )
+        find_module.clear_cache()
+        return path.relative_to(tmp_path).as_posix()
+
+    tides = write("tides", "- [fact] harbor tides rise ^rise")
+    gauges = write("gauges", "- [fact] harbor gauges read depth ^depth")
+    moorings = write("moorings", "- [fact] mooring chains hold boats ^chains")
+    lexstore.ensure_fresh(tmp_path)
+
+    def interpreted(admitted: set[str]) -> int:
+        with call_spans.meter(call_spans.UNIT_PARENTS_INTERPRETED) as measured:
+            lexstore.search_semantic_units(
+                tmp_path, "harbor", 5, scope="kb", admitted_parent_paths=admitted,
+                _validate_current=False, repair=False,
+            )
+        return int(measured[call_spans.UNIT_PARENTS_INTERPRETED])
+
+    everything = {tides, gauges, moorings}
+    assert interpreted(everything) == 3
+    write("tides", "- [fact] harbor tides rise and fall ^rise")
+    lexstore.ensure_fresh(tmp_path)
+
+    assert interpreted({gauges}) == 0
+    assert interpreted(everything) == 1
+
+
 def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occurrence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
