@@ -227,8 +227,8 @@ _BASELINE_CAPTURE = (
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
     "there, else one concise compiled observation; Records only for a compatible existing "
     "measurement. Before an affiliation facet, check the relation queue: a match the user "
-    "confirms goes to link_acceptance instead. Fleeting preferences, one-offs, incidental "
-    "associations, trivia, and tentative claims stay quiet."
+    "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
+    "incidental associations, trivia, and tentative claims stay quiet."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
