@@ -143,6 +143,9 @@ class InternalStateDescriptor:
     #: stays seamless and an older reader accepts it. Set True only for a family that once lived
     #: inside the vault or that a restore writes back inside it, and ship that with its migration.
     migrates_from_vault: bool = False
+    #: Whether store mode owns the files of this family as pages (`vault_store.ownership`). Every other
+    #: reserved family stays outside the store: governance and replica state have their own owners.
+    vault_store: bool = False
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -437,6 +440,7 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
         trees=("_compiled",),
     ),
     InternalStateDescriptor(
