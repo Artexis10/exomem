@@ -192,11 +192,17 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `"14:32"`), the timestamp of the matching keyframe.
 - **Look at a stored image — `read_media`.** To *see* a photo, scan or screenshot,
   call `read_media(operation={"kind": "image", "path": ...})` with the image or its
-  Source page, or `"paths": [...]` for up to six images to compare. Each comes back
-  INLINE as an upright, downscaled JPEG image block with its file name and EXIF
-  capture time; the stored original is unchanged. A camera raw file such as DNG,
-  or an image too large to decode, cannot be shown: recover it with `transfer_artifact`
-  download instead. Personal servers show images; Exomem Cloud does not yet.
+  Source page, or `"paths": [...]` to compare several. Each comes back INLINE as an
+  upright JPEG image block with its file name and EXIF capture time; the stored
+  original is unchanged. `max_side` sets the long side in pixels, or `"original"`
+  for full resolution; the default is the server's setting. Your model may shrink a
+  large image again, so to inspect detail pass `"region": [x, y, width, height]`
+  (fractions of the upright image) and the server crops at full resolution first.
+  A view too large for the inline limit comes back smaller with an `original_link`;
+  images past a call's limit are listed in `not_shown` for another call. A camera
+  raw file such as DNG, or an image too large to decode, cannot be shown: recover it
+  with `transfer_artifact` download instead. Personal servers show images; Exomem
+  Cloud does not yet.
 - **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
   `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns

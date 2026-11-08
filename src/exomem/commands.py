@@ -9684,16 +9684,18 @@ def op_read_media(
     max_frames: int = 8,
     start_sec: float | None = None,
     end_sec: float | None = None,
-    max_side: int | None = None,
+    max_side: int | Literal["original"] | None = None,
+    region: list[float] | None = None,
 ) -> ToolResult:
     """Show stored images or sampled video frames inline (MCP only).
 
     Args:
         path: Image or video path.
-        paths: Up to 6 images to compare.
+        paths: Images to show, in order.
         start_sec: Start, seconds.
         end_sec: End, seconds.
-        max_side: Longest side px, 256-2048.
+        max_side: Long side px or "original".
+        region: Crop [x, y, w, h] as fractions, for detail.
     """
     if media == "image":
         from . import cloud_cell
@@ -9703,7 +9705,7 @@ def op_read_media(
                 "IMAGE_VIEW_UNAVAILABLE: Exomem Cloud does not show images yet; "
                 "download the original with `exomem cloud download`"
             )
-        return _show_images(vault_root, path=path, paths=paths, max_side=max_side)
+        return _show_images(vault_root, path=path, paths=paths, max_side=max_side, region=region)
     if path is None or paths is not None:
         raise ValueError("MEDIA_PATH_REQUIRED: a video read takes one `path`")
     return op_get_video_frames(
@@ -9716,7 +9718,12 @@ def op_read_media(
 
 
 def _show_images(
-    vault_root: Path, *, path: str | None, paths: list[str] | None, max_side: int | None
+    vault_root: Path,
+    *,
+    path: str | None,
+    paths: list[str] | None,
+    max_side: int | str | None,
+    region: list[float] | None,
 ) -> ToolResult:
     from . import artifact_recovery, image_view
 
@@ -9724,32 +9731,55 @@ def _show_images(
         raise ValueError("MEDIA_PATH_SELECTOR_CONFLICT: use either path or paths, not both")
     selected = [path] if path is not None else list(paths or [])
     try:
-        shown = image_view.show(vault_root, selected, max_side=max_side)
+        result = image_view.show(vault_root, selected, max_side=max_side, region=region)
     except artifact_recovery.RecoveryUnavailable as error:
         # The custody refusal stays content-free: missing, changed and withheld look the same.
         raise ValueError(f"ORIGINAL_UNAVAILABLE: {selected[0] if len(selected) == 1 else 'an image'} cannot be shown; check the path, or retry if the server was busy") from error
-    images = [
-        {
+    shown = result.images
+    images = []
+    for item in shown:
+        entry = {
             "path": item.path,
             "file_name": item.file_name,
             "taken_at": item.taken_at,
             "original_pixels": list(item.original_pixels),
             "shown_pixels": list(item.shown_pixels),
         }
-        for item in shown
-    ]
+        if item.shrunk_to_fit:
+            # The client's per-image limit cut the view below the size asked for: link the original.
+            entry["shrunk_to_fit"] = True
+            entry["original_link"] = _original_link(vault_root, item.path)
+        images.append(entry)
     names = ", ".join(item.file_name for item in shown)
+    outcome = f"Showing {len(shown)} image{'s' if len(shown) != 1 else ''} below: {names}."
+    if result.not_shown:
+        outcome += f" {len(result.not_shown)} more did not fit in this call; show them in another call."
     meta = {
-        "outcome": f"Showing {len(shown)} image{'s' if len(shown) != 1 else ''} below: {names}.",
+        "outcome": outcome,
         "images": images,
-        "note": "Each image is a downscaled view; the stored original is unchanged. "
-        "For the original file, use transfer_artifact operation=download.",
+        "note": "Models may shrink a large image again; to inspect detail, show a region. "
+        "The stored original is unchanged; for the file itself, use transfer_artifact operation=download.",
     }
+    if region is not None:
+        meta["region"] = list(region)
+    if result.not_shown:
+        meta["not_shown"] = result.not_shown
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
         + [FastMCPImage(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
         structured_content=meta,
     )
+
+
+def _original_link(vault_root: Path, path: str) -> str:
+    """The original's short HTTPS download link, or the download route when none can be minted."""
+    from . import artifact_recovery
+
+    try:
+        https = artifact_recovery.prepare(vault_root, path).get("deliveries", {}).get("https")
+    except ValueError:  # Includes RecoveryUnavailable: a refused or unsigned original keeps the route.
+        https = None
+    return https["url"] if https else "transfer_artifact operation=download"
 
 
 def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
