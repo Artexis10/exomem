@@ -174,7 +174,9 @@ class RelationRegistry:
     @cached_property
     def link_key(self) -> str:
         """The key of the plain link: the one core relation a body `[[wikilink]]` mints."""
-        return next(key for key, definition in self.core.items() if "wikilink" in definition.origins)
+        return next(
+            key for key, definition in self.core.items() if "wikilink" in definition.origins
+        )
 
     @cached_property
     def active_keys_by_label(self) -> dict[str, tuple[str, ...]]:
