@@ -686,6 +686,22 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
+def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
+    """The wikilink resolver's lower-cased display title for one page's bytes, as a file read gives it.
+
+    ``path`` (absolute or vault-relative) only supplies the filename fallback of the title precedence.
+    It returns None when the bytes are not UTF-8 text.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # A text-mode read translates newlines before it parses; the bytes path must parse the same text.
+    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    title = resolve_display_title(fm, body, path)
+    return title.lower() if title else None
+
+
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
@@ -8355,12 +8371,10 @@ class WikilinkResolver:
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
-            text = abs_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw = abs_path.read_bytes()
+        except OSError:
             return None
-        fm, body, _ = parse_frontmatter(text)
-        title = resolve_display_title(fm, body, abs_path)
-        return title.lower() if title else None
+        return title_key_from_bytes(raw, abs_path)
 
     def on_files_changed(
         self,
