@@ -182,6 +182,19 @@ Watch the recall and capture lines separately, too. A clause such as "stay quiet
 chit-chat" belongs to recall; moved or generalised to capture, it suppresses exactly
 the casual-looking conversations where a real result tends to arrive.
 
+### The learning instruction — paste it first at Balanced and Maximal
+
+The level blocks state policy. This instruction is your own request to recall
+before a task and to save what the task establishes. Paste it ahead of the
+Balanced or Maximal block. With either block it is longer than one 1,500-character
+field, so on ChatGPT give it a field of its own. `exomem setup` offers the same
+text for Claude Code and Codex. Leave it out at Light and Off: those levels save
+only when you ask.
+
+```text
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+```
+
 ### Maximal — recommended for web and hosted
 
 ```

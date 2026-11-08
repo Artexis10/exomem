@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import setup_wizard
+from exomem import client_config, prominence, setup_wizard
 from exomem.__main__ import main
 
 
@@ -125,10 +125,12 @@ def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
         with_hooks=False,
         skip_claude_register=True,
         scope="user",
+        learning_instruction=False,
         input_fn=lambda prompt="": next(answers),
         run_fn=recorder,
         which_fn=lambda name: None,
         home=home,
+        codex_home=tmp_path / "codex",
         environ={},
         project_dir=tmp_path,
         persist_profile_fn=lambda _profile: None,
@@ -847,3 +849,154 @@ def test_codex_falls_back_to_config_toml_when_its_cli_cannot_register(
     assert "[mcp_servers.exomem]" in written
     assert 'model = "gpt-5"' in written, "must not clobber the user's other settings"
     assert "config.toml" in out
+
+
+# ---- Learning instruction: the user's own request, placed only with consent ----
+#
+# CLAUDE.md and AGENTS.md belong to the user. Setup may add the learning
+# instruction there only when asked, only between its markers, and never at a
+# prominence level that saves only on request.
+
+
+def test_interactive_setup_shows_the_learning_instruction_and_writes_only_where_the_user_agrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    claude_md = home / "CLAUDE.md"
+    claude_md.parent.mkdir(parents=True)
+    claude_md.write_bytes(b"# My rules\r\nAnswer briefly.\r\n")
+    events: list[str] = []
+
+    def answer(prompt: str = "") -> str:
+        events.append(f"ASK {prompt}")
+        if prompt.startswith("Packs"):
+            return ""
+        if "_access.yaml" in prompt:
+            return "n"
+        if str(claude_md) in prompt:
+            return "y"
+        if str(codex_home / "AGENTS.md") in prompt:
+            return "n"
+        pytest.fail(f"unexpected prompt: {prompt}")
+
+    code, _ = _setup(
+        vault,
+        home,
+        Recorder(),
+        yes=False,
+        codex_home=codex_home,
+        input_fn=answer,
+        print_fn=events.append,
+    )
+
+    assert code == 0
+    shown = next(i for i, event in enumerate(events) if prominence.LEARNING_INSTRUCTION in event)
+    asked = next(
+        i for i, event in enumerate(events) if event.startswith("ASK") and str(claude_md) in event
+    )
+    assert shown < asked, "setup asked before it showed the text"
+    span = [
+        client_config.LEARNING_BEGIN,
+        prominence.LEARNING_INSTRUCTION,
+        client_config.LEARNING_END,
+    ]
+    expected = "# My rules\r\nAnswer briefly.\r\n\r\n" + "\r\n".join(span) + "\r\n"
+    assert claude_md.read_bytes() == expected.encode(), "the user's lines or line endings changed"
+    assert not (codex_home / "AGENTS.md").exists(), "a declined file was written"
+
+
+def test_a_rerun_replaces_only_the_marked_span(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    claude_md = home / "CLAUDE.md"
+    claude_md.parent.mkdir(parents=True)
+    above, below = "# My rules\nAnswer briefly.\n\n", "\n## Later notes\nKeep this.\n"
+    claude_md.write_text(
+        f"{above}{client_config.LEARNING_BEGIN}\nAn older learning instruction.\n"
+        f"{client_config.LEARNING_END}\n{below}",
+        encoding="utf-8",
+    )
+
+    code, out = _setup(vault, home, Recorder(), learning_instruction=True)
+
+    assert code == 0
+    assert claude_md.read_text(encoding="utf-8") == (
+        f"{above}{client_config.LEARNING_BEGIN}\n{prominence.LEARNING_INSTRUCTION}\n"
+        f"{client_config.LEARNING_END}\n{below}"
+    )
+    assert "learning: [done] updated in CLAUDE.md" in out
+
+
+def test_scripted_setup_writes_no_instruction_file_unless_the_flag_asks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+
+    code, out = _setup(vault, home, Recorder(), codex_home=codex_home)
+
+    assert code == 0
+    assert not (home / "CLAUDE.md").exists()
+    assert not (codex_home / "AGENTS.md").exists()
+    summary = out.split("Summary:", 1)[1]
+    assert "add --learning-instruction" in summary
+
+
+def test_a_level_saved_through_the_agent_keeps_setup_from_offering_the_instruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user who told their agent "coding: off" asked Exomem to save only on request.
+    Setup reads the vault's saved level as the owner, so it must not offer the
+    instruction that asks for unprompted saves.
+    """
+    from exomem import prominence_preferences
+    from exomem.governance.principal import library_scope
+
+    monkeypatch.delenv("EXOMEM_PROMINENCE", raising=False)
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    first, _ = _setup(vault, home, Recorder(), learning_instruction=False)
+    assert first == 0
+    with library_scope():
+        revision = prominence_preferences.inspect(vault)["revision"]
+        prominence_preferences.set_preference(vault, "off", revision, context="coding")
+
+    def answer(prompt: str = "") -> str:
+        if prompt.startswith("Packs"):
+            return ""
+        if "_access.yaml" in prompt or prompt.startswith("Skill already installed"):
+            return "n"
+        pytest.fail(f"unexpected prompt: {prompt}")
+
+    code, out = _setup(vault, home, Recorder(), yes=False, input_fn=answer)
+
+    assert code == 0
+    assert not (home / "CLAUDE.md").exists()
+    assert "learning: [skipped: prominence is off" in out
+
+
+def test_light_prominence_never_offers_the_learning_instruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+
+    def answer(prompt: str = "") -> str:
+        if prompt.startswith("Packs"):
+            return ""
+        if "_access.yaml" in prompt:
+            return "n"
+        pytest.fail(f"unexpected prompt: {prompt}")
+
+    code, out = _setup(vault, home, Recorder(), yes=False, input_fn=answer)
+
+    assert code == 0
+    assert not (home / "CLAUDE.md").exists()
+    assert prominence.LEARNING_INSTRUCTION not in out
+    assert "learning: [skipped: prominence is light" in out

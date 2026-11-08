@@ -2663,6 +2663,27 @@ def _remove_deployed_scripts(hook_dir: Path) -> list[dict]:
     return removed
 
 
+def _remove_learning_instruction(client: str, settings_path: Path | None) -> dict:
+    """Remove the learning-instruction span `exomem setup` placed for this client.
+
+    The instruction file sits in the client's config home, beside the settings
+    file, and never in a shared hook home. Reports rather than raises, like the
+    config prune: the user still has to finish by hand what this could not reach.
+    """
+    from . import client_config
+
+    path = client_config.instruction_file(client, _profile_home(client, settings_path))
+    report: dict = {"path": str(path), "changed": False, "backup": None, "error": None}
+    try:
+        outcome = client_config.remove_learning_instruction(path)
+    except (OSError, ValueError) as error:
+        report["error"] = str(error)
+        return report
+    report["changed"] = outcome["action"] == "removed"
+    report["backup"] = outcome["backup"]
+    return report
+
+
 def uninstall_hook(
     *,
     hook_dir: Path | None = None,
@@ -2675,9 +2696,12 @@ def uninstall_hook(
     Removes only what this installer wrote -- recognised the same way the
     idempotent install recognises its own entries -- so a hand-written hook
     sitting in the same group survives, and so does the rest of the config.
+    It also removes the learning-instruction span `exomem setup` placed in the
+    client's instruction file, and only that span.
 
     Returns {"client", "settings", "config_changed", "removed_entries",
-    "backup", "settings_error", "alternates", "hook_dir", "scripts", "success"}.
+    "backup", "settings_error", "alternates", "hook_dir", "scripts",
+    "instruction", "success"}.
     Never raises for a config it could not read: an uninstall reports what it
     could not reach, because the user still has to go and finish it by hand.
     """
@@ -2689,6 +2713,7 @@ def uninstall_hook(
     deployed = _prune_one_config(settings)
     alternates = [_prune_one_config(source) for source in _alternate_sources(settings)]
     scripts = _remove_deployed_scripts(hook_dir) if remove_scripts else []
+    instruction = _remove_learning_instruction(client, settings_path)
     return {
         "client": client,
         "settings": str(settings),
@@ -2699,9 +2724,11 @@ def uninstall_hook(
         "alternates": alternates,
         "hook_dir": str(hook_dir),
         "scripts": scripts,
+        "instruction": instruction,
         "success": deployed["error"] is None
         and all(row["error"] is None for row in alternates)
-        and all(row["error"] is None for row in scripts),
+        and all(row["error"] is None for row in scripts)
+        and instruction["error"] is None,
     }
 
 
@@ -2761,6 +2788,11 @@ def render_uninstall_human(report: dict) -> str:
         lines.append(f"Removed {len(gone)} hook {noun} from {report['hook_dir']}.")
     for row in stuck:
         lines.append(f"  ! left {row['path']}: {row['error']}")
+    instruction = report["instruction"]
+    if instruction["changed"]:
+        lines.append(f"Removed the Exomem learning instruction from {instruction['path']}.")
+    elif instruction["error"]:
+        lines.append(f"Could not update {instruction['path']}: {instruction['error']}")
     lines.append(f"Restart {label} to stop running the hooks it already loaded.")
     return "\n".join(lines)
 

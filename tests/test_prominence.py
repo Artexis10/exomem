@@ -278,6 +278,26 @@ def test_the_deployed_copy_matches_the_packaged_hook() -> None:
     assert deployed.read_bytes() == packaged.read_bytes()
 
 
+@pytest.mark.reads_repository_docs
+def test_every_guide_shows_the_packaged_learning_instruction() -> None:
+    """A hosted-client user pastes the guide's copy, so it must be the packaged text.
+
+    Setup writes the packaged text into CLAUDE.md and AGENTS.md; a guide still
+    showing an older wording would give hosted clients a different request.
+    """
+    root = Path(__file__).resolve().parents[1]
+    fence = f"```text\n{prominence.LEARNING_INSTRUCTION}\n```"
+    guides = ("docs/ai-assistant-guide.md", "docs/remote-quickstart.md", "docs/prominence.md")
+
+    differing = [
+        guide for guide in guides if fence not in (root / guide).read_text(encoding="utf-8")
+    ]
+
+    assert differing == [], (
+        f"{differing} do not show exomem.prominence.LEARNING_INSTRUCTION as a ```text block"
+    )
+
+
 # --- the capture predicate has to cover lifecycle consequences ---------------
 
 
