@@ -2382,9 +2382,14 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
     assert paired.returncode == 0, paired.stderr
 
     # collect-released-media D3: a retained cell's namespace has no access label, and its backup Jobs still reach
-    # the edge port to condemn. Admission gives job-egress exactly that third rule and nothing wider.
+    # the edge port to condemn. Admission gives job-egress exactly that third rule and nothing wider. The spec
+    # takes the private ranges that this render hands cellctl, so admission judges only the edge rule.
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "cellctl")
+    cellctl_env = {entry["name"]: entry.get("value")
+                   for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
     retained = _spec(cell_id=_cell_id(), image=image, media_edge_url="", media_collector_url=endpoint,
-                     media_collector_credential="collector")
+                     media_collector_credential="collector",
+                     job_egress_except=tuple(cellctl_env["CELLCTL_JOB_EGRESS_EXCEPT"].split(",")))
     _apply_server_side(k3s.name, [render_namespace(retained)])
     collecting = next(p for p in render_network_policies(retained) if p["metadata"]["name"] == "job-egress")
     admitted = dry_run(collecting)
