@@ -1338,6 +1338,50 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
     return result._replace(items=tuple(items))
 
 
+def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[str], bool] | None) -> list[str]:
+    """Move each live note that compiled a candidate Source ahead of that Source.
+
+    Text ranking can put a short, term-dense recap above the note compiled from it, which
+    sends the agent to an older, partial account first. Coverage is the citation rule that
+    the audit uses (`source_coverage`): the Source names the note in `ingested_into` and the
+    live note cites it back in `sources:`. Only candidates are looked up, so no page outside
+    them moves; a note pulled ahead can push the last candidate past the limit. Without a
+    resident resolver the text order stands, and where the context pack would, the miss
+    schedules the background rebuild that restores it. A restricted caller keeps text order:
+    the broad resolver also sees withheld pages, and a withheld namesake could flip the order.
+    """
+    from . import find, lifecycle_statuses, note_types, source_coverage, vault
+
+    if len(paths) < 2:
+        return paths
+    snapshot = find.borrow_query_resolver(
+        vault_root, visible=visible, schedule_rebuild=vault.inbound_recovery_available(vault_root),
+    )
+    if snapshot is None:
+        return paths
+    candidates = set(paths)
+
+    def lookup(path: str):
+        return find._CACHE.get(vault_root / path, vault_root) if path in candidates else None  # noqa: SLF001
+
+    status_basis, type_basis = lifecycle_statuses.Basis(vault_root), note_types.Basis(vault_root)
+    ordered: list[str] = []
+    for path in paths:
+        page = lookup(path)
+        if page is not None and page.frontmatter.get("ingested_into"):
+            coverage = source_coverage.evaluate(
+                vault_root, page, lookup=lookup, resolver=lambda: snapshot,
+                status_basis=status_basis, type_basis=type_basis,
+            )
+            ordered.extend(
+                item.path for item in coverage.derivatives
+                if item.reason is None and item.path and item.path not in ordered
+            )
+        if path not in ordered:
+            ordered.append(path)
+    return ordered
+
+
 @governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
@@ -1492,7 +1536,10 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_failed"})
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
-    return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    ordered = list(found.values()) if restricted else [
+        found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
+    ]
+    return ordered[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
 
 
 def _conclusion_pages(
