@@ -1399,16 +1399,18 @@ class _SelectedUnits:
 
     def contributions(
         self, column: str, parents: Sequence[str],
-    ) -> dict[str, tuple[_UnitContribution, ...]]:
-        """Each of `parents`' referable units, as ranking statistics count it, by parent.
+    ) -> tuple[dict[str, tuple[_UnitContribution, ...]], set[str]]:
+        """Each of `parents`' referable units, as ranking statistics count it, by parent, and the parents read.
 
         A unit holds its stemmed tokens and its public ref; a candidate no
         interpretation emits, or an overlapping occurrence, never weighs in.
         A parent's units come in rowid order, which fixes which occurrence of a
-        shared ref stands for it. A parent with no unit has no entry.
+        shared ref stands for it. A parent with no unit has no entry. The set
+        names every parent that had a stored row and so was interpreted, even
+        when its interpretation emitted no unit.
         """
         if not parents:
-            return {}
+            return {}, set()
         rows = self.conn.execute(
             "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed, u.rowid FROM semantic_units u "
             "JOIN unit_fts ON unit_fts.rowid = u.rowid "
@@ -1432,7 +1434,7 @@ class _SelectedUnits:
                 # Interned: the units of a base share each distinct token.
                 tuple(map(sys.intern, str(row[2]).split())),
             ))
-        return {path: tuple(units) for path, units in grouped.items()}
+        return {path: tuple(units) for path, units in grouped.items()}, interpreted
 
 
 @dataclass(frozen=True, slots=True)
@@ -3202,7 +3204,7 @@ class _UnitBase:
     `key` names the catalogue and the public instance's definitions, the only inputs of a parent's units beyond
     its revision. A parent enters `parents` only when its page selects the public instance: an owner-only
     instance's interpretation is the owner's, so every request interprets such a parent again and never keeps it.
-    A parent with no unit enters as an empty entry, which holds no interpretation.
+    A parent with no stored unit row enters as an empty entry, which holds no interpretation.
     """
 
     key: tuple
@@ -6150,7 +6152,9 @@ class LexicalStore:
                 f"USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
             self._create_frequency_revision_triggers(conn, "unit_fts_content")
-            # The shadow row's id is the unit's rowid, whose parent the `semantic_units` row names.
+            # The shadow row's id is the unit's rowid, whose parent the `semantic_units` row names. FTS5
+            # writes an update as a delete and an insert; the UPDATE trigger, like the frequency one above,
+            # covers a direct write to the shadow row.
             self._create_unit_revision_triggers(
                 conn, "unit_fts_content", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
                 lambda row: f"(SELECT parent_path FROM semantic_units WHERE rowid = {row}.id)",
@@ -10416,7 +10420,7 @@ class LexicalStore:
             with self._term_frequency_cache_lock:
                 base = self._unit_bases.get(scope)
             held = base.parents if base is not None and base.key == base_key else {}
-            fresh = view.contributions("in_vault" if scope == "vault" else "in_kb", [
+            fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
                 path for path, revision in revisions.items()
                 if (kept := held.get(path)) is None or kept.revision != revision
             ])
@@ -10430,10 +10434,12 @@ class LexicalStore:
                 parent = held.get(path)
                 if parent is None or parent.revision != revision:
                     units = fresh.get(path, ())
-                    # A parent of an owner-only instance is interpreted by its caller alone, on every request.
+                    # A parent of an owner-only instance is interpreted by its caller alone, on every request,
+                    # even when its interpretation emitted no unit: another caller may be refused that instance.
+                    # Only a parent with no stored row holds no interpretation at all.
                     parent = (
                         _ParentUnits(revision, units)
-                        if not units or view.instance(path) == PUBLIC_INSTANCE else None
+                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
                     )
                 else:
                     units = parent.units

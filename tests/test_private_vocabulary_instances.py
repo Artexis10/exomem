@@ -1709,6 +1709,63 @@ def test_unit_ranking_keeps_only_public_instance_parents_across_requests(
     assert ranked(full, both)[0] is None
 
 
+def test_a_private_page_without_referable_units_still_reports_unavailable_after_revocation(
+    configured_boundary, storage_scope, private_instances, vault
+):
+    """A private page whose sections emit no unit must not enter the shared base as an empty public entry.
+
+    An ordinary heading section gives the page stored candidate rows but no referable unit under the
+    owner's private reading. If that empty reading were kept, a caller later refused the instance would
+    reuse it, skip interpreting the page, and get a complete answer where the cold path says unavailable.
+    """
+    from exomem import epistemic_graph, freshness, lexstore
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    def write(name: str, extra: str, number: int, content: str) -> str:
+        path = f"Knowledge Base/Notes/Insights/{name}.md"
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}9999999-9999-4999-8999-999999999999\n---\n"
+            f"# {name}\n\n{content}\n"
+        )
+        return path
+
+    public = write("ranked-public", "", 1, "- [fact] harbor gauges read depth ^gauges")
+    private = write(
+        "headed-private", "project: private-project\n", 2, "## Harbor notes\n\nHarbor tides rise in the evening."
+    )
+    full = private_instances("full")
+    both = {public, private}
+
+    def ranked():
+        with principal.request_scope(full):
+            hits = lexstore.search_semantic_units(
+                vault, "harbor depth", 5, scope="kb", admitted_parent_paths=both,
+                released_parent_paths=both, _validate_current=False, repair=False,
+            )
+        return None if hits is None else [(hit.parent_path, hit.anchor) for hit in hits]
+
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+
+    assert ranked() is not None
+    config, _ = configured_boundary
+    data = json.loads(config.read_text())
+    data["clients"][1]["denied_scope_ids"] = [storage_scope, INBOX]
+    config.write_text(json.dumps(data))
+
+    warm = ranked()
+    lexstore.clear_stores()
+    cold = ranked()
+    assert (warm, cold) == (None, None)
+
+
 def test_a_hidden_page_with_a_private_status_never_changes_a_limited_clients_find_consumers(
     configured_boundary, vault, tmp_path, monkeypatch
 ):
