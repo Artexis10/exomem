@@ -218,6 +218,8 @@ def test_an_image_too_large_to_decode_names_the_download(served, monkeypatch):
     assert "IMAGE_TOO_LARGE" in refused
     assert (9000, 6000) not in decoded, "the canvas was decoded before the size check"
     assert "transfer_artifact operation=download" in refused
+    # A PNG decodes at full size whatever is asked, so a smaller request would fail the same way.
+    assert "smaller max_side" not in refused
 
 
 def test_a_black_and_white_scan_keeps_its_thin_lines_when_downscaled(served):

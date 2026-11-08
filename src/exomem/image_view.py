@@ -131,7 +131,8 @@ def resolve_side(max_side: int | str | None) -> int | None:
         raise ImageViewError(
             "IMAGE_MAX_SIDE_INVALID", 'give max_side as a positive number of pixels, or "original"'
         )
-    return max_side
+    # No decodable image has a side longer than its pixel ceiling: a larger request asks for the original.
+    return None if max_side > MAX_DECODE_PIXELS else max_side
 
 
 def resolve_region(region: Sequence[float] | None) -> Region | None:
@@ -205,7 +206,8 @@ def _render(
         # The header names the decode size. Check it before anything that loads pixels:
         # Pillow decodes a whole PNG to read EXIF that follows the image data.
         if opened.size[0] * opened.size[1] > MAX_DECODE_PIXELS:
-            raise _TooLarge
+            # Only JPEG decodes at a reduced scale, so only there does a smaller request help.
+            raise _TooLarge(smaller_helps=opened.format == "JPEG")
         exif = opened.getexif()
         original = stored if exif.get(_ORIENTATION) not in _QUARTER_TURNS else stored[::-1]
         taken_at = _taken_at(opened)
@@ -243,7 +245,7 @@ def _render(
             )
             jpeg, shrunk = _jpeg(image), True
         if wire_bytes(jpeg) > inline_bytes:
-            raise _TooLarge
+            raise _TooLarge(smaller_helps=True)
         return original, image.size, taken_at, jpeg, shrunk
 
 
@@ -254,14 +256,19 @@ def _jpeg(image) -> bytes:
 
 
 class _TooLarge(Exception):
-    pass
+    def __init__(self, *, smaller_helps: bool):
+        super().__init__()
+        self.smaller_helps = smaller_helps
 
 
-def _download_instead(path: str) -> str:
-    return (
-        f"{path} is too large to show at this size; ask for a smaller max_side or a region, "
-        "or download the original with transfer_artifact operation=download"
-    )
+def _download_instead(path: str, *, smaller_helps: bool = False) -> str:
+    """The refusal text, naming a smaller request only where one can be shown."""
+    if smaller_helps:
+        return (
+            f"{path} is too large to show at this size; ask for a smaller max_side or a region, "
+            "or download the original with transfer_artifact operation=download"
+        )
+    return f"{path} is too large to show; download the original with transfer_artifact operation=download"
 
 
 def _read_original(vault_root: Path, path: str, who) -> tuple[str, str, str, bytes]:
@@ -316,7 +323,8 @@ def show(
             original_path, file_name, suffix, data = _read_original(vault_root, path, who)
         except artifact_recovery.RecoveryUnavailable:
             # The request's deadline also ends a staged read; past it, return what was shown.
-            if shown and not request_budget.can_afford(0):
+            budget = request_budget.current()
+            if shown and budget is not None and budget.remaining() <= 0:
                 return Shown(shown, list(selected[index:]), "time")
             raise
         from PIL import Image
@@ -326,7 +334,11 @@ def show(
                 original, size, taken_at, jpeg, shrunk = _render(data, suffix, side, crop, inline_bytes, inline_side)
         except ImportError as error:
             raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
-        except (_TooLarge, Image.DecompressionBombError) as error:
+        except _TooLarge as error:
+            raise ImageViewError(
+                "IMAGE_TOO_LARGE", _download_instead(path, smaller_helps=error.smaller_helps)
+            ) from error
+        except Image.DecompressionBombError as error:
             raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path)) from error
         except (OSError, ValueError) as error:
             raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error
