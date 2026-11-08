@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.166.0](https://github.com/Artexis10/exomem/compare/v0.165.0...v0.166.0) (2026-11-08)
+
+
+### Features
+
+* **cloud:** collect released media versions through backup manifests ([#2556](https://github.com/Artexis10/exomem/issues/2556)) ([5c181d5](https://github.com/Artexis10/exomem/commit/5c181d5f7f990d2d636999d619a41060949d17eb))
+* **collections:** move structured collections to SQLite-only storage ([#2545](https://github.com/Artexis10/exomem/issues/2545)) ([4f81f0b](https://github.com/Artexis10/exomem/commit/4f81f0bcadcd2901d26ff19c3b64ab462a21954c))
+* **vault-store:** add store-mode migrate, verify and rollback behind the off release gate ([#2551](https://github.com/Artexis10/exomem/issues/2551)) ([eabd8df](https://github.com/Artexis10/exomem/commit/eabd8dffecd574cb1512e65ccfe48f204cdbc375))
+
+
+### Bug Fixes
+
+* **capture:** keep the save when advisory link acceptance names a match ([#2553](https://github.com/Artexis10/exomem/issues/2553)) ([033c693](https://github.com/Artexis10/exomem/commit/033c693d115e7ed75c078ff60a856fe468d6f918))
+* **cloud:** route /favicon.ico on the Cloud host to the gateway ([#2561](https://github.com/Artexis10/exomem/issues/2561)) ([0c72b37](https://github.com/Artexis10/exomem/commit/0c72b37d1a03d7caf46986749e9712c5ce8b85e0))
+* **recall:** run the dense task lane while the keyword index lags ([#2566](https://github.com/Artexis10/exomem/issues/2566)) ([06cd48b](https://github.com/Artexis10/exomem/commit/06cd48b692eaf9f2c0a7c0d5ed12a226e977bc5f))
+* **relations:** keep a reviewed-none decision across edits ([#2548](https://github.com/Artexis10/exomem/issues/2548)) ([02fa0b2](https://github.com/Artexis10/exomem/commit/02fa0b2b72f065b1c05f61779252dd9b516cbbe4))
+* spell dismissal calls for the live schema and keep breadth tags in one place ([#2550](https://github.com/Artexis10/exomem/issues/2550)) ([40998f8](https://github.com/Artexis10/exomem/commit/40998f830079f0a954e4dd3ec90119d6684b1945))
+* **state:** admit the collection store on a vault with an armed connector boundary ([#2562](https://github.com/Artexis10/exomem/issues/2562)) ([ea55be2](https://github.com/Artexis10/exomem/commit/ea55be25142f7c1addce80748ce1fd257e8538d5))
+
+
+### Performance
+
+* **resources:** keep recall caches in normal mode until memory runs short ([#2565](https://github.com/Artexis10/exomem/issues/2565)) ([75abd1c](https://github.com/Artexis10/exomem/commit/75abd1c2d4467c27eec78b7a40e7f93574dc49c6))
+
 ## [0.165.0](https://github.com/Artexis10/exomem/compare/v0.164.1...v0.165.0) (2026-11-08)
 
 
