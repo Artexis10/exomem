@@ -276,7 +276,7 @@ schema_version: 1
 lifecycle: active
 view_mode: summary
 storage:
-  strategy: markdown-items
+  strategy: sqlite
   source: Items
   format_version: 1
 item_schema:
@@ -399,7 +399,7 @@ lifecycle: active
 view_mode: summary
 derived: true
 storage:
-  strategy: markdown-items
+  strategy: sqlite
   source: Items
   format_version: 1
 item_schema:
