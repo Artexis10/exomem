@@ -1,0 +1,327 @@
+# governed-curation-lane Specification
+
+## Purpose
+Carry an agent's reviewed multi-step vault curation through one immutable plan: deterministic work items, exact plan approval, bounded one-step execution, reconstructible commit evidence for every step, and a separate reviewed compensation plan.
+
+## Requirements
+
+### Requirement: Curation context remains deterministic and agent-decided
+
+The system SHALL provide a bounded curation work item containing only recorded
+page content, stable review references, deterministic measurements, current
+content hashes, relevant registry identities, and the closed plan-step schemas.
+The system MUST NOT use a server-side reasoning model, text generator, semantic
+authority score, or language classifier to select, rank, interpret, or author a
+curation plan. The active agent SHALL remain the sole author of the proposed
+interpretation and steps.
+
+#### Scenario: Agent requests context for surfaced maintenance work
+
+- **WHEN** the agent requests a curation work item for named review refs or paths
+- **THEN** Exomem returns bounded recorded context and exact bindings without
+  writing a plan or deciding what the material means
+
+#### Scenario: No model capability is installed
+
+- **WHEN** Exomem runs in a lean standalone installation with no optional model
+  runtime
+- **THEN** work-item, proposal validation, preview, execution, recovery, and
+  compensation remain available with identical authority semantics
+
+### Requirement: Forward plans are strict, immutable, and exactly bound
+
+The system SHALL accept an ordered agent-authored forward plan only through a
+strict schema, canonicalize it to immutable JSON, and derive `plan_id` as the
+SHA-256 digest of the canonical bytes. Proposal validation SHALL capture an
+ordered target manifest, expected present content hashes, expected absent
+paths, semantic draft identities, edit transitions with their reviewed
+postconditions, relevant registry fingerprints, deterministic postconditions, and sealed compensation material.
+An agent-supplied binding that does not match current state MUST be refused and
+MUST NOT be silently refreshed. A stored plan MUST be create-only; the same id
+with different bytes MUST be refused as a collision.
+
+#### Scenario: Reviewed target changed before proposal
+
+- **WHEN** the agent submits a plan with the hash it reviewed and the live page
+  now has a different hash
+- **THEN** proposal creation refuses stale without storing a rebound plan
+
+#### Scenario: Plan bytes are changed after creation
+
+- **WHEN** a caller presents the stored plan id with different ordered steps or
+  arguments
+- **THEN** preview and execution refuse the identity mismatch and no step runs
+
+### Requirement: Curation exposes only governed step kinds
+
+The v1 forward step vocabulary SHALL be exactly `create-note`, `create-entity`,
+`accept-relation`, `edit`, `supersede`, `move`, `delete`, and `recover`. Each
+kind SHALL have a closed per-kind argument schema and SHALL dispatch through
+the matching existing governed leaf. A plan MUST NOT contain a command name,
+raw filesystem operation, callable, shell fragment, or free-form patch program.
+All existing leaf confirmation, draft, content-hash, relation, source/evidence,
+protected-tree, and path-confinement checks SHALL remain authoritative at plan
+validation and immediately before commit. An edit's transition alone SHALL be
+minted when its step runs, never taken from the plan, so the edited page
+carries the commit instant in `updated` and the transition's age never refuses
+an approved edit. Before any byte is written, the executor SHALL refuse with
+`CURATION_BINDING_STALE` a planned page that, with `updated` set back to the
+reviewed instant, differs from the sealed postcondition. Proposal SHALL refuse
+with `RELATION_REVIEW_NOT_APPLICABLE` a step that gives a relation disposition
+when its leaf's validation reports a fully governed page that needs none,
+because the leaf refuses that review at commit; it ignores a review on any
+other page. Proposal SHALL also refuse with `SEMANTIC_CONTRACT_BLOCKED` a step
+whose leaf validation reports a blocking finding that the step does not answer,
+because the leaf refuses that step at commit. This covers create, supersede
+and edit steps. The step's own relation review answers a relation-disposition
+finding. When the step writes a link to a page that an earlier step of the plan
+creates, the relation-disposition judgement moves to execution, because the leaf
+can judge that link only once the page exists; if the link does not qualify, the
+leaf still refuses the step there.
+
+#### Scenario: Plan requests an arbitrary command
+
+- **WHEN** a plan step supplies a product command name or a step kind outside
+  the closed vocabulary
+- **THEN** proposal validation refuses the step before storing an executable plan
+
+#### Scenario: Leaf guard changes after preview
+
+- **WHEN** a plan previews successfully but its target hash, relation candidate,
+  semantic draft, or registry changes before apply
+- **THEN** the canonical leaf refuses the step and curation cannot bypass or
+  weaken that refusal
+
+#### Scenario: Plan gives a review the page does not need
+
+- **WHEN** a step gives `reviewed_none` for a page whose leaf validation does
+  not require it, such as a page that already links to an existing page
+- **THEN** proposal refuses with `RELATION_REVIEW_NOT_APPLICABLE` and stores no
+  plan
+
+#### Scenario: Plan omits a review the page needs
+
+- **WHEN** a create step has no qualifying relation and no review, or an edit
+  step changes a page so that its saved relation review is no longer current
+  and gives no new review
+- **THEN** proposal refuses with `SEMANTIC_CONTRACT_BLOCKED` and stores no plan
+
+#### Scenario: Edit approved days after proposal
+
+- **WHEN** an edit step is applied more than a day after proposal and its
+  target and link targets are unchanged
+- **THEN** the edit applies the reviewed change and the page's `updated` is the
+  commit instant
+
+#### Scenario: Edit renders differently at approval
+
+- **WHEN** another writer changes what an approved edit step renders, such as
+  creating the target of one of its links
+- **THEN** the step refuses with `CURATION_BINDING_STALE`, nothing is written,
+  and the run records the refusal as not retryable
+
+### Requirement: Curation leaves typed administrative domains to their owners
+
+The curation executor SHALL refuse direct step targets in Planning, Records,
+workflow-contract storage, `_Schema`, `_Governance`, `_Adoption`, trash internals,
+and every other protected administrative subtree except its own internally
+written run artifacts. Planning and Records changes SHALL continue to route
+only through their typed product commands, and OpenSpec lifecycle behavior
+SHALL remain outside curation.
+
+#### Scenario: Plan attempts to update a Planning item
+
+- **WHEN** an otherwise valid edit or move step targets a Planning collection
+  item
+- **THEN** proposal validation refuses the target and directs the caller to the
+  typed Planning owner without writing anything
+
+### Requirement: Exact plan approval gates bounded execution
+
+The first forward execution request SHALL require the exact `plan_id`, current
+`expected_plan_fingerprint`, and a bounded single-line approval rationale. The
+system SHALL revalidate the plan fingerprint and every live binding under the
+vault mutation boundary before recording approval. Approval SHALL bind only
+those immutable bytes. Each `apply` or `resume` request SHALL execute at most
+one content step, and `resume` SHALL run only the next step of the already
+approved forward or compensation plan.
+
+#### Scenario: Confirmed plan begins execution
+
+- **WHEN** the agent invokes apply after explicit user confirmation with the
+  exact current plan identity, fingerprint, and rationale
+- **THEN** Exomem durably binds approval to that plan and executes no more than
+  its next uncommitted step
+
+#### Scenario: Resume tries to switch plans
+
+- **WHEN** a resume request names a different or newly proposed plan from the
+  plan whose approval is stored
+- **THEN** the request is refused and neither plan advances
+
+### Requirement: A plan's later steps may link to its own earlier pages
+
+Proposal SHALL render a later step's links to a page that an earlier step of
+the same plan creates as the writer renders a link to an existing page, so the
+sealed draft matches at execution. Only the writer's link resolution SHALL be
+projected; every other check SHALL read the vault as it is, and a page that
+another writer creates, edits or removes after proposal SHALL still make the
+affected step refuse through its leaf. Proposal SHALL refuse with `CURATION_STEP_CONFLICT`
+these plans, which could not then run as sealed:
+
+- a later step bound to a path that an earlier step writes;
+- a step that links to a page an earlier step supersedes;
+- a step that gives a relation disposition while it links to a page an earlier
+  step creates, because that link is its relation once the page exists.
+
+A later step's other dependencies on an earlier step's effects, such as a link
+by a title that an earlier edit changes, are not projected; such a step
+refuses through its leaf when it runs.
+
+#### Scenario: Split note links its second page to its first
+
+- **WHEN** an approved plan creates a page and a later step creates a page
+  whose content links to it by path or by title
+- **THEN** every step applies in order and the later page holds the link in the
+  form the writer renders for an existing page
+
+#### Scenario: Another writer creates the link target after proposal
+
+- **WHEN** a sealed step links to a page that did not exist at proposal and
+  that no earlier step of its plan creates, and another writer creates it
+- **THEN** that step refuses through its leaf and writes nothing
+
+#### Scenario: Plan a projection cannot make run
+
+- **WHEN** a later step is bound to a path an earlier step writes, links to a
+  page an earlier step supersedes, or gives a relation disposition while it
+  links to a page an earlier step creates
+- **THEN** proposal refuses with `CURATION_STEP_CONFLICT` and stores no plan
+
+### Requirement: Every committed step has exact reconstructible commit evidence
+
+Before invoking a governed leaf, the executor SHALL persist a prepared step with
+a deterministic operation id equal to the SHA-256 digest of canonical JSON for
+the domain-separated tuple `["exomem-curation-operation-v1", plan_id, ordinal,
+step_id]`. The encoding SHALL preserve the ordinal as a number and MUST NOT use
+ambiguous field concatenation.
+
+Content-write leaves SHALL commit one content-free curation witness in the same
+atomic batch as their canonical effect.
+
+Relocation steps (`move`, `delete`, `recover`) remain valid in the plan schema
+so a reviewer can express them, but until the held filesystem exposes durable
+monotonic parent-namespace generation tokens the executor SHALL refuse them.
+The refusal SHALL occur at proposal, preview, and apply, before any transition
+record is published and before any rename is attempted, and SHALL be reported as
+`CURATION_RENAME_HISTORY_UNPROVABLE`. A refused relocation step SHALL leave no
+rename, no rollback, no trash write, no relocation candidate or authorization,
+no witness, and no terminal receipt, and SHALL create no governed run store. The
+prepared-relocation protocol that would lift this refusal is specified by the
+`add-curation-relocation-protocol` change and is out of scope for v1.
+
+Every curation witness SHALL bind the run, plan, ordinal, step, operation id,
+exact before/after target manifest, governed leaf identity, result digest, and
+optional parent compensation identity. Terminal attempt receipts and approval
+artifacts SHALL be create-only; at most one committed
+or recovered-committed receipt SHALL exist per step; and state SHALL be
+derivable from immutable verified governed evidence rather than mutable
+projection state. This is governed-store authorization, not cryptographic
+authentication against an actor able to forge `_Governance`; adding such a
+threat model requires a separate portable signing-root design.
+
+#### Scenario: Process stops before any leaf effect
+
+- **WHEN** a crash occurs after prepared state is durable but, for a content
+  leaf, before its matching witness commits
+- **THEN** recovery proves no step effect committed and permits exact retry only
+  if every live guard still matches
+
+#### Scenario: Reviewed plan contains a relocation step
+
+- **WHEN** a plan containing a `move`, `delete`, or `recover` step is proposed,
+  previewed, or applied on a filesystem without durable parent-namespace
+  generation tokens
+- **THEN** the request fails with `CURATION_RENAME_HISTORY_UNPROVABLE` before any
+  transition record is published and before any rename is attempted
+- **AND** no rename, rollback, trash write, relocation candidate, authorization,
+  witness, terminal receipt, or governed run store is created
+
+#### Scenario: Process stops after the leaf commit
+
+- **WHEN** a crash occurs after a content effect and matching witness commit
+  but before the terminal step receipt is stored
+- **THEN** read-only status reports that exact recovery is required, and the
+  next resume verifies the witness and live postcondition, writes one
+  recovered-committed receipt, and never invokes the leaf again
+
+#### Scenario: Evidence and live state disagree
+
+- **WHEN** a witness is invalid, competing, or inconsistent with the exact live
+  postcondition
+- **THEN** the run becomes blocked with `CURATION_OUTCOME_UNCERTAIN` and no
+  automatic retry or compensation proceeds
+
+### Requirement: Run phases report partial truth and exact replay
+
+The system SHALL derive run phase from the immutable plan, create-only approval,
+verified relocation candidates and authorizations, witnesses, and terminal
+receipts and SHALL expose at least `proposed`, `approved`, `executing`,
+`partial`, `failed`, `completed`, `blocked`, `compensating`, `compensation-partial`,
+and `compensated`. It MUST NOT report a multi-step atomic commit. Exact replay
+SHALL return already-committed step outcomes without executing their leaves;
+changed plan bytes, stale bindings, or an unprovable outcome SHALL refuse.
+
+#### Scenario: Third step fails after two commits
+
+- **WHEN** two ordered steps have committed receipts and the third cleanly fails
+- **THEN** status reports `partial`, identifies both committed steps and the
+  failed next step, and preserves the exact next permitted action
+
+#### Scenario: Completed apply is replayed
+
+- **WHEN** the same approved plan and next-step request is repeated after its
+  terminal receipt exists
+- **THEN** Exomem returns the stored outcome and creates no second content effect
+
+### Requirement: Compensation is a separate reviewed history-preserving plan
+
+The system SHALL derive compensation only from committed step receipts,
+matching witnesses, and sealed pre-step material. It SHALL create a new
+immutable compensation plan linked to the forward plan and reverse committed
+steps in descending order. Creation effects SHALL move to governed trash;
+deletions SHALL recover their exact trash entries; moves SHALL use a guarded
+inverse move; edits and accepted relations SHALL create a superseding
+correction from the sealed pre-step document; supersessions SHALL be corrected
+by superseding the committed successor; and recovered items SHALL be deleted
+through the governed delete leaf. Compensation SHALL require its own exact
+fingerprint and approval rationale and SHALL preserve all forward and reverse
+plans, witnesses, receipts, trash history, and supersession chains.
+
+#### Scenario: User approves compensation after a partial run
+
+- **WHEN** a forward run committed two steps before failing and the user reviews
+  and approves the derived compensation plan
+- **THEN** compensation processes only those committed effects in reverse order
+  through governed leaves and leaves the original evidence intact
+
+#### Scenario: Later work changed a compensation target
+
+- **WHEN** a target no longer matches the sealed forward receipt at compensation
+  proposal or apply time
+- **THEN** compensation refuses stale rather than overwriting the later work
+
+### Requirement: Plan execution is content-language-neutral
+
+The curation plan, work item, receipts, and validation paths SHALL preserve
+Unicode text and SHALL determine executability from typed step ids, operation
+schemas, paths, hashes, draft tokens, and registry ids rather than English
+keywords or monolingual entailment labels. Existing ASCII slug rules MAY still
+govern filenames while Unicode titles and bodies remain unchanged.
+
+#### Scenario: Multilingual plan is reviewed and applied
+
+- **WHEN** an agent proposes a typed correction whose title and body contain
+  non-English or mixed-language Unicode text
+- **THEN** the same validation, fingerprint, approval, receipt, recovery, and
+  compensation contract applies without language-specific fallback
