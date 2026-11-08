@@ -19,13 +19,22 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
-from ..faults import REPLACEMENT_RUN, books, incomplete_why, replayed
+from ..faults import HELDOUT_RUN_INDEXES, REPLACEMENT_RUN, books, incomplete_why, replayed
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from ..workspace import pin
 
 BOOTSTRAP_SEED = 20261107
 #: Upstream's own list of the questions it asks after the schema migration.
 POST_MIGRATION_FILE = "data/database_exploration/questions_post_drift.json"
+
+#: What each comparison is for (PREREGISTRATION section 7, sequence 10): the decision reads the PP
+#: pairs, P measures the product gap that a capture change must close, and the rest is description.
+PAIR_ROLES = {
+    "PP-N": "read by the decision",
+    "PP-F": "read by the decision",
+    "P-N": "product gap, description only",
+    "P-F": "product gap, description only",
+}
 
 Rows = dict[tuple[int | None, str], dict]
 
@@ -279,38 +288,60 @@ def per_question(rows: Rows, runs: set[int | None]) -> dict[str, float]:
     return {q: round(statistics.mean(v), 4) for q, v in sorted(by_question.items())}
 
 
+def contains(interval: list[float] | None, bound: float) -> bool | None:
+    """Whether the interval holds the bound its rule tests; None when there is no interval."""
+    return None if interval is None else interval[0] <= bound <= interval[1]
+
+
 def decision(pairs: dict, runs: dict, arms: dict[str, dict]) -> dict:
-    """PREREGISTRATION §7: each rule reads the lower bound and every run's mean; None means unknown."""
+    """PREREGISTRATION §7, sequence 10: the sequence-9 rules read PP; each reads the lower bound and every run's mean.
+
+    ``None`` means unknown. The decision stays incomplete while a rule's interval contains its bound and
+    an ordering is left to play: it is complete once the orderings run out or no interval holds its bound.
+    """
+    played = {"run_indexes_played": runs["played"]}
     if runs["decision_void"]:
-        return {"status": "void", "why": runs["void_reason"]}
+        return {"status": "void", "why": runs["void_reason"], **played}
     why = [*([runs["incomplete"]] if runs["incomplete"] else []), *runs["unfinished"]]
     if why := [*why, *incomplete_why([], arms)]:
-        return {"status": "incomplete", "why": why}
+        return {"status": "incomplete", "why": why, **played}
 
     def read(pair: str):
         body = pairs.get(pair)
         if not body or body.get("ci95") is None:
             return None, None
         every_run = all(r["mean_difference"] > 0 for r in body["per_run_mean_difference"])
-        return body["ci95"][0], every_run
+        return body["ci95"], every_run
 
-    helps_low, helps_runs = read("P-N")
-    folder_low, folder_runs = read("P-F")
-    return {
-        "status": "complete",
+    helps_ci, helps_runs = read("PP-N")
+    folder_ci, folder_runs = read("PP-F")
+    rules = {
         "helps": {
-            "rule": "lower bound of P-N above 0 and every run's mean P-N above 0",
-            "result": None if helps_low is None else helps_low > 0 and helps_runs,
+            "rule": "lower bound of PP-N above 0 and every run's mean PP-N above 0",
+            "result": None if helps_ci is None else helps_ci[0] > 0 and helps_runs,
+            "interval_contains_bound": contains(helps_ci, 0),
         },
         "not_worse_than_folder": {
-            "rule": f"lower bound of P-F above {NOT_WORSE_BOUND}",
-            "result": None if folder_low is None else folder_low > NOT_WORSE_BOUND,
+            "rule": f"lower bound of PP-F above {NOT_WORSE_BOUND}",
+            "result": None if folder_ci is None else folder_ci[0] > NOT_WORSE_BOUND,
+            "interval_contains_bound": contains(folder_ci, NOT_WORSE_BOUND),
         },
         "beats_folder": {
-            "rule": "lower bound of P-F above 0 and every run's mean P-F above 0",
-            "result": None if folder_low is None else folder_low > 0 and folder_runs,
+            "rule": "lower bound of PP-F above 0 and every run's mean PP-F above 0",
+            "result": None if folder_ci is None else folder_ci[0] > 0 and folder_runs,
+            "interval_contains_bound": contains(folder_ci, 0),
         },
     }
+    undecided = [name for name, rule in rules.items() if rule["interval_contains_bound"]]
+    left = [i for i in HELDOUT_RUN_INDEXES if i not in runs["played"]]
+    if undecided and left:
+        # The figures stay in the report, but a one-ordering result with an interval on its bound decides nothing yet.
+        why = (
+            f"the protocol calls for run_index {left[0]}: the interval of "
+            f"{', '.join(undecided)} contains its bound"
+        )
+        return {"status": "incomplete", "why": [why], **played, **rules}
+    return {"status": "complete", **played, **rules}
 
 
 def build(
@@ -344,7 +375,10 @@ def build(
         for question, reward in per_question(rows, valid).items():
             cases[question][arm] = reward
     pair_bodies = {
-        f"{a}-{b}": paired(rows_by_arm[a], rows_by_arm[b], valid, post)
+        f"{a}-{b}": {
+            **paired(rows_by_arm[a], rows_by_arm[b], valid, post),
+            **({"role": PAIR_ROLES[f"{a}-{b}"]} if f"{a}-{b}" in PAIR_ROLES else {}),
+        }
         for a, b in pairs
         if a in rows_by_arm and b in rows_by_arm
     }

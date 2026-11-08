@@ -643,7 +643,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 9
+    assert len(identity.amendments) == 10
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -702,13 +702,21 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert acknowledged_nine.acknowledgment_status == "acknowledged"
     assert acknowledged_nine.introduced_family_ids == SEQUENCE_NINE_FAMILIES
     assert acknowledged_nine.contract.repository_revision == SEQUENCE_NINE_ACKNOWLEDGED_REVISION
-    assert identity.effective.sha256 == acknowledged_nine.contract.sha256
+    # Sequence 10 changes the arms, scale and judge of f35 to f37 and adds no family, so
+    # being pending withholds nothing new.
+    pending_ten = identity.amendments[9]
+    assert pending_ten.sequence == 10
+    assert pending_ten.acknowledgment_status == "pending"
+    assert pending_ten.introduced_family_ids == ()
+    assert pending_ten.contract.repository_revision == pending_ten.receipt.introduction_revision
+    assert identity.effective.sha256 == pending_ten.contract.sha256
     assert identity.pending_amendments == (
         pending_two,
         pending_four,
         pending_five,
         pending_seven,
         pending_eight,
+        pending_ten,
     )
     assert identity.withheld_family_ids == frozenset(
         SEQUENCE_TWO_FAMILIES

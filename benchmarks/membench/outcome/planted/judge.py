@@ -234,6 +234,25 @@ def decision(
     }
 
 
+def agreement(first: dict[str, dict], again: list[dict]) -> dict[str, str] | None:
+    """Per measure, how many of the items both judgements settled got the same verdict, as ``k/n``; None when none did."""
+    both = [(first[row["id"]], row["verdict"]) for row in again if row["id"] in first]
+    if not both:
+        return None
+    return {m: f"{sum(a[m] == b[m] for a, b in both)}/{len(both)}" for m in MEASURES}
+
+
+def sample_agreement(judge_run: Path, sample_run: Path) -> dict:
+    """A second judge's verdicts on a sample, set against the first judge's: description only."""
+    first = {
+        r["id"]: r["verdict"]
+        for r in read_rows(judge_run / "judge" / "verdicts.jsonl")
+        if r["verdict"]
+    }
+    other = [r for r in read_rows(sample_run / "judge" / "verdicts.jsonl") if r["verdict"]]
+    return {"items_judged": len(other), "agreement": agreement(first, other)}
+
+
 def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = False) -> dict:
     require_newcombe_vector()
     sessions = json.loads((judge_run / "unblinding" / "sessions.json").read_text())
@@ -284,12 +303,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     if heldout:
         report["decision"] = decision(raw.get("E-P"), struck, failed, report["arms"])
     again = [r for r in read_rows(judge_run / "judge" / "rejudge.jsonl") if r["verdict"]]
-    first = {r["id"]: r["verdict"] for r in rows if r["verdict"]}
-    agree = [
-        first[r["id"]]["stale_trusted"] == r["verdict"]["stale_trusted"]
-        for r in again
-        if r["id"] in first
-    ]
-    report["judge_self_agreement_stale_trusted"] = f"{sum(agree)}/{len(agree)}" if agree else None
+    own = agreement({r["id"]: r["verdict"] for r in rows if r["verdict"]}, again)
+    report["judge_self_agreement_stale_trusted"] = own["stale_trusted"] if own else None
     (judge_run / "score.json").write_text(json.dumps(report, indent=2))
     return report

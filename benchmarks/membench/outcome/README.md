@@ -9,13 +9,15 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
 
 - **clbench** is CL-Bench `database_exploration` (upstream scoring, family f35). The actor answers
   a sequence of questions about an unknown database. Arm `N` keeps nothing between questions. Arm
-  `F` keeps a plain memory folder. Arm `P` is Exomem as its users get it, the primary Exomem arm:
-  the shipped Claude plugin (skills and hooks) at its default prominence, the documented
-  balanced custom-instruction block, the Skill tool, the full Exomem tool surface and a task
-  prompt that says nothing about memory. Arm `E` is an ablation: Exomem over MCP alone, with
-  our memory instruction in the task prompt. Arm `EH` is a diagnostic: `E` plus the plugin. The
+  `F` keeps a plain memory folder. Arm `PP` is the primary Exomem arm: Exomem as its users get it,
+  with CL-Bench's per-task memory sentence pointed at Exomem. Arm `P` is `PP` without that
+  sentence, so the pair `PP` and `P` differs only by the sentence. Both have the shipped Claude
+  plugin (skills and hooks) at its default prominence, the documented balanced custom-instruction
+  block, the Skill tool and the full Exomem tool surface. Arm `P` measures the product gap that a
+  capture change must close, and only describes. Arm `E` is an ablation: Exomem over MCP alone,
+  with the same sentence in the task prompt. Arm `EH` is a diagnostic: `E` plus the plugin. The
   suite answers whether memory lowers the queries and raises the score across a sequence, and
-  whether Exomem as shipped beats a folder.
+  whether Exomem beats a folder. The arms run in the order `N`, `F`, `PP`, `P`, `E`, `EH`.
 - **lab** is Harvey LAB multi-document synthesis (family f36). The actor writes one deliverable per
   matter. Arm `S` reads the documents. Arm `WP` is Exomem as its users get it, the primary Exomem
   arm: a compile session builds a vault from the documents, then a fresh task session writes the
@@ -30,7 +32,7 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
   without it. A blind judge reads each answer against the case key. The suite answers whether
   governance keeps the agent from trusting the stale value.
 
-The plugin arms (`P`, `EH`, `WP`, `WG`) run the plugin's hooks with no service credential. The
+The plugin arms (`PP`, `P`, `EH`, `WP`, `WG`) run the plugin's hooks with no service credential. The
 hooks keep their state inside the arm directory. The report records the characters the hooks
 injected, and any tool the CLI refused for want of permission. Each CL-Bench question and each
 LAB session starts with a fresh hook home, so a hook's cooldown from an earlier question cannot
@@ -53,16 +55,25 @@ Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exo
 - **dev** is the default. It is instrument evidence for building and tuning. A dev run never calls
   the gate. Its report says `"evidence": "instrument"`.
 - **heldout** is a decision run (`--split heldout`). Before its first session it requires the
-  family's amendment to be acknowledged, and every held-out input file to match the digest the
-  amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
+  family's amendment and amendment sequence 10, which this harness implements, to be acknowledged,
+  and every held-out input file to match the digest the amendment receipt froze. CL-Bench and LAB also need an upstream checkout without local changes.
   The Exomem checkout must have no uncommitted changes either. Any failure is a one-line refusal. The run refuses any `--model` or `--effort` other than the
   frozen actor (`claude-sonnet-5-5` at `high`). The report of LAB or planted refuses any judge
-  other than `gpt-6.1-sol` on Codex. Only a run that passes all of this reports
-  `"evidence": "decision"`. CL-Bench runs upstream's `default` schedule at seed 42, run indexes
-  1, 2 and 3. Run index 4 is allowed once, as the replacement for one voided run.
+  other than `claude-opus-5-5` on Claude, which is the actor's own model family, so those
+  reports carry `"judge_family": "same as actor"`. Only a run that passes all of this reports
+  `"evidence": "decision"`. A CL-Bench decision plays `N`, `F`, `PP` and `P`; it refuses `E`
+  and `EH`, which are ablations. It runs upstream's `default` schedule at seed 42 and plays
+  `run_index` 1 by default. When a decision interval contains its bound (0 for "helps" and
+  "beats", -0.05 for "not worse"), the decision is incomplete and the report says that the protocol
+  calls for the next ordering; the figures stay in the report. It is complete once the three
+  orderings have run, or no interval holds its bound. Add an ordering with the same run id: `--seeds 1,2`, then `--seeds 1,2,3`. The orderings come in that
+  order only, so `--seeds 2` alone is refused, and a finished cell is not replayed. Run index 4 is
+  allowed once, as the replacement for one voided run. The report states the run indexes played.
+  The decision reads `PP - N` and `PP - F`. The pairs `P - N` and `P - F` are the product gap and
+  only describe.
 - **panel** is the release panel. It runs from a clean checkout of the release tag `v<version>` and
   refuses any other checkout. It runs the Exomem arms on a fixed slice of development cases:
-  CL-Bench `P` and `E` on the `multi_group` variant (never the `default` schedule), the LAB dev
+  CL-Bench `PP` and `P` on the `multi_group` variant (never the `default` schedule), the LAB dev
   matters with `WP`, and the planted dev cases with `E`. It is evidence and never a gate. If the
   actor's CLI version or reported model differs from the previous panel, the control arms (`N`,
   `F`, `S`, `P`) run too, and the `.md` names the change. The stored files hold numbers, ids and
@@ -95,7 +106,9 @@ checked.
    than 2 struck units.
 6. A held-out report says the decision is incomplete, and decides nothing, while a judgement has
    failed, a unit is missing or a scheduled CL-Bench cell has not finished. It names each one.
-   Run the same command again, with the same run id. The judge retries failed items. A resume
+   A CL-Bench decision is also incomplete while a decision interval holds its bound and an ordering
+   is left to play. It names the next ordering; add it with `--seeds`.
+   For the other causes, run the same command again, with the same run id. The judge retries failed items. A resume
    must match the run it continues: `outcome.json` records the product revision, whether the
    checkout had changes, and the CLI version (`claude --version`). A call that differs in any of
    them refuses before it starts a session. Use a new run id, or restore the checkout and CLI.
@@ -125,6 +138,11 @@ Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -
    questions, matters or cases and is for dev runs only.
 3. Report it: `membench outcome report clbench --run-id r1`. LAB and planted also judge, with
    `--judge claude` (default) or `--judge codex`. The judge model id is recorded in the report.
+   Add `--rejudge-sample codex` to LAB or planted to re-judge a seeded random 20% of the items
+   with `gpt-6.1-sol`. It writes its own files (`judge-codex-sample/`) and adds a `rejudge_sample`
+   block with the agreement to the report. The block is description only and never changes a
+   decision. The command writes the report first and the sample after it, and refuses the report's
+   own judge backend. It spends Codex quota, so run it only when Codex has room.
 4. The product under test is this checkout. Each arm manifest records `exomem --version`, the
    checkout's commit, the CLI version, the requested and reported model, the tools served and the
    MCP config digest.

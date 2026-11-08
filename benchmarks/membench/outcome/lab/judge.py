@@ -317,10 +317,8 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     return report
 
 
-def judge_noise(judge_run: Path, rows: list[dict]) -> dict | None:
-    """How often the judge repeats its own criterion verdicts on the re-judged items."""
-    again = [r for r in read_rows(judge_run / "judge" / "rejudge.jsonl") if r["verdict"]]
-    first = {r["id"]: r["verdict"] for r in rows if r["verdict"]}
+def criteria_agreement(first: dict[str, dict], again: list[dict]) -> dict | None:
+    """How often a second judgement repeats the first's criterion verdicts, on the items both settled; None when none."""
     same = total = 0
     gaps = []
     for row in again:
@@ -334,7 +332,24 @@ def judge_noise(judge_run: Path, rows: list[dict]) -> dict | None:
     if not total:
         return None
     return {
-        "items_rejudged": len(gaps),
+        "items_compared": len(gaps),
         "criteria_agreement": f"{same}/{total}",
         "mean_abs_pass_fraction_gap": round(statistics.mean(gaps), 4),
     }
+
+
+def judge_noise(judge_run: Path, rows: list[dict]) -> dict | None:
+    """How often the judge repeats its own criterion verdicts on the re-judged items."""
+    again = [r for r in read_rows(judge_run / "judge" / "rejudge.jsonl") if r["verdict"]]
+    return criteria_agreement({r["id"]: r["verdict"] for r in rows if r["verdict"]}, again)
+
+
+def sample_agreement(judge_run: Path, sample_run: Path) -> dict:
+    """A second judge's verdicts on a sample, set against the first judge's: description only."""
+    first = {
+        r["id"]: r["verdict"]
+        for r in read_rows(judge_run / "judge" / "verdicts.jsonl")
+        if r["verdict"]
+    }
+    other = [r for r in read_rows(sample_run / "judge" / "verdicts.jsonl") if r["verdict"]]
+    return {"items_judged": len(other), "agreement": criteria_agreement(first, other)}
