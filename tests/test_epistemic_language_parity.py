@@ -1001,20 +1001,19 @@ def test_activation_counts_a_page_row_by_its_relation(fixture_vault: Path, relat
     ) == ROW_ACTIVATION[relation]
 
 
-def test_activation_counts_a_row_in_an_extension_of_derived_from_as_no_provenance(
+def test_activation_counts_a_row_in_an_extension_of_derived_from_as_provenance(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 2: the provenance set holds core keys, so `x.based_on` counts as typed only.
+    """FLIPS 2: the provenance set held core keys, so `x.based_on` counted as typed only.
 
-    After intended change 2 it counts as provenance through its parent, and the
-    expected provenance count becomes 1.
+    It now counts as provenance through its parent.
     """
     measured = _activation(
         fixture_vault, body=f"## Relations\n- x.based_on {_link(f'{KB}/qual-target')}\n"
     )
 
     assert measured["typed_relations"] == 1  # CORE
-    assert measured["provenance_relations"] == 0  # FLIPS 2
+    assert measured["provenance_relations"] == 1  # FLIPS 2
 
 
 # ---------------------------------------------------------------------------

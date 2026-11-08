@@ -35,7 +35,6 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
 )
 
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
-_PROVENANCE_RELATIONS = frozenset({"derived_from", "evidenced_by", "cites"})
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]+)?\]\]")
 
 
@@ -395,7 +394,7 @@ def measure_document(
     assertion_blocks = sum(
         1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )
-    provenance_relations = sum(1 for kind in registered if kind in _PROVENANCE_RELATIONS)
+    provenance_relations = sum(1 for kind in registered if "sources" in registry.behaviours_of(kind))
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered
     }
