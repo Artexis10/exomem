@@ -633,3 +633,31 @@ adversarial comparison at acceptable marginal cost.
   Upstream's setup downloads the two CL-Bench databases from a dataset without a revision pin, so these digests, not the upstream commit, freeze them. The LAB matters' documents and criteria are files of the pinned LAB commit, and a held-out run refuses a LAB checkout with local changes.
 
   **No other change.** This amendment adds no §2 assertion, operation kind, catastrophic assertion or budget constant. Until the owner acknowledges the receipt, f35 to f37 MUST NOT support a comparative run, score or claim. Every earlier run of these suites is instrument evidence about the harness, never a comparative claim.
+
+- 2026-11-08 — **Outcome evaluation amendment, sequence 10.** This amendment changes the arms, the scale and the judge of sequence 9 (f35, f36 and f37). It adds no family. Reason: development rounds on 2026-11-08 showed four things.
+  - Exomem as shipped never saved anything on CL-Bench (0 writes in 50 sessions, under the balanced block, the maximal block and an added save line).
+  - Every CL-Bench memory system receives the benchmark's per-task memory sentence; sequence 9's P arm did not.
+  - The owner decided on 2026-11-08 to run both framings.
+  - The owner also decided to shrink the deciding run and to stop waiting for the Codex judge.
+
+  **f35 arms.** The deciding run keeps N and F as sequence 9 states them and adds two Exomem arms:
+  - PP (primary): P with CL-Bench's per-task memory sentence pointed at Exomem. This is the same sentence that E receives, in the same place as F's.
+  - P: Exomem as shipped, unchanged. It measures the product gap that a capture change must close. It is description only.
+
+  E and EH remain ablations and do not run in the deciding run.
+
+  **f35 decisions.** The rules of sequence 9 apply to PP in place of P:
+  - Exomem helps when the lower bound of PP − N is above 0.
+  - Exomem is not worse than a plain folder when the lower bound of PP − F is above −0.05.
+  - Exomem beats a plain folder when the lower bound of PP − F is above 0.
+
+  P − F and P − N are reported as the product gap.
+
+  **f35 scale.** The deciding run plays one ordering: the `default` schedule at seed 42 with `run_index` 1. The interval resamples its 40 questions. The post-migration 20 are reported separately.
+  - When an interval contains a decision bound (0 for "helps" and "beats", −0.05 for "not worse"), the run adds `run_index` 2 and 3 in that order, and the statistics of sequence 9 apply to all the runs played.
+  - The run does not add orderings for any other reason.
+  - The deciding run starts only after a product change makes Exomem as shipped capture learned facts without the benchmark's sentence. Its product revision is bound before generation.
+
+  **f36 and f37 judge.** The decision judge is `claude-opus-5-5` on the Claude subscription. It is blind, it uses the same view and JSON schema as before, and it re-judges 20% of items. It is from the same model family as the actor, and every report says so. When Codex has room, `gpt-6.1-sol` re-judges a random 20% sample of the decision items. The report gives the agreement, which is description only and changes no decision. The f36 and f37 runs need no product change and may start once this receipt is acknowledged.
+
+  **No other change.** Sequence 9's held-out inputs, measures, fault rules and loss bounds stand. Until the owner acknowledges this receipt, sequence 9's rules govern, and no run uses the PP arm, the reduced scale or the Opus decision judge as decision evidence.
