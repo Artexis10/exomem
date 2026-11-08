@@ -318,7 +318,7 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential for the media bucket, and that credential SHALL NOT be able to delete file versions. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT hide, list or delete.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT send a hide, list or delete request, although its key's write capability also permits a hide.
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL report its loaded generation, the SHA-256 of the loaded set's validated bytes and its bucket name beside the settled generation. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
@@ -387,7 +387,7 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions. The bucket SHALL stay in the founder account.
 
-This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold a key that reads and writes it. the change `collect-released-media` SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
+This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold the only key that reads and writes it. The change `collect-released-media` SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
 
 No age or time cutoff SHALL decide destruction.
 

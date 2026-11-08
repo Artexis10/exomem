@@ -165,14 +165,14 @@ This contract does not imply that tenant lock or its delivery channel is impleme
 
 The privacy copy states this custody truthfully (`cloud-operator-access`).
 
-### D6. A media edge holds the only bucket credential
+### D6. A media edge holds the only write credential for the bucket
 
 A new in-cluster service, the media edge, moves ciphertext between cells and the media bucket. It follows the artifact broker's shape: its own Deployment and Service on a literal ClusterIP, Recreate rollout, and a canary list plus a fleet switch.
 
 - **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. The export packing step (D8) reaches it on the same terms and has no other egress.
 - **Authentication.** cells carry no ServiceAccount token. cellctl signs a per-cell edge credential with its own signing key, binding audience, cell ID and version, and renders it into the cell's Secret. The edge holds only the public key. It maps the credential's cell ID to that cell's object prefix and accepts no prefix from the request.
 - **Revocation.** A valid signature is not enough. cellctl publishes the active set: each selected cell's ID and current credential version. The edge accepts a credential only while its cell and version are in that set. Rotation bumps the version, and the old credential stops working once the edge loads the new set. The edge reports a set generation only after it has loaded that set and drained every request accepted under an earlier one, so cellctl can observe when a revocation takes effect.
-- **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge cannot hide, list or delete. Its bucket key cannot delete file versions, and no running service holds `deleteFiles` on the media bucket (D7). Version destruction belongs to a follow-on change (D9).
+- **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge sends no hide, list or delete request. Its bucket key cannot delete file versions, but its `writeFiles` capability also permits a hide. cellctl holds a separate key that can only list the bucket, and no running service holds `deleteFiles` on the media bucket (D7). Version destruction belongs to a follow-on change (D9).
 - **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing, with its list-only key (D7), and alerts when a cell exceeds its allowance plus retained-version headroom (D10). The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
 
 Refinements from the build (2026-10-27):
