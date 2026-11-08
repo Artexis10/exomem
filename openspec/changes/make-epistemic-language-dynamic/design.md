@@ -61,7 +61,7 @@ Interfaces:
 - `RelationRegistry.keys_with(behaviour)` returns core and extension keys.
 - `RelationRegistry.frontmatter_fields()` and `frontmatter_relation(field)` expose the field binding (see "Frontmatter fields are registry data").
 - The kind registry gets `traits_of(kind)` and `kinds_with(trait)`.
-- SQL readers expand behaviour keys over the admitted instances through `traversal_profiles.relation_query_plan`, as `relation_edges()` does.
+- SQL readers ask `exomem_edge_behaves(EDGE_COLUMNS, behaviour)`, which reads the edge's behaviours through its authoring page's registry. A reader that filters on stored keys expands them through `traversal_profiles.relation_query_plan`, as `relation_edges()` does, or keeps the candidate status, because an extension is stored as a candidate.
 
 ### Inventory decisions
 
@@ -277,7 +277,7 @@ Kinds:
 - **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
 - **Display annotations add noise.** `flag_open` marks every open question, hypothesis, prediction and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
 - **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.
-- **Behaviour keys from `core_registry()` alone miss vault extensions in SQL.** Expand them through `relation_query_plan` over the admitted instances. The graph's resolution reader already does this, but for labels only.
+- **Behaviour keys from `core_registry()` alone miss vault extensions in SQL.** A stored key column holds core keys, and an extension is a candidate that each page interprets. Readers ask `exomem_edge_behaves`, or expand the keys through `relation_query_plan` over the admitted instances.
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
 - **The grandfathered family-mismatch case flips silently.** The fixture holds one such extension.
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.
