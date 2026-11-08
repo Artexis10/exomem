@@ -20,7 +20,8 @@ On 2026-11-08 the owner asked for this language to be dynamic and first-class. E
 ## What Changes
 
 - **Closed behaviours, open words.** Code decides what a word does only from closed attributes that the registry schema declares and code implements. It never branches on a relation, kind or verdict key.
-  - Core relation entries gain `behaviours` from a closed set, beside the existing `presentation_role`. Each behaviour replaces one hard-coded set, and the shipped pack reproduces today's sets exactly. An extension inherits its parent's behaviours and cannot change them.
+  - Core relation entries gain `behaviours` from a closed set, beside the existing `presentation_role`. Each behaviour replaces one hard-coded set, and for core relations the shipped pack reproduces today's sets, except two named widenings (declared pairs and entity hydration). An extension inherits its parent's behaviours and cannot change them.
+  - A core relation entry may also bind page frontmatter fields to its relation (`frontmatter_fields`), so graph indexing, relation facts and activation read one map.
   - Kind entries gain `traits` from a separate closed set, for example `assertion` for today's `_ASSERTION_BLOCK_TYPES`.
 - **Kinds and verdicts become registry data.** The built-in kinds and verdicts move into the shipped pack, and code reads them from there. Verdicts carry labels and no behaviours, because a verdict is state. An experiment page's `outcome:` follows the verdict registry, as it shares the verdict vocabulary today.
 - **Epistemic dimensions become registry data.** A dimension groups relation families, unit kinds and governed metadata keys by the question they answer. The pack ships 12: `currency`, `correction`, `provenance`, `attribution`, `kind`, `argument`, `dependency`, `entities`, `identity`, `scope`, `uncertainty` and `order`. Every dimension, shipped or added, gets filtering in retrieval, grouping in the context compiler, and queues in reviews and reports. A dimension may also name display behaviours from a third closed set: shipped `currency` leads with the current view, and `provenance` shows where each claim came from. Display behaviours change order and annotation only. They never hide a unit or change its standing.
@@ -42,7 +43,7 @@ On 2026-11-08 the owner asked for this language to be dynamic and first-class. E
 
 ## Impact
 
-- **Data:** existing vaults keep working. The shipped defaults reproduce today's relation and kind behaviour exactly, and existing unit text is unchanged. Definitions and procedures already have kinds (`definition`, `procedure`), and `extends` ("extends or specializes") already covers subtypes. This change adds nothing for them. Extensions of core relations gain their parent's behaviour where key-keyed sets missed them; that change is intended.
+- **Data:** existing vaults keep working. For core relations, the shipped defaults reproduce today's relation and kind behaviour, except two named widenings, and existing unit text is unchanged. Definitions and procedures already have kinds (`definition`, `procedure`), and `extends` ("extends or specializes") already covers subtypes. This change adds nothing for them. Extensions of core relations gain their parent's behaviour where key-keyed sets missed them; that change is intended.
 - **Code:** each hard-coded set becomes a registry read. That pays down the old C4 debt the survey found.
 - **Out of scope, named as debt:**
   - `RECOGNIZED_SECTIONS` in `context_pack.py` lists page section names, not kinds.

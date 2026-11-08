@@ -117,7 +117,7 @@ def test_relation_lifecycle_fixture_uses_public_surfaces_and_keeps_resolution_no
         "policy-applicability-extension",
         "core-part-of-reuse",
         "alias-reuse-without-duplicate",
-        "honest-generic-relation",
+        "plain-link-last-resort",
         "topical-proximity-abstains",
         "extension-parent-rollup",
         "survivor-directed-replacement",
@@ -231,7 +231,7 @@ def test_lifecycle_gate_refuses_whole_helper_literals_with_forged_trace(
         {
             "policy-applicability-extension",
             "core-part-of-reuse",
-            "honest-generic-relation",
+            "plain-link-last-resort",
             "topical-proximity-abstains",
             "extension-parent-rollup",
             "survivor-directed-replacement",

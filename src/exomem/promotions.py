@@ -404,7 +404,7 @@ def subject_holds(
 
     proof = (
         promotion_proof.registry(Path(vault_root), subject)
-        if kind == "registry" else promotion_proof.page(Path(vault_root), kind, subject)
+        if kind == "registry" else promotion_proof.page(Path(vault_root), kind, subject, resolve)
     )
     # Unknown continuity leaves a readable notice; only proved absence settles it.
     return proof.status != "ended"

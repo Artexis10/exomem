@@ -431,7 +431,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none or generic."
+              "description": "Audit reason for reviewed-none."
             },
             "promotion_reason": {
               "type": "string",
@@ -773,7 +773,7 @@
                     "type": "object"
                   },
                   "type": "array",
-                  "description": "create-entity only. {kind, target, reason?} edges; relates_to needs a reason."
+                  "description": "create-entity only. {kind, target} edges; a specific relation key."
                 }
               },
               "required": [
@@ -1126,7 +1126,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none or generic."
+              "description": "Audit reason for reviewed-none."
             },
             "promotion_reason": {
               "type": "string",
@@ -1718,7 +1718,7 @@
             },
             "relation_review_reason": {
               "type": "string",
-              "description": "Audit reason for reviewed-none or generic."
+              "description": "Audit reason for reviewed-none."
             },
             "reason": {
               "type": "string",
@@ -3742,7 +3742,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none or generic."
+          "description": "Audit reason for reviewed-none."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -4941,7 +4941,7 @@
                 },
                 "relation_review_reason": {
                   "type": "string",
-                  "description": "Audit reason for reviewed-none or generic."
+                  "description": "Audit reason for reviewed-none."
                 },
                 "reason": {
                   "type": "string",
@@ -9294,7 +9294,7 @@
         },
         "relation_review_reason": {
           "type": "string",
-          "description": "Audit reason for reviewed-none or generic."
+          "description": "Audit reason for reviewed-none."
         },
         "vocabulary_decision": {
           "additionalProperties": false,

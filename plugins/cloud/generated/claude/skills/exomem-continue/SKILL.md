@@ -2,7 +2,7 @@
 name: exomem-continue
 description: Resume prior project or session context from Exomem when the user wants to continue, pick something back up, or remember what was happening on a topic.
 metadata:
-  skill_contract: f603d5b56d61e2b1cac280a8d238b9cf7023499ca98c3ed70cf3f8c0e058f083
+  skill_contract: 4e83a25a2540c6363eb14150d9eb98ac028667698dd2a32e87e357009cb4e63f
   version: "0.1.0"
 ---
 
@@ -79,12 +79,12 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 6. Summarize current state, decisions already made, blockers, and likely next actions.
 
 ## Relation governance
-Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
-joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
-them), or choose no edge. Durable recurring
-meaning is proposal-first through `propose-relation` and hash-guarded
-`save-relations`; corrections use a new canonical key and deprecate the old one.
+Resolve typed meaning with `resolve-relation` before authoring, and name a specific
+truthful relation on every edge. When none fits, propose a new relation type: durable
+recurring meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`. A plain link is the last resort. A write that adds the generic
+relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations and the
+exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.

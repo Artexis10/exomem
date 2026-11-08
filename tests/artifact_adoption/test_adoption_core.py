@@ -1708,6 +1708,8 @@ def test_a_source_hand_over_of_identical_bytes_under_a_new_key_is_already_stored
     row = again["files"][0]
     assert row["state"] == "already_stored"
     assert row["duplicate_of"]["path"] == first["files"][0]["stored_path"]
+    # capture_source builds its compile guidance from `page`, so the earlier copy's page must be named.
+    assert row["page"] == first["files"][0]["page"]
     assert again["summary"]["already_stored"] == 1
     assert again["summary"]["stored"] == 0
     assert commits == []

@@ -270,7 +270,9 @@ def _visible_route(route: dict[str, Any], keep) -> dict[str, Any]:
     args = dict(route.get("args") or {})
     if isinstance(args.get("paths"), list):
         args["paths"] = [path for path in args["paths"] if _visible(keep, str(path))]
-    return {"tool": route.get("tool"), "args": args}
+    # `choose` is the menu of a route that needs the agent's choice; it names pages by relation, not path.
+    choose = route.get("choose")
+    return {"tool": route.get("tool"), "args": args, **({"choose": choose} if choose else {})}
 
 
 def _payload(vault_root: Path) -> dict[str, Any] | None:

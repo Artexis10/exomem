@@ -12,9 +12,9 @@ governed rich kind is the alternative when richer semantics are intended.
 Each `## Relations` line below shows one registered relation that often fits that
 page type; it is an example, not a default. State the meaning the note actually
 has with the registered relation that fits (resolve it with
-`read_connections(operation={'kind': 'resolve-relation'})`), use `relates_to`
-only for a real generic connection (it needs a stated reason when it joins an entity
-and a specific relation fits), and write no edge when no meaning is known.
+`read_connections(operation={'kind': 'resolve-relation'})`). When none fits, propose a
+new relation type; a plain link is the last resort. A write that adds the generic
+relation is refused. Write no edge when no meaning is known.
 
 ## source
 
@@ -584,8 +584,8 @@ the summary or in `fact` units: activation serves them only when the turn asks t
 the person.
 
 On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
-topic-to-person edge. On the entity page, prefer a specific relation such as
-`member_of` or `produces`; `relates_to` stays honest only for a real generic connection.
+topic-to-person edge. On the entity page, write a specific relation such as
+`member_of` or `produces`; a write that adds the generic relation is refused.
 
 ### Organizations
 
