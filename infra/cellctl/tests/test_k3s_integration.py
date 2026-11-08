@@ -2414,6 +2414,105 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
     assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, denied.stderr
 
 
+def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) -> None:
+    """add-cloud-media-store D8: a stolen cellctl token must not give a media key to a
+    pod with public egress, nor public egress to the pack. Each forged object is an
+    admitted render with one change, so each refusal names the one rule it breaks."""
+    from cellctl.capacity import GIB
+    from cellctl.exports import PACK, PAUSE, UPLOAD, ExportRow, export_size
+    from cellctl.manifests import (
+        MEDIA_IDENTITY_KEY,
+        MEDIA_NAME_KEY_KEY,
+        render_export_job,
+        render_export_staging_claim,
+        render_namespace,
+        render_network_policies,
+    )
+
+    from .test_media_edge import _spec
+
+    cell_id = _cell_id()
+    image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
+    endpoint = "http://10.43.0.30:8769"
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set", "mediaEdge.enabled=true",
+        "--set-string", f"mediaEdge.endpoint={endpoint}",
+        "--set-string", "mediaEdge.bucket=media-bucket",
+        "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
+        "--set-json", f'mediaEdge.cellIds=["{cell_id}"]',
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "cellctl")
+    cellctl_env = {entry["name"]: entry.get("value")
+                   for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    now = datetime.now(UTC)
+    spec = _spec(cell_id=cell_id, image=image, media_edge_url=endpoint, media_collector_url=endpoint,
+                 media_collector_credential="collector", hold_kind="export", hold_started_at=now.isoformat(),
+                 storage_class="exomem-cloud-encrypted", storage_gib=10,
+                 job_egress_except=tuple(cellctl_env["CELLCTL_JOB_EGRESS_EXCEPT"].split(",")))
+    policies = {policy["metadata"]["name"]: policy for policy in render_network_policies(spec)}
+    # The isolation policy admits a pod only beside the namespace's default-deny.
+    _apply_server_side(k3s.name, [render_namespace(spec), *policies.values()])
+    item = ExportRow(str(uuid.uuid4()), cell_id, "requested", now)
+    jobs = {step: render_export_job(spec, item, step, deadline_seconds=600, size=export_size(GIB),
+                                    part_urls=["https://storage.example/part"], media_mode="served")
+            for step in (PAUSE, PACK, UPLOAD)}
+    staging = render_export_staging_claim(spec, item, size_gib=13, storage_class="exomem-cloud-encrypted")
+    cellctl = "--as=system:serviceaccount:exomem-cloud:cellctl"
+
+    def dry_run(document: dict) -> subprocess.CompletedProcess[str]:
+        verb = "apply" if document["kind"] == "NetworkPolicy" else "create"
+        return _kubectl(k3s.name, [verb, "--dry-run=server", "--filename=-", cellctl], documents=[document], check=False)
+
+    def policy_settled() -> bool:
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        return dry_run(jobs[PACK]).returncode == 0
+
+    _wait_for(policy_settled, timeout=60, description="admission to admit the export pack")
+    for document in (*jobs.values(), staging, policies["job-egress"]):
+        admitted = dry_run(document)
+        assert admitted.returncode == 0, (document["metadata"]["name"], admitted.stderr)
+
+    def with_key(job: dict, key: str) -> dict:
+        forged = copy.deepcopy(job)
+        forged["spec"]["template"]["spec"].setdefault("volumes", []).append(
+            {"name": "forged", "secret": {"secretName": "cell-credentials", "items": [{"key": key, "path": "key"}]}})
+        return forged
+
+    whole_secret = copy.deepcopy(jobs[UPLOAD])
+    whole_secret["spec"]["template"]["spec"]["volumes"].append(
+        {"name": "forged", "secret": {"secretName": "cell-credentials"}})
+    relabelled_pack = copy.deepcopy(jobs[PACK])
+    relabelled_pack["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] = "export"
+    public_pack = copy.deepcopy(policies["job-egress"])
+    public_pack["spec"]["podSelector"]["matchExpressions"] = public_pack["spec"]["podSelector"]["matchExpressions"][:1]
+    retained_staging = copy.deepcopy(staging)
+    retained_staging["spec"]["storageClassName"] = "exomem-hcloud-encrypted-retain"
+    upload_with_affinity = copy.deepcopy(jobs[UPLOAD])
+    upload_with_affinity["spec"]["template"]["spec"]["affinity"] = copy.deepcopy(
+        jobs[PACK]["spec"]["template"]["spec"]["affinity"])
+    key_rule = "may give a media key of the cell Secret only to the runtime"
+    for described, forged, rule in (
+        ("the upload holding the media identity", with_key(jobs[UPLOAD], MEDIA_IDENTITY_KEY), key_rule),
+        ("the pause holding the media identity", with_key(jobs[PAUSE], MEDIA_IDENTITY_KEY), key_rule),
+        ("the pack holding the name key", with_key(jobs[PACK], MEDIA_NAME_KEY_KEY), key_rule),
+        ("the upload mounting the whole cell Secret", whole_secret, key_rule),
+        ("the pack relabelled into job-egress", relabelled_pack, key_rule),
+        ("job-egress that selects the pack and the pause", public_pack, "for every Job but the export pause and pack"),
+        ("a staging claim on the class that retains volumes", retained_staging, "on a configured cell class"),
+        ("the upload with the pack's affinity", upload_with_affinity, "an export pack's to its own upload"),
+    ):
+        print(f"[5.5] scenario: admission denies {described}")
+        denied = dry_run(forged)
+        assert denied.returncode != 0 and rule in denied.stderr, (described, denied.stderr)
+
+
 # === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell
 # connect admission, on the same disposable K3s cluster. ===
 
