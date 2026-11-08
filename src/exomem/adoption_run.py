@@ -426,6 +426,15 @@ def _hidden(name: str) -> bool:
     return name.startswith(".")
 
 
+def _recordable(path: str) -> bool:
+    """Whether a run's record can hold this path: a name that is not UTF-8 reads back with surrogates, which UTF-8 refuses."""
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _order_key(row: dict) -> tuple[int, str]:
     """A file row's place in the scan: artifacts first, then text, then rows that never import; each by path.
 
@@ -3661,9 +3670,11 @@ def filing_done(root: Path, path: str, runs: Iterable[dict]) -> bool:
 def _filing_page(root: Path, store: AdoptionRunStore, path: str, collection: str | None, continuation: str | None) -> dict | None:
     """The newest page that `file` carries on, or None when the call starts a new scan.
 
-    A continuation names the run that issued it. A path alone carries on the newest scan of that path (see
-    `_resumed_page`). A call that names another collection than the scan's is refused, because the scan keeps
-    the label that its first page fixed.
+    A continuation names the run that issued it, and the call carries on that run's scan. When that scan is done,
+    the call carries on the newest scan of the path instead, so the repeat of a call that stopped right after it
+    started a new scan carries on that scan rather than starting another. A path alone carries on the newest scan
+    of that path (see `_resumed_page`). A call that names another collection than the scan's is refused, because
+    the scan keeps the label that its first page fixed.
     """
     source_root = _clean(path)
     if source_root and (len(PurePosixPath(source_root).parts) < 2 or PurePosixPath(source_root).parts[0] != IMPORT_STAGE_DIR):
@@ -3684,7 +3695,8 @@ def _filing_page(root: Path, store: AdoptionRunStore, path: str, collection: str
                 f"that continuation belongs to the import of {issuer['source_root']!r} as collection "
                 f"{issuer['collection']['label']!r}; pass the same path and collection, or neither",
             )
-        return _chain_end(store, issuer)
+        end = _chain_end(store, issuer)
+        return end if _next_filing_step(end) != "done" else _resumed_page(store, store.runs_at(issuer["source_root"]))
     if not source_root:
         raise AdoptionRunError("IMPORT_REQUEST_INVALID", f"file takes the path of the staged folder, {IMPORT_STAGE_DIR}/<id>")
     page = _resumed_page(store, store.runs_at(source_root))
@@ -3741,7 +3753,8 @@ def _unscanned(root: Path, store: AdoptionRunStore, page: dict) -> int:
     Such a file came after the scan, such as one that a rerun of a local import copied, or one put in the stage by
     hand. The classification is the residual's own (`adoption_consume.stage_reasons` over the pages of the scan), so
     a `done` reply's residual reads the same pages. A hidden file does not count: a scan skips it by design, so a new
-    scan would not classify it either.
+    scan would not classify it either. Nor does a file whose name is not UTF-8: no run can record it, so a new scan
+    would fail on it at every call. The residual lists both.
     """
     parts = PurePosixPath(page["source_root"]).parts
     if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
@@ -3750,7 +3763,7 @@ def _unscanned(root: Path, store: AdoptionRunStore, page: dict) -> int:
     files = [
         (path, size) for path, size in import_stage.staged_files(root, parts[1])
         if PurePosixPath(path).parts[:len(inner)] == inner
-        and not any(_hidden(name) for name in PurePosixPath(path).parts[len(inner):])
+        and not any(_hidden(name) for name in PurePosixPath(path).parts[len(inner):]) and _recordable(path)
     ]
     pages = (page, *_earlier_pages(store, page))
     reasons = adoption_consume.stage_reasons(parts[1], files, pages, _APPLIED_STATUSES)
@@ -3793,9 +3806,10 @@ def _file_step(
             opened = start(root, after=f"{run['run_id']}:{_open_cursor(run, 'after')}", today=today)
         return store.load(opened["run_id"])
     if step == "rescan":
-        # The new scan keeps the label of the finished one, so a file that the finished scan filed is not filed twice.
+        # The new scan keeps the label of the finished one, so a file that the finished scan filed is not filed twice,
+        # and its `consume` choice, so staged copies that the import keeps stay.
         opened = start(
-            root, path=run["source_root"], collection=run["collection"]["label"],
+            root, path=run["source_root"], collection=run["collection"]["label"], consume=run.get("consume", True),
             max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
         )
         return store.load(opened["run_id"])
@@ -3950,21 +3964,23 @@ def _filing_summary(filing: str, filed: int, failed: int, remaining: int) -> str
 def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict | None = None) -> dict:
     """The compact reply of a `file` call: where the import stands, what comes next and what only the person can do.
 
-    `progress` and `summary` count the whole import over every page. A `done` reply's `filed` holds the stage's
-    residual and, under `last_finished_page`, what the last `finish` reported about its own page alone.
+    `progress` and `summary` count the whole import: every page of every scan of its folder, with each file's
+    newest outcome, so a file that a new scan finds filed already counts once. A `done` reply's `filed` holds the
+    stage's residual and, under `last_finished_page`, what the last `finish` reported about its own page alone.
     """
     run = store.load(run["run_id"])
     filing, derived = _filing_state(root, store, run)
     if stop is not None:
         filing, derived = _STOPPED, stop
     pages = (run, *_earlier_pages(store, run))
-    outcomes = [outcome for page in pages for outcome in (page.get("outcomes") or {}).values()]
-    filed = sum(1 for outcome in outcomes if outcome.get("status") in _APPLIED_STATUSES)
-    failed = sum(1 for outcome in outcomes if outcome.get("status") == "failed")
+    scans = sorted(store.runs_at(run["source_root"]), key=lambda page: str(page.get("created") or ""))
+    newest = {path: outcome for page in scans for path, outcome in (page.get("outcomes") or {}).items()}
+    filed = sum(1 for outcome in newest.values() if outcome.get("status") in _APPLIED_STATUSES)
+    failed = sum(1 for outcome in newest.values() if outcome.get("status") == "failed")
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
     if _next_filing_step(run) == "done":
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
-    pages_done = sum(1 for page in pages if page["phase"] in _FINISHED_PHASES)
+    pages_done = sum(1 for page in scans if page["phase"] in _FINISHED_PHASES)
     person: list[dict] = []
     if stop is None and filing == _STOPPED and run.get("apply_stop"):
         person.append({"need": "free_space", "text": run["apply_stop"]["next"]})

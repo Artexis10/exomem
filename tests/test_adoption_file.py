@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -337,6 +338,73 @@ def test_a_file_put_in_the_stage_after_done_is_filed_by_the_next_call(vault, mon
 
     assert again["filing"] == "done" and len(_sources(vault)) - len(before) == 1
     assert "outside_run" not in again["filed"]["residual"]["by_reason"]
+    # The counts cover the whole import, the first scan's files with the one that the new scan filed.
+    assert again["summary"] == f"Filing is done: {FILES + 1} files filed, 0 failed, 0 left."
+    assert again["progress"]["pages_done"] == 4
+
+
+def test_the_repeat_of_a_call_that_stopped_right_after_the_new_scan_started_carries_on_that_scan(vault, monkeypatch):
+    """Catches a continuation of a finished scan whose repeat starts a second new scan and leaves the first one orphaned."""
+    monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
+    staged = _staged(vault)
+    (vault / staged / "doc9.bin").write_bytes(b"x" * (len(PDF) + 50))  # stays staged, so the stage folder stays
+    first = adoption_run.file(vault, path=staged, today=TODAY)
+    reply = first
+    while reply["filing"] == "working":
+        reply = adoption_run.file(vault, path=staged, continuation=reply["continuation"], today=TODAY)
+    assert reply["filing"] == "done"
+    (vault / staged / "late.pdf").write_bytes(PDF + b"late")
+    runs, before = _runs(vault), _sources(vault)
+    real_start = adoption_run.start
+
+    def start_then_crash(*args, **kwargs):
+        real_start(*args, **kwargs)
+        raise RuntimeError("synthetic interruption")
+
+    monkeypatch.setattr(adoption_run, "start", start_then_crash)
+    with pytest.raises(RuntimeError):
+        adoption_run.file(vault, path=staged, continuation=first["continuation"], today=TODAY)
+    monkeypatch.setattr(adoption_run, "start", real_start)
+
+    again = adoption_run.file(vault, path=staged, continuation=first["continuation"], today=TODAY)  # the exact repeat
+    while again["filing"] == "working":
+        again = adoption_run.file(vault, path=staged, continuation=again["continuation"], today=TODAY)
+
+    assert again["filing"] == "done" and len(_sources(vault)) - len(before) == 1
+    assert len(_runs(vault)) - len(runs) == 1
+
+
+def test_the_new_scan_of_an_import_that_keeps_its_staged_copies_keeps_them_too(vault):
+    """Catches a new scan that removes the staged copies that the import's first scan was told to keep."""
+    staged = _staged(vault)
+    adoption_run.start(vault, path=staged, consume=False, today=TODAY)
+    _file_to_the_end(vault, staged)
+    (vault / staged / "late.pdf").write_bytes(PDF + b"late")
+    before = _sources(vault)
+
+    again = _file_to_the_end(vault, staged)
+
+    assert again["filing"] == "done" and len(_sources(vault)) - len(before) == 1
+    assert sorted(path.name for path in (vault / staged).glob("*.pdf")) == sorted(
+        [*(f"doc{n}.pdf" for n in range(FILES)), "late.pdf"])
+    # The new scan finds each kept copy filed already, and the import counts it once.
+    assert again["progress"]["filed"] == FILES + 1
+
+
+def test_a_file_whose_name_is_not_utf8_put_in_the_stage_after_done_starts_no_scan_and_the_done_reply_lists_it(
+        vault, monkeypatch):
+    """Catches a staged name that is not UTF-8, which failed every later call on a finished import as it scanned again."""
+    monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
+    staged = _staged(vault)
+    (vault / staged / "doc9.bin").write_bytes(b"x" * (len(PDF) + 50))  # stays staged, so the stage folder stays
+    _file_to_the_end(vault, staged)
+    runs = _runs(vault)
+    (vault / staged / os.fsdecode(b"late-\xff.pdf")).write_bytes(PDF + b"late")
+
+    again = adoption_run.file(vault, path=staged, today=TODAY)
+
+    assert again["filing"] == "done" and _runs(vault) == runs
+    assert again["filed"]["residual"]["by_reason"]["outside_run"]["files"] == 1
 
 
 def test_a_hidden_file_put_in_the_stage_after_done_starts_no_scan_and_the_done_reply_lists_it(vault, monkeypatch):
