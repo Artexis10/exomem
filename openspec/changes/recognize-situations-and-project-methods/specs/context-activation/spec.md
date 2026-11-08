@@ -66,6 +66,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 
 - **WHEN** the request budget runs out after some discovery lanes ran
 - **THEN** each later lane checks the budget before it starts and is skipped with a `budget` missing reason, the costliest lane last
+- **AND** when leads are already found, the method search stops early enough to leave time for their ordering, links and projection, sized to the request's own budget, so a slow method search does not drop them
 - **AND** task context returns the candidates already found with state `partial`, not an empty result
 
 #### Scenario: A candidate lists what it links to
