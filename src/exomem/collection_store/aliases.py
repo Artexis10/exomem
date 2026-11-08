@@ -3,13 +3,15 @@
 Converting a collection to summary mode removes its item files and keeps each row's former view
 path in ``items.view_path`` as that row's retired alias (``CollectionWriter.convert_to_summary``).
 A read of a retired path answers the stored row as the collection's governed query releases it,
-read-only and labelled as a store row. Nothing writes the file back.
+read-only and labelled as a store row. Nothing writes the file back. A wikilink that names a retired
+path resolves through ``link_target`` to the same row.
 """
 
 from __future__ import annotations
 
 from .. import collection_profiles
 from .. import structured_collections as collections
+from .connection import CollectionStoreError
 from .preview import bound_writer, canonical_read
 from .summary import SUMMARY
 
@@ -58,3 +60,31 @@ def read(vault_root, path):
         "source": "collection store",
         "read_only": True,
     }
+
+
+def read_named(vault_root, path):
+    """``read`` for every spelling of ``path`` that a direct page read accepts, or None.
+
+    Those spellings drop the Knowledge Base prefix, the ``.md`` suffix or both, as a wikilink does.
+    """
+    from .. import get_page
+
+    for spelling in get_page.spellings(path):
+        if (row := read(vault_root, spelling)) is not None:
+            return row
+    return None
+
+
+def link_target(vault_root, target):
+    """The retired item path that the wikilink path ``target`` names, or None.
+
+    None also when the caller may not read the row, so a withheld row reads as a missing page.
+    """
+    from ..cli_ops import OpError
+
+    try:
+        row = read_named(vault_root, target)
+    except (OpError, CollectionStoreError):
+        # A store that this process cannot reach leaves the link a forward reference, as before conversion.
+        return None
+    return None if row is None else row["path"]

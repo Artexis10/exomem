@@ -4372,10 +4372,7 @@ def _retired_item(vault_root: Path, path: str) -> dict | None:
     """The stored row behind a retired item path of a converted collection, or None."""
     from .collection_store import aliases
 
-    for spelling in get_page_module.spellings(path):
-        if (row := aliases.read(vault_root, spelling)) is not None:
-            return row
-    return None
+    return aliases.read_named(vault_root, path)
 
 
 def op_get(
