@@ -200,10 +200,10 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | K21 pointer readers | find_types 202, 209; working_set 480, 1163, 2671; stance 77; delete_file 230; replace 436; context_pack 365, 673; memory_context 135; audit 6229, 6370; semantic_contract 4805; working_set_currency 34 | Naming the field tokens is sound. The repeated rule "a successor pointer means not current" is debt. Fold it into one lifecycle predicate that reads the reverse field from the `supersedes` binding. |
 | K22 field-name lists | lexstore 584; episode_capture 54; review_context 37; entity_types 76; governance/bridges 60; governance/egress 812, 856, 5138; working_set_conversation 143; memory_context 136 | Transport and allow-lists. They carry no behaviour. |
 | K24 teaching copy | commands 1600-1608; relation_vocabulary 84 | Prose. Slice 6 teaches from the pack. |
-| C4 and C5 category fallbacks; C6 category leg; C9; C11 | artifact_role_review 84-92; epistemic_graph 14748; audit 6018 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
+| C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
-| Page-type keys found on the way | vocabulary_projection 76; dreamer_families 612; artifact_role_state 210 | Note-type keys where the note-type `role` states the fact. Outside this change. |
+| Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 
 Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, and projection_runtime 1837 (a core-or-extension test).
 
@@ -249,7 +249,7 @@ Core parity: these outputs must be identical.
 - Referent and projection tiers, for one plain link and one typed edge.
 - The page claim.
 - The built-in traversal profiles.
-- For each frontmatter field, the graph, the relation facts and activation record the same edge.
+- For each frontmatter field, the graph and the relation facts record the same edge. Activation counts the relation per field and records no edge direction.
 
 Extensions: one per parent, each showing its line in the intended-changes list.
 - `x.backs` (supports), `x.based_on` (derived_from), `x.closes` (resolves), `x.retires` (supersedes), `x.disputes` (contradicts), `x.see_also` (links_to), `x.concerns` (about_entity).
