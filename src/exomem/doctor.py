@@ -998,10 +998,18 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
     """
     if vault_root is None or not vault_root.is_dir():
         return None
+    from . import state_migration
     from .vault_store import availability
 
     try:
         inconsistency = availability.marker_inconsistency(vault_root)
+    except state_migration.StateMigrationManifestError as error:
+        # The manifest decides whether this vault is in store mode, and a write refuses while it is unreadable.
+        return _check(
+            "vault_store_records", "fail",
+            "Whether this vault is in store mode is unknown: the state migration manifest is unreadable or invalid.",
+            "Repair the state manifest that the state.placement check names.",
+            details={"migration_manifest": str(error.path)})
     except (OSError, RuntimeError, sqlite3.Error) as error:
         return _check("vault_store_records", "warn", f"The store-mode records could not be read: {error}")
     if inconsistency is None:

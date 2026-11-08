@@ -8,12 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands, doctor, server_runtime, state_migration
+from exomem import commands, doctor, server_runtime, state_migration, state_paths
 from exomem.cli_ops import OpError
 from exomem.collection_store import admission, connection, migration, preflight, schema
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability, mode
+from exomem.vault_store import availability
 
 AT = "2026-11-08T00:00:00Z"
 LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_CLOUD_CELL")
@@ -145,13 +145,13 @@ def test_a_staged_migration_with_pending_collections_refuses_in_store_mode(store
     assert refused.value.code == availability.PAGES_AT_RISK
 
 
-def test_a_store_mode_check_that_cannot_read_the_manifest_refuses_and_changes_no_markdown(
-        store_mode_vault, monkeypatch):
-    """Defect: an unreadable manifest passes for file mode, so a write lands in Markdown the store owns."""
-    def unreadable(vault_root):
-        raise state_migration.StateMigrationManifestError(vault_root, "the manifest cannot be read")
+def _corrupt_manifest(vault):
+    (state_paths.vault_state_dir(vault) / state_migration.MANIFEST_NAME).write_bytes(b"{not json")
 
-    monkeypatch.setattr(mode, "store_mode_active", unreadable)
+
+def test_a_corrupt_manifest_refuses_a_write_and_a_start_and_changes_no_markdown(store_mode_vault):
+    """Defect: a damaged manifest passes for file mode, so a write lands in Markdown the store owns."""
+    _corrupt_manifest(store_mode_vault)
     before = _vault_bytes(store_mode_vault)
     with pytest.raises(state_migration.StateMigrationManifestError):
         commands.op_remember(store_mode_vault, title="Pump note", status="draft",
@@ -160,6 +160,17 @@ def test_a_store_mode_check_that_cannot_read_the_manifest_refuses_and_changes_no
     assert _vault_bytes(store_mode_vault) == before
     with pytest.raises(state_migration.StateMigrationManifestError):
         availability.require_servable(store_mode_vault)
+
+
+def test_the_doctor_reports_a_corrupt_manifest_as_the_manifest_error_not_as_a_marker_inconsistency(
+        store_mode_vault):
+    """Defect: a damaged manifest crashes the doctor, or reads as the crash state that a rollback settles."""
+    _corrupt_manifest(store_mode_vault)
+    check = doctor._check_vault_store_records(store_mode_vault)
+    assert (check.status, check.details) == (
+        "fail", {"migration_manifest": str(state_paths.vault_state_dir(store_mode_vault) / state_migration.MANIFEST_NAME)})
+    assert "unreadable or invalid" in check.message
+    assert "store-mode rollback" not in check.message + check.remediation
 
 
 @pytest.mark.parametrize("store_exists", [False, True], ids=["no store file", "store without a store_mode row"])

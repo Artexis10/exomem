@@ -76,9 +76,9 @@ def marker_inconsistency(vault_root: Path) -> str | None:
     a crash between the two leaves the id beside no store file, no ``store_mode`` row or a row that
     says file. ``store_mode_active`` reads that as file mode, and rerunning the activation or the
     rollback settles it, so this reports and never refuses. A vault without the id never opens its store.
+    A manifest that cannot be read is no such state: ``StateMigrationManifestError`` surfaces to the caller.
     """
-    recorded = state_migration.recorded_descriptor_ids(vault_root)
-    if recorded is None or state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
+    if not state_migration.vault_store_recorded(vault_root):
         return None
     if mode.store_mode_active(vault_root):
         return None
