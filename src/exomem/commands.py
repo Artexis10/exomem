@@ -9678,24 +9678,77 @@ def _media_remediation(code: str) -> str:
 
 def op_read_media(
     vault_root: Path,
-    path: str,
+    path: str | None = None,
+    media: Literal["video", "image"] = "video",
+    paths: list[str] | None = None,
     max_frames: int = 8,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    max_side: int | None = None,
 ) -> ToolResult:
-    """Read sampled video images inline (MCP only).
+    """Show stored images or sampled video frames inline (MCP only).
 
     Args:
-        path: Video path.
+        path: Image or video path.
+        paths: Up to 6 images to compare.
         start_sec: Start, seconds.
         end_sec: End, seconds.
+        max_side: Longest side px, 256-2048.
     """
+    if media == "image":
+        from . import cloud_cell
+
+        if cloud_cell.cloud_mode_enabled():
+            raise ValueError(
+                "IMAGE_VIEW_UNAVAILABLE: Exomem Cloud does not show images yet; "
+                "download the original with `exomem cloud download`"
+            )
+        return _show_images(vault_root, path=path, paths=paths, max_side=max_side)
+    if path is None or paths is not None:
+        raise ValueError("MEDIA_PATH_REQUIRED: a video read takes one `path`")
     return op_get_video_frames(
         vault_root,
         path=path,
         max_frames=max_frames,
         start_sec=start_sec,
         end_sec=end_sec,
+    )
+
+
+def _show_images(
+    vault_root: Path, *, path: str | None, paths: list[str] | None, max_side: int | None
+) -> ToolResult:
+    from . import artifact_recovery, image_view
+
+    if path is not None and paths is not None:
+        raise ValueError("MEDIA_PATH_SELECTOR_CONFLICT: use either path or paths, not both")
+    selected = [path] if path is not None else list(paths or [])
+    try:
+        shown = image_view.show(vault_root, selected, max_side=max_side)
+    except artifact_recovery.RecoveryUnavailable as error:
+        # The custody refusal stays content-free: missing, changed and withheld look the same.
+        raise ValueError(f"ORIGINAL_UNAVAILABLE: {selected[0] if len(selected) == 1 else 'an image'} cannot be shown; check the path, or retry if the server was busy") from error
+    images = [
+        {
+            "path": item.path,
+            "file_name": item.file_name,
+            "taken_at": item.taken_at,
+            "original_pixels": list(item.original_pixels),
+            "shown_pixels": list(item.shown_pixels),
+        }
+        for item in shown
+    ]
+    names = ", ".join(item.file_name for item in shown)
+    meta = {
+        "outcome": f"Showing {len(shown)} image{'s' if len(shown) != 1 else ''} below: {names}.",
+        "images": images,
+        "note": "Each image is a downscaled view; the stored original is unchanged. "
+        "For the original file, use transfer_artifact operation=download.",
+    }
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [FastMCPImage(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
+        structured_content=meta,
     )
 
 
@@ -14915,6 +14968,13 @@ def _cloud_frames_selected() -> bool:
     )
 
 
+#: One operation of a served command withheld from a Cloud cell, keyed (command, action), with why.
+#: Lifted when a cell decodes images in an owned child under the media brakes, as frames are.
+CLOUD_WITHHELD_ACTIONS = MappingProxyType({
+    ("read_media", "image"): "Images decode in the serving process, and a cell runs no decode child for them yet.",
+})
+
+
 def cloud_surface_exclusions(*, upload_bridge: bool = False) -> tuple[SurfaceExclusion, ...]:
     """The exclusions in force on a cell, with or without gateway upload handoffs."""
     return tuple(
@@ -14946,6 +15006,8 @@ def product_commands_for(
         and (cloud or not c.cloud_only)
         and c.name not in excluded
     )
+    if cloud:
+        selected = tuple(_without_cloud_withheld_actions(command) for command in selected)
     if surface not in {"mcp", "rest"}:
         return selected
     from .writer_lease import remote_admitted_maintenance_modes
@@ -14958,6 +15020,18 @@ def product_commands_for(
         for rendering in command.renderings
         if any(variant.effect == "read" or variant.action in admitted for variant in rendering.variants)
     )) if command.name == "maintain_memory" else command for command in selected)
+
+
+def _without_cloud_withheld_actions(command: Command) -> Command:
+    if not any(name == command.name for name, _action in CLOUD_WITHHELD_ACTIONS):
+        return command
+    return replace(command, renderings=tuple(
+        replace(rendering, variants=tuple(
+            variant for variant in rendering.variants
+            if (command.name, variant.action) not in CLOUD_WITHHELD_ACTIONS
+        ))
+        for rendering in command.renderings
+    ))
 
 
 def validate_product_registry() -> dict:

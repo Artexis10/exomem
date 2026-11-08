@@ -372,11 +372,13 @@ MOVE_PREFLIGHTS = "move_preflights"
 #: counts scanned, the candidate rows its corroboration test examined, whether
 #: admitted ranking statistics were rebuilt rather than reused, and how many
 #: pages that rebuild tokenized (a small count is an incremental rebuild).
+#: Unit ranking statistics report their rebuild's interpreted parents the same way.
 ADMITTED_PAGES = "admitted"
 STEM_ROWS = "stem_rows"
 CANDIDATES = "candidates"
 STATS_REBUILT = "stats_rebuilt"
 PAGES_TOKENIZED = "pages_tokenized"
+UNIT_PARENTS_INTERPRETED = "unit_parents_interpreted"
 
 #: The meter open on this thread of control, innermost first: the counts a
 #: span collects from code several calls below it. A ContextVar rather than a

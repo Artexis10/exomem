@@ -111,8 +111,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
@@ -604,17 +602,6 @@ def _parse_hits(payload) -> list[dict] | None:
     return None
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _open_no_redirect(req: urllib.request.Request, timeout: float):
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), _NoRedirect()
-    ).open(req, timeout=timeout)
-
-
 def _fetch_via_rest(
     prompt: str,
     lane,
@@ -625,7 +612,7 @@ def _fetch_via_rest(
     """One POST to the local REST facade's `/api/search_memory` (hybrid mode, compact
     detail). Returns the compact hit list, or `None` on ANY failure — connection
     error, timeout, non-200, malformed JSON, `success: false` — never raises.
-    `lane` builds the authenticated request. `base_url` is the local listener's
+    `lane` sends the authenticated request. `base_url` is the local listener's
     loopback origin when the local rung asks."""
     if base_url is None:
         port = _rest_port()
@@ -636,11 +623,8 @@ def _fetch_via_rest(
     body = json.dumps(
         {"query": prompt, "detail": "compact", "limit": limit, "mode": INJECT_MODE}
     ).encode("utf-8")
-    req = lane.request(url, body)
     try:
-        with _open_no_redirect(req, timeout=timeout) as resp:
-            status = resp.getcode()
-            raw = resp.read()
+        status, raw = lane.post(url, body, timeout)
         if status != 200:
             return None
         payload = json.loads(raw.decode("utf-8"))
@@ -744,7 +728,7 @@ def _gather_with_lane(rest_call, cli_call):
 
     Both rungs draw on one wall-clock budget (`INJECT_BUDGET_SECONDS`). The
     CLI rung's `subprocess.run(timeout=)` is a wall-clock bound already; the
-    REST rung's `urlopen(timeout=)` is only a per-socket-operation timeout, so a
+    REST rung's opener timeout (`Lane.post`) is only a per-socket-operation timeout, so a
     server that dribbles a byte every few seconds would never trip it (measured
     52 s against an 8 s budget). The REST rung therefore runs on a daemon thread
     joined against the remaining budget: past the deadline the rung counts as
@@ -1267,23 +1251,17 @@ def _fetch_packet_via_rest(
             body["conversation"] = sent
         else:
             body.pop("conversation", None)
-        req = lane.request(
-            f"{base_url}/api/recall_context", json.dumps({**body, **extra}).encode("utf-8")
-        )
+        request_body = json.dumps({**body, **extra}).encode("utf-8")
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             return None
         try:
-            with _open_no_redirect(req, timeout=remaining) as resp:
-                status = resp.getcode()
-                raw = resp.read()
+            status, raw = lane.post(f"{base_url}/api/recall_context", request_body, remaining)
+            if status == 400 and (extra or sent):
+                continue
             if status != 200:
                 return None
             payload = json.loads(raw.decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            if (extra or sent) and error.code == 400:
-                continue
-            return None
         except Exception:  # noqa: BLE001 - hook must never break prompt submission
             return None
         packet = _parse_packet(payload)

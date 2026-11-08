@@ -144,6 +144,7 @@ The slices follow the gate, so each one reports a before and an after on the sam
   - carry private source hashes through the existing cache and validate selected child evidence on cache hits.
 
   Verify unchanged-evidence parity against the exhaustive path for hits, order, excerpts and frame annotations. Cover pending parent changes before the cap, invalid and out-of-scope parents, denied referenced parents, separate excerpt and annotation sources, and selected drift without promotion or refill. Verify the amended selected-source read bound and corpus-growth ratios through the existing structural gate. The latency-contract delta records the canonical-drift difference; this task stays open until its implementation and proof complete.
+- [ ] 6.15 Incremental unit statistics (#2523): name each parent's stored unit inputs with a catalogue-maintained revision; keep a per-scope base of public-instance contributions; interpret only changed parents after a write. Verify that one write interprets only the changed parent with results identical to a full build, that a limited principal never consumes owner-only interpretation, that unit-only and structure-only repairs retire the statistics, and the live methods lane after a write before and after.
 
 ### Task 6.1: source-loaded bar reconciliation
 

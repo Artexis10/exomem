@@ -240,7 +240,14 @@ def _job_store_signature(store: MediaJobStore) -> tuple[object, ...] | None:
 
 
 def _ledger_busy(error: BaseException) -> bool:
-    """Whether `error` says only that another connection holds the job ledger now, so a later pass can outlast it."""
+    """Whether `error` says only that the job ledger is busy now, so a later pass can outlast it.
+
+    Opening the ledger can meet contention that is not SQLite's: the identity guard before it refuses
+    with a retryable `OpError` while another holder keeps its domain. Every other error is a failure.
+    """
+    if isinstance(error, OpError):
+        # The refusal's own declaration of "not now", as `MUTATION_BUSY` carries it.
+        return error.details.get("status") == "retryable"
     # The lexical store's SQLite triage, reused rather than copied; imported only once an error needs it.
     from . import lexstore
 
@@ -1137,7 +1144,7 @@ class MediaWorker:
         keeps its page, and no page is written for a row that runs. Without the guard, the page keeps
         its blocked text and the row returns anyway; the requeue checks the row itself.
 
-        A ledger that another connection holds puts the row back first in line, and its error reaches
+        A busy ledger (see `_ledger_busy`) puts the row back first in line, and its error reaches
         the caller, so the supervisor tries the row again after one poll. Any other error leaves the row
         blocked for the next start with a runtime, and the rows after it still run. Before the page is
         shown, the page still says blocked; after it, that one page is ahead of its row, as a stop at
@@ -2183,11 +2190,12 @@ class MediaWorker:
                     # One handed-over row per pass, after the child watch above. The next pass starts at once
                     # while rows remain, and a stop ends the sweep after the row in hand.
                     requeuing = not self._stop_event.is_set() and self._requeue_next_runtime_block(self._store)
-                except sqlite3.Error as exc:
+                except Exception as exc:  # noqa: BLE001 - `_ledger_busy` names the one kind that a pass outlasts
                     if not _ledger_busy(exc):
                         raise
-                    # Another connection holds the job ledger past its busy timeout. The pass ends here and the
-                    # next one starts after one poll. Nothing recorded an answer, so it asks the store again.
+                    # The job ledger is busy past its own wait: another connection holds it, or its open meets
+                    # contention that is not SQLite's. The pass ends here and the next one starts after one poll.
+                    # Nothing recorded an answer, so it asks the store again.
                     idle_signature = None
                     # The first held pass warns, the passes after it log at debug, and the first free pass
                     # warns again, so a long hold writes two warnings.

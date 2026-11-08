@@ -534,7 +534,7 @@ _TOOL_HELP = {
     "preserve_evidence": ("write", "Preserve evidence", "Preserve original text or attached files as governed Evidence. File attachments stay in top-level files."),
     "read_review": ("read", "Read review", "Read review queues, provenance, drift, backlog or one review item's bounded context. Submit meaning questions through triage_memory."),
     "triage_memory": ("write", "Triage memory", "Save a review decision or submit a meaning question. These writes do not grant mutation authority."),
-    "read_media": ("read", "Read media", "Read native video frames or inspect media processing status."),
+    "read_media": ("read", "Read media", "Show stored images or video frames to the model, or inspect media processing status."),
     "change_media": ("write", "Change media", "Process, retry or reprocess media."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
@@ -606,7 +606,10 @@ _REMAINING = {
         # `paths` stays optional so the handler refuses a call without them, whatever the client sends.
         _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
-    "read_media": (None, (_row("video", "read_media"),)),
+    "read_media": ("media", (
+        _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec"), ("path",)),
+        _row("image", "read_media", ("path", "paths", "max_side")),
+    )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
         _row("process", "change_media", ("path", "paths", "language", "multilingual"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
