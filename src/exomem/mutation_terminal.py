@@ -2368,6 +2368,11 @@ def project_terminal(
                 key: leaf["source"][key] for key in ("path", "ref")
                 if key in leaf["source"]
             }
+        # What the duplicate check found or could not do: the caller acts on each of these.
+        compact.update(
+            {key: leaf[key] for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable")
+             if key in leaf}
+        )
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(media_projection)

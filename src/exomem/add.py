@@ -30,7 +30,9 @@ from . import (
     call_spans,
     cli_ops,
     corpus_aware,
+    duplicates,
     indexes,
+    lexstore,
     memory_refs,
     project_keys,
     schema,
@@ -128,6 +130,14 @@ class AddResult:
     # One line per source kind or domain this capture registered on first use.
     vocabulary_receipt: list[str] = field(default_factory=list)
     capture_outcome: source_capture.CaptureOutcome | None = None
+    # A capture whose text an earlier Source already holds returns that Source: its path, ref, title, kind and URL.
+    duplicate_of: dict[str, object] | None = None
+    # Each caller-provided field that differs from the reused Source's, with the provided and the kept value.
+    fields_not_applied: list[dict[str, object]] | None = None
+    # Earlier Sources that share this capture's canonical URL: the newest few and the total.
+    same_url: dict[str, object] | None = None
+    # True when the duplicate index could not answer, so the capture was stored without a duplicate check.
+    duplicate_check_unavailable: bool = False
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -150,6 +160,13 @@ class AddResult:
             out["vocabulary_receipt"] = list(self.vocabulary_receipt)
         if self.capture_outcome is not None:
             out["capture_outcome"] = self.capture_outcome
+        if self.duplicate_of is not None:
+            out["duplicate_of"] = self.duplicate_of
+            out["fields_not_applied"] = self.fields_not_applied or []
+        if self.same_url is not None:
+            out["same_url"] = self.same_url
+        if self.duplicate_check_unavailable:
+            out["duplicate_check_unavailable"] = True
         return out
 
 
@@ -430,6 +447,7 @@ def add(
     capture_input_digest: str | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    reuse_payload: bool = False,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -457,6 +475,11 @@ def add(
     `defer_fanout_to_terminal` is the episode recorder's opt-in: its caller
     keeps planning and canonical writes under the wide guard, while derived
     refresh waits for the committed mutation's terminal.
+
+    `reuse_payload` is the capture door's opt-in, and its caller holds the mutation guard across this
+    call: a text capture without identity, correction, adoption or episode fields that repeats the text
+    of a Source the caller can read returns that Source (`capture_outcome` "reused") and writes nothing.
+    A new capture with a URL also names earlier Sources that share the canonical URL.
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
@@ -569,6 +592,28 @@ def add(
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
             return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
+    # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
+    # episode revision and a protected capture each have a lane of their own.
+    checks_duplicates = (
+        reuse_payload and artifact is None and source_identity is None and correction is None
+        and adoption_seed is None and not supersede and extra_frontmatter is None
+        and not raw_protection and _prepare is None and _allocation is None
+    )
+    duplicate_unavailable = False
+    same_url: dict[str, object] | None = None
+    if checks_duplicates:
+        lookup = duplicates.find_duplicate(
+            vault_root, sha256=duplicates.text_payload_sha256(content), lane=duplicates.SOURCES, protected=False
+        )
+        if lookup.hit is not None:
+            return _reused_capture(
+                lookup.hit, title=title, kind=kind.key, url=url, tags=_clean_tags(tags), why_captured=why_captured,
+                domain=domain_resolution.key if domain_resolution else None,
+                projects=list(dict.fromkeys(projects or ())),
+            )
+        duplicate_unavailable = not lookup.available
+        if url and url.strip():
+            same_url = _same_url_advisory(duplicates.same_url_sources(vault_root, url))
     if adoption_seed is not None:
         actual_destination = folder_path.relative_to(vault_root).as_posix()
         if adoption_seed.get("destination") != actual_destination:
@@ -899,6 +944,16 @@ def add(
             vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
         )
 
+    if checks_duplicates:
+        # The next acquisition of the mutation boundary finds this text, whatever other indexes have caught up.
+        if not lexstore.record_payload_commit(vault_root, [source_path.relative_to(vault_root).as_posix()]):
+            duplicate_unavailable = True
+    if duplicate_unavailable:
+        warnings.append(
+            "duplicate_check_unavailable: the duplicate index could not answer, so this text was stored without "
+            "a check for an earlier copy; the audit reports any copy later"
+        )
+
     from . import due_state
 
     # A new Source is outstanding from the moment it lands, so the backlog counts it now.
@@ -946,7 +1001,71 @@ def add(
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
         vocabulary_receipt=taxonomy_plan.receipt(),
         capture_outcome="created" if source_identity is not None else None,
+        same_url=same_url,
+        duplicate_check_unavailable=duplicate_unavailable,
     )
+
+
+def _stored_why(page_text: str) -> str | None:
+    """The reason a Source page records in its leading blockquote, in the shape `_render_source` writes it."""
+    _, body, _ = parse_frontmatter(page_text)
+    lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
+    quoted = [line[2:] for line in lines if line.startswith("> ")]
+    return "\n".join(quoted) or None
+
+
+def _reused_capture(
+    hit: duplicates.Duplicate, *, title: str, kind: str, url: str | None, tags: list[str],
+    why_captured: str | None, domain: str | None, projects: list[str],
+) -> AddResult:
+    """The result of a capture whose text `hit` already holds: nothing is written or merged.
+
+    A caller-provided field whose value differs from the earlier Source's is named in `fields_not_applied`
+    with both values, so the caller can see what the earlier Source did not take.
+    """
+    kept = hit.payload.frontmatter
+    why = "\n".join(why_captured.strip().splitlines()) if why_captured and why_captured.strip() else None
+    provided_url = url.strip() if url and url.strip() else None
+    differences = [
+        {"field": field_name, "provided": provided, "kept": stored}
+        for field_name, provided, stored in (
+            ("title", title.strip(), kept.get("title")),
+            ("source_kind", kind, kept.get("source_type")),
+            ("url", provided_url, kept.get("url")),
+            ("tags", tags or None, kept.get("tags") or None),
+            ("why_captured", why, _stored_why(hit.payload.text)),
+            ("domain", domain, kept.get("domain")),
+            ("projects", projects or None, kept.get("projects")),
+        )
+        # A field the caller omitted, or that equals the kept value, is not listed. Lists compare as sets.
+        if provided is not None and (
+            sorted(provided) != sorted(map(str, stored or [])) if isinstance(provided, list) else provided != stored
+        )
+    ]
+    return AddResult(
+        path=hit.path, ref=hit.ref, warnings=[], capture_outcome="reused",
+        duplicate_of={
+            "path": hit.path, "ref": hit.ref, "title": kept.get("title"),
+            "source_kind": kept.get("source_type"), "url": kept.get("url"),
+        },
+        fields_not_applied=differences,
+    )
+
+
+def _same_url_advisory(found: duplicates.SameUrl | None) -> dict[str, object] | None:
+    """The `same_url` advisory for earlier Sources that share a capture's URL: up to five of them and the total."""
+    if found is None:
+        return None
+    return {
+        "count": found.count,
+        "sources": [
+            {
+                "ref": source.ref, "path": source.path, "title": source.payload.frontmatter.get("title"),
+                "captured": str(source.payload.frontmatter.get("captured")),
+            }
+            for source in found.sources
+        ],
+    }
 
 
 _SUGGESTION_KIND = "source_classification_debt"

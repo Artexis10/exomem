@@ -3813,15 +3813,21 @@ def _add_source(
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    reuse: bool = False,
 ) -> dict:
-    """Capture text as a source under an already-resolved kind."""
+    """Capture text as a source under an already-resolved kind.
+
+    `reuse` is `capture_source`'s opt-in to payload reuse. The duplicate lookup and the commit then share
+    one acquisition of the mutation boundary, which a caller that already holds it re-enters.
+    """
     try:
         from .writer_lease import active_manager, active_mutation_request_id
 
         guard = active_manager().mutation_guard(
             vault_root, request_id=active_mutation_request_id(),
-            operation="capture_source_identity", holder_kind="command",
-        ) if source_identity is not None or correction is not None else nullcontext()
+            operation="capture_source_identity" if source_identity is not None or correction is not None else "capture_source_payload",
+            holder_kind="command",
+        ) if source_identity is not None or correction is not None or reuse else nullcontext()
         with guard:
             result = add_module.add(
                 vault_root,
@@ -3839,6 +3845,7 @@ def _add_source(
                 source_identity=source_identity,
                 expected_sha256=expected_sha256,
                 correction=correction,
+                reuse_payload=reuse,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -8828,15 +8835,24 @@ def op_capture_source(
             source_identity=source_identity,
             expected_sha256=expected_sha256,
             correction=correction,
+            reuse=True,
         )
         out = {"source": source}
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"
+        elif source.get("capture_outcome") == "reused":
+            out["capture_outcome"] = "reused"
+            out["mutated"] = False
         # The terminal reads these from the leaf's top level.
         for key in ("vocabulary_resolution", "vocabulary_receipt"):
             if key in source:
                 out[key] = source[key]
+        # What the duplicate check found moves up, so a reused reply (which the terminal passes through whole)
+        # states it once.
+        for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable"):
+            if key in source:
+                out[key] = source.pop(key)
         source_paths = [source["path"]]
     out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
     if compile_guidance:

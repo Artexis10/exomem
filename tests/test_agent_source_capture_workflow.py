@@ -82,3 +82,58 @@ def test_published_read_follows_correction_and_can_read_history(vault, source_sc
     assert previous["ref"] == first["ref"]
     assert "09:00" in previous["body"]
     assert (vault / first["path"]).read_bytes() == historical
+
+
+def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply(upload_env, monkeypatch):
+    vault, who, *_ = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    mcp = server.build_server(require_auth=False)
+
+    def capture(**arguments):
+        with principal.request_scope(who):
+            result = asyncio.run(mcp.call_tool("capture_source", {"source_kind": "session", **arguments}, run_middleware=False))
+        payload = result.structured_content or json.loads(result.content[0].text)
+        assert payload.get("success", True), payload
+        return payload.get("result", payload)
+
+    def stored_sources():
+        return {path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*.md")}
+
+    seeded = stored_sources()
+    text = "Quarterly retention fell two points after the pricing change."
+    first = capture(title="Retention note", content=text, url="https://Example.com:443/a#top", tags=["metrics"])
+    page = vault / first["path"]
+    stored = page.read_bytes()
+    assert "duplicate_of" not in first and "same_url" not in first
+
+    again = capture(title="Retention note, again", content=text, url="https://example.com/b", tags=["metrics"])
+    assert again["capture_outcome"] == "reused"
+    assert again["mutated"] is False
+    assert again["duplicate_of"]["path"] == first["path"]
+    first_ref = again["duplicate_of"]["ref"]
+    assert again["source"] == {"path": first["path"], "ref": first_ref, "warnings": [], "capture_outcome": "reused"}
+    assert (again["duplicate_of"]["title"], again["duplicate_of"]["url"]) == ("Retention note", "https://Example.com:443/a#top")
+    assert again["fields_not_applied"] == [
+        {"field": "title", "provided": "Retention note, again", "kept": "Retention note"},
+        {"field": "url", "provided": "https://example.com/b", "kept": "https://Example.com:443/a#top"},
+    ]
+    assert page.read_bytes() == stored
+    assert len(stored_sources() - seeded) == 1
+
+    other_text = capture(title="Other text, same page", content=text + " It held through the second quarter.",
+                         url="https://example.com/a", tags=["metrics"])
+    assert other_text["path"] != first["path"]
+    assert "duplicate_of" not in other_text
+    advisory = other_text["same_url"]
+    assert advisory["count"] == 1
+    assert [(row["ref"], row["path"], row["title"]) for row in advisory["sources"]] == [
+        (first_ref, first["path"], "Retention note")
+    ]
+    assert len(stored_sources() - seeded) == 2
+
+    identified = capture(title="Retention note, keyed", content=text, tags=["metrics"],
+                         source_identity={"system": "archive", "record_id": "item-1", "revision": "r1"})
+    assert identified["capture_outcome"] == "created"
+    assert identified["path"] not in (first["path"], other_text["path"])
+    assert page.read_bytes() == stored
+    assert len(stored_sources() - seeded) == 3

@@ -9,14 +9,16 @@ custom builds only); the fallback/kill-switch tests run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
 
+from exomem import duplicates, lexstore
 from exomem import find as find_module
-from exomem import lexstore
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5/trigram"
@@ -2133,3 +2135,102 @@ def test_a_changed_catalogue_recomputes_request_admission_before_ranking(tmp_pat
     assert after.readiness.complete and independent.readiness.complete
     assert {path for path, _score in after.value} == {first, second}
     assert after.value == independent.value
+
+
+# ---------------------------------------------------------------- duplicate-handling index
+
+
+def _write_source(root: Path, name: str, text: str, *, original: bytes | None = None) -> str:
+    """A Source page of the shape `add` writes, with its original beside it when `original` is given."""
+    folder = root / "Knowledge Base" / "Sources" / "Session"
+    folder.mkdir(parents=True, exist_ok=True)
+    original_lines = ""
+    if original is not None:
+        (folder / f"{name}.txt").write_bytes(original)
+        original_lines = (
+            f"evidence_file: Knowledge Base/Sources/Session/{name}.txt\n"
+            f"binary_sha256: {hashlib.sha256(original).hexdigest()}\n"
+        )
+    (folder / f"{name}.md").write_text(
+        f"---\ntype: source\nexomem_id: {uuid.uuid4()}\ntitle: {name}\nsource_type: session\n"
+        f"captured: 2026-01-01\n{original_lines}tags: []\n---\n\n# {name}\n\n## Capture\n\n{text}\n",
+        encoding="utf-8",
+    )
+    return f"Knowledge Base/Sources/Session/{name}.md"
+
+
+def _lookup(root: Path, sha256: str) -> duplicates.DuplicateLookup:
+    return duplicates.find_duplicate(root, sha256=sha256, lane=duplicates.SOURCES, protected=False)
+
+
+def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path):
+    first = _write_source(tmp_path, "first", "the first capture")
+    assert lexstore.payload_candidates(tmp_path, duplicates.text_payload_sha256("the first capture")) == (first,)
+
+    # A later capture commits while search indexing has not caught up: no `upsert_after_write` runs.
+    second = _write_source(tmp_path, "second", "the second capture")
+    digest = duplicates.text_payload_sha256("the second capture")
+    assert lexstore.payload_candidates(tmp_path, digest) == (), "the lag hides the page, so the test does exercise it"
+
+    assert lexstore.record_payload_commit(tmp_path, [second])
+    assert lexstore.payload_candidates(tmp_path, digest) == (second,)
+
+
+def test_a_deleted_index_rebuilds_from_pages_and_changes_no_page(tmp_path):
+    kept = _write_source(tmp_path, "kept", "stored text", original=b"stored original")
+    digest = hashlib.sha256(b"stored original").hexdigest()
+    assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
+
+    def tree() -> dict[str, tuple[bytes, int]]:
+        return {
+            path.relative_to(tmp_path).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in sorted(tmp_path.rglob("*")) if path.is_file()
+        }
+
+    before = tree()
+    for sidecar in lexstore.lexical_path(tmp_path).parent.glob(".lexical.sqlite*"):
+        sidecar.unlink()
+    lexstore.clear_stores()  # a restarted process finds no index
+
+    assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
+    assert tree() == before
+
+
+def test_an_unfinishable_rebuild_reports_unavailable_not_empty(tmp_path, monkeypatch):
+    _write_source(tmp_path, "kept", "stored text")
+    digest = duplicates.text_payload_sha256("stored text")
+    assert lexstore.payload_candidates(tmp_path, "0" * 64) == (), "an answering index with no match is empty"
+    for sidecar in lexstore.lexical_path(tmp_path).parent.glob(".lexical.sqlite*"):
+        sidecar.unlink()
+    lexstore.clear_stores()
+
+    def fails(self, conn):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", fails)
+
+    assert lexstore.payload_candidates(tmp_path, digest) is None
+    lookup = _lookup(tmp_path, digest)
+    assert lookup.hit is None
+    assert lookup.available is False
+
+
+def test_an_indexed_original_edited_on_disk_is_not_reused(tmp_path):
+    page = _write_source(tmp_path, "original", "a description", original=b"the original bytes")
+    digest = hashlib.sha256(b"the original bytes").hexdigest()
+    assert _lookup(tmp_path, digest).hit.path == page, "intact and indexed, it is the copy to reuse"
+
+    (tmp_path / "Knowledge Base/Sources/Session/original.txt").write_bytes(b"edited behind the index")
+
+    assert lexstore.payload_candidates(tmp_path, digest) == (page,), "the index still names the page"
+    assert _lookup(tmp_path, digest) == duplicates.DuplicateLookup()
+
+    text_page = _write_source(tmp_path, "text", "captured words")
+    text_digest = duplicates.text_payload_sha256("captured words")
+    assert lexstore.record_payload_commit(tmp_path, [text_page])
+    assert _lookup(tmp_path, text_digest).hit.path == text_page
+    (tmp_path / text_page).write_text(
+        (tmp_path / text_page).read_text(encoding="utf-8").replace("captured words", "other words"), encoding="utf-8"
+    )
+    assert _lookup(tmp_path, text_digest) == duplicates.DuplicateLookup()
+
