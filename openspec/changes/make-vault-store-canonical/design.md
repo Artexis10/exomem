@@ -145,7 +145,9 @@ Every interval includes zero: no change. These offline sets have little power: t
 - Agents read 0.57% (0.40 to 0.82) of those within 30 s, about a sixth of the rate for other hits at the same ranks.
 - Of 99 hits that a write cited within 2 hours, none came from the graph lane alone (0 to 3.7%).
 
-The graph has to earn its place through denser, typed links rather than through its current recall lane. Unit-level edges (D10) and the traversal capabilities above are where that density can come from. The ablation reruns after D10 (task 5.4). Its effect on agent outcomes, not only on retrieval, belongs to the outcome evaluation (see Epistemics evaluation).
+**What the ablation does not cover.** It tests one mechanism: recall adds the one-hop neighbours of its hits to the ranked results, whether or not they fit the question. It does not test an agent that reads a page's links and chooses which to follow, and it scores retrieval, not task outcomes. Published evidence favours that second shape. In Anthropic's study of agent memory ([The components of agent memory](https://www.anthropic.com/research/components-of-agent-memory), 2026-11-06), the agent wrote subject pages that link to its other notes, and an offline pass kept them current. On merger questions where most criteria needed several documents, the agent scored 87% with those pages and 73% with search alone. On a second document set, the pages alone scored 48% against 53% for search alone, and pages plus search reached 61%. The study did not test links apart from the pages that carry them.
+
+The graph therefore has to earn its place through denser, typed links that agents follow, not through its current recall lane. Unit-level edges (D10) and the traversal capabilities above are where that density can come from. Before unit results ship, task 5.4 compares search alone with search plus agent-followed links, on tasks that span several pages, scored by outcome. The outcome evaluation (see Epistemics evaluation) carries the graph on/off comparison on agent outcomes for the switch.
 
 ### D7. Embeddings stay asynchronous
 
@@ -218,15 +220,15 @@ When the true original of content already filed as an original arrives, a govern
 | 2 | Semantic units as one row set, unit-level edges and claim-level writes (D10) | 1–1.5 |
 | 2 | Canonicity records and the supersede-original write (D11) | 0.5–1 |
 
-**Result.** These are single-author weeks. About 11 to 13 weeks in total. The smallest local release, the first six stage-1 rows, is 7 to 8 weeks. Embeddings, Cloud, Windows and deletion bring stage 1 to 9.5 to 10.5 weeks; stage 2 adds 1.5 to 2.5. No cut of this table fits one month for one author.
+**Result.** These are weeks at the Records move's pace, mostly one PR at a time. About 11 to 13 weeks in total. The smallest local release, the first six stage-1 rows, is 7 to 8 weeks. Embeddings, Cloud, Windows and deletion bring stage 1 to 9.5 to 10.5 weeks; stage 2 adds 1.5 to 2.5. No cut of this table fits one month at that pace.
 
-**Parallel schedule.** With parallel lanes, the smallest local release takes about four to five weeks of elapsed time:
+**Parallel schedule.** With parallel workstreams, the smallest local release, plus embeddings keyed by store revision and an acceptance run on Windows, takes about four to five weeks of elapsed time:
 
-1. Week 1, two lanes: the store schema, migration with both verifications, rollback exports and the ownership rule; and, beside it, the availability, replica and contract-amendment work. This fixes the table contract the later lanes share.
-2. Weeks 2 and 3, three lanes on separate files: the write path; every reader, built against a migrated store so it does not wait for the write path; the projector and importer, then embeddings keyed by store revision.
+1. Week 1, two workstreams: the store schema, migration with both verifications, rollback exports and the ownership rule; and, beside it, the availability, replica and contract-amendment work. This fixes the table contract and the governed write entry point that the later workstreams share.
+2. Weeks 2 and 3, three workstreams on separate files: the write path; every reader, built against a migrated store so it does not wait for the write path; the projector and importer, then embeddings keyed by store revision.
 3. Week 4: integration and acceptance on a real-vault copy and on a Windows runner.
 
-Four weeks holds only at the lower ends of the package estimates. At the upper ends the write-path and reader lanes fill their two weeks with no slack, and integration has no package of its own, so plan for five. This schedule defers stage 2, file-mode deletion and Cloud cells until after the switch, and file mode remains the rollback path. Any slip lands in the last week. Store mode can stay behind a per-vault setting while a release ships in file mode, which separates the switch from the release.
+Four weeks holds only at the lower ends of the package estimates. At the upper ends the write-path and reader workstreams fill their two weeks with no slack, and integration has no package of its own, so plan for five. This schedule defers stage 2, file-mode deletion and Cloud cells until after the switch, and file mode remains the rollback path. Any slip lands in the last week. The switch also waits on the outcome evaluation's store-mode run (task 7.3), which runs in its own session outside these weeks. Store mode can stay behind a per-vault setting while a release ships in file mode, which separates the switch from the release.
 
 ## Epistemics evaluation
 
@@ -245,3 +247,4 @@ The design's epistemics check is a separate outcome evaluation, run in its own s
 - Whether append-only pages such as `log.md` should become rows that the projection renders, so a write appends one row instead of re-indexing a 1.3 MB page. Measure the transaction with and without that file first.
 - Switch timing: before or after the public release. The owner decides from these numbers.
 - Whether a Cloud cell projects Markdown at all, or exports only on request.
+- Whether recall keeps the one-hop graph lane before task 5.4 or the outcome evaluation shows a gain. Today 4.6% of returned hits come from that lane alone, and agents read them at about a sixth of the rate of other hits at the same ranks.
