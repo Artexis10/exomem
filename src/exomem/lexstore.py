@@ -6990,7 +6990,9 @@ class LexicalStore:
                 )
             except (OSError, UnicodeError, ValueError):
                 state = None
-        # An unreadable page has no bytes for the gate to read; the disk gate above admitted it.
+        # An unreadable page has no bytes to admit. An ordinary page still gets its empty-text row.
+        # A Records manifest is admitted by its content, so it gets no row until a later pass reads
+        # it: the gate fails closed.
         rows = page_rows(
             self.vault_root,
             rel,
