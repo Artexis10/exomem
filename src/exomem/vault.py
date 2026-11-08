@@ -4438,7 +4438,11 @@ def read_bounded_guarded_bytes(
         if expected_hash is not None and guard.expected_content_hash != expected_hash:
             raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
         return data, guard
-    return _read_bounded_guarded_disk(root, target, limit=limit, expected_hash=expected_hash)
+    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(root, target, limit)
+    if expected_hash is not None and guard.expected_content_hash != expected_hash:
+        raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+    guard.recheck(root)
+    return data, guard
 
 
 def _require_read_limit(limit: int) -> None:
@@ -4466,17 +4470,6 @@ def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, Pa
     return page.body, _store_guard(rel, page.meta.sha256)
 
 
-def _read_bounded_guarded_disk(
-    root: Path, target: str, *, limit: int, expected_hash: str | None = None
-) -> tuple[bytes, PathGuard]:
-    _require_read_limit(limit)
-    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(root, target, limit)
-    if expected_hash is not None and guard.expected_content_hash != expected_hash:
-        raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
-    guard.recheck(root)
-    return data, guard
-
-
 def read_bounded_guarded_bytes_with_generation(
     vault_root: Path, target: str, *, limit: int
 ) -> tuple[bytes, PathGuard, PathGuard | None]:
@@ -4499,11 +4492,8 @@ def read_bounded_guarded_bytes_with_generation(
     until it syncs, and one write call that runs longer than the racy window.
     """
     root = Path(vault_root)
-    stored = _read_stored_guarded(root, target, limit)
-    if stored is not None:
-        return stored[0], stored[1], None  # a stored page has no stat generation to bind
     if not STAT_GENERATION_TRUSTED:
-        data, guard = _read_bounded_guarded_disk(root, target, limit=limit)
+        data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
         return data, guard, None
     _safe_guard_target(target)
     leaf = os.path.join(os.fspath(root), target)
@@ -4512,10 +4502,14 @@ def read_bounded_guarded_bytes_with_generation(
     try:
         before = os.lstat(leaf)
     except FileNotFoundError:
-        raise
+        # A page that the store serves may have no file yet; the file of any other path is missing.
+        stored = _read_stored_guarded(root, target, limit)
+        if stored is None:
+            raise
+        return stored[0], stored[1], None  # a stored page has no stat generation to bind
     except OSError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
-    data, guard = _read_bounded_guarded_disk(root, target, limit=limit)
+    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
     try:
         after = os.lstat(leaf)
     except OSError:
