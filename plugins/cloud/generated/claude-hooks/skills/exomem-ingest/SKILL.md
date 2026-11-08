@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 07ce085bc4c28736a4e9c60f91825ccc83f38fb0d38ff2d5b5b6d1aee9c493b3
+  skill_contract: f058d4137187fc4c05a3dadf7b5b888aefd8ca533b7ac127268250037f90ba5f
   version: "0.1.0"
 ---
 
@@ -73,9 +73,10 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
    absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then set `operation.kind` to `file`
    with the staged `path` and a `collection` name where the person gives one. Repeat the same
-   call with the returned `continuation` until `filing` is not `working`, and report the
-   `summary` and the `coverage` in `filed`, including what was refused, what is still pending
-   and what the `person` list asks. A folder with own-note rules, or an older server that
+   call with the returned `continuation` until `filing` is not `working`. Report the whole
+   import from `summary` and the `progress` counts, including the failed files, then the
+   residual in `filed.residual` and what the `person` list asks. `filed.last_finished_page`
+   describes one page only, never the import. A folder with own-note rules, or an older server that
    refuses `file`, uses the step path: `start`, `select` folders (with a `source_kind` and
    `domain` per folder rule where known), `plan`, `apply`, then `finish`, repeating each with
    its `continuation`. For a large folder, a full disk or a staged copy to discard, follow
