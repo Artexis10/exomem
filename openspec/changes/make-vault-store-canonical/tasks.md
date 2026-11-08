@@ -1,6 +1,6 @@
 ## 1. Store schema, migration and rollback
 
-- [ ] 1.1 Add `store_pages`, the projection manifest and queue, held corrections, unit rows, canonicity records and the audit trail to the per-vault collection store database, beside the lexical catalogue and graph tables.
+- [ ] 1.1 Add `store_pages`, binary records, the projection manifest and queue, held corrections and the audit trail to the per-vault collection store database, beside the lexical catalogue and graph tables. Unit rows move to 5.1 and canonicity records to 5.3.
 - [ ] 1.2 Define one ownership rule for the files the store owns (D1), shared by migration, the reconcile sweep and the projector, so none of them treats another's files as created or deleted.
 - [ ] 1.3 Extend `collection_store/migration.py` with an offline page migration that loads exact bytes and current derived rows.
 - [ ] 1.4 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
@@ -27,9 +27,9 @@
 
 ## 5. Stage 2: semantic units and canonicity
 
-- [ ] 5.1 Merge the lexical unit rows and graph unit nodes into one unit row set under today's identity rule (authored anchor, else fingerprint-bound reference), and prove it reproduces both for the same bytes.
+- [ ] 5.1 Add the unit row table (moved from 1.1). Merge the lexical unit rows and graph unit nodes into one unit row set under today's identity rule (authored anchor, else fingerprint-bound reference), and prove it reproduces both for the same bytes.
 - [ ] 5.2 Resolve links to `[[Page#^anchor]]` as unit-level edges; make claim-level writes change the page and the unit in one transaction.
-- [ ] 5.3 Record origin, hash, size, format and derivation for every stored file, mapped onto the existing Evidence custody fields; add the governed write that supersedes a false original and keeps the copy as derived.
+- [ ] 5.3 Add the canonicity table (moved from 1.1). Record origin, hash, size, format and derivation for every stored file, mapped onto the existing Evidence custody fields; add the governed write that supersedes a false original and keeps the copy as derived.
 - [ ] 5.4 Before unit results ship, compare search alone with search plus agent-followed unit-level links on tasks that span several pages, scored by outcome with the outcome evaluation's method, case by case with 95% intervals; rerun the graph-lane ablation with unit-level edges beside it.
 
 ## 6. Embeddings, Cloud and Windows
