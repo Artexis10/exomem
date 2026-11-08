@@ -213,16 +213,21 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
 
 def build_media_listing() -> B2ObjectStorage | None:
     """add-cloud-media-store D7, D10: the list-only key for the media bucket, which cellctl uses for the
-    physical meter and for nothing else. None while the media edge is off."""
+    physical meter and for nothing else. None while the media edge is off, and None with one log line
+    while the key is missing: the meter is a report, not a gate, so a release that reaches the cluster
+    before its list-key Secret must still start."""
 
     if not os.environ.get("CELLCTL_MEDIA_EDGE_URL"):
         return None
+    key_id, application_key = (os.environ.get("CELLCTL_MEDIA_LIST_KEY_ID"),
+                               os.environ.get("CELLCTL_MEDIA_LIST_APPLICATION_KEY"))
+    if not key_id or not application_key:
+        logging.getLogger("cellctl").warning(
+            "cellctl: the media list key is missing, so every cell's physical media figure is unknown and "
+            "its hide and over-allowance alerts are off until the key's Secret exists and cellctl restarts")
+        return None
     return B2ObjectStorage(
-        B2Config(
-            key_id=os.environ["CELLCTL_MEDIA_LIST_KEY_ID"],
-            application_key=os.environ["CELLCTL_MEDIA_LIST_APPLICATION_KEY"],
-            bucket_id=os.environ["CELLCTL_MEDIA_BUCKET_ID"],
-        )
+        B2Config(key_id=key_id, application_key=application_key, bucket_id=os.environ["CELLCTL_MEDIA_BUCKET_ID"])
     )
 
 

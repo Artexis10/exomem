@@ -342,16 +342,20 @@ spec:
               value: {{ .Values.mediaEdge.physicalHeadroom | quote }}
             - name: CELLCTL_MEDIA_BUCKET_ID
               value: {{ .Values.mediaEdge.bucketId | quote }}
+            # The physical meter is a report, not a gate: without this Secret cellctl starts, logs once
+            # and reports every media figure unknown (add-cloud-media-store D10).
             - name: CELLCTL_MEDIA_LIST_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.mediaEdge.listSecretName }}
                   key: keyId
+                  optional: true
             - name: CELLCTL_MEDIA_LIST_APPLICATION_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.mediaEdge.listSecretName }}
                   key: applicationKey
+                  optional: true
             {{- if .Values.mediaEdge.allCells }}
             - name: CELLCTL_MEDIA_EDGE_ALL_CELLS
               value: "true"

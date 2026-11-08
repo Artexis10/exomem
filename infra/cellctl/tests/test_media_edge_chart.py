@@ -209,11 +209,14 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
     assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {
         **default_policy, "evict_after_days": 30, "max_temporary_bytes": 5637144576, "max_hydrations": 1}
     # The physical meter lists with its own list-only key, never the edge's: the Secret is the list key's.
+    # It is optional, so a release that reaches the cluster before that Secret still starts cellctl.
     secret_refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in cellctl["env"] if "valueFrom" in e}
     assert env["CELLCTL_MEDIA_BUCKET_ID"] == "4a48fe8875c6214145260818"
     assert env["CELLCTL_MEDIA_PHYSICAL_HEADROOM"] == "2"
-    assert secret_refs["CELLCTL_MEDIA_LIST_KEY_ID"] == {"name": "exomem-cloud-media-list", "key": "keyId"}
-    assert secret_refs["CELLCTL_MEDIA_LIST_APPLICATION_KEY"] == {"name": "exomem-cloud-media-list", "key": "applicationKey"}
+    assert secret_refs["CELLCTL_MEDIA_LIST_KEY_ID"] == {
+        "name": "exomem-cloud-media-list", "key": "keyId", "optional": True}
+    assert secret_refs["CELLCTL_MEDIA_LIST_APPLICATION_KEY"] == {
+        "name": "exomem-cloud-media-list", "key": "applicationKey", "optional": True}
     assert role["metadata"]["namespace"] == NAMESPACE
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["exomem-media-edge-active-set"],

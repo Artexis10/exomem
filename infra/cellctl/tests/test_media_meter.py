@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from cellctl import alerts, media_meter
+from cellctl import alerts, main, media_meter
 from cellctl.media_meter import PhysicalFigure
 from cellctl.storage.fake_b2 import FakeB2
 from cellctl.storage.interface import cell_object_prefix
@@ -200,3 +200,13 @@ async def test_a_deleted_cell_leaves_the_meter_but_its_hide_alert_stays(cell_db,
     finally:
         await fleet.close()
 
+
+def test_cellctl_starts_without_the_list_key_and_says_so_once(monkeypatch, caplog) -> None:
+    # A release can reach the cluster before its list-key Secret; the meter is a report, so cellctl must start.
+    monkeypatch.setenv("CELLCTL_MEDIA_EDGE_URL", "http://10.43.0.30:8769")
+    monkeypatch.setenv("CELLCTL_MEDIA_BUCKET_ID", "4a48fe8875c6214145260818")
+    monkeypatch.delenv("CELLCTL_MEDIA_LIST_KEY_ID", raising=False)
+    monkeypatch.delenv("CELLCTL_MEDIA_LIST_APPLICATION_KEY", raising=False)
+
+    assert main.build_media_listing() is None
+    assert [record.levelname for record in caplog.records if record.name == "cellctl"] == ["WARNING"]
