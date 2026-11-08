@@ -114,6 +114,29 @@ def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_thre
     assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
 
 
+def test_a_generic_edge_inside_a_unit_without_an_anchor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writing guide teaches unit-level relations; an unanchored one is still a new edge."""
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+
+    refused = call(
+        "create_note",
+        {
+            "title": "Crane",
+            "note_type": "insight",
+            "content": (
+                "## Observations\n\n- [fact] Crane was settled.\n\n"
+                f"## Finding\n- relations: relates_to: [[{anchor}]]\n\nCrane lifts the load.\n"
+            ),
+            "sources": [_source(call, "Crane")],
+        },
+    )
+
+    assert refused["error"]["code"] == CODE
+    assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
+
+
 def test_a_retry_with_the_menus_top_relation_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

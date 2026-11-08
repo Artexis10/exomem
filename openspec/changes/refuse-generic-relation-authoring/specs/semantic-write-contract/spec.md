@@ -23,6 +23,10 @@ Default compact mutation feedback SHALL retain the advisory and an actionable re
 - **WHEN** an otherwise valid write adds a generic relation to a page
 - **THEN** the write is refused with the relation menu and no advisory replaces the refusal
 
+#### Scenario: A generic relation inside a semantic unit is refused
+- **WHEN** an otherwise valid write adds a generic relation in a unit's `relations:` metadata, and the unit has no anchor
+- **THEN** the write is refused like a generic Relations bullet, unless the page it replaces authored the same relation, target and unit kind
+
 #### Scenario: Honest generic edges remain writable
 - **WHEN** a page already holds only admitted generic relations that it authored earlier, and an otherwise valid edit adds none
 - **THEN** the edit may commit with the advisory and no specificity refusal

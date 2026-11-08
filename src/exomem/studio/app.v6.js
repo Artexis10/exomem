@@ -788,8 +788,8 @@ function renderRelationCandidate(item, group) {
   if (fitting.length) summary.append(element("span", `a specific relation fits: ${fitting.join(", ")}`, "fine-print"));
   li.append(summary);
   const actions = element("div", "", "actions");
-  // The queue refuses the generic relation where a specific one fits, so the owner chooses one instead.
-  const choosing = fitting.length > 0;
+  // The queue refuses the generic relation, so the owner chooses a specific one or the plain link.
+  const choosing = fitting.length > 0 || Boolean(item.plain_link);
   const accept = element("button", choosing ? "Choose relation" : "Accept");
   accept.type = "button";
   accept.dataset.relationRef = item.ref;

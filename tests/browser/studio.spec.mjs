@@ -243,6 +243,15 @@ test("a queue item offers the plain link last and writes it as a plain link", as
   expect(calls.find((call) => call.name === "edit_memory").body.new_string).toBe("- links_to [[Knowledge Base/Notes/Insights/target-two]]");
 });
 
+test("a queue item with only the plain link offers a choice, never a bare accept", async ({page}) => {
+  const calls = [];
+  const group = {...relationGroups[0], items: [{...relationGroups[0].items[0], relation_type: null, relation_label: null, bullet: null, options: [], plain_link: "links_to"}]};
+  await connectRelations(page, calls, {queueResponses: [relationQueue({groups: [group]})]});
+  await expect(page.getByRole("button", {name: /^Accept/})).toHaveCount(0);
+  await page.getByRole("button", {name: /Choose relation/}).click();
+  await expect(page.getByRole("dialog").getByRole("combobox")).toContainText("plain link (no specific relation)");
+});
+
 test("a queue item with fitting relations is written as the chosen one through an audited edit", async ({page}) => {
   const calls = [];
   const options = [{key: "owns", label: "owns", description: "The subject owns the object.", parent: null}, {key: "operates", label: "operates", description: "", parent: null}];

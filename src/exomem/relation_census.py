@@ -110,6 +110,14 @@ class AddedEdges(NamedTuple):
     #: Facts whose endpoints no stable identity could prove, and every fact compared.
     unavailable: int
     compared: int
+    #: The current facts left out of `edges` because no stable identity proves their
+    #: endpoints, such as a relation inside a unit with no anchor.
+    unproven: tuple[Any, ...] = ()
+
+
+def fact_operand(fact: Any) -> tuple[Any, ...]:
+    """What an author wrote for one edge: relation, target, anchor and source kind."""
+    return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
 
 
 def added_edges(
@@ -140,8 +148,7 @@ def added_edges(
             if fact.authored_path == path and fact.authored and fact.origin in _AUTHORED_ORIGINS
         ]
 
-    def operand(fact: Any) -> tuple[Any, ...]:
-        return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
+    operand = fact_operand
 
     def endpoint(context: Any, path: str, anchor: str | None = None) -> str:
         page = context.pages.get(path)
@@ -190,6 +197,7 @@ def added_edges(
         not stable_endpoints(after, fact) for fact in current
     )
     compared = len(prior) + len(current)
+    unproven = tuple(fact for fact in current if not stable_endpoints(after, fact))
     prior = [fact for fact in prior if stable_endpoints(before, fact)]
     current = [fact for fact in current if stable_endpoints(after, fact)]
     # Unchanged operands cannot become additions through resolver or registry drift.
@@ -229,7 +237,7 @@ def added_edges(
                 hashlib.sha256(json.dumps(edge_identity, sort_keys=True).encode()).hexdigest(),
             )
         )
-    return AddedEdges(additions, uncertain, compared)
+    return AddedEdges(additions, uncertain, compared, unproven)
 
 
 def operation_provenance(

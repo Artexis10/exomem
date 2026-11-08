@@ -4801,19 +4801,14 @@ def _preflight_creation(
             and artifact.predecessor_content_hash == predecessor_content_hash
         ):
             provenance_server_at = artifact.provenance_server_at
-        # The `generic` disposition sends no review fields, so it has no hash to supply.
-        one_call_hash = (
-            {
-                "relation_review_hash": _one_call_review_hash(
-                    draft_bound=draft_bound,
-                    disposition=relation_disposition,
-                    supplied_hash=relation_review_hash,
-                    validation=validation,
-                )
-            }
-            if supplied_review_fields
-            else {}
-        )
+        one_call_hash = {
+            "relation_review_hash": _one_call_review_hash(
+                draft_bound=draft_bound,
+                disposition=relation_disposition,
+                supplied_hash=relation_review_hash,
+                validation=validation,
+            )
+        }
         # This stamp also guards the relation-review verdict: both evaluations
         # read this page's definitions and the status basis after the entry
         # generation, so a change between or after them leaves it stale.

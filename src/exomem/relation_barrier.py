@@ -9,13 +9,14 @@ or, as a last resort, write a plain link. No answer keeps the generic edge.
 The barrier judges only an edge this call adds (`relation_census.added_edges`), so a
 page that already holds a generic edge from before can still be edited, and an edge a
 successor carries from its predecessor is never asked about again. A page that is not
-live and a bulk operation pass without a word. The refusal fires on the relation key,
-so it leaks nothing about the target: a withheld target reads as an absent one, and
+live and a bulk operation pass without a word. The refusal fires on the registry's
+`generic` attribute of the relation, so it leaks nothing about the target: a withheld target reads as an absent one, and
 the menu is built from the writer's own page and the pages the writer may see.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -127,23 +128,32 @@ def evaluate(
         return None
     from . import relation_census
 
+    prior_facts = (
+        semantic_contract.writer_authored_facts(prior, prior_corpus) if prior is not None else ()
+    )
     added = relation_census.added_edges(
         prior_corpus,
         corpus,
         prior_path=prior.path if prior is not None else None,
         current_path=page.path,
-        prior_facts=(
-            semantic_contract.writer_authored_facts(prior, prior_corpus)
-            if prior is not None
-            else ()
-        ),
+        prior_facts=prior_facts,
         current_facts=current,
     )
+    new_facts = [edge.fact for edge in added.edges]
+    # The census proves identity only for stable endpoints, so a relation inside a unit with no
+    # anchor is left out of its edges. Such a fact is new unless the page it replaces wrote it.
+    written_before = Counter(relation_census.fact_operand(fact) for fact in prior_facts)
+    for fact in added.unproven:
+        key = relation_census.fact_operand(fact)
+        if written_before[key]:
+            written_before[key] -= 1
+        else:
+            new_facts.append(fact)
     # One answer settles every identical bullet, so the writer hears of each relation and target once.
     refused: dict[tuple[str, str], semantic_contract.RelationFact] = {}
-    for edge in added.edges:
-        if registry.is_generic(edge.fact.canonical_relation or ""):
-            refused.setdefault((edge.fact.raw_relation, edge.fact.raw_target), edge.fact)
+    for fact in new_facts:
+        if registry.is_generic(fact.canonical_relation or ""):
+            refused.setdefault((fact.raw_relation, fact.raw_target), fact)
     if not refused:
         return None
     fact = next(iter(refused.values()))
