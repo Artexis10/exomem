@@ -135,11 +135,13 @@ answer its one question now: does this page answer more than one independent
 question? Name them.
 
 - **One question.** Keep the page whole however long it is. Dismiss the item with
-  `triage_memory(ref=<ref>, action="dismiss", expected_fingerprint=<fingerprint>,
-  why="intentional: <the one question>")`. The page stays quiet until it reaches its
+  `triage_memory(operation={'kind': 'decision', 'ref': <ref>, 'action': 'dismiss',
+  'expected_fingerprint': <fingerprint>, 'why': 'intentional: <the one question>'})`. The page stays quiet until it reaches its
   next size step.
 - **Several questions, each with its own material.** Propose a split through the
-  curation lane, `repair_memory` operation `curation-propose`. Preview the plan and
+  curation lane. Read the page's `check_memory` `curation-work-item` first: its
+  `step_schemas` give each step kind's required and allowed args. Then submit the
+  plan with `repair_memory` operation `curation-propose`. Preview the plan and
   ask the user for exact confirmation before applying it. After a split, a remainder
   or a new child that still reaches a size step gets its own item. Answer those in
   the same pass.
@@ -422,7 +424,7 @@ can write in any form; the on-disk file lands canonical.
 
 If a wikilink target doesn't exist yet, prefer creating the entity stub via
 **read_connections/change_connections** rather than leaving a dangling link. Dangling links accumulate
-and surface in **read_review/triage_memory(mode="audit")** as `broken_wikilink`.
+and surface in `read_review(operation={'kind': 'audit'})` as `broken_wikilink`.
 
 When creating an entity that points at a **currently-evolving external artifact**
 (a live spec, a code library, a service config), use **pointer-style** — summary

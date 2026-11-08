@@ -12,7 +12,8 @@ What remains is vocabulary-free plumbing that other modules import:
 - `_terms` and `_is_term` normalise tags, titles and project keys into one
   comparable set of words, script-aware (`text_scripts`);
 - `FUNCTION_WORDS` and `_STOPWORDS` keep glue words out of that set;
-- `BREADTH_TAGS` names the tags that declare a page broad on purpose.
+- `BREADTH_TAGS` and `BREADTH_SLUG_SUFFIXES` name the tags and slug endings that
+  declare a page broad on purpose.
 
 The collection and record-governance matchers import these. A change to them changes
 every one of those comparisons, so none of them belongs to a single caller.
@@ -24,9 +25,12 @@ from collections.abc import Iterable
 
 from .text_scripts import comparison_words, is_scriptio_continua
 
-#: Pages that deliberately announce breadth. Same convention that already exempts
-#: these tags from staleness pressure and semantic-unit requirements elsewhere.
+#: Pages that deliberately announce breadth, by tag or by slug suffix. The shipped
+#: skill fixes this convention (an architecture overview, a hub, a point-in-time
+#: snapshot), so these are closed sets, not vault vocabulary. Staleness, semantic-unit
+#: minimums, activation and the cohesion question all read them from here.
 BREADTH_TAGS = frozenset({"hub", "snapshot"})
+BREADTH_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 
 #: Closed-class English function words: prepositions, conjunctions, auxiliaries,
 #: pronouns, determiners and a few ubiquitous verbs. Never a content word, however

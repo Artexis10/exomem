@@ -423,7 +423,12 @@ def plan_fingerprint(
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
-        raise _error("CURATION_UNKNOWN_FIELD", f"{where} has unknown fields: {unknown}")
+        # Naming the allowed fields lets an agent correct its plan from one refusal
+        # instead of probing the shape field by field.
+        raise _error(
+            "CURATION_UNKNOWN_FIELD",
+            f"{where} has unknown fields: {unknown}; allowed: {sorted(allowed)}",
+        )
 
 
 def _require_string(value: Any, field: str, *, max_chars: int = MAX_PLAN_BYTES) -> str:

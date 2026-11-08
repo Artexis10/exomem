@@ -46,6 +46,7 @@ from .cli_ops import OpError, relation_review_stable_id_remediation
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
@@ -84,12 +85,6 @@ _GRANDFATHERED_OPERATIONS = frozenset(
 )
 _SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
     {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
-)
-_SEMANTIC_UNIT_EXEMPT_TAGS = frozenset({"hub", "snapshot"})
-_SEMANTIC_UNIT_EXEMPT_SUFFIXES = (
-    "-architecture",
-    "-snapshot",
-    "-catalog-snapshot",
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
@@ -931,7 +926,7 @@ def _path_excluded_from_semantic_minimum(path: str) -> bool:
     parts = _path_parts(path)
     name = parts[-1] if parts else ""
     stem = PurePosixPath(name).stem
-    return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+    return any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES)
 
 
 def _route_name(path: str) -> str | None:
@@ -999,7 +994,7 @@ def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
 def _semantic_unit_explicitly_exempt(page: SemanticPageState) -> bool:
     return bool(
         _path_excluded_from_semantic_minimum(page.path)
-        or (_frontmatter_tags(page) & _SEMANTIC_UNIT_EXEMPT_TAGS)
+        or (_frontmatter_tags(page) & BREADTH_TAGS)
     )
 
 

@@ -116,8 +116,8 @@ connection. A write can answer in three ways.
   `relation_advisory.specific_options`: fitting relations, each with an `edit_note`
   route that swaps the predicate of that one bullet. Follow a route when the
   relation states what the source says. Otherwise dismiss the offer with
-  `triage_memory(ref=<its review>, action="dismiss", why=..., expected_fingerprint=<its
-  fingerprint>)`.
+  `triage_memory(operation={'kind': 'decision', 'ref': <its review>, 'action': 'dismiss',
+  'expected_fingerprint': <its fingerprint>, 'why': ...})`.
 - **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
   this write added and that has no page and no entity, with its `create-entity` route.
   Follow the route when the name is a durable referent: stable, recurring and
