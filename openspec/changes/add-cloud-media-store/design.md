@@ -277,11 +277,7 @@ The same provider holds backups and media. A second copy at another provider was
 - **Playback and download.** The gateway serves a download route behind the owner's signed-in session. It forwards to the cell, which hydrates if needed and streams the original with range support. A tool result may carry this link, because it grants nothing without the owner's session. Local agents use `exomem cloud download` over OAuth, which verifies size and SHA-256 before it renames the file into place. No tool result carries a bearer link.
   - *Agent download.* The agent's route is `GET /download?path=<vault path>` on the gateway with the owner's OAuth access token, and it needs no ticket. The gateway validates the token, resolves the owner's cell, and signs a fresh gateway origin proof for each request, range requests included. The proof carries `purpose: "download"` and `target_sha256`, the SHA-256 of the requested path. The cell route checks the cell bearer, then the proof, and refuses with `DOWNLOAD_UNAVAILABLE` before it resolves anything. It then serves through the same artifact recovery as a local recovery, with its governance, custody page, size and SHA-256 checks. `transfer_artifact` download on Cloud returns the descriptor and a `next_step` command (`exomem cloud download '<path>'`), never a URL.
   - *Browser link.* The signed-in browser link stays open as task 5.1.
-- **Export.** Export runs in two steps, so the media key never shares a pod with public egress:
-  - A *packing* step mounts the media key. It reaches only the media edge and builds the archive on the export staging volume, writing evicted originals byte-identical. Each manifest SHA-256 must equal the sidecar's.
-  - A separate *upload* step without the media key transfers the archive as today's export does.
-
-  The archive's format and delivery stay those of the export contract. Export of more media than the staging volume can hold is an open question; until it is settled, no cell other than the canary may store more media than its export can stage (D11).
+- **Export.** Export runs in three steps, so the vault pauses only for a local copy and the media key never shares a pod with public egress. The amendment of 2026-11-08 below defines them.
 - **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because this change destroys no version, and `collect-released-media` removes none that a retained snapshot references. A restored reference reads its pinned version, so a restore needs no reactivation step.
 - **Restore from an export.** A vault restored from an export can carry references to versions destroyed since the export. So the cell confirms with a head request that a pinned version exists before it evicts an original or reuses the version. A reference to an absent version counts as no reference, and the original is offloaded again (D3).
 
@@ -328,6 +324,34 @@ The operator confirmed the shape in D12 on 2026-10-30. It adds windows and filin
 - **Text.** Text members up to the 4 MiB inline text limit file by the copy and consume path of `scale-agent-led-imports`. A text-like member above that limit is an artifact, so it files by rename like any other artifact.
 - **After filing.** A filed original leaves the volume through write-through (D1) and eviction (D3). This shape adds no stage reference and no stage offload, and it keeps D2 unchanged.
 - **Processing.** Extraction of a filed original queues as today. M4 in D3 lets eviction take the original before a worker claims the job, and the worker hydrates it at the claim.
+
+**Amendment, 2026-11-08 (task 5.5): export in three steps.**
+
+Today's export holds the vault while it hashes, packs and uploads every byte, and it reads evicted originals from the volume. That breaks two promises: Home promises a pause of a few minutes, and an evicted original is not on the volume. Each step below is a Job of the cell image, `exomem cell-export --phase <step>`. All three mount the export's own staging claim, `export-staging-<export id>`.
+
+- **Pause.** The export hold stops the runtime, as today. The pause Job mounts the cell volume and the staging claim. It holds no media key and has no egress.
+  - It copies every archive member that is present on the volume into staging, at the same path, so staging mirrors `/data`. The archive classification decides what a member is: notes, sidecars, resident and cached originals, Trash, refusals and the offload backlog are all members. It copies with `copy_file_range` and hashes nothing; the pack hashes.
+  - It writes the plan into staging: the member list with sizes, and one entry for each evicted original, with its archive path, object name, version ID, plaintext size and SHA-256 from its companion. A companion under Trash counts like a live one.
+  - It mounts the media store configuration. When cellctl sets a media mode for the cell and no store binding resolves, it refuses, because it cannot tell an evicted original from a deleted one.
+  - An evicted original on a cell with no edge credential (a retained store) fails the plan with `EXPORT_MEDIA_UNREACHABLE`.
+  - A companion that it cannot read is still copied as a member. The plan counts it as unreadable, and the export completes as partial with that count in its report. It never drops the count.
+  - It reports numbers only: member count and bytes, evicted count and bytes, the planned archive bytes and the unreadable count.
+- **The hold ends at the pause report.** cellctl releases the hold when the pause succeeds, and the runtime starts again. The remaining steps run without a hold, so backups, upgrades and restarts go on beside them.
+- **Pack.** The pack Job mounts only the staging claim, at `/data`, so state paths that follow the vault path resolve. It holds the media key bundle and the edge credential, and its only egress is the media edge's ClusterIP and port, with no DNS.
+  - It hashes each staged member, checks the staged set against the plan, and fetches each evicted original by its version ID through the edge. It decrypts the stream and writes it into the archive. Its size and SHA-256 must equal the companion's.
+  - A transport failure during a read restarts the read from the first byte. The pack checks that the re-read prefix has the digest of the bytes already written, and continues after them. A mismatch, an absent version or an edge that stays down fails the export.
+  - It writes the archive into a spool on staging, as numbered parts of at most 1 GiB. It holds at most two parts on staging, the one that it writes included. It ends with an end record that holds the archive size and SHA-256, or a failure record with its code.
+- **Upload.** The upload Job mounts only the staging claim, holds no media key, and keeps today's egress (TCP 443 and DNS). It sends each part in order to its presigned part URL, deletes it, and reports the parts as today. cellctl completes and verifies the upload as today.
+- **Staging.** The claim uses the cell's own storage class only when that class deletes its volumes on release. It never uses the legacy class that retains them. Its size is the cell's last measured used bytes plus 10% plus 2 GiB for the spool, in whole GiB. Hetzner's 10 GiB minimum volume covers most cells. cellctl deletes the claim, the Jobs and the multipart upload when the export ends, fails or is interrupted.
+- **The short pause.** The pause has its own deadline. Its pod must run within 2 minutes, and then copy at least a configured floor rate over the used bytes. On a miss cellctl stops the Job, releases the hold and fails the export with `EXPORT_FAILED` and a staging diagnostic. It does not retry and does not fall back to a long hold; the owner retries. The pause length is the claim's create and attach time plus the copy time. The rehearsal measures both on TopoLVM and on Hetzner (task 5.5.9).
+- **Limits from the plan.** The archive is bounded by the planned bytes, not by the cell size. cellctl sizes the parts, the part count (at most 1000, which bounds an archive near 1 TiB), the byte limit and the deadline from them. The deadline covers the pack, the upload and the verification. Above the bound the plan refuses with `EXPORT_TOO_LARGE`. The per-file limit becomes the planned bound too, so an evicted recording above 2 GiB exports.
+- **Image.** The pack and the upload run the image digest that the pause ran.
+- **Capacity.** Each node admits one concurrent export: one attach slot on Hetzner, the staging bytes of one export on TopoLVM. The number is a value in the one limits source. A second export on that node waits, and its row says that it waits.
+- **Quota.** The cell's quota admits the staging claim, the pack and upload pods and their requests. On local storage it admits four pods and one transition slot, and the requests of three Jobs beside the runtime: backup, pack and upload.
+- **Placement on Hetzner.** The pack has a required affinity to the upload pod, so the one attachable staging volume serves both on one node. cellctl creates the upload Job first.
+- **Purge.** The pack reads a version by its ID even after collection hid it (`condemned`), until the lifecycle rule deletes it N days later. So `collect-released-media` requires a grace period N longer than the longest export deadline. No protection row is written for an export. If the sandbox check of `collect-released-media` task 1.1 shows that a hidden version does not read by its ID through the edge, protection rows replace this rule.
+
+The alternatives were a long hold over the whole export (it breaks the short pause), staging whole trees (it copies evicted bytes that are not on the volume) and protection rows written into the live ledger (a second mechanism for what the grace period already covers).
 
 ### D9. Deletion
 
@@ -653,7 +677,7 @@ Each question below names what settles it.
 
 - **Eviction target, margin and minimum idle age.** Settled by two to four weeks of hydration records on the canary cell.
 - **Edge integration:** the custom service is selected above. Task 2.1 still measures 1 GB hydration; sandbox provider checks verify exact-version recovery after lost replies.
-- **Export of more media than the export staging volume can hold.** This covers staging, part limits and deadlines; Cloud export today sizes its total from the cell. It is settled with the owners of `add-cloud-owner-export` and gates the fleet switch (D11).
+- **Export of more media than the export staging volume can hold.** Settled by the amendment of 2026-11-08 to D8: staging holds the volume's members and a two-part spool, and evicted originals stream from the edge into the archive. The rehearsal (task 5.5.9) still measures the pause on TopoLVM and Hetzner.
 - **Direct presigned upload to the store for files above the 2 GiB upload-session limit.** Settled by the first such file.
 - **Unbound binaries.** A file that was neither preserved nor matched by the extraction registry has no sidecar and stays on the volume. Whether discovery should give large unbound files a sidecar is settled by their byte share in canary vaults.
 - **The archive member pool.** It stores content-addressed members in the vault. Whether it is in scope is settled by its byte share.

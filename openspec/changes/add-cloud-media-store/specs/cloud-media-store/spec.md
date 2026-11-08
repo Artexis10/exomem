@@ -316,6 +316,11 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 - **WHEN** the export's upload step, which has public egress, is rendered
 - **THEN** it mounts no media key bundle
 
+#### Scenario: The export pause step is inspected
+
+- **WHEN** the export's pause step, which copies under the hold, is rendered
+- **THEN** it mounts no media key bundle and no edge credential, and it has no egress
+
 ### Requirement: A media edge is the only path between cells and the media bucket
 
 A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else, until `collect-released-media` adds `condemn` for a collector credential. It SHALL NOT send a list or delete request, and SHALL send a hide only for `condemn`, although its key's write capability permits any hide.
