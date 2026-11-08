@@ -133,28 +133,17 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
-    rel = path.strip().replace("\\", "/").lstrip("/")
-    if privacy_log.is_reserved_hosted_vault_path(rel):
+    if privacy_log.is_reserved_hosted_vault_path(path.strip().replace("\\", "/").lstrip("/")):
         raise GetError(code="INVALID_PATH", reason="path is reserved by hosted runtime")
-    # Only auto-append .md if the path has NO extension. Previously this
-    # appended unconditionally, which made e.g. `foo.meta.json` resolve to
-    # `foo.meta.json.md` and 404 — surfaced when trying to inspect trash
-    # sidecars via `get`.
-    rel = missing_path_for(rel)
-    missing_path = rel
+    named = spellings(path)
+    rel = missing_path = named[0]
 
     with call_spans.span("read.prepare.resolve_path"):
-        candidate = vault_root / rel
-
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if not candidate.exists() and not rel.startswith(kb_prefix()):
-            kb_rel = kb_prefix() + rel
-            kb_candidate = vault_root / kb_rel
-            if kb_candidate.exists():
-                candidate = kb_candidate
-                rel = kb_rel
+        if len(named) > 1 and not (vault_root / rel).exists() and (vault_root / named[1]).exists():
+            rel = named[1]
 
         try:
             resolution = resolve_under_vault(vault_root, rel, return_details=True)
@@ -246,6 +235,15 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         raw=snapshot.data,
         mtime=snapshot.mtime,
     )
+
+
+def spellings(path: str) -> tuple[str, ...]:
+    """The vault-relative paths a direct read of `path` names: as written, then under Knowledge Base/.
+
+    Only auto-append .md if the path has NO extension (`missing_path_for`).
+    """
+    rel = missing_path_for(path.strip().replace("\\", "/").lstrip("/"))
+    return (rel,) if rel.startswith(kb_prefix()) else (rel, kb_prefix() + rel)
 
 
 def missing_path_for(path: str) -> str:

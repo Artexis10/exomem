@@ -13,7 +13,7 @@ from test_collection_store_service import (
     call,
     offline_create,
 )
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import CID, manifest_path, manifest_text
 
 from exomem import writer_lease
@@ -121,7 +121,7 @@ def test_a_released_store_runs_every_tick_without_opening_the_store_or_taking_th
     with monkeypatch.context() as held:
         # A rollup that is still building is the backfill the tick owes; hold the tick while it is declared.
         held.setattr(runtime.StoreServer, "_backfill_tick", lambda self: runtime.IMPORT_IDLE_SECONDS)
-        text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
+        text = sqlite_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
                             .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
         call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Lever"),
              manifest_text=text, why="a collection with rows to roll up")

@@ -66,7 +66,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The description on the adoption envelope's `key` adds 59 B to capture_source and to
 # preserve_artifacts, so an agent gives each hand-over its own key: capture_source measures 3,395 B
 # and its ceiling rounds to 3,400 B. The complete local wire measures 168,705 B, so the budget rises 150 B.
-TOTAL_BUDGET = 168_750
+# The `cursor` on the collections-store kind of check_memory pages its collection inventory, and the
+# collections-cutover kind previews the move of every collection to SQLite-only storage: check_memory
+# measures 6,981 B and its ceiling rounds to 7,000 B. The complete local wire measures 168,577 B, so the
+# budget rises 150 B.
+# A query that names one row by `item_key` or `plan_id` returns that row's body, which after the SQLite-only
+# conversion has no item file: read_records measures 3,337 B, read_plans 2,757 B and change_plans 3,360 B,
+# so their ceilings round to 3,350 B, 2,800 B and 3,400 B. The complete local wire measures 168,761 B, so
+# the budget rises 200 B.
+# With both sets of changes above, the complete local wire measures 169,044 B, so the budget is 169,050 B.
+TOTAL_BUDGET = 169_050
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -81,12 +90,12 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_governance": 4650,
     "change_media": 1600,
     "change_observations": 6200,
-    "change_plans": 3350,
+    "change_plans": 3400,
     "change_records": 5550,
     "change_schema": 9450,
     "change_session_access": 1700,
     "change_settings": 1500,
-    "check_memory": 6850,
+    "check_memory": 7000,
     "configure_memory": 1400,
     "connect_memory": 4500,
     "coordination_status": 500,
@@ -111,8 +120,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_governance": 2250,
     "read_media": 1750,
     "read_memory": 3450,
-    "read_plans": 2700,
-    "read_records": 3300,
+    "read_plans": 2800,
+    "read_records": 3350,
     "read_review": 7550,
     "read_schema": 16700,
     "recall_context": 2950,

@@ -851,8 +851,7 @@ def route_with_proof(command, vault_root, arguments):
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
-    from ..cli_ops import OpError
-    from .preview import UNSERVED, bound_writer
+    from .preview import bound_writer
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
@@ -867,7 +866,7 @@ def route_with_proof(command, vault_root, arguments):
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
     proof = ownership.current(root)
-    summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
+    summary = arguments.get("action") == "create" and summary_create(root, arguments)
     if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
@@ -875,10 +874,7 @@ def route_with_proof(command, vault_root, arguments):
         connection.load_store_libraries()
     if summary:
         if proof.marker is None:
-            from . import admission, capability
-
-            capability.require_records_summary(root)
-            raise admission.enrollment_required()
+            refuse_unserved_create(root, None)
     elif progress_review or selector is None and (
         arguments.get("action") == "inspect"
         or (command == "record_memory" and arguments.get("action") == "describe")
@@ -892,10 +888,26 @@ def route_with_proof(command, vault_root, arguments):
     if server is None and not summary:
         return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
-        raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
-        )
+        refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
+
+
+def refuse_unserved_create(root, marker):
+    """Refuse a NEW summary collection's create that no serving store thread runs.
+
+    A vault without a store needs the owner's offline enrolment; a vault with one needs
+    the service that serves it.
+    """
+    from ..cli_ops import OpError
+    from . import admission, capability
+    from .preview import UNSERVED
+
+    if marker is None:
+        capability.require_records_summary(root)
+        raise admission.enrollment_required()
+    raise OpError(
+        "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
+    )
 
 
 def _curation_route(command, root, arguments):
@@ -1002,12 +1014,13 @@ def summary_create(root, arguments):
         return False
 
 
-def served_create(vault_root, arguments):
+def served_create(vault_root, arguments, facade_profile=None):
     """Create a NEW summary collection on the serving session, or None for any other manifest.
 
     It runs on the store thread under the request principal, through the producer's own
     create (``admission.create_new``), which a vault already enrolled in this store
     completes with writer authority. Enrolling a vault is the owner's offline step.
+    ``facade_profile`` is the calling tool's profile, which the create requires and scaffolds.
     """
     from .. import structured_collections as collections
     from .. import writer_lease
@@ -1030,7 +1043,11 @@ def served_create(vault_root, arguments):
         result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
-            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
+            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
+            facade_profile=facade_profile)
+        if (receipt := result.get("receipt")) and receipt.get("warnings"):
+            # The create's own warnings lead, where the tool result shows them.
+            result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}
         if result.get("status") == "pending":
             # Committed, but its replica publication did not finish: the store stays the
             # create's until this thread's create tick resumes it, so this request ends

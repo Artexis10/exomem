@@ -98,6 +98,9 @@ def _unexportable(manifest, imported, rendered):
     """
     if imported is None:
         return _blocker(STORE_NATIVE, "the store created this collection, so file mode never held it")
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        # A converted collection's item files went to the conversion archive; its rows live only in the store.
+        return _blocker(STORE_NATIVE, "this collection keeps its rows only in the store, so file mode cannot hold it")
     # A log's bound is the adapter's own: _render_log parses the rendered log through it.
     if rendered is None or manifest.storage.strategy == "markdown-log":
         return None
@@ -247,8 +250,9 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
     row = {"collection_id": cid, "path": manifest_path, "layout": layout,
            "rows": conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]}
     rendered, targets, resolved = None, {}, {}
+    in_files = manifest.storage.strategy != collections.SQLITE_STORAGE
     try:
-        if imported is not None and native:
+        if imported is not None and native and in_files:
             rendered = {"manifest": text.encode("utf-8"), "sources": (
                 _render_items(root, conn, manifest, cid) if layout == "markdown-items"
                 else _render_log(root, conn, manifest, cid, frame_json)), "held": _held(conn, manifest, cid)}
@@ -259,7 +263,7 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
                 if path not in held and sha is not None}
             targets = {manifest_path: rendered["manifest"], **dict(rendered["sources"]), **dict(rendered["held"]),
                        **dict.fromkeys(resolved)}
-        elif imported is not None:
+        elif imported is not None and in_files:
             # Projection stamping changes bytes, never the unwritten collection's rollback promise.
             targets = {manifest_path: text.encode("utf-8"), **legacy_originals.export_sources(root, conn, cid),
                        **{path: raw for path, raw in conn.execute(
@@ -933,7 +937,9 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                         elif data is not None and (data == target or path == planned["manifest_path"]
                                                    and data == checkpointed):
                             views.append((_sha(data), path))
-                    audit_history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
+                    audit_history = records._audit_events(
+                        root, semantic_profile=manifest.semantic_profile, collection_id=cid,
+                        transition_ids=(transition,))
                     if planned["checkpoint"] and audit_history.parsed and any(
                             event["transition_id"] == transition for event in audit_history.events):
                         # The log holds this checkpoint, so the legacy chain ends there. A checkpoint cut

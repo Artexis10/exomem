@@ -13,7 +13,7 @@ from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import governance
 from exomem.collection_store.preview import preview_store
-from exomem.governance import membership
+from exomem.governance import connector_boundary, membership
 from exomem.governance.principal import request_scope
 from exomem.record_memory import record_memory
 
@@ -77,6 +77,33 @@ def test_warm_partial_refusal_does_not_rebuild_or_evaluate_the_collection(store,
         with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
             store.append_record(CID, item={"title": "New"}, item_key=OTHER, why="capture")
     assert evaluated == []
+
+
+def test_a_row_withheld_while_its_connector_input_cannot_be_read_is_released_once_it_reads(
+        store, tmp_path, monkeypatch):
+    """Defect: the release cache keeps a denial that an unreadable connector input decided, so once
+    the input reads again the writer still gets COLLECTION_NOT_FOUND until something else changes."""
+    create(store)
+    store.append_record(CID, item={"title": "Seen"}, item_key=KEY, why="seed")
+    writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                          capture_paths=["Knowledge Base/Records"])("external")
+    readable = connector_boundary.capture_membership
+    failed = []
+
+    def unreadable_once(root, path, compiled):
+        # One read of the row's capture membership fails, as while the host rewrites its boundary file.
+        if path != manifest_path() and not failed:
+            failed.append(path)
+            raise connector_boundary.BoundaryUnavailable()
+        return readable(root, path, compiled)
+
+    monkeypatch.setattr(connector_boundary, "capture_membership", unreadable_once)
+    with request_scope(writer):
+        with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
+            store.append_record(CID, item={"title": "Refused"}, item_key=OTHER, why="capture")
+        store.append_record(CID, item={"title": "Admitted"}, item_key=OTHER, why="capture")
+    assert failed
+    assert store.connection.execute("SELECT COUNT(*) FROM items WHERE item_key=?", (OTHER,)).fetchone() == (1,)
 
 
 def test_manifest_bindings_return_fresh_heads_and_revised_contract(store):

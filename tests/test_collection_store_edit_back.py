@@ -1466,19 +1466,22 @@ def test_an_unreleased_route_takes_no_view_edit(quick_service, monkeypatch, rele
 
 
 def test_an_owner_edit_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(quick_service, monkeypatch):
-    """Defect: under the edit-back release, an owner who removes view_mode from an empty summary
-    collection's manifest view turns it into an items-mode store collection; only the route refused."""
+    """Defect: under the edit-back release, an owner who edits an empty summary collection's
+    manifest view back to Markdown items, without view_mode, turns it into an items-mode store
+    collection; only the route refused."""
     from test_collection_store_service import call
-    from test_collection_store_summary import summary_text
+    from test_collection_store_summary import sqlite_text
 
     root, empty = quick_service.root, "88888888-8888-4888-8888-888888888888"
     path = manifest_path().replace("Work", "Empty")
     monkeypatch.setattr(capability, "RELEASED", frozenset({capability.RECORDS_SUMMARY_V1, VIEWS}))
     call(root, "record_memory", action="create", manifest_path=path, why="empty",
-         manifest_text=summary_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty")))
+         manifest_text=sqlite_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty")))
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM projection_state WHERE state!='current'") == [(0,)])
     view = root / path
-    view.write_bytes(view.read_bytes().replace(b"view_mode: summary\n", b""))
+    # A sqlite collection's view mode is summary by default, so only the strategy edit can reach items mode.
+    view.write_bytes(view.read_bytes().replace(b"view_mode: summary\n", b"")
+                     .replace(b"strategy: sqlite\n", b"strategy: markdown-items\n"))
     until(lambda: store_rows(root, "SELECT COUNT(*) FROM held_candidates WHERE collection_id=?", (empty,)) == [(1,)])
     assert store_rows(root, "SELECT view_mode FROM collections WHERE collection_id=?", (empty,)) == [("summary",)]
     assert store_rows(root, "SELECT COUNT(*) FROM txns WHERE operation='view_edit'") == [(0,)]

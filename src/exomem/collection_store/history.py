@@ -381,10 +381,7 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
     from . import governance
 
     subject = next(iter(governance.iter_subjects(conn, cid, writer._operation.logical_vault_id, row_key=item_key)), None)
-    if subject is None or writer._operation.decision(subject).level < 6:
-        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-    plan = writer._operation.field_plan(manifest)
-    if not plan.owner and plan.whole_fields != set(manifest.schema.fields):
+    if not writer._operation.reads_whole_row(cid, subject):
         raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
     item = writer._item(cid, item_key)
     assessment = audit(writer, writer._collection_row(manifest))

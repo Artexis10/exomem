@@ -406,10 +406,12 @@ def test_note_type_usage_is_unavailable_without_a_graph(vault: Path) -> None:
 
 def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
     from exomem import collection_profiles, records
+    from exomem.collection_store import summary
 
     # Every `type:` value a product writer emits, and an untyped page. Writers
     # that hold their type in a constant are read from it, so a new collection
-    # profile or held-record type fails here until the pack defines it.
+    # profile, held-record type or generated collection page fails here until
+    # the pack defines it.
     product_types = (
         "research-note",
         "insight",
@@ -421,7 +423,8 @@ def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
         "source",
         "evidence",
         "collection",
-        "collection-summary",
+        summary.SUMMARY_PAGE_TYPE,
+        summary.SAVED_VIEW_PAGE_TYPE,
         "dataset",
         "adoption-manifest",
         "adoption-run-manifest",

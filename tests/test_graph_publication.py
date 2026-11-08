@@ -45,7 +45,7 @@ def graph_db(tmp_path: Path):
     with closing(sqlite3.connect(path)) as writer:
         writer.execute("PRAGMA journal_mode=WAL")
         index = object.__new__(epistemic_graph.EpistemicGraphIndex)
-        index._create_graph_schema(writer)
+        epistemic_graph.create_row_schema(writer, publication=True)
         target = "notes/target.md"
         target_key = epistemic_graph._file_key(target)
         _put(writer, "graph_nodes", node_key=target_key, path=target, text="published")

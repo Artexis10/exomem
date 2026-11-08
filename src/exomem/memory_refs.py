@@ -1330,7 +1330,7 @@ def _pages_without_id(
 
     Unreadable, malformed, protected and store-owned candidates go to `skipped`.
     """
-    from . import access
+    from . import access, recall_policy
     from .collection_store import ownership
 
     kb = Path(vault_root) / kb_dirname()
@@ -1359,6 +1359,10 @@ def _pages_without_id(
             reason = access.writable_reason(vault_root, rel)
             if reason is None and ownership.owned(vault_root, rel) is not None:
                 reason = "canonical collection view has store authority"
+            # The records writer owns Records-layer bytes under its audit chain; a stamp there
+            # would change audited items behind that writer.
+            if reason is None and recall_policy.is_structured_only_path(vault_root, rel):
+                reason = "records writer owns this file under its audit chain"
             if reason is not None:
                 skipped.append({"path": rel, "reason": reason})
                 continue

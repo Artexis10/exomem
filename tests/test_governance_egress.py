@@ -3122,6 +3122,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "collections-store-adopt-local": True,
             # Preview unless `apply=true`, which only the offline owner runs.
             "collections-store-export": True,
+            # Preview only: the owner applies its plan_id with the CLI, offline.
+            "collections-cutover": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}

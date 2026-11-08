@@ -27,7 +27,7 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gat
 
 Hosted candidate tasks 4.1–4.3 and 4.5 are superseded, not current release obligations.
 
-- [ ] 4.4 Supply clean supported-client traces for direct adoption, sibling no-write, honest no-handle handoff, and receipt-linked delivery.
+- [x] 4.4 Supply clean supported-client traces for direct adoption, sibling no-write, honest no-handle handoff, and receipt-linked delivery. Evidence: the four cases (A1 to A4) passed in the real-model client-trace acceptance of 2026-11-08 (16 sessions on a75947aaa, plus the advisory-variant rerun on the #2553 head).
 
 ## 5. Mutants and verification
 
@@ -38,4 +38,4 @@ Hosted candidate tasks 4.1–4.3 and 4.5 are superseded, not current release obl
 
 ## 6. OpenSpec closure
 
-- [ ] 6.1 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
+- [x] 6.1 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive. Evidence: archived third of the four with `openspec archive`, with strict validation before and after.

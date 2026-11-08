@@ -708,8 +708,8 @@ def test_the_cloud_ingress_sets_the_trusted_ingress_source_header_the_gateway_ex
     assert middleware["metadata"]["namespace"] == EDGE_NAMESPACE
     assert middleware["spec"]["headers"]["customRequestHeaders"] == {header: value}
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
-    (rule,) = route["spec"]["routes"]
-    assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+    for rule in route["spec"]["routes"]:
+        assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}], rule["match"]
 
 
 # --- harden-exomem-cloud-operator-access: edge isolation (D1-D3) ---
@@ -823,8 +823,11 @@ def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
     assert external["metadata"]["name"] == "exomem-cloud-gateway"
     assert external["spec"]["externalName"] == "exomem-cloud-gateway.exomem-cloud.svc.cluster.local"
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
-    (rule,) = route["spec"]["routes"]
-    assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}]
+    for rule in route["spec"]["routes"]:
+        assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}], rule["match"]
+    # Without this route, clients that show the server's site icon fall back to the parent domain's.
+    assert any("Path(`/favicon.ico`)" in rule["match"] and "Method(`HEAD`)" in rule["match"]
+               for rule in route["spec"]["routes"])
 
     # The edge namespace holds no Secret but the certificate cert-manager
     # writes there at runtime: the chart itself renders none, and no issuer.

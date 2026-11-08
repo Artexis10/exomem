@@ -53,7 +53,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | change_schema | save, restore, infer-and-save, refresh, save-roles, save-conventions, save-relations, save-entity-types | schema_memory |
 | change_session_access | revoke, declare | govern_memory |
 | change_settings | set, clear | configure_memory |
-| check_memory | audit, collections-store, fix, backfill-ids, reconcile, maintenance-job, structured-files, tag-variants, collections-store-adopt-local, collections-store-export, curation-work-item, curation-preview, curation-status | maintain_memory |
+| check_memory | audit, collections-store, collections-cutover, fix, backfill-ids, reconcile, maintenance-job, structured-files, tag-variants, collections-store-adopt-local, collections-store-export, curation-work-item, curation-preview, curation-status | maintain_memory |
 | create_note | Direct inputs | remember |
 | edit_note | Direct inputs | edit_memory |
 | grant_session_access | grant | govern_memory |

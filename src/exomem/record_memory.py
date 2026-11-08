@@ -131,7 +131,8 @@ def record_memory(
         item: Item values for append.
         item_key: The item's internal UUID identity, required for update. Omit it
             on append and identity derives from the collection's declared natural
-            key; supplying a natural-key value here refuses.
+            key; supplying a natural-key value here refuses. On query it selects
+            that one row and returns its Markdown body as `body`.
         expected_container_hash: Exact current container hash for append or update.
         body: Optional Markdown item body for append.
         delivery: Optional receipt-gated artifact-delivery validation envelope
@@ -206,7 +207,7 @@ def record_memory(
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
-        if action == "import" or query is not None:
+        if action == "import" or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
             # below never confirms that a collection exists.
@@ -216,11 +217,18 @@ def record_memory(
                 raise CollectionError(
                     "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
                 )
+            if query is None:
+                raise CollectionError(
+                    "QUERY_UNAVAILABLE", "a query with item_key reads a store-routed collection; this one keeps "
+                    "each body in its item file, so read that file with read_memory"
+                )
             raise CollectionError(
                 "QUERY_UNAVAILABLE", "a v1 query runs only on a store-routed Records collection"
             )
         if action == "describe":
-            return parse_manifest_contract()
+            from .collection_store import ownership
+
+            return parse_manifest_contract(store_vault=not ownership.file_only(vault_root))
         if action == "validate":
             assert manifest_text is not None
             if collection is not None:
@@ -248,6 +256,7 @@ def record_memory(
                 root, root / manifest_path, manifest_text.encode("utf-8")
             )
             record_governance.require_records_profile(manifest)
+            records.require_file_create(root, manifest)
             return records.create_collection(
                 vault_root,
                 manifest_path,
@@ -407,14 +416,18 @@ def record_memory(
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
 
 
-def parse_manifest_contract(*, store_mode: bool = False) -> dict[str, Any]:
-    """Project the parser-owned collection contract without vault content."""
+def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = False) -> dict[str, Any]:
+    """Project the parser-owned collection contract without vault content.
+
+    A bound store (``store_mode``) or a vault with an enrolled store (``store_vault``) creates
+    only sqlite collections, so its examples declare sqlite.
+    """
     from .collection_store.connection import UNSUPPORTED_WRITERS
     from .structured_collections import manifest_authoring_contract
 
     # A served vault answers describe in file mode too, so both modes carry the store's writer rule.
     return {
-        **manifest_authoring_contract(),
+        **manifest_authoring_contract(store=store_mode or store_vault),
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
         "writer_lease": UNSUPPORTED_WRITERS,
     }
@@ -638,6 +651,9 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))
     if action == "query" and values["expand_children"] is True and values["expand_child"] is not None:
         _invalid_arguments("expand_children and expand_child are mutually exclusive")
+    if action == "query" and values["item_key"] is not None and supplied - {"collection", "item_key"}:
+        _invalid_arguments("a query with item_key reads that one row and its body, so it takes only collection; "
+                           "remove " + ", ".join(sorted(supplied - {"collection", "item_key"})))
 
 
 def refuse_arguments(detail: str) -> Never:

@@ -516,6 +516,23 @@ def collection_values(conn, collection_id: str) -> list[tuple[str, dict[str, Any
 _HYDRATE_BATCH = 500
 
 
+def keyed_values(conn, collection_id: str, keys) -> list[tuple[str, dict[str, Any]]]:
+    """The key and current values of each named item that exists, read through the item-key index."""
+    keys = list(keys)
+    layout = None if collection_encoding(conn, collection_id) == JSON_V1 else require_layout(conn, collection_id)
+    found = []
+    for offset in range(0, len(keys), _HYDRATE_BATCH):
+        batch = keys[offset:offset + _HYDRATE_BATCH]
+        marks = ",".join("?" for _ in batch)
+        if layout is None:
+            found.extend((key, json.loads(raw)) for key, raw in conn.execute(
+                f"SELECT item_key, values_json FROM items WHERE collection_id = ? AND item_key IN ({marks})",
+                (collection_id, *batch)))
+        else:
+            found.extend((key, values) for _, key, values in _current(conn, layout, f"i.item_key IN ({marks})", batch))
+    return found
+
+
 def hydrate(conn, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Give ``items`` row dicts their canonical ``values_json`` text without storing it.
 

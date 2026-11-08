@@ -118,6 +118,15 @@ def _parsed_marker(root, _kb_dirname, raw):
     return marker
 
 
+def store_layout(strategy):
+    """The store's region layout for a manifest's storage strategy.
+
+    A sqlite collection's source is the folder of its summary pages, the folder region that
+    markdown-items records, so the store schema and the marker format keep their two layouts.
+    """
+    return "markdown-items" if strategy == collections.SQLITE_STORAGE else strategy
+
+
 def marker_entry(collection_id, manifest_path, store_id, semantic_profile, source_path=None, layout=None):
     """One marker entry routing a collection to the store, with the profile it was created with.
 
@@ -126,7 +135,7 @@ def marker_entry(collection_id, manifest_path, store_id, semantic_profile, sourc
     """
     return {"collection_id": collection_id, "manifest_path": manifest_path, "authority": "store",
             "store_id": store_id, "semantic_profile": semantic_profile,
-            **({"source_path": source_path, "layout": layout} if source_path is not None else {})}
+            **({"source_path": source_path, "layout": store_layout(layout)} if source_path is not None else {})}
 
 
 def _owned_regions(entry):
@@ -148,7 +157,7 @@ def _overlap(entry, other):
 def file_ownership(manifest):
     """The namespace a file collection owns, in the shape a marker entry records it."""
     return {"manifest_path": manifest.path, "source_path": manifest.storage.source,
-            "layout": manifest.storage.strategy}
+            "layout": store_layout(manifest.storage.strategy)}
 
 
 def require_new_file_ownership(root, marker, entry):
@@ -322,7 +331,7 @@ def require_selected(conn, marker, entry, *, root):
     if sid is None or sid[0] != marker["store_id"] or row is None or row[0] != entry["manifest_path"]:
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "store differs from authority marker")
     manifest = collections.parse_manifest_bytes(root, row[0], row[1].encode())
-    if (row[2:] != (manifest.storage.source, manifest.storage.strategy) or
+    if (row[2:] != (manifest.storage.source, store_layout(manifest.storage.strategy)) or
             marker["version"] == 2 and row[2:] != (entry["source_path"], entry["layout"])):
         raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "marker ownership differs from canonical storage")
     if entry.get("semantic_profile") is not None:

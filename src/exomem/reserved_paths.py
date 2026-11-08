@@ -673,6 +673,15 @@ _REGISTRY = (
         patterns=(_COLLECTION_EXPORTED_RE,),
     ),
     InternalStateDescriptor(
+        "collection-archive",
+        "collection_store.conversion",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The item files that a summary conversion retired from the vault, each copy verified,
+        # beside the store that now holds their rows, and the collections cutover's run records
+        # under ``cutover/``. Canonical evidence: no reset touches it.
+        trees=(".collection-archive",),
+    ),
+    InternalStateDescriptor(
         "collection-replica",
         "collection_store.replica",
         StatePlacement.VAULT_CANONICAL,
