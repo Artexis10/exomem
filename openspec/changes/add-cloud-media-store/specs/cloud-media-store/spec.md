@@ -508,9 +508,9 @@ When a cell row is set to `deleted`, cellctl SHALL retire its media content keys
 Live-copy absence and retention evidence SHALL continue to govern the key-destruction claim.
 Cleanup MAY retain only the non-content credentials it needs.
 
-cellctl SHALL keep a deleted cell's observed state at `deleting` while the previously published active set lists the cell, or the cell has a `media_store` record in its custody observation, or cellctl cannot read the previously published active set, until the edge's exact-set evidence shows a set that omits the cell.
-cellctl SHALL record the time of the first wait in that `media_store` record, because the next pass publishes a set that no longer lists the cell. When the evidence matches, cellctl SHALL persist the revoked generation, the set digest and the observation time in the same record. The record SHALL survive a restart.
-A cell that a readable active set never listed SHALL NOT wait.
+cellctl SHALL keep a deleted cell's observed state at `deleting` while the cell has a `media_store` record in its custody observation that holds no revoked generation, until the edge's exact-set evidence shows a set that omits the cell.
+The database statement that retires a deleted cell's media key bundle SHALL also record the revocation request time in that `media_store` record, because the same pass publishes a set that no longer lists the cell. A cell receives an edge credential only after its bundle exists, so the record exists for every cell that the edge may admit, even when the rest of that pass fails. When the evidence matches, cellctl SHALL persist the revoked generation, the set digest and the observation time in the same record. The record SHALL survive a restart.
+A cell that never held a media key bundle or a `media_store` record SHALL NOT wait.
 Then cellctl SHALL report the cell `deleted` and the existing cleanup alert SHALL fire.
 cellctl SHALL hold no `deleteFiles` on the media bucket and SHALL NOT delete media objects.
 An unreadable, older or different edge set MUST NOT count as observed.
@@ -534,8 +534,13 @@ A dry run that finds no version and no unfinished file SHALL be the proof of abs
 
 #### Scenario: The edge is unreadable during deletion
 
-- **WHEN** a cell that an active set listed is being deleted and the edge's evidence is unreadable, behind or from a different set
+- **WHEN** a cell that held a media key bundle is being deleted and the edge's evidence is unreadable, behind or from a different set
 - **THEN** the row stays `deleting` and cellctl retries the check
+
+#### Scenario: The deletion pass fails after it publishes the set
+
+- **WHEN** a pass retires a deleted cell's media key bundle and publishes a set without the cell, and then fails before it reconciles that cell
+- **THEN** the next pass still keeps the cell `deleting` until the edge reports the exact set that omits it
 
 #### Scenario: Cellctl restarts after the revocation was observed
 

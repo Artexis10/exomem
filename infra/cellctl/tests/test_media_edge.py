@@ -926,24 +926,46 @@ async def test_a_restarted_cellctl_keeps_a_deleted_cell_waiting_for_the_edge(
         await fleet.close()
 
 
-async def test_a_deleted_cell_waits_when_the_published_set_that_may_have_listed_it_is_lost(
+async def test_a_deleted_cell_waits_for_the_edge_when_its_own_pass_fails_after_the_set_drops_it(
     cell_db, delivered: list[tuple[str, bool]], staging,
 ) -> None:
-    # An unreadable set does not show the cell was absent from it.
+    # The pass publishes a set without the cell before it reconciles the cell. If that row fails there, the
+    # next pass sees a set without the cell, so the row must already say that the edge may have admitted it.
     fleet = await _fleet(cell_db, CANARY)
     _alerting(fleet)
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     try:
         await fleet.run()
-        fleet.cluster.active_set = None
-        await _delete(fleet, CANARY, NOW + timedelta(minutes=5))
+        fleet.cluster.reported = fleet.cluster.serving()
+        await fleet.run(NOW + timedelta(minutes=1))
+        listing_the_cell = fleet.cluster.reported
+        await app.execute("UPDATE exomem_cloud_cells SET desired_state='deleted' WHERE cell_id=$1", CANARY)
+        fleet.cluster.observations[CANARY] = ClusterObservation(namespace_exists=True, namespace_cell_label=CANARY)
+        working = fleet.cluster.delete_cell_secrets
+
+        def away_once(namespace: str, *, cell_id: str) -> bool:
+            fleet.cluster.delete_cell_secrets = working
+            raise RuntimeError("the API server is away")
+
+        fleet.cluster.delete_cell_secrets = away_once
+        await fleet.run(NOW + timedelta(minutes=5))
+        assert CANARY not in fleet.cluster.published()["cells"]
+
         await fleet.run(NOW + timedelta(minutes=6))
+        assert namespace_name(CANARY) in fleet.cluster.deleted_namespaces
+        fleet.cluster.observations[CANARY] = ClusterObservation()
+        for minute in (7, 8):
+            await fleet.run(NOW + timedelta(minutes=minute))
+        assert fleet.cluster.reported == listing_the_cell
         assert ((await fleet.rows())[CANARY].observed_state, delivered) == ("deleting", [])
 
         fleet.cluster.reported = fleet.cluster.serving()
-        await fleet.run(NOW + timedelta(minutes=7))
-        await fleet.run(NOW + timedelta(minutes=8))
+        await fleet.run(NOW + timedelta(minutes=9))
+        await fleet.run(NOW + timedelta(minutes=10))
         assert (await fleet.rows())[CANARY].observed_state == "deleted"
+        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
     finally:
+        await app.close()
         await fleet.close()
 
 

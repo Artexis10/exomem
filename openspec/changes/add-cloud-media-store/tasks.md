@@ -62,7 +62,8 @@
 - [ ] 4.7 Extend cell deletion (D9, decision 2026-11-06). cellctl retires media content keys under `cloud-cell-key-custody` before any provider work, revokes the cell at the edge, and reports `deleted` only after exact-set evidence that the edge's set omits the cell. The operator's cleanup script deletes the versions. Verify these with cellctl deletion tests using a fake edge and the fake provider, and with the script's tests:
   - the cell stays `deleting` while the edge is unreadable, behind, or holds a different set, and becomes `deleted` on an exact match, with the existing cleanup alert;
   - the recorded `revoked_generation`, `set_sha256` and `observed_at` survive a restart;
-  - a cell that no set ever listed does not wait;
+  - a cell that never held a media key bundle does not wait;
+  - a pass that publishes the set without the cell and then fails for that cell still leaves it waiting;
   - content-key retirement is not postponed by an edge or provider outage, and no destruction claim is made;
   - the script's media mode deletes nothing before the 7-day grace from the operator's first dry run, then deletes every version under `cells/<cell>/` and cancels unfinished large files, and a final dry run shows zero;
   - no upload lands after revocation.
