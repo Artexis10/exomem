@@ -417,7 +417,9 @@ def transfer_step(row: CellRow, item: ExportRow, jobs: dict[str, ExportJob], *, 
     if now >= transfer_deadline(item, config):
         return end("failed", EXPORT_FAILED, TRANSFER_DEADLINE)
     if item.archive_version_id is not None:
-        return None if verify.present else TransferStep(run=VERIFY)
+        # The removal of staging after the upload repeats in each pass until it lands, so a failed
+        # delete never keeps a claim that the quota counts against the next export.
+        return TransferStep(run=None if verify.present else VERIFY, remove_staging=True)
     if not upload.present:
         return TransferStep(run=UPLOAD)
     if not pack.present:

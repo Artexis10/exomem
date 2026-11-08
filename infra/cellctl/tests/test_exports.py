@@ -410,6 +410,31 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         assert harness.s3.versions == {} and harness.s3.uploads == {}
 
 
+async def test_a_staging_removal_that_failed_after_the_upload_is_repeated(cell_db, monkeypatch):
+    """Defect: one failed delete after the upload keeps the staging claim until the export expires, and
+    the quota of a cell without a local volume admits one staging claim, so the next export cannot stage."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        export_id = await harness.request(CELL)
+        await harness.pack(CELL, export_id, b"PK archive whose staging outlives one delete")
+        removed = ("delete_export_staging", namespace_name(CELL), export_id)
+        attempts = []
+
+        def fail_first_removal(namespace: str, export: str) -> None:
+            attempts.append(export)
+            if len(attempts) == 1:
+                raise ApiException(status=500)
+            harness.cluster.events.append(("delete_export_staging", namespace, export))
+
+        monkeypatch.setattr(harness.cluster, "delete_export_staging", fail_first_removal)
+        await harness.run()  # completes the upload, then the removal fails
+        assert (await harness.export(export_id))["archive_version_id"] and removed not in harness.cluster.events
+
+        await harness.run(NOW + timedelta(seconds=10))
+
+        assert removed in harness.cluster.events
+
+
 async def test_a_stopped_cell_is_exported_without_its_runtime_starting(cell_db, monkeypatch):
     """Defect: exporting a suspended account starts its runtime."""
     async with Harness(cell_db, monkeypatch) as harness:
