@@ -51,8 +51,21 @@ WAIT_POLL_SECONDS = 30
 WAIT_LIMIT_SECONDS = 7200
 LIST_LIMIT = 50
 GIB = 1 << 30
-# Filing a window to its end gives up on a window whose replies move no count this many times in a row.
+# Filing a window to its end gives up on a window whose replies show no movement this many times in a row: no count
+# moved, and the page's position (its number, its phase and the files planned) stayed the same.
 FILING_STALL_CALLS = 5
+# The states of the cell's `file` reply, from the module that builds it.
+WORKING, STOPPED, DONE = adoption_run.FILING_STATES
+# The CLI's own state for a `file` call that the cell refused with an error; no `file` reply has it.
+CALL_ERROR = "error"
+# The cell reconciles a `file` call whose outcome it could not report only under the same call, so the CLI repeats that
+# call: once after an unknown outcome, and after a wait while the acknowledgement is pending.
+_REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"})  # nosemgrep: ep-word-set -- the cell's closed outcome codes.
+_REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
+# The code with which a cell refuses an action that it does not know.
+_UNKNOWN_ACTION = "INVALID_MODE"
+# The code that the CLI gives a tool error, because the transport carries no code of the cell's own.
+_TOOL_ERROR = "TOOL_ERROR"
 
 OFFLOADABLE, RESIDENT, TEXT = media_capacity.OFFLOADABLE, media_capacity.RESIDENT, media_capacity.TEXT
 # D12 order: offloadable artifacts, resident artifacts, then text, each in path order.
@@ -114,8 +127,27 @@ class McpCell(Cell):
         try:
             return await self._call({key: value for key, value in arguments.items() if value is not None})
         except ToolError as error:
-            # A `file` call that runs reports its own failure in its reply; a refusal before that is a cell that lacks the action.
-            raise FilingUnavailable from error
+            # An older cell refuses the unknown action in argument validation, which reaches the client as a tool error.
+            if await self._lacks_file():
+                raise FilingUnavailable from error
+            return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
+
+    async def _lacks_file(self) -> bool:
+        """Whether the cell's published schema lists the kinds of `import_memory`, and `file` is not one of them.
+
+        A schema that cannot be read, or that lists no kinds, proves nothing, so the caller keeps the error as a stop.
+        """
+        try:
+            tools = await self._client.list_tools()
+        except Exception:  # noqa: BLE001 -- a listing that fails says nothing about the action
+            return False
+        kinds: set[str] = set()
+        for tool in tools:
+            operation = ((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}
+            for variant in (operation.get("oneOf") or operation.get("anyOf") or ()) if tool.name == "import_memory" else ():
+                kind = ((variant if isinstance(variant, dict) else {}).get("properties") or {}).get("kind") or {}
+                kinds.update([kind["const"]] if "const" in kind else kind.get("enum") or ())
+        return bool(kinds) and "file" not in kinds
 
 
 @dataclass(frozen=True)
@@ -196,29 +228,53 @@ class Reading:
                       | ({self.bounds_why} if self.bounds is None else set()))
 
 
+def _one_line(text: object) -> str | None:
+    """A cell's reason as one line of bounded length, or None when it gives none."""
+    words = text.split() if isinstance(text, str) else []
+    return " ".join(words)[:400] or None
+
+
 @dataclass(frozen=True)
 class FilingReply:
-    """A `file` reply, as far as the CLI reads it: where filing stands, the counts, and what only the person can do."""
+    """A `file` reply, as far as the CLI reads it: where filing stands, the counts, and what only the person can do.
+
+    `state` is one of the cell's `FILING_STATES`, or `CALL_ERROR` when the cell refused the call. `counts` follow
+    `FILING_COUNTS`. `position` is the page's position as the cell reports it, compared whole to see movement.
+    """
 
     state: str
     continuation: str | None
-    counts: tuple[int, int, int, int]
+    counts: tuple[int, ...]
+    position: str
     code: str | None
+    reason: str | None
     needs: frozenset[str]
+
+    def count(self, name: str) -> int:
+        return self.counts[adoption_run.FILING_COUNTS.index(name)]
+
+    @classmethod
+    def refused(cls, code: str | None, reason: object) -> FilingReply:
+        return cls(CALL_ERROR, None, (), "", code, _one_line(reason), frozenset())
 
     @classmethod
     def of(cls, reply: dict) -> FilingReply:
-        """A reply that does not read as the cell's `file` contract is a cell that does not file in the way this CLI knows."""
+        """Only a refusal of the action itself is an older cell; any other error, or a reply this CLI cannot read, is a stop."""
+        if reply.get("success") is False:
+            error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+            code = safe_code(error.get("code"))
+            if code == _UNKNOWN_ACTION:
+                raise FilingUnavailable
+            return cls.refused(code, error.get("message"))
         progress, stop = reply.get("progress"), reply.get("stop")
-        names = ("filed", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of the cell's `file` reply.
-        # nosemgrep: ep-word-membership -- the closed states of the cell's `file` reply.
-        if reply.get("filing") not in ("working", "stopped", "done") or not isinstance(progress, dict) or any(
-                type(progress.get(name)) is not int for name in names):
-            raise FilingUnavailable
+        if reply.get("filing") not in adoption_run.FILING_STATES or not isinstance(progress, dict) or any(
+                type(progress.get(name)) is not int for name in adoption_run.FILING_COUNTS):
+            return cls.refused("FILING_REPLY_UNREADABLE", "the reply lacks the state or the counts of a file reply")
+        stop = stop if isinstance(stop, dict) else {}
         person = reply.get("person") if isinstance(reply.get("person"), list) else []
         return cls(reply["filing"], reply.get("continuation") if isinstance(reply.get("continuation"), str) else None,
-                   tuple(progress[name] for name in names),
-                   safe_code(stop.get("code")) if isinstance(stop, dict) else None,
+                   tuple(progress[name] for name in adoption_run.FILING_COUNTS),
+                   json.dumps(progress.get("page"), sort_keys=True), safe_code(stop.get("code")), _one_line(stop.get("reason")),
                    frozenset(item["need"] for item in person if isinstance(item, dict) and isinstance(item.get("need"), str)))
 
 
@@ -375,12 +431,13 @@ class _Run:
         self.cell, self.api, self.uploads, self.limits, self.progress = cell, api, uploads, limits, progress
         self.sleep, self.clock, self.on_landed = sleep, clock, on_landed
         # Filing: the CLI files each landed window through the cell's `file`. `unfiled` maps a landed window's import ID to
-        # the continuation of its last `file` reply; `counts` and `stopped` keep the last counts and the stop code of a window.
+        # the continuation of its last `file` reply. `marks` keeps a window's last counts and page position, and
+        # `stopped` its last stop code.
         self.filing, self.collection = file, collection
         self.unfiled: dict[str, str | None] = {}
-        self.counts: dict[str, tuple[int, int, int, int]] = {}
-        self.stopped: dict[str, str | None] = {}
-        self.finished_windows: dict[str, tuple[int, int, int, int]] = {}
+        self.marks: dict[str, tuple[tuple[int, ...], str]] = {}
+        self.stopped: dict[str, str] = {}
+        self.finished_windows: dict[str, FilingReply] = {}
         self.refusal: str | None = None
         # No wait outlasts a demand's renewal interval, so a waiting sender renews its demand in time.
         self.poll = min(poll_seconds, DEMAND_RENEWAL_SECONDS)
@@ -422,12 +479,41 @@ class _Run:
         return 1 + next((n for n, window in enumerate(self.series.windows) if import_id in window.ids()), -1)
 
     def seed_unfiled(self, reading: Reading) -> None:
-        """Windows of this series that the cell holds landed with members left to file: a rerun carries on filing them."""
+        """Windows of this series that the cell holds landed with members left to file: a rerun carries on filing them.
+
+        A window whose filing is done is left out: its members that stay are the person's to review, not more filing.
+        """
         mine = {import_id for window in self.series.windows for import_id in window.ids()}
         for record in reading.windows:
             if record.get("import_id") in mine and record.get("state") == import_stage.WINDOW_LANDED \
-                    and (record.get("unfiled") or {}).get("count") != 0:
+                    and (record.get("unfiled") or {}).get("count") != 0 and record.get("filing_done") is not True:
                 self.unfiled.setdefault(record["import_id"], None)
+
+    async def _file_call(self, import_id: str) -> FilingReply:
+        """One `file` call on a landed window, repeated exactly when the cell could not report its outcome, as the cell asks."""
+        path, continuation = f"{import_stage.STAGE_DIR}/{import_id}", self.unfiled[import_id]
+
+        async def call() -> FilingReply:
+            return FilingReply.of(await self.cell.file(path, collection=self.collection, continuation=continuation))
+
+        reply = await call()
+        if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:
+            reply = await call()
+        waits = 0
+        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:
+            await self.sleep(self.poll)
+            reply = await call()
+            waits += 1
+        return reply
+
+    def _say_stop(self, import_id: str, reply: FilingReply) -> None:
+        """Say why filing a window stopped, once for each code: the cell's code and reason, and what frees space."""
+        code = reply.code or "no code"
+        if self.stopped.get(import_id) != code:
+            self.progress.say(f"Filing window {self._number(import_id)} stopped ({code})"
+                              + (f": {reply.reason}" if reply.reason else ".")
+                              + (" Free space on the cell, then run the command again to carry on." if "free_space" in reply.needs else ""))
+        self.stopped[import_id] = code
 
     async def file_windows(self, *, to_the_end: bool = False) -> bool:
         """Call the cell's `file` on each landed window, once while the series waits and until it stops at the end.
@@ -440,32 +526,32 @@ class _Run:
             same = 0
             while self.filing and import_id in self.unfiled:
                 try:
-                    reply = FilingReply.of(await self.cell.file(
-                        f"{import_stage.STAGE_DIR}/{import_id}", collection=self.collection, continuation=self.unfiled[import_id]))
+                    reply = await self._file_call(import_id)
                 except FilingUnavailable:
                     self.filing = False
                     self.refusal = ("The cell refused the file call, so it does not file an upload in one call yet. "
                                     "The staged windows wait for your assistant to file them.")
                     self.progress.say(self.refusal)
                     return moved
-                changed = reply.counts != self.counts.get(import_id)
-                moved = moved or changed
-                same = 0 if changed else same + 1
-                self.counts[import_id] = reply.counts
+                if reply.state == CALL_ERROR:
+                    # No step ran, so the window keeps its continuation for the next pass, or for a rerun after this one ends.
+                    self._say_stop(import_id, reply)
+                    break
+                previous = self.marks.get(import_id)
+                counted = previous is None or reply.counts != previous[0]
+                moved = moved or counted
+                same = 0 if counted or reply.position != previous[1] else same + 1
+                self.marks[import_id] = (reply.counts, reply.position)
                 self.unfiled[import_id] = reply.continuation
-                if reply.state == "done":
+                if reply.state == DONE:
                     del self.unfiled[import_id]
                     self.stopped.pop(import_id, None)
-                    self.finished_windows[import_id] = reply.counts
+                    self.finished_windows[import_id] = reply
                     moved = True
-                    self.progress.say(f"Filed window {self._number(import_id)}: {reply.counts[0]:,} files filed, "
-                                      f"{reply.counts[1]:,} failed.")
-                elif reply.state == "stopped":
-                    if self.stopped.get(import_id) != (reply.code or ""):
-                        self.progress.say(f"Filing window {self._number(import_id)} stopped ({reply.code or 'no code'})."
-                                          + (" Free space on the cell, then run the command again to carry on."
-                                             if "free_space" in reply.needs else ""))
-                    self.stopped[import_id] = reply.code or ""
+                    self.progress.say(f"Filed window {self._number(import_id)}: {reply.count('filed'):,} files filed, "
+                                      f"{reply.count('failed'):,} failed.")
+                elif reply.state == STOPPED:
+                    self._say_stop(import_id, reply)
                     if reply.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
                         del self.unfiled[import_id]
                     break
@@ -839,8 +925,9 @@ class _Run:
                   "import_ids": [window.import_id for window in landed], "keep_source": keep,
                   "not_sent": list(self.series.skipped)}
         if self.filing or self.refusal:
-            counts = self.finished_windows.values()
-            result["filing"] = {"filed": sum(c[0] for c in counts), "failed": sum(c[1] for c in counts),
+            finished = self.finished_windows.values()
+            result["filing"] = {"filed": sum(reply.count("filed") for reply in finished),
+                                "failed": sum(reply.count("failed") for reply in finished),
                                 "windows_done": len(self.finished_windows), "windows_waiting": len(waiting)}
         return result
 

@@ -65,7 +65,7 @@ class FakeCell(Cell):
         import_id = path.removeprefix("_Imports/")
         self.filed.append((import_id, collection, continuation))
         reply = self.file_replies[min(len(self.filed), len(self.file_replies)) - 1] if self.file_replies else FILED
-        if reply["filing"] == "done":  # The staged copies are filed and removed: their room is free and nothing is left to file.
+        if reply.get("filing") == "done":  # The staged copies are filed and removed: their room is free and nothing is left to file.
             self.windows[import_id] = {**self.windows[import_id], "unfiled": {"count": 0}}
             self.budget = self.room_after_filing
         return reply
@@ -1471,6 +1471,18 @@ def test_an_older_cell_that_refuses_file_keeps_todays_behaviour_and_says_so(rig)
     assert rig.cloud.all_sent() == ["a01.bin"] and result["filing"]["windows_done"] == 0
     assert "refused the file call" in rig.said()
     assert "The upload is done and filing continues." in rig.said()
+
+
+def test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_the_cells_code(rig):
+    """Catches a CLI that reads every refusal as an older cell, which hides the cell's reason and stops filing for good."""
+    rig.files(a01__bin=800)
+    rig.cell.file_replies = [{"success": False, "error": {"code": "MUTATION_BUSY", "message": "Another write holds the vault."}}]
+
+    result = rig.run(file=True)
+
+    assert "refused the file call" not in rig.said()
+    assert "Filing window 1 stopped (MUTATION_BUSY): Another write holds the vault." in rig.said()
+    assert result["filing"]["windows_waiting"] == 1 and "Keep the source folder" in rig.said()
 
 
 def test_a_window_that_stops_for_space_is_filed_again_from_its_continuation_on_the_next_poll(rig):
