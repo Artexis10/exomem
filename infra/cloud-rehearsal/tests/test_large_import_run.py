@@ -130,7 +130,7 @@ def _working(run_id, *, filed=0, failed=0, token="t"):
 
 def _done(run_id, *, filed, failed=0, residual=None):
     return {"run_id": run_id, "filing": "done", "person": [], "progress": {"filed": filed, "failed": failed, "remaining": 0, "pages_done": 2},
-            "filed": {"coverage_run": run_id, **({"residual": residual} if residual is not None else {})}}
+            "filed": {"last_finished_page": {"page": 2, "run_id": run_id}, **({"residual": residual} if residual is not None else {})}}
 
 
 def _stored(rows, *, stage=STAGE, finish=None):

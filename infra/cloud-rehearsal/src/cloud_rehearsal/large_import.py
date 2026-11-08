@@ -269,7 +269,12 @@ def file_step(reply: Mapping[str, Any], seconds: float, *, before: int | None) -
 
 
 def files_per_second(steps: Sequence[Mapping[str, Any]]) -> float | None:
-    """Files filed over the seconds of the `file` calls that filed them; None when a call's files are unknown."""
+    """Files filed per second of round trip over these `file` calls; None when a call's rise is unknown.
+
+    The files are each call's rise in the stage's filed count. The seconds are each call's whole round trip,
+    so they include the steps that file nothing (`plan`, `finish`, the next page's `start`) and the transport.
+    `file_pages` passes the calls whose reply named one page.
+    """
     seconds = sum(step["seconds"] for step in steps)
     if not seconds or any(step["files"] is None for step in steps):
         return None
@@ -644,11 +649,13 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         consumed += int(recorded.get("consumed") or 0)
-        if page["run_id"] == (reply.get("filed") or {}).get("coverage_run") and recorded.get("residual") != (reply["filed"]).get("residual"):
+        # A done reply carries the residual of the newest page's own `finish`; a newest page that closed has none to compare.
+        if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
+                and recorded.get("residual") != (reply.get("filed") or {}).get("residual"):
             problems["compact_reply"].append(
                 f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
-              f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files/s), "
+              f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
               f"consumed {page['consumed']}", flush=True)
     folder.report["pages"] = list(pages.values())
     folder.residual = (reply.get("filed") or {}).get("residual")

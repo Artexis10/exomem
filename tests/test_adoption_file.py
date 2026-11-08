@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from fastmcp import Client
@@ -204,8 +204,8 @@ def test_a_page_with_nothing_eligible_does_not_stop_the_import(vault, monkeypatc
     """Catches a page that no plan can cover, which the import would wait on for ever."""
     monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
     stage = _staged(vault, 3)
-    # Two files that the stage's manifest does not list and that exceed the ceiling stay staged. Rows sort by
-    # path: doc0, doc1 | big-a, big-b | doc2, so the middle page holds nothing that can import.
+    # Two files that the stage's manifest does not list and that exceed the ceiling stay staged. Artifacts sort
+    # first and rows that never import last: doc0, doc1 | doc2, doc1a | doc1b, so the last page holds nothing to import.
     for name in ("doc1a.bin", "doc1b.bin"):
         (vault / stage / name).write_bytes(b"x" * (len(PDF) + 50))
 
@@ -219,6 +219,86 @@ def test_a_page_with_nothing_eligible_does_not_stop_the_import(vault, monkeypatc
     assert reply["progress"]["pages_done"] == 3
     assert reply["filed"]["residual"]["files"] == 2
     assert [item["need"] for item in reply["person"]] == ["review_residual", "discard"]
+    # The whole import's totals are `progress` and `summary`. Page 3 finished nothing, so `finish`'s report of
+    # page 2 alone, which covers one file, sits under a key that names that page.
+    assert reply["summary"] == "Filing is done: 3 files filed, 0 failed, 0 left."
+    assert set(reply["filed"]) == {"last_finished_page", "residual"}
+    last = reply["filed"]["last_finished_page"]
+    assert last["page"] == 2 and last["coverage"]["selected"] == 1
+
+
+def _file_to_the_end(vault: Path, staged: str) -> dict:
+    reply = adoption_run.file(vault, path=staged, today=TODAY)
+    for _ in range(40):
+        if reply["filing"] != "working":
+            return reply
+        reply = adoption_run.file(vault, path=staged, continuation=reply["continuation"], today=TODAY)
+    raise AssertionError("filing never ended in 40 calls")
+
+
+@pytest.mark.parametrize("failing_attempts", [1, None], ids=["the-retry-files-them", "they-keep-failing"])
+def test_a_page_whose_files_fail_retries_them_once_and_the_import_goes_on_to_the_later_pages(
+        vault, monkeypatch, failing_attempts):
+    """Catches a page with failed files that dead-ends the import, or a done reply that hides the files that failed."""
+    staged = _staged(vault)
+    before = _sources(vault)
+    page_one = {"doc0.pdf", "doc1.pdf"}
+    attempts = {"page one": 0}
+    real = adoption_run.adopt_module.commit_import_items
+
+    def disk_error_on_page_one(root, items, **kwargs):
+        if page_one & {PurePosixPath(item.original_path).name for item in items}:
+            attempts["page one"] += 1
+            if failing_attempts is None or attempts["page one"] <= failing_attempts:
+                raise OSError("synthetic disk error")
+        return real(root, items, **kwargs)
+
+    monkeypatch.setattr(adoption_run.adopt_module, "commit_import_items", disk_error_on_page_one)
+
+    reply = _file_to_the_end(vault, staged)
+
+    assert reply["filing"] == "done" and reply["progress"]["pages_done"] == 3
+    assert attempts["page one"] == 2  # The full apply and one retry, never more.
+    if failing_attempts is None:
+        assert len(_sources(vault)) - len(before) == FILES - 2
+        assert (reply["progress"]["filed"], reply["progress"]["failed"]) == (FILES - 2, 2)
+        assert reply["summary"] == "Filing is done: 3 files filed, 2 failed, 0 left."
+        assert reply["filed"]["residual"]["by_reason"]["failed"]["files"] == 2
+        assert "review_residual" in [item["need"] for item in reply["person"]]
+    else:
+        assert len(_sources(vault)) - len(before) == FILES
+        assert (reply["progress"]["filed"], reply["progress"]["failed"]) == (FILES, 0)
+
+
+@pytest.mark.parametrize("leftover", [True, False], ids=["with-a-residual", "stage-fully-filed"])
+def test_a_call_with_only_the_path_after_done_answers_done_again_and_starts_no_run(vault, monkeypatch, leftover):
+    """Catches a finished import that a repeated first call scans again, or refuses because its stage is gone."""
+    staged = _staged(vault)
+    if leftover:
+        monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
+        (vault / staged / "doc9.bin").write_bytes(b"x" * (len(PDF) + 50))
+    done = _file_to_the_end(vault, staged)
+    assert done["filing"] == "done"
+    assert (vault / staged).exists() is leftover
+    runs = _runs(vault)
+
+    again = adoption_run.file(vault, path=staged, today=TODAY)
+
+    assert again["filing"] == "done" and again["run_id"] == done["run_id"]
+    assert again["progress"] == done["progress"] and _runs(vault) == runs
+
+
+def test_a_call_with_only_the_path_that_names_another_collection_is_refused_with_the_imports_own(vault):
+    """Catches a second collection name that the import drops without a word, so the person files under the wrong label."""
+    staged = _staged(vault)
+    first = adoption_run.file(vault, path=staged, collection="Field Notes", today=TODAY)
+    assert first["collection"] == "Field Notes"
+
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        adoption_run.file(vault, path=staged, collection="Reading List", today=TODAY)
+
+    assert refused.value.code == "INVALID_CONTINUATION" and "'Field Notes'" in refused.value.reason
+    assert adoption_run.file(vault, path=staged, collection="Field Notes", today=TODAY)["run_id"] == first["run_id"]
 
 
 def test_file_refuses_a_folder_that_is_not_a_stage(vault):

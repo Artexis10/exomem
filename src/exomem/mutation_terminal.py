@@ -2369,6 +2369,9 @@ def project_terminal(
                 "filing", "summary", "stop", "person", "filed",
             ) if key in leaf}
         )
+        if "filing" in leaf and "collection" in leaf:
+            # A `file` reply names its collection by label; other Adoption Studio replies keep theirs out of this view.
+            compact["collection"] = leaf["collection"]
         plan = leaf.get("plan")
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]

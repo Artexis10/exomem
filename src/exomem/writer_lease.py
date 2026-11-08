@@ -505,7 +505,8 @@ def _fast_ack_enabled(command: str | None = None, action: str | None = None) -> 
     if flag is not None:
         return flag == "1"
     # Fixed command/action protocol: bulk apply uses existing durable custody by
-    # default; an explicit flag still provides the synchronous rollback.
+    # default, and so does `file`, which runs at most one apply per call; an
+    # explicit flag still provides the synchronous rollback.
     return command == "adoption_studio" and action in ("apply", "file")
 
 
