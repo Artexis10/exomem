@@ -81,7 +81,7 @@ def resolve_relation(
             "extension_hash": registry.extension_hash,
         },
         "honest_outcomes": {
-            "relates_to": "available when a meaningful generic connection is justified",
+            "plain_link": f"last resort when no specific or proposed relation fits: write `{registry.link_key}`",
             "no_edge": "available when no durable relationship is established",
         },
         "selected_relation": None,

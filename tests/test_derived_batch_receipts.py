@@ -3485,3 +3485,88 @@ def test_pass_that_dispatches_without_completing_still_counts_as_progress(
     ).state == "retryable"
     # The scheduler backs off to its maximum only on zero progress.
     assert progress == 1
+
+
+def _record_fanout(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from exomem import index_sync
+
+    replayed: list[str] = []
+    report = index_sync.IndexSyncReport(
+        "upsert", (), (), (index_sync.IndexComponentOutcome("lexstore", "completed", "published"),)
+    )
+
+    def upsert(root, written, **_kwargs):
+        replayed.extend(path.relative_to(root).as_posix() for path in written)
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", upsert)
+    index_sync.reset_derived_fanout_memo()
+    return replayed
+
+
+def test_a_batch_leaves_a_shared_page_to_the_newer_batch_that_carries_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every write appends to the vault log, so an older batch's replay of the
+    log races each later commit and never lands: the batch retried for ever and
+    held its pending rows over every read. The newer batch that carries the log
+    converges its current bytes, so the older batch replays only its own page."""
+    from exomem import index_sync
+
+    protocol = _protocol()
+    lexstore = frozenset({protocol.DerivedComponent.LEXSTORE})
+    log, page = "Knowledge Base/log.md", "Knowledge Base/Notes/own-page.md"
+    _write(vault / log, b"log 0")
+    _write(vault / page, b"page 0")
+    older = _prepare(
+        vault,
+        batch_id="older-batch",
+        paths=(
+            _path(protocol, log, before=b"log 0", after=b"log 1"),
+            _path(protocol, page, before=b"page 0", after=b"page 1"),
+        ),
+        required=lexstore,
+        now=10.0,
+    )
+    _write(vault / log, b"log 1")
+    _write(vault / page, b"page 1")
+    assert protocol.prove_committed(vault, older, current_generation="generation-1").outcome == "ready"
+    newer = _prepare(
+        vault,
+        batch_id="newer-batch",
+        paths=(_path(protocol, log, before=b"log 1", after=b"log 2"),),
+        required=lexstore,
+        now=11.0,
+    )
+    _write(vault / log, b"log 2")
+    assert protocol.prove_committed(vault, newer, current_generation="generation-1").outcome == "ready"
+    assert protocol.publish_pending_visibility(vault, newer, publisher=lambda _root, _receipt: True)
+    replayed = _record_fanout(monkeypatch)
+
+    assert index_sync.converge_derived_component(vault, older, protocol.DerivedComponent.LEXSTORE) is True
+    assert replayed == [page]
+
+
+def test_a_page_moved_by_an_edit_no_batch_carries_stays_the_batch_s_own(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand edit in an editor leaves no newer batch to converge the page, so
+    the batch must still replay it."""
+    from exomem import index_sync
+
+    protocol = _protocol()
+    page = "Knowledge Base/Notes/hand-edited.md"
+    _write(vault / page, b"page 0")
+    receipt = _prepare(
+        vault,
+        batch_id="only-batch",
+        paths=(_path(protocol, page, before=b"page 0", after=b"page 1"),),
+        required=frozenset({protocol.DerivedComponent.LEXSTORE}),
+    )
+    _write(vault / page, b"page 1")
+    assert protocol.prove_committed(vault, receipt, current_generation="generation-1").outcome == "ready"
+    _write(vault / page, b"page edited by hand")
+    replayed = _record_fanout(monkeypatch)
+
+    assert index_sync.converge_derived_component(vault, receipt, protocol.DerivedComponent.LEXSTORE) is True
+    assert replayed == [page]

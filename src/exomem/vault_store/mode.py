@@ -1,11 +1,12 @@
-"""Whether a vault is in store mode: one answer, read from the records on every call."""
+"""Whether a vault is in store mode: read from the records, fresh for a write and by stat for a read."""
 
 from __future__ import annotations
 
+import os
 from contextlib import closing
 from pathlib import Path
 
-from .. import state_migration
+from .. import state_migration, state_paths
 from ..collection_store import capability, connection, schema
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
@@ -44,9 +45,51 @@ def store_mode_active(vault_root: Path) -> bool:
     It reads the records each time and keeps no cache: it prevents a service from writing Markdown
     into a vault that the store owns, so a stale answer would cost more than the read.
     A manifest that is absent, a store that is absent and a store older than schema 15 are file mode:
-    none of them holds pages.
+    none of them holds pages. A byte reader calls ``store_mode_for_reads`` instead.
     """
     return state(vault_root) == STORE_MODE
+
+
+#: One entry per vault and placement environment: the manifest path, its stat signature when the answer
+#: was read, and the answer. A small bound keeps a process that sees many vaults from holding them all.
+_READ_MODES: dict[tuple[str, tuple[str, ...]], tuple[Path, tuple[int, ...] | None, bool]] = {}
+_READ_MODES_MAX = 64
+
+
+def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
+    """The manifest's identity and change marks, or None when it is absent: one stat, no read.
+
+    An atomic replace changes the inode and an in-place rewrite changes ``st_ctime_ns``, which no caller can
+    set back, so an unchanged signature means the same bytes.
+    """
+    try:
+        found = manifest.stat()
+    except FileNotFoundError:
+        return None
+    return (found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns, found.st_ctime_ns)
+
+
+def store_mode_for_reads(vault_root: Path) -> bool:
+    """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
+
+    Activation and rollback run offline, and each changes the manifest, so a reader may keep its answer
+    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window is
+    never kept, and a manifest or store that cannot be read raises as ``state`` does. The write refusal
+    in ``availability`` does not use this: it asks ``store_mode_active`` every time.
+    """
+    key = (os.fspath(vault_root), state_paths._placement_environment())
+    cached = _READ_MODES.get(key)
+    if cached is not None and _manifest_signature(cached[0]) == cached[1]:
+        return cached[2]
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault_root))
+    # The signature comes before the read, so a manifest replaced between them is read again next call.
+    signature = _manifest_signature(manifest)
+    current = state(vault_root)
+    if current in (FILE_MODE, STORE_MODE):
+        if len(_READ_MODES) >= _READ_MODES_MAX:
+            _READ_MODES.clear()
+        _READ_MODES[key] = (manifest, signature, current == STORE_MODE)
+    return current == STORE_MODE
 
 
 def _stored_mode(vault_root: Path) -> str | None:

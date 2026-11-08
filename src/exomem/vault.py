@@ -686,6 +686,22 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
+def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
+    """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
+
+    ``path`` (absolute or vault-relative) only supplies the filename fallback of the title
+    precedence. It returns None when the bytes are not UTF-8 text.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # A text-mode read translates newlines before it parses; the bytes path parses the same text.
+    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    title = resolve_display_title(fm, body, path)
+    return title.lower() if title else None
+
+
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
@@ -1272,10 +1288,22 @@ class PathGuard:
     ancestors: tuple[PathIdentity, ...]
     missing_parents: tuple[str, ...]
     leaf_identity: PathIdentity | None
-    leaf_policy: Literal["absent", "stable", "content", "generation"]
+    #: "store" guards a page that the vault's store owns: it holds the stored hash, or None for a
+    #: page the store lacks, and it rechecks against the store and never touches the disk.
+    leaf_policy: Literal["absent", "stable", "content", "generation", "store"]
     expected_content_hash: str | None
     expected_content_size: int | None = field(default=None, init=False)
     expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
+
+    @classmethod
+    def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
+        """Guard a path that the store serves: bind its stored hash, or its absence there."""
+        from .vault_store import read
+
+        rel = "/".join(_safe_guard_target(target))
+        if not read.serves(Path(vault_root), rel):
+            raise PathGuardError("PATH_GUARD_INVALID", "the store does not serve this path")
+        return _store_guard(rel, _stored_sha256(Path(vault_root), rel))
 
     @classmethod
     def capture(
@@ -1377,6 +1405,8 @@ class PathGuard:
 
     def prepare_and_bind_parents(self, vault_root: Path) -> PathGuard:
         self.recheck(vault_root)
+        if self.leaf_policy == "store":
+            return self  # a stored page has no folders to create; the projector makes them
         root = Path(vault_root)
         _create_missing_guard_parents(
             root,
@@ -1396,6 +1426,8 @@ class PathGuard:
         self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
     ) -> None:
         """Re-prove retained ancestry without testing the destination leaf."""
+        if self.leaf_policy == "store":
+            return  # a stored page has no ancestry on disk
         root = Path(vault_root)
         # Plain string joins: a round rechecks thousands of leaves and pathlib
         # construction was most of each one.
@@ -1427,6 +1459,9 @@ class PathGuard:
     ) -> None:
         """Re-prove the guard, sharing ancestor proofs within one round."""
         root = Path(vault_root)
+        if self.leaf_policy == "store":
+            self._recheck_store(root)
+            return
         root_text = os.fspath(root)
         self.recheck_ancestors(root, verified_ancestors)
         for relative in self.missing_parents:
@@ -1483,6 +1518,36 @@ class PathGuard:
             elif _leaf_hash(Path(leaf), self.leaf_identity) != self.expected_content_hash:
                 # Compatibility for callers that predate bounded snapshots.
                 raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+    def _recheck_store(self, root: Path) -> None:
+        current = _stored_sha256(root, self.target)
+        if current == self.expected_content_hash:
+            return
+        if self.expected_content_hash is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf appeared")
+        if current is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared")
+        raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+def _store_guard(rel: str, sha256: str | None) -> PathGuard:
+    return PathGuard(rel, (), (), None, "store", sha256)
+
+
+def _stored_sha256(root: Path, rel: str) -> str | None:
+    """The hash of the page that the store holds at ``rel``, or None when it holds none."""
+    from .collection_store.connection import CollectionStoreError
+    from .vault_store import read
+
+    try:
+        with read.snapshot(root) as view:
+            meta = view.page_meta(rel)
+    except CollectionStoreError as error:
+        if error.code != read.NOT_ACTIVE:
+            raise
+        raise PathGuardError("PATH_GUARD_CHANGED", "the store no longer serves it") from error
+    return None if meta is None else meta.sha256
 
 
 def recheck_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> None:
@@ -3503,8 +3568,28 @@ def replace_tolerating_transient_sharing(
     raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
 
 
-def read_bytes_without_pinning(path: Path) -> bytes:
-    """Read a canonical file without blocking a concurrent replacement of it.
+def read_bytes_without_pinning(path: Path, vault_root: Path | None = None) -> bytes:
+    """The bytes of a canonical file, read as ``read_disk_bytes_without_pinning`` reads them.
+
+    ``vault_root`` is the vault that holds ``path``. A page that this vault's store owns is read
+    from the store, because there the file is only a projection that may lag; a page that the
+    store serves but lacks raises ``FileNotFoundError``, as a missing file does. A caller that
+    reads a file of a vault names the vault: the path alone cannot tell where a vault begins.
+    Without ``vault_root`` the file is no vault page (a state file, say) and the disk answers.
+    """
+    if vault_root is not None:
+        from .vault_store import read
+
+        page = read.owned_page_at(vault_root, path)
+        if page is not None:
+            return page.body
+    return read_disk_bytes_without_pinning(path)
+
+
+def read_disk_bytes_without_pinning(path: Path) -> bytes:
+    """Read a canonical file from the disk without blocking a concurrent replacement of it.
+
+    It never asks the store: a migration and a rollback compare the file with the store's page.
 
     Python's Windows `open()` requests FILE_SHARE_READ | FILE_SHARE_WRITE and
     omits FILE_SHARE_DELETE, so for as long as the file is open an `os.replace`
@@ -4096,8 +4181,12 @@ def _unbounded_leaf_reason(info: os.stat_result, limit: int) -> str | None:
     if info.st_nlink != 1:
         return f"has {info.st_nlink} hard links; only a file with one link is read"
     if info.st_size > limit:
-        return f"is {info.st_size} bytes, over the {limit}-byte read limit"
+        return _over_limit_reason(info.st_size, limit)
     return None
+
+
+def _over_limit_reason(size: int, limit: int) -> str:
+    return f"is {size} bytes, over the {limit}-byte read limit"
 
 
 def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
@@ -4334,16 +4423,47 @@ def read_bounded_guarded_bytes(
     limit: int,
     expected_hash: str | None = None,
 ) -> tuple[bytes, PathGuard]:
-    """Read one bounded regular vault file and bind its exact descriptor snapshot."""
-    if type(limit) is not int or limit < 0:
-        raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
-    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(
-        Path(vault_root), target, limit
-    )
+    """Read one bounded regular vault file and bind its exact descriptor snapshot.
+
+    A page that the vault's store owns is read from the store and bound to its stored hash instead.
+    """
+    root = Path(vault_root)
+    stored = _read_stored_guarded(root, target, limit)
+    if stored is not None:
+        data, guard = stored
+        if expected_hash is not None and guard.expected_content_hash != expected_hash:
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+        return data, guard
+    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(root, target, limit)
     if expected_hash is not None and guard.expected_content_hash != expected_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
-    guard.recheck(Path(vault_root))
+    guard.recheck(root)
     return data, guard
+
+
+def _require_read_limit(limit: int) -> None:
+    if type(limit) is not int or limit < 0:
+        raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
+
+
+def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, PathGuard] | None:
+    """The stored page and its store guard when the store serves ``target``, else None.
+
+    None means read the file. A page that the store serves but lacks fails as a missing file does.
+    """
+    from .vault_store import read
+
+    _require_read_limit(limit)
+    rel = "/".join(_safe_guard_target(target))
+    try:
+        page = read.owned_page(root, rel)
+    except FileNotFoundError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    if page is None:
+        return None
+    if page.meta.size > limit:
+        raise _refuse_unbounded_leaf(target, _over_limit_reason(page.meta.size, limit))
+    return page.body, _store_guard(rel, page.meta.sha256)
 
 
 def read_bounded_guarded_bytes_with_generation(
@@ -4378,7 +4498,11 @@ def read_bounded_guarded_bytes_with_generation(
     try:
         before = os.lstat(leaf)
     except FileNotFoundError:
-        raise
+        # A page that the store serves may have no file yet; the file of any other path is missing.
+        stored = _read_stored_guarded(root, target, limit)
+        if stored is None:
+            raise
+        return stored[0], stored[1], None  # a stored page has no stat generation to bind
     except OSError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
     data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
@@ -4418,8 +4542,13 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
                 "PATH_GUARD_INVALID", "guarded read target is outside the vault"
             ) from error
     absolute = root / relative
+    from .vault_store import read
+
+    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
+    # A page that the store lacks raises FileNotFoundError, as the missing file does.
+    stored = read.owned_meta(root, relative.as_posix())
     try:
-        limit = absolute.lstat().st_size
+        limit = absolute.lstat().st_size if stored is None else stored.size
     except FileNotFoundError:
         raise
     except OSError as error:
@@ -8358,12 +8487,10 @@ class WikilinkResolver:
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
-            text = abs_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw = abs_path.read_bytes()
+        except OSError:
             return None
-        fm, body, _ = parse_frontmatter(text)
-        title = resolve_display_title(fm, body, abs_path)
-        return title.lower() if title else None
+        return title_key_from_bytes(raw, abs_path)
 
     def on_files_changed(
         self,

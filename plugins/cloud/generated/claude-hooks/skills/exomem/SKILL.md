@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 902e76bbbaaa04cc3a1444524409433970955cab22a800a48f0c28114c7dc578
+  skill_contract: 9a058584c6d94d4053b7a850ae5e340ca6be6fcb8715ac81f631fac0fd96384c
   version: "0.32.0"
 ---
 
@@ -25,6 +25,8 @@ to `Notes/`; stable reusable identities to `Entities/`. Sources/Evidence are
 append-only. Everything outside `Knowledge Base/` is read-only input, and
 in-vault readonly/excluded paths remain protected. Prefer supersession over
 removal; never invent IDs, sources, relations, or numeric confidence scores.
+Name a specific relation on every edge. When none fits, propose a new relation type;
+a plain link is the last resort, and a write that adds the generic relation is refused.
 Use product tools so validation, indexes, logs, and provenance stay governed.
 
 ## Loading the tools

@@ -526,7 +526,7 @@ def infer_relation_registry(
         # The full registered vocabulary, not just what the corpus happens to use.
         # Without this a caller can only discover a relation by finding one already
         # written, so unused-but-perfect labels stay invisible and authors fall back
-        # to `relates_to` or invent an unregistered word. Listing it closes the
+        # to a generic relation or invent an unregistered word. Listing it closes the
         # retrieve -> promote -> retrieve loop: promoted labels appear here.
         "vocabulary": [
             {
@@ -1047,7 +1047,7 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
             if candidate not in (None, [], "active", "directed", ["semantic_relation"]):
                 value[field] = candidate
         # Direction is meaning-bearing. Omitting the format default is unsafe
-        # when a directed extension refines symmetric ``relates_to``: loading
+        # when a directed extension refines a symmetric parent relation: loading
         # the emitted proposal would silently inherit the parent's direction.
         value["direction"] = item.direction
         if item.presentation_role is not None:

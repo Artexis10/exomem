@@ -1655,21 +1655,8 @@ def _relation_advisory_context(leaf: Mapping[str, Any]) -> Mapping[str, Any] | N
     return None
 
 
-def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The specific-relation options the semantic writer built for this committed write.
-
-    It has already bounded the list and shaped each entry.
-    """
-    context = _relation_advisory_context(leaf)
-    options = context.get("specific_options") if context is not None else None
-    if not isinstance(options, (list, tuple)):
-        return []
-    return [dict(option) for option in options if isinstance(option, Mapping)]
-
-
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
-    """Project just-parsed unregistered facts plus optional indexed recurrence, and the
-    specific relations a note-to-note generic edge could take.
+    """Project just-parsed unregistered facts plus optional indexed recurrence.
 
     The fact scan is bounded by the semantic feedback renderer. Recurrence is a
     point lookup against one already-current graph snapshot and is deliberately
@@ -1722,9 +1709,8 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
-    specific = _specific_options_projection(leaf)
     if not labels:
-        return {"specific_options": specific} if specific else None
+        return None
     ordered = sorted(labels)
     retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
     truncated = facts_truncated or len(ordered) > len(retained)
@@ -1809,8 +1795,6 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             "args": {"operation": "resolve-relation"},
         },
     }
-    if specific:
-        advisory["specific_options"] = specific
     return advisory
 
 

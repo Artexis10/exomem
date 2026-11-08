@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 902e76bbbaaa04cc3a1444524409433970955cab22a800a48f0c28114c7dc578
+  skill_contract: 9a058584c6d94d4053b7a850ae5e340ca6be6fcb8715ac81f631fac0fd96384c
   version: "0.1.0"
 ---
 
@@ -108,12 +108,12 @@ new meaning; save with the current hash and `why`. Report saved versus queued
 and the returned restore route. Use only exposed operations.
 
 ## Relation governance
-Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
-truthful match. Keep `relates_to` for a real generic link, with a stated reason when it
-joins an entity and a specific relation fits (`GENERIC_RELATION_NEEDS_REASON` lists
-them), or choose no edge. Durable recurring
-meaning is proposal-first through `propose-relation` and hash-guarded
-`save-relations`; corrections use a new canonical key and deprecate the old one.
+Resolve typed meaning with `resolve-relation` before authoring, and name a specific
+truthful relation on every edge. When none fits, propose a new relation type: durable
+recurring meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`. A plain link is the last resort. A write that adds the generic
+relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations and the
+exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
 Report preserved originals, compiled outputs and the scope actually inspected.

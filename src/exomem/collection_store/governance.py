@@ -2074,7 +2074,9 @@ class OperationAuthorization:
                     )
                     if relative != path:
                         return False
-                    fingerprint = hashlib.sha256(vault.read_bytes_without_pinning(page)).hexdigest()
+                    fingerprint = hashlib.sha256(
+                        vault.read_bytes_without_pinning(page, vault_root=self.root)
+                    ).hexdigest()
                 scopes = tuple(sorted(scope_ids))
                 current: list[authority.SessionMembership] = []
 

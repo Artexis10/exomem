@@ -8,7 +8,6 @@ writer transaction. A refusal or a kill leaves file mode as it was.
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import sqlite3
 import tempfile
@@ -25,6 +24,7 @@ from .. import (
     cloud_cell,
     epistemic_graph,
     lexstore,
+    memory_refs,
     state_migration,
     state_paths,
     vault,
@@ -33,6 +33,7 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from . import availability, mode, ownership, verify
+from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
@@ -55,10 +56,11 @@ class Staged:
     pages: int = 0
     binaries: int = 0
     skipped: list[ownership.Skipped] = field(default_factory=list)
-    #: Each object the lexical, then the graph, owner created: name -> type, in creation order.
+    #: Each object the lexical, then the graph, then the references, owner created: name -> type, in creation order.
     objects: dict[str, str] = field(default_factory=dict)
     lexical_tables: list[str] = field(default_factory=list)
     graph_tables: list[str] = field(default_factory=list)
+    refs_tables: list[str] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -69,7 +71,7 @@ def snapshot(
     for owned in ownership.iter_owned(vault_root, on_skip=on_skip):
         path = Path(vault_root) / owned.rel
         if owned.ownership is ownership.Ownership.PAGE:
-            body = vault.read_bytes_without_pinning(path)
+            body = vault.read_disk_bytes_without_pinning(path)
             digest = hashlib.sha256(body).hexdigest()
         else:
             body = None
@@ -95,17 +97,22 @@ def schema_objects(conn: sqlite3.Connection) -> dict[str, str]:
     }
 
 
-def create_owner_schema(conn: sqlite3.Connection) -> tuple[dict[str, str], dict[str, str]]:
-    """Create the lexical, then the graph, tables with their owners' DDL; return what each created."""
+def create_owner_schema(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Create the lexical, graph, then references tables with their owners' DDL; return what each created."""
     before = schema_objects(conn)
     lexstore.create_catalogue_schema(conn)
     middle = schema_objects(conn)
     # The store publishes nothing to independent readers, so it takes no capture tables or triggers.
     epistemic_graph.create_row_schema(conn, publication=False)
+    graph_done = schema_objects(conn)
+    memory_refs.create_identity_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
-        {n: t for n, t in after.items() if n not in middle},
+        {n: t for n, t in graph_done.items() if n not in middle},
+        {n: t for n, t in after.items() if n not in graph_done},
     )
 
 
@@ -113,10 +120,11 @@ def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> S
     """Load the exact bytes of every owned file and copy the sidecars' rows into ``conn``, a staged store."""
     staged = Staged()
     started = time.perf_counter()
-    lexical, graph = create_owner_schema(conn)
-    staged.objects = {**lexical, **graph}
+    lexical, graph, refs = create_owner_schema(conn)
+    staged.objects = {**lexical, **graph, **refs}
     staged.lexical_tables = [n for n, t in lexical.items() if t in ("table", "virtual")]
     staged.graph_tables = [n for n, t in graph.items() if t in ("table", "virtual")]
+    staged.refs_tables = [n for n, t in refs.items() if t in ("table", "virtual")]
     _load_files(vault_root, conn, staged, revision)
     staged.timings["load_files_s"] = time.perf_counter() - started
     started = time.perf_counter()
@@ -131,8 +139,17 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         for owned, fact, body in snapshot(vault_root, staged.skipped.append):
             if body is not None:
                 conn.execute(
-                    "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision) VALUES (?, ?, ?, ?, ?, ?)",
-                    (owned.rel, body, fact.sha256, fact.size, _frontmatter_json(body), revision),
+                    "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision, mtime_ns) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        owned.rel,
+                        body,
+                        fact.sha256,
+                        fact.size,
+                        frontmatter_json(body),
+                        revision,
+                        fact.mtime_ns,
+                    ),
                 )
                 staged.pages += 1
             else:
@@ -147,34 +164,12 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         raise
 
 
-def _frontmatter_json(body: bytes) -> str | None:
-    """The page's frontmatter as JSON, or None when it has none or the bytes are not text."""
-    try:
-        frontmatter, _, _ = vault.parse_frontmatter(body.decode("utf-8"))
-    except (UnicodeDecodeError, vault.FrontmatterError):
-        return None
-    # YAML dates have no JSON form; their text is the form a reader of the page sees.
-    return (
-        json.dumps(_text_keyed(frontmatter), sort_keys=True, ensure_ascii=False, default=str)
-        if frontmatter
-        else None
-    )
-
-
-def _text_keyed(value):
-    """Give every mapping a text key: YAML allows any scalar there, and JSON allows only text."""
-    if isinstance(value, dict):
-        return {str(key): _text_keyed(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_text_keyed(item) for item in value]
-    return value
-
-
 def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -> None:
     """Copy each sidecar table, rows and row ids as they are, into the staged database."""
     sources = (
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
         (epistemic_graph.sidecar_path(vault_root), staged.graph_tables),
+        (memory_refs.sidecar_path(vault_root), staged.refs_tables),
     )
 
     def copy() -> None:
@@ -283,6 +278,7 @@ def _require_sidecars(vault_root: Path) -> None:
             "graph_meta",
             epistemic_graph.SCHEMA_VERSION,
         ),
+        ("references", memory_refs.sidecar_path(vault_root), "ref_meta", memory_refs.SCHEMA_VERSION),
     )
     for label, path, table, wanted in sidecars:
         found = _stamped_version(path, table)
@@ -290,7 +286,7 @@ def _require_sidecars(vault_root: Path) -> None:
             raise OpError(
                 "VAULT_STORE_SIDECAR_NOT_READY",
                 f"the {label} index is {'missing' if found is None else f'at version {found}'}, not at version {wanted}",
-                "Start the service once so that it builds both indexes, stop it, then run this command again.",
+                "Start the service once so that it builds the indexes, stop it, then run this command again.",
             )
 
 
@@ -452,15 +448,21 @@ def _install_rows(
             "VAULT_STORE_OBJECTS_EXIST",
             f"the store already holds {len(present)} of the tables store mode creates, e.g. {', '.join(present[:5])}",
         )
-    lexical, graph = create_owner_schema(conn)
-    if {**lexical, **graph} != staged.objects:
+    lexical, graph, refs = create_owner_schema(conn)
+    if {**lexical, **graph, **refs} != staged.objects:
         raise OpError(
             "VAULT_STORE_SCHEMA_DRIFT",
             "the owners' schema differs from the one that was staged and proved",
         )
 
     def copy() -> None:
-        for table in (*staged.lexical_tables, *staged.graph_tables, "store_pages", "store_binaries"):
+        for table in (
+            *staged.lexical_tables,
+            *staged.graph_tables,
+            *staged.refs_tables,
+            "store_pages",
+            "store_binaries",
+        ):
             _copy_table(conn, source, table)
 
     _copy_rows_without_triggers(conn, staged, copy)
@@ -469,6 +471,11 @@ def _install_rows(
     conn.executemany(
         "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, ?, ?, ?)",
         [(rel, fact.sha256, fact.size, fact.mtime_ns, revision) for rel, fact in pages],
+    )
+    # The page's mtime is the manifest's: both come from the recheck, which is the last read before the commit.
+    conn.execute(
+        "UPDATE store_pages SET mtime_ns = "
+        "(SELECT mtime_ns FROM store_manifest WHERE store_manifest.path = store_pages.path)"
     )
     conn.executemany(
         "INSERT INTO store_mode_objects(name, type) VALUES (?, ?)", list(staged.objects.items())
@@ -481,8 +488,8 @@ def _install_rows(
     )
     conn.execute(
         "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
-        "VALUES (?, NULL, 'migrate', 'store-mode migrate', NULL, ?, ?)",
-        (revision, why, now),
+        "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
+        (revision, Origin.MIGRATION.value, why, now),
     )
 
 

@@ -1295,6 +1295,27 @@ def _newer_custody_wrote_bytes(
     )
 
 
+def _newer_batch_owns(
+    connection: sqlite3.Connection,
+    batch_sequence: int,
+    rel_path: str,
+    state: str,
+    before_hash: str | None,
+) -> bool:
+    """Whether a newer proven batch carries this path's current bytes.
+
+    A moved path (`other`) needs newer exact custody of the path; a path back at
+    this batch's before-bytes needs a newer batch that wrote exactly those bytes.
+    Every batch owes every fan-out component, so custody of the path is custody
+    of its convergence.
+    """
+    if state == "other":
+        return _newer_custody_covers_path(connection, batch_sequence, rel_path)
+    if state == "before":
+        return _newer_custody_wrote_bytes(connection, batch_sequence, rel_path, before_hash)
+    return False
+
+
 def _handed_on(
     vault_root: Path,
     connection: sqlite3.Connection,
@@ -1331,13 +1352,13 @@ def _handed_on(
     handed = {
         rel
         for rel in moved
-        if _newer_custody_covers_path(connection, sequence, rel)
+        if _newer_batch_owns(connection, sequence, rel, "other", None)
         or _recall_lanes_hold_current(vault_root, rel)
     }
     handed.update(
         rel
         for rel, identity in returned
-        if _newer_custody_wrote_bytes(connection, sequence, rel, identity)
+        if _newer_batch_owns(connection, sequence, rel, "before", identity)
         or (identity is None and proven and _recall_lanes_hold_current(vault_root, rel))
     )
     return frozenset(handed)
@@ -1723,6 +1744,37 @@ def _publication_split(
         connection.close()
     owned = tuple(p for p in open_paths if p.rel_path not in handed_on)
     return owned, frozenset(retired | handed_on)
+
+
+def converge_paths(vault_root: Path, receipt: Any) -> tuple[DerivedBatchPath, ...]:
+    """The paths a proven batch still converges itself.
+
+    A path whose bytes moved on since this batch is skipped only when a newer
+    proven batch carries it: that batch's own components converge its current
+    bytes. Every other path stays this batch's, including one moved by an edit
+    no receipt covers.
+    """
+    paths = tuple(receipt.paths)
+    if not deferred_index.store_path(vault_root).exists():
+        return paths
+    states = [_canonical_path_state(vault_root, path) for path in paths]
+    if all(state == "after" for state in states):
+        return paths
+    connection = _connect_receipt_read(vault_root)
+    try:
+        row = connection.execute(
+            "SELECT rowid FROM derived_batches WHERE batch_id = ?", (receipt.batch_id,)
+        ).fetchone()
+        if row is None:
+            return paths
+        sequence = int(row[0])
+        return tuple(
+            path
+            for path, state in zip(paths, states, strict=True)
+            if not _newer_batch_owns(connection, sequence, path.rel_path, state, path.before_hash)
+        )
+    finally:
+        connection.close()
 
 
 def pending_visibility_complete(vault_root: Path, receipt: DerivedBatchReceipt) -> bool:

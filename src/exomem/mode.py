@@ -229,6 +229,20 @@ def release_idle_cpu_caches_only_under_pressure() -> bool:
     return not service_profile_enabled() and resolve_mode() == "normal"
 
 
+def idle_cpu_cache_release() -> str:
+    """When the reaper releases an idle CPU cache: `never`, `under_memory_pressure` or `after_idle`.
+
+    Both releases also wait out the idle threshold, and an unreadable memory reading
+    releases under `under_memory_pressure` too. Kept out of `resolved()`: bootstrap serves
+    that whole dict, and no agent acts on this value.
+    """
+    if not release_when_idle() or retain_cpu_caches():
+        return "never"
+    if release_idle_cpu_caches_only_under_pressure():
+        return "under_memory_pressure"
+    return "after_idle"
+
+
 def defer_expensive_indexes() -> bool:
     """Whether semantic/visual indexing should be queued or capped."""
     return not service_profile_enabled() and resolve_mode() == "quiet"
