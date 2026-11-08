@@ -838,6 +838,7 @@ def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
     assert still["input_revision"] == 1
 
 
+@pytest.mark.usefixtures("earlier_layout")
 def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
     """A withheld successor cannot hide the retired recap, exact span or single origin."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
@@ -905,6 +906,7 @@ def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, so
         assert other is not None and other.root != roots[-1]
 
 
+@pytest.mark.usefixtures("earlier_layout")
 @pytest.mark.parametrize("scheme", [None, "evidence-v1"])
 @pytest.mark.parametrize("selection", ["page", "unit"])
 def test_retired_recorder_keeps_the_bound_scope_and_digest_scheme(

@@ -1,5 +1,9 @@
 """Prior Markdown interpretations, retained atomically by the semantic writer.
 
+The episode recorder keeps the same entries for the one page of a recap. A recap
+Source is the only Source whose text is revised, and only that recorder revises
+it (`plan_episode_entry`), so a revision never loses its previous text.
+
 One entry keeps one before image as read. History stays outside ordinary reads
 and indexing; this owner admits every retained image before serving its fields.
 It reuses the held history reader and Records' page bounds and continuation, without
@@ -14,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +38,8 @@ from .governance.principal import OWNER_AUDIENCE, effective_principal
 from .kbdir import kb_dirname
 
 ENTRY_VERSION = 1
+#: The `operation` an episode revision's entry carries; the semantic writer names its own.
+EPISODE_OPERATION = "episode_revision"
 
 
 def history_root() -> str:
@@ -152,6 +159,45 @@ def plan_entry(
     # retry re-plans identical bytes; a token minted before this field lacks it.
     if "exomem_version" in token:
         entry["exomem_version"] = token["exomem_version"]
+    return _new_entry_write(root, path, entry)
+
+
+def plan_episode_entry(
+    root: Path, *, path: str, before_source: str, after_source: str
+) -> vault.PlannedWrite:
+    """Keep the exact previous bytes of an episode page that the recorder revises.
+
+    The recorder is the only caller. Unlike `plan_entry` it plans for a Source,
+    which that function leaves out, and it mints its own transition: a recap
+    revision has no semantic preflight to take one from.
+    """
+    from . import __version__
+
+    parent_ref = memory_refs.ref_from_markdown(before_source) or context_refs.vault_ref(path)
+    moment = dt.datetime.now(dt.UTC)
+    transition_id = uuid.uuid4().hex
+    who = effective_principal()
+    entry = {
+        "version": ENTRY_VERSION,
+        "parent_ref": parent_ref,
+        "path": path,
+        "at": moment.isoformat().replace("+00:00", "Z"),
+        "operation": EPISODE_OPERATION,
+        "transition_id": transition_id,
+        "before_hash": vault.content_hash(before_source),
+        "after_hash": vault.content_hash(after_source),
+        "affected_units": [],
+        "reason": None,
+        "actor": {"audience": who.audience_id, "surface": who.surface},
+        "prior": {"source": before_source},
+        "binding": provenance.parse_origin(before_source, managed=True).payload,
+        "exomem_version": __version__,
+    }
+    name = registry_history.version_id(moment, transition_id) + ".json"
+    return _new_entry_write(root, root / history_dir(parent_ref) / name, entry)
+
+
+def _new_entry_write(root: Path, path: Path, entry: dict) -> vault.PlannedWrite:
     guard = vault.PathGuard.capture(root, path.relative_to(root).as_posix(), leaf_policy="absent")
     return vault.PlannedWrite(
         path,

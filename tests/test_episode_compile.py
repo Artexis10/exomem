@@ -73,7 +73,7 @@ def test_the_block_names_the_recap_to_cite_and_the_open_count_falls_once_a_live_
     find_module.shared_resolver(vault)
     second = record_episode(episode=first["episode"], decided=DECIDED, open=["Pick the paint"])
 
-    assert second["source"]["path"] != first["source"]["path"]
+    assert second["source"]["path"] == first["source"]["path"]
     assert second["compile"]["open"] == 0
     assert second["compile"]["outcome"] == "This recap has 2 decided items; 2 are already cited by a live page."
     assert "next_step" not in second["compile"], "nothing is left to cite"

@@ -11,6 +11,7 @@ import pytest
 from test_connector_boundary import PUBLIC
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_connector_boundary import public_matter_writer as public_matter_writer
+from test_episode_memory_command import _episodes, _record
 from test_latency_gate import _seed_freshness_live
 from test_observe_memory import (
     PAGE,
@@ -898,3 +899,20 @@ def test_history_is_unreadable_once_the_page_is_deleted(tmp_path: Path, owner) -
         commands.op_read_memory(tmp_path, path=PAGE, include_history=True)
     assert str(direct.value).startswith("NOT_FOUND:")
     assert str(through_read.value).startswith("NOT_FOUND:")
+
+
+def test_a_revised_episode_page_reads_back_its_previous_bytes_through_history(
+    vault: Path, owner
+) -> None:
+    """A recap revision whose previous text no read can reach has lost what the first recap said."""
+    first = _record(vault)["source"]["path"]
+    original = (vault / first).read_bytes()
+    _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
+
+    page = commands.op_read_memory(vault, path=first, include_history=True)
+
+    history = page["revision_history"]
+    entry, = history["revisions"]
+    assert (history["status"], history["returned"]) == ("retained", 1)
+    assert entry["prior"]["source"].encode() == original
+    assert [path.relative_to(vault).as_posix() for path in _episodes(vault)] == [first]
