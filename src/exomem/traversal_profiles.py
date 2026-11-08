@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import yaml
 
 from . import relation_registry, vault
 from .kbdir import kb_dirname
+from .vocabulary import registry as vocabulary_registry
 
 SCHEMA_VERSION = 1
 MAX_DEPTH = 5
@@ -159,37 +161,31 @@ def builtin_profiles(
 ) -> dict[str, TraversalProfile]:
     registry = registry or relation_registry.core_registry()
     all_families = frozenset(item.family for item in registry.core.values())
-    values = {
-        "epistemic": {
-            "support",
-            "contradiction",
-            "refinement",
-            "duplication",
-            "supersession",
-            "question",
-            "answer",
-        },
-        "provenance": {"derivation", "evidence", "citation", "observation"},
-        "causal": {"causality", "dependency", "mitigation", "blocking", "resolution"},
-        "decision": {
-            "evidence",
-            "derivation",
-            "dependency",
-            "implementation",
-            "use",
-            "mitigation",
-            "resolution",
-        },
-        "all": set(all_families),
-    }
-    return {
-        name: TraversalProfile(
-            name=name,
-            families=frozenset(families),
-            priority=tuple(sorted(families)),
+    profiles = dict(_shipped_profiles())
+    profiles["all"] = TraversalProfile(
+        name="all", families=all_families, priority=tuple(sorted(all_families))
+    )
+    return profiles
+
+
+@lru_cache(maxsize=1)
+def _shipped_profiles() -> dict[str, TraversalProfile]:
+    """The profiles of `packs/core/traversal-profiles.yaml`. A malformed pack is a build defect."""
+    data = yaml.safe_load(vocabulary_registry.pack_text("traversal-profiles.yaml"))
+    if data.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"traversal-profiles pack schema_version must be {SCHEMA_VERSION}")
+    core_families = relation_registry.core_registry().families
+    profiles: dict[str, TraversalProfile] = {}
+    for name, value in data["profiles"].items():
+        if name == "all" or set(value) - {"add_families"}:
+            raise ValueError(f"traversal-profiles pack profile {name!r} is not a shipped profile")
+        families = frozenset(value["add_families"])
+        if families - core_families:
+            raise ValueError(f"traversal-profiles pack profile {name!r} names an unknown family")
+        profiles[str(name)] = TraversalProfile(
+            name=str(name), families=families, priority=tuple(sorted(families))
         )
-        for name, families in values.items()
-    }
+    return profiles
 
 
 def profile_path(vault_root: Path) -> Path:
