@@ -1530,7 +1530,8 @@ def task_candidates(
     for origin, query_text in method_queries:
         # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
         # The leads already found must still be projected, so the search may spend only what that leaves.
-        reserve = request_budget.TASK_PROJECTION_RESERVE_SECONDS + (
+        kept = request_budget.task_projection_reserve(len(found))
+        reserve = kept + (
             method_seconds if method_seconds is not None else request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
         )
         if budget_exhausted("working_set.task_context_methods", reserve=reserve):
@@ -1539,7 +1540,7 @@ def task_candidates(
         started = time.monotonic()
         with (
             find_types.timing_span(timings, "working_set.task_context_methods"),
-            request_budget.leaving(request_budget.TASK_PROJECTION_RESERVE_SECONDS),
+            request_budget.leaving(kept),
             lexstore.stopping_at_budget(),
         ):
             methods = lexstore.get_store(vault_root).search_semantic_units_result(
@@ -1555,6 +1556,9 @@ def task_candidates(
         method_seconds = time.monotonic() - started
         if methods.readiness.status == lexstore.DEADLINE_STATUS:
             missing.append({"role": "task_context", "reason": "budget"})
+            budget = request_budget.current()
+            if budget is not None:
+                budget.note_truncated("working_set.task_context_methods")
             break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -2532,7 +2536,8 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     START a stage but never enough to finish one.
 
     `reserve` overrides that flat second for a stage whose cost this request
-    has already MEASURED. Nothing interrupts a stage once it has started, so
+    has already MEASURED. Nothing interrupts a started stage unless its queries run inside
+    `lexstore.stopping_at_budget`, so
     a flat reserve is only honest for stages that cost about the same every
     time; the carry's query is the same shape as the first lexical pass and
     costs about as much, so on a request where that pass took three seconds

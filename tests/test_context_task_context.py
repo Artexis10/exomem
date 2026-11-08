@@ -573,7 +573,7 @@ def test_a_slow_method_search_leaves_time_to_serve_the_leads_already_found(
         return lexstore.CatalogQueryResult(None, lexstore.CatalogReadiness(lexstore.DEADLINE_STATUS, False, "sqlite"))
 
     monkeypatch.setattr(type(lexstore.get_store(vault)), "search_semantic_units_result", runs_to_its_deadline)
-    budget = request_budget.RequestBudget(seconds=request_budget.TASK_PROJECTION_RESERVE_SECONDS + 3.0)
+    budget = request_budget.RequestBudget(seconds=8.0)
     token = request_budget.set_current(budget)
     try:
         packet = _activate(vault, turn="Inspect the optical alignment before the workshop", max_chars=8000)
@@ -584,3 +584,30 @@ def test_a_slow_method_search_leaves_time_to_serve_the_leads_already_found(
     assert lead in {item["source_ref"] for item in task["candidates"]}
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
+
+
+def test_the_short_activation_door_still_runs_the_method_search(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hook's doors bind a 6 s budget; a reserve sized for the 50 s MCP budget would skip methods on every turn."""
+    from exomem import request_budget
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    _page(vault, "alignment-visit", body="Inspect the optical alignment before the workshop.\n")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    store_type = type(lexstore.get_store(vault))
+    real = store_type.search_semantic_units_result
+    searched = []
+
+    def recorded(self, *args, **kwargs):
+        searched.append(True)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(store_type, "search_semantic_units_result", recorded)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=request_budget.ACTIVATION_DOOR_BUDGET_SECONDS))
+    try:
+        packet = _activate(vault, turn="Inspect the optical alignment before the workshop", max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+    assert searched
+    assert {"role": "task_context", "reason": "budget"} not in packet["task_context"]["missing"]
