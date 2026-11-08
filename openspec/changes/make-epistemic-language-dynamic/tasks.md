@@ -6,15 +6,19 @@
 
 ## 2. Relation behaviours
 
-- [ ] 2.1 Inventory every branch on a relation key or family value in `src/exomem`. Map each to a behaviour, add a behaviour with its code, or name it as debt.
-- [ ] 2.2 Declare the closed relation-behaviour set, give the core relations their behaviours, and make extensions inherit them.
-- [ ] 2.3 Replace the hard-coded lift, membership, resolution, prediction-evidence, provenance and supersession sets with behaviour reads. Prove identical output on a fixture vault.
-- [ ] 2.4 Add `precedes` and `follows` with their opposite order behaviours, and order them in compiled context.
+- [ ] 2.1 Record the inventory's mapping in design.md: the relation-behaviour table, the `frontmatter_fields` binding and the debt list.
+- [ ] 2.2 Declare the closed relation-behaviour set and the `behaviours` field on core entries. Resolve an extension's behaviours through its core parent in one registry accessor. Refuse `behaviours` on an extension.
+- [ ] 2.3 Add `frontmatter_fields` to the core pack, and derive the `frontmatter` origin from it. Make graph indexing, relation facts and activation read it, and delete the three copies.
+- [ ] 2.4 Replace each relation branch that the design table maps with a behaviour or binding read. SQL readers expand keys over the admitted instances through `relation_query_plan`. Give each remaining branch its debt reason in a code comment.
+- [ ] 2.5 Move the shipped traversal profiles into the core pack, in the vault overlay's grammar.
+- [ ] 2.6 Prove the cutover on the fixture vault in design.md ("Fixture"): core outputs identical, and each intended change in design.md shown by its own case.
+- [ ] 2.7 Update the AGENTS.md section "Vocabulary lives in registries": code branches on `behaviours`, `traits`, `role` and status `class`, never on a family value.
+- [ ] 2.8 Add `precedes` and `follows` with their opposite order behaviours, and order them in compiled context.
 
 ## 3. Kinds and verdicts
 
-- [ ] 3.1 Inventory every branch on a kind key. Map each to a trait or name it as debt.
-- [ ] 3.2 Move the built-in kinds into the shipped pack with their traits. Replace the kind branches with trait reads, and prove identical output on a fixture vault.
+- [ ] 3.1 Record the kind mapping in design.md: the kind-trait table and the kind debt.
+- [ ] 3.2 Move the 27 built-in kinds, their aliases and the compact `observation` kind into the shipped pack. Declare the traits `assertion`, `page_claim`, `procedure`, `outcome` and `question`. Replace the kind reads with trait reads, and prove identical output on the fixture vault in design.md ("Fixture").
 - [ ] 3.3 Move the verdicts into a registry with labels. Update the verdict remediation, bootstrap's taught verdicts and the experiment `outcome:` check.
 
 ## 4. Belief and the new keys
@@ -28,7 +32,7 @@
 
 - [ ] 5.1 Add the dimension registry with the 12 shipped dimensions and their members.
 - [ ] 5.2 Add filtering in retrieval, grouping in the context compiler, and queues in reviews and reports, for any dimension.
-- [ ] 5.3 Add the closed display-behaviour set, and prove that no display behaviour hides a unit or changes its standing.
+- [ ] 5.3 Add the closed display-behaviour set, and prove that no display behaviour hides a unit or changes its standing. Declare the `closable` kind trait with `flag_open`, its only reader.
 - [ ] 5.4 Check on real models that the display annotations help an agent rather than add noise.
 
 ## 6. Language and teaching
@@ -39,4 +43,4 @@
 ## 7. Proof and delivery
 
 - [ ] 7.1 Prove each slice on real models: agents choose the right word on realistic and hostile inputs.
-- [ ] 7.2 Review, merge, release, and archive this change.
+- [ ] 7.2 Review, merge, release, and archive this change. Before the archive, refresh each MODIFIED block against the canonical spec, keeping the requirements and scenarios that later changes added. Three other changes copy "Current Relation Review Disposition".

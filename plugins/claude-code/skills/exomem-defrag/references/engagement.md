@@ -336,8 +336,9 @@ own workspace or repository; those already persist there.
 
 Give each hand-over its own `adoption.key`, such as the file name plus a version.
 A revision you hand over later takes a new key and is kept beside the first under
-the next free name. The same bytes again, under any key or name, return
-`already_stored` and write nothing. The same key with other bytes is refused as
+the next free name. The same bytes again under a new key or name return
+`already_stored`, name the earlier copy and write nothing; a retry with the same
+key replays the first answer. The same key with other bytes is refused as
 `ADOPTION_KEY_REUSED`.
 
 Choose the semantic lane before transport: reasoning material is a Source;
