@@ -109,7 +109,8 @@ Admitted status definitions and their identity SHALL remain separate from its no
 Clients SHALL discover current status vocabulary through the exposed registry contract.
 Released hosted profiles SHALL retain their historical semantic contract artifacts and descriptors while using current shared runtime semantics.
 The versioned bootstrap operating contract SHALL provide separate corrective guidance for the current class rule and classification outcomes.
-Compact and full bootstrap SHALL expose that correction without requiring a parameter absent from the frozen descriptor.
+Full bootstrap SHALL expose that correction without requiring a parameter absent from the frozen descriptor.
+Compact bootstrap SHALL expose the current class rule and need not carry the correction's note on historical inactive-label lists, because the compact core is held under a byte ceiling and the released hosted profiles that needed the note are retired.
 Registry lookup guidance SHALL name only routes exposed by the active profile.
 Unknown labels SHALL create debt only after admitted classification establishes that they are unregistered.
 

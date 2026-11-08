@@ -34,7 +34,7 @@
 
 ## 9. Archive
 
-- [ ] 9.1 After merge and round A, synchronize the deltas into the canonical specs and archive this change with `openspec archive`.
+- [x] 9.1 After merge and round A, synchronize the deltas into the canonical specs and archive this change with `openspec archive`. Evidence: archived last of the five with `openspec archive`, after the four changes that it hands acceptance to, with strict validation before and after.
 
 ## 10. Round-3 repair
 
