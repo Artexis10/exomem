@@ -17,14 +17,16 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import BEHAVIOURS, is_stable
+from .cases import BEHAVIOURS, STORE_NAMES, is_stable
 
 SEED = 20261108
-#: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
-#: A closed set of the harness's own literals, not a reading of what an answer means. The judge reads them as
-#: STORE_MARK, so an answer's wording cannot show it the arm; the report still counts the raw mentions.
-STORE_NAMES = ("memory/", "exomem")
 STORE_MARK = "[store]"
+#: One whole token around a store name: a path such as notes/memory/web.md or a tool name such as
+#: mcp__exomem__recall_context becomes one bare mark, so the mark keeps no path or tool shape.
+_STORE_TOKENS = [
+    re.compile(r"[\w./\\-]*" + re.escape(name) + r"[\w./\\-]*", re.IGNORECASE)
+    for name in STORE_NAMES
+]
 JUDGE_TIMEOUT_SECONDS = 600
 #: The label of an answer given with the whole history in its prompt (the solvable gate).
 HISTORY_ARM = "N-history"
@@ -173,10 +175,9 @@ def items(
 
 
 def hide_store_names(text: str) -> str:
-    """``text`` with every store name the harness introduces replaced by ``STORE_MARK``, case-folded."""
-    for name in STORE_NAMES:
-        mark = STORE_MARK + "/" if name.endswith("/") else STORE_MARK
-        text = re.sub(re.escape(name), mark, text, flags=re.IGNORECASE)
+    """``text`` with each whole token that holds a store name (``STORE_NAMES``) replaced by ``STORE_MARK``."""
+    for token in _STORE_TOKENS:
+        text = token.sub(STORE_MARK, text)
     return text
 
 

@@ -77,7 +77,7 @@ The judge sees an opaque id, the probe task, the key (value, accepted phrasings,
 
 The judge decides correctness. That keeps a correct answer in other words from scoring as wrong.
 
-Before judging, the harness replaces the store names it introduces, the folder path and the product name, with a neutral mark in the answer and the changed files. In a smoke run, every folder and Exomem answer named its store, which would show the judge the arm. The report still counts the raw mentions per arm.
+Before judging, the harness replaces each token that holds a store name it introduces, the folder path or the product name, with a neutral mark in the answer and the changed files. The case check refuses case text that holds one, so every mark comes from an arm. In a smoke run, every folder and Exomem answer named its store. The mask hides those names; it does not hide every hint of the arm, so the report counts the raw mentions per arm.
 
 - **Cross-check:** when a probe names a structured answer field, such as `config/deploy.yaml` at `staging.approvals`, the harness reads it with a parser and compares it with the key value. The report lists every disagreement with the judge. In the dev round, the list drives key repairs. In the held-out run, it is description only. If no case names such a field, the harness builds no cross-check and the report says so.
 - **Re-judging:** a fresh call of the same judge re-judges a 20% sample. If agreement on `correct` is below 90%, the run reads incomplete. In the dev round, the rubric is repaired. A held-out run has no tiebreaker, because only the frozen decision judge's verdicts are decision evidence. A judge from another family may re-judge a sample as description.

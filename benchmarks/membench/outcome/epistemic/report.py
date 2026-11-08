@@ -22,8 +22,8 @@ from recall_parity.scoring import DEFAULT_RESAMPLES
 from ..faults import books
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
-from .cases import is_stable
-from .judge import BEHAVIOURS, HISTORY_ARM, STORE_NAMES, behaviours_asked, scored
+from .cases import STORE_NAMES, is_stable
+from .judge import BEHAVIOURS, HISTORY_ARM, behaviours_asked, scored
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -190,12 +190,15 @@ def store_mentions(outcomes: list[dict], arms: list[str]) -> dict:
     """Per arm, the raw answers that name a memory store (``STORE_NAMES``); the judge read each one masked."""
     rows = {}
     for arm in arms:
-        texts = [o["answer"] for o in outcomes if o["arm"] == arm and o["state"] == "answered"]
+        answered = [o["answer"] for o in outcomes if o["arm"] == arm and o["state"] == "answered"]
+        # A run judged before raw answers were kept has none: unknown, never a mention-free answer.
+        texts = [text for text in answered if text is not None]
         naming = sum(any(name in text.casefold() for name in STORE_NAMES) for text in texts)
         rows[arm] = {
             "answers": len(texts),
             "naming_a_store": naming,
             "share": round(naming / len(texts), 4) if texts else None,
+            "raw_answer_unknown": len(answered) - len(texts),
         }
     return rows
 

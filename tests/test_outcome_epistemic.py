@@ -457,7 +457,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "item": None,
             "task": "t",
             "key": {"value": "8443"},
-            "answer": "Port 8443, as Exomem recalled.",
+            "answer": "Port 8443, as Exomem recalled through mcp__exomem__recall_context.",
             "changed": "",
         },
     ]
@@ -467,7 +467,10 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
 
     shown = (judge_run / "judge" / "items.jsonl").read_text()
     assert "memory/" not in shown and "exomem" not in shown.casefold()
-    assert shown.count("[store]") == 3
+    assert "[store]/" not in shown and "__recall" not in shown, (
+        "the whole token goes, path and tool shape too"
+    )
+    assert shown.count("[store]") == 4
 
     rows = [json.loads(line) for line in shown.splitlines()]
     (judge_run / "judge" / "verdicts.jsonl").write_text(
@@ -476,6 +479,18 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
     outcomes, _, _ = epistemic_judge.scored(judge_run)
     mentions = report.store_mentions(outcomes, ["F", "P"])
     assert mentions["F"]["naming_a_store"] == 1 and mentions["P"]["naming_a_store"] == 1
+
+
+def test_case_text_that_holds_a_store_name_is_refused_because_the_judge_would_read_it_masked():
+    """An ops key such as 'raise the memory/CPU limit' would reach the judge as an arm's note."""
+    project = invented_project()
+    project["probes"][0]["key"]["rubric"] = ["raises the memory/CPU limit to 2"]
+
+    problems = cases.structure_problems(project)
+
+    assert problems == [
+        "probe p-early key.rubric[0] holds a store name the judge masks (memory/, exomem); reword it"
+    ]
 
 
 def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
@@ -738,9 +753,14 @@ def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():
 
     rows = report.store_mentions(outcomes, ["F", "P", "N"])
 
-    assert rows["F"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
-    assert rows["P"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
-    assert rows["N"] == {"answers": 0, "naming_a_store": 0, "share": None}, "no answer is not 0"
+    assert rows["F"] == {"answers": 2, "naming_a_store": 1, "share": 0.5, "raw_answer_unknown": 0}
+    assert rows["P"] == {"answers": 2, "naming_a_store": 1, "share": 0.5, "raw_answer_unknown": 0}
+    assert rows["N"] == {
+        "answers": 0,
+        "naming_a_store": 0,
+        "share": None,
+        "raw_answer_unknown": 0,
+    }, "no answer is not 0"
 
 
 def window_state(project, window, hour, status="complete"):
