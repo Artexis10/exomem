@@ -423,8 +423,11 @@ def _short(path: str) -> str:
     return path.removeprefix(f"{KB}/").removeprefix(f"{ENTITIES}/").removesuffix(".md")
 
 
-def _suggested(vault: Path, name: str, method: str) -> list[tuple[str, str]]:
-    """The (relation, target) pairs one suggestion method proposes for one page."""
+def _suggested(vault: Path, name: str, method: str) -> list[tuple[str | None, str]]:
+    """The (relation, target) pairs one suggestion method proposes for one page.
+
+    A generic proposal names no relation, so its relation is None.
+    """
     found = epistemic_graph.suggest_relations(vault, path=f"{KB}/{name}.md", limit=50)
     return sorted(
         (c["relation_type"], _short(c["to"])) for c in found["candidates"] if c["method"] == method
@@ -479,10 +482,10 @@ def test_two_pages_that_answer_one_target_are_proposed_as_related(fixture_vault:
     assert [
         item
         for item in _suggested(fixture_vault, "res-a", "shared_resolution_target")
-        if item != ("relates_to", "res-c")
-    ] == [("relates_to", "res-b")]  # CORE
+        if item != (None, "res-c")
+    ] == [(None, "res-b")]  # CORE
     assert _suggested(fixture_vault, "rr-1", "shared_resolution_target") == [  # CORE
-        ("relates_to", "rr-2")
+        (None, "rr-2")
     ]
 
 
@@ -496,10 +499,10 @@ def test_an_extension_of_resolves_does_not_feed_shared_resolution_candidates(
     build_graph(fixture_vault)
 
     assert _suggested(fixture_vault, "res-c", "shared_resolution_target") == [  # FLIPS 3
-        ("relates_to", "res-a"),
-        ("relates_to", "res-b"),
+        (None, "res-a"),
+        (None, "res-b"),
     ]
-    assert ("relates_to", "res-c") in _suggested(  # FLIPS 3
+    assert (None, "res-c") in _suggested(  # FLIPS 3
         fixture_vault, "res-a", "shared_resolution_target"
     )
 
@@ -508,7 +511,7 @@ def test_two_pages_that_carry_one_question_are_proposed_as_related(fixture_vault
     build_graph(fixture_vault)
 
     assert _suggested(fixture_vault, "oq-a", "shared_open_question") == [  # CORE
-        ("relates_to", "oq-b")
+        (None, "oq-b")
     ]
 
 
@@ -522,8 +525,8 @@ def test_frontmatter_sources_and_shared_sources_are_proposed(fixture_vault: Path
     assert [
         item
         for item in _suggested(fixture_vault, "fs-a", "shared_sources")
-        if item != ("relates_to", "fs-c")
-    ] == [("relates_to", "fs-b")]  # CORE
+        if item != (None, "fs-c")
+    ] == [(None, "fs-b")]  # CORE
 
 
 def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
@@ -537,10 +540,10 @@ def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
     build_graph(fixture_vault)
 
     assert _suggested(fixture_vault, "fs-c", "shared_sources") == [  # FLIPS 8
-        ("relates_to", "fs-a"),
-        ("relates_to", "fs-b"),
+        (None, "fs-a"),
+        (None, "fs-b"),
     ]
-    assert ("relates_to", "fs-c") in _suggested(  # FLIPS 8
+    assert (None, "fs-c") in _suggested(  # FLIPS 8
         fixture_vault, "fs-a", "shared_sources"
     )
 
@@ -565,11 +568,11 @@ def test_the_review_batch_carries_the_lift_and_source_rows(fixture_vault: Path) 
     ]
     assert rows["fs-a"] == [  # CORE
         ("frontmatter_sources", "derived_from", "src-doc"),
-        ("shared_sources", "relates_to", "fs-b"),
+        ("shared_sources", None, "fs-b"),
     ]
     assert rows["res-c"] == [  # FLIPS 3
-        ("shared_resolution_target", "relates_to", "res-a"),
-        ("shared_resolution_target", "relates_to", "res-b"),
+        ("shared_resolution_target", None, "res-a"),
+        ("shared_resolution_target", None, "res-b"),
         ("unit_relation_lift", "x.closes", "res-target"),
     ]
     assert rows["lift-d"] == [  # FLIPS 9
@@ -1709,7 +1712,7 @@ def _pins_its_target(root: Path, relation: str) -> bool:
         ("contradicts", True),  # CORE
         ("answers", True),  # CORE
         ("x.backs", True),  # CORE
-        ("relates_to", False),  # CORE
+        # `relates_to` is not listed: a write that adds it is refused before the guard runs.
         ("links_to", False),  # CORE
         ("evidenced_by", False),  # CORE
         ("x.see_also", False),  # CORE
