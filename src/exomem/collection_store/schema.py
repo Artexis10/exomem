@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
@@ -1040,6 +1040,27 @@ def _migrate_to_15(conn: sqlite3.Connection) -> None:
 
 
 _TRIGGERS_V15 = _append_only_triggers("store_audit")
+
+
+def _migrate_to_16(conn: sqlite3.Connection) -> None:
+    """Give the store-mode read path what it needs: a page mtime and two covering indexes.
+
+    ``store_pages.mtime_ns`` is the modification time of the projected file, so a page read answers the
+    same stat as a file read. It starts from the projection manifest's value. ``store_pages_meta`` lets a
+    metadata read (path, revision, hash, size, mtime, frontmatter) skip the page body, and
+    ``store_audit_by_path`` lets an audit read by path skip the whole trail. Nothing here changes a row's
+    meaning, so every vault keeps its data and every older reader of the tables keeps working.
+    """
+    conn.execute("ALTER TABLE store_pages ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE store_pages SET mtime_ns = COALESCE("
+        "(SELECT mtime_ns FROM store_manifest WHERE store_manifest.path = store_pages.path), 0)"
+    )
+    conn.execute(
+        "CREATE INDEX store_pages_meta ON "
+        "store_pages(path, revision, sha256, size, mtime_ns, frontmatter_json)"
+    )
+    conn.execute("CREATE INDEX store_audit_by_path ON store_audit(path, revision)")
 
 
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
