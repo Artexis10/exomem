@@ -58,6 +58,9 @@ the public-suite lanes.
 | f32 | utility_action_episode | operational | none | utility_action_state_valid · utility_no_prohibited_effects (seeded helpful-history, self-contained and stale-distractor action episodes) |
 | f33 | referent_capture_replay | operational | none | referent_entity_typed · referent_key_edge_present · referent_used_in_fresh_session · twin_left_no_referent (six positives from the owner's list, each with a twin that names the same referent as often but as a passing or one-off thing; one fresh owner-anchored session per positive) |
 | f34 | organisation_autonomy_replay | operational | none | key-scored outcome per §7 sequence 8; no §2 assertion (40 held-out situations: relation, referent and durability twin, placement and vocabulary freshness; each a capture session and a fresh-recall session) |
+| f35 | clbench_outcome_over_sessions | operational | CL-Bench 1.0 `database_exploration` (Apache-2.0, upstream-scored) | key-scored outcome per §7 sequence 9; no §2 assertion (40-question schedule with a schema migration after question 20, held-out orderings `run_index` 1-3; arms no memory, plain memory folder and Exomem as shipped, with bare-MCP Exomem and a hook-only variant as ablations) |
+| f36 | multidoc_synthesis_outcome | operational | Harvey LAB (MIT, expert pass/fail criteria) | key-scored outcome per §7 sequence 9; no §2 assertion (20 held-out matters; arms file search and Exomem as shipped, with bare Exomem read tools and the graph index off as declared ablations) |
+| f37 | planted_governance_ablation | operational | none | key-scored outcome per §7 sequence 9; no §2 assertion (32 held-out planted stale or wrong notes; identical authored text with and without governance) |
 
 ## 2. Assertion registry (deterministic; unknown name = fixture load error)
 
@@ -563,3 +566,98 @@ adversarial comparison at acceptable marginal cost.
   The aggregate digest is `2feb75c61589b5dacad5b2ef96a557118663141e4e690fc7912fedadfe97ae01`: the SHA-256 of a text with one line for each of the 80 case and key files above, in name order, each line being the digest, two spaces, the file name and a newline.
 
   **No other change.** This amendment adds no §2 assertion, operation kind, catastrophic assertion or budget constant. The measurement lane scores f34 against the frozen keys under this entry's rules. The owner is asked to acknowledge this amendment before the decision run. Until the receipt is acknowledged, f34 MUST NOT support a comparative run, score or claim, and PR B's acceptance reads as open.
+
+- 2026-11-07 — **Outcome evaluation amendment, sequence 9.** Add f35 `clbench_outcome_over_sessions`, f36 `multidoc_synthesis_outcome` and f37 `planted_governance_ablation` to §1. Reason: on 2026-11-07 the owner asked that public outcome benchmarks become first-class in Exomem, and that the benchmarks measure Exomem's epistemics where plain notes fail. These families measure task outcome, not recognition. Every result they produce is an internal diagnostic. The actors run on the Claude subscription, not under the suites' official API protocols, so no figure is publishable as a suite result.
+
+  **Authorship and custody.**
+  - f35 and f36 take their questions, documents, answer keys and criteria from the pinned upstream suites. The measured session wrote none of them. The upstream commits are CL-Bench `5f8c50eb1e84b2eda2ef4faff757dfc812a0ea26` and Harvey LAB `ba363f57c900166b616062c8153560d0508d9175`.
+  - An independent case-authoring lane wrote f37's cases and keys on 2026-11-07. That lane never runs, answers or judges. All of the content is invented and fictional. The files stay in evaluator custody outside the repository.
+  - This entry freezes every held-out input by SHA-256 in the receipt's `fixture_sha256`. Each path there is relative to the outcome run root. A held-out run checks each file against its digest before its first session and refuses on any difference.
+
+  **Held-out units.**
+  - f35: the `default` schedule at seed 42 with `run_index` 1, 2 and 3. The schedule is 20 base questions, a schema migration, then 20 post-migration questions. Development rounds and the release panel use the `multi_group` variant only, so the post-migration questions never appear before the decision run. The 20 base questions also appear in `multi_group`, so only the post-migration half is unseen; the report gives that half separately.
+  - f36: 20 matters drawn with `random.Random(20261108)` from the tasks with their own folder of 8 to 40 documents and one deliverable, one matter per practice area. 3 further matters from other practice areas serve development.
+  - f37: 32 held-out cases, 8 per correction kind, drawn with `random.Random(20261107)`. The kinds are a superseded rule, a claim contradicted by a later source, a refuted claim and a qualified claim. 16 further cases serve development and share no case id or fact with the held-out cases.
+
+  **Sampling unit.**
+  - f35: the question. Memory written early in a run shapes every later question in that run, and the three runs replay the same 40 questions in different orders. The interval therefore resamples questions, each carrying its differences from all three runs, and the report also gives each run's mean difference.
+  - f36: the matter. The criteria inside one deliverable are not independent.
+  - f37: the case. Cases share one author, the vault's distractor pages and the actor model. Each case has its own fact, pages and task.
+
+  **Arms.** Every arm uses one actor: `claude-sonnet-5-5` at high effort on the Claude subscription. Every session goes through the shared headless argv builder, with project-only settings, a strict MCP configuration, an out-of-tree working directory, auto memory off and path-scoped file permissions. The upstream authors configured the controls; this repository did not. The primary Exomem arm of f35 and f36 is Exomem as a Claude Code user gets it: the shipped plugin with its skills and hooks at the default prominence, `balanced`, plus the balanced custom-instruction block that `docs/prominence.md` publishes, read from that file at run time. It carries no instruction written for the benchmark. Every other Exomem arm is a declared ablation and never decides.
+  - f35 N: upstream's stateless baseline. Each question gets a fresh session and nothing is kept.
+  - f35 F: a plain memory folder with upstream's own Claude memory instruction.
+  - f35 P: Exomem as shipped, on a fresh disposable vault, with the full Exomem tool surface and the skill tool. The task prompt is upstream's, without a memory instruction. The workspace and the hooks' local state reset for each question, so Exomem is the only carrier. Each question stands for a separate session spread over time, so a wall-clock hook cooldown does not carry from one question to the next.
+  - f35 E (ablation): bare Exomem over MCP with an instruction parallel to F's, no plugin, skills or hooks, and the same workspace reset.
+  - f35 EH (ablation): E plus the shipped hooks at the default activation packet.
+  - f36 S: the converted matter documents with file tools.
+  - f36 WP: S plus Exomem as shipped. One compile session first captures the same documents and compiles notes without seeing the task. A fresh task session then gets the plain task prompt.
+  - f36 W (ablation): the compile and task sessions with bare Exomem tools, read tools only in the task session, and a sentence telling the session that its memory holds notes from the matter.
+  - f36 WG (ablation): the WP task session again on a copy of WP's vault taken after the compile, with the graph index disabled.
+  - f37 E: Exomem's read tools (`recall_context`, `search_memory`, `read_memory`) over a vault built through Exomem's own tools, with the governance an agent writes when a correction arrives.
+  - f37 P: the same tools over a vault with the identical authored text and no governance writes. The governance is the claim-unit verdict and relation lines and the supersession metadata that E's writes add. Before any answer the run removes those lines from E's pages and refuses on any other difference from P. Each case answers from a fresh copy of its arm's built vault and state, so no read from one case reaches the next.
+
+  Before generation the run binds, for each arm, the product version and its interpreter, the CLI version, the requested and reported model, the served tool list, the loaded skills and plugins, and the MCP configuration digest. A plugin arm also records the characters its hooks inject per turn. Model fallback is off.
+
+  **Measures.**
+  - f35: upstream's per-question reward. A correct answer scores 1 minus its exploratory queries over the 15-query budget; any other answer scores 0. The run reports the post-migration questions' reward separately.
+  - f36: the fraction of the matter's criteria that pass. The all-pass flag is description only.
+  - f37: `stale_trusted` (primary), `correct`, `flags_conflict` and `rationalises`.
+  - Every family also reports turns, wall time, tokens by kind, refused tool calls and faults per arm. A count the CLI does not report is unknown, never 0. A product failure, refusal, timeout or budget exhaustion is a scored loss; in f37 an unanswered case scores as `stale_trusted` and not `correct`, without judging. Only an evidenced harness fault voids a unit, and the report lists every scheduled, valid, invalid and missing unit. A session that reports another model than the frozen actor, or an API key as its credential source, is a harness fault.
+
+  **Judging.** f35 needs no judge, because upstream code scores every answer. f36 and f37 use a blind judge through a JSON schema. The judge sees an opaque id, the task, the key or criteria, and the answer, in the same view for every arm. It never sees the arm, the vault or the recall packet. The decision judge is `gpt-6.1-sol` on the Codex subscription, another family than the actor. When Codex has no room, the run waits; it does not switch judges. An Opus judge scores development rounds only, and its report never reads as decision evidence. The judge scores 20% of items twice, to measure judge noise.
+
+  **Statistics and decisions.** An interval that contains 0 establishes no difference.
+  - f35: the per-question paired difference averaged over the three runs, with a 95% percentile bootstrap interval of 10,000 resamples over the 40 questions. Exomem helps when the lower bound of P − N is above 0 and each run's mean P − N is above 0. Exomem is not worse than a plain folder when the lower bound of P − F is above −0.05, the largest loss the owner accepts. Exomem beats a plain folder when the lower bound of P − F is above 0 and each run's mean P − F is above 0. E − F, P − E and EH − E are description only.
+  - f36: the per-matter paired difference WP − S, with a 95% percentile bootstrap interval over matters. Every document stays in the task folder, and the development round put S at a mean pass fraction of 0.96 on its three matters, so the suite has little room to show a gain and is read for harm. Exomem as shipped does no harm to document work when the lower bound of WP − S is above −0.05, the largest loss the owner accepts. It helps when that lower bound is above 0. W − S and WG − WP are description only.
+  - f37: the paired table of `stale_trusted`, with the 95% interval by Newcombe's method 10. The run reuses the sequence-8 implementation and checks it against that entry's test vector before scoring. Governance protects the agent when the upper bound of E − P is below 0 and the point estimate of `correct` E − P is at least 0, so that an arm cannot gain by not answering. The same table and interval for `correct` are reported.
+
+  **Faults.** A harness fault is one of these, each with evidence in the run file: a CLI that exits abnormally or sends no init event before its timeout, an Exomem MCP server that the init event does not report as connected, a lost transcript, a reported model other than the frozen actor, an API key as the credential source, or a subscription limit that the CLI reports as rejected. A rejected limit stops the whole run at once, without retries, and the run waits for room as an incomplete run. Any other error result that the CLI returns, including an exhausted context or turn budget, is a scored loss, not a harness fault. A harness fault is retried with the same inputs at most twice; a retry is not a repeat. In f35 only a question's first turn can be retried, because upstream's environment cannot rewind a question; a fault in a later turn voids the run without retry. A decision whose report has a failed judgement, a missing unit or an unfinished cell reads as incomplete and decides nothing until a rerun completes it.
+  - f35: a fault that survives the retries voids that run for every arm, because memory carries across its questions. One voided run is replaced by `run_index` 4. A second voided run voids the decision, and a rerun needs a new amendment.
+  - f36 and f37: a unit whose session still faults leaves every arm, and the report lists it. More than 2 struck units void the decision.
+
+  **Spend and holds.** The decision runs use the Claude subscription for actors and the Codex subscription for judges. No API or credit spend is authorized. The decision runs wait for:
+  - the owner's acknowledgment of this receipt, which also confirms the −0.05 loss bound;
+  - room in the Claude subscription window for the actor sessions;
+  - room in the Codex subscription for the f36 and f37 judges.
+
+  **Frozen inputs.** The receipt's `fixture_sha256` holds these digests, with paths relative to the outcome run root:
+  - `upstream/clbench/data/database_exploration/questions.json`: `f98e515c14b74f4d30c29401fb79cca9ceeb15fe9ee2432b10265a4a649d1771`
+  - `upstream/clbench/data/database_exploration/questions_post_drift.json`: `c05aa6a33def3878e6b655a1cba6454e55e1a9c16ded8c1fe53b7811986a45de`
+  - `cases/lab/heldout.json`: `9694f756698a1d5ace7b6a2c897e4e82e52e6b6b95b4d113562fe89cc66f700a`
+  - `cases/planted/heldout.jsonl`: `14d523aee34072df570c64caaec8e59dd4b03c4a74c086688a01e6dad477edfa`
+  - `cases/planted/distractors.jsonl`: `676e42e574ce9255a665a584cf878a86ed1f60be13f1daf75ebc0c7920523af4`
+  - `upstream/clbench/data/database_exploration/products.db`: `edf8ee80ff125de0bfd6c37a1d185efa9e3037ce28eb1bd1d32ae0829bd264a6`
+  - `upstream/clbench/data/database_exploration/products_drifted.db`: `a53d523f70604be0e4328f3722417895250ac35e1127cc504b609576aee70fad`
+
+  Upstream's setup downloads the two CL-Bench databases from a dataset without a revision pin, so these digests, not the upstream commit, freeze them. The LAB matters' documents and criteria are files of the pinned LAB commit, and a held-out run refuses a LAB checkout with local changes.
+
+  **No other change.** This amendment adds no §2 assertion, operation kind, catastrophic assertion or budget constant. Until the owner acknowledges the receipt, f35 to f37 MUST NOT support a comparative run, score or claim. Every earlier run of these suites is instrument evidence about the harness, never a comparative claim.
+
+- 2026-11-08 — **Outcome evaluation amendment, sequence 10.** This amendment changes the arms, the scale and the judge of sequence 9 (f35, f36 and f37). It adds no family. Reason: development rounds on 2026-11-08 showed four things.
+  - Exomem as shipped never saved anything on CL-Bench (0 writes in 50 sessions, under the balanced block, the maximal block and an added save line).
+  - Every CL-Bench memory system receives the benchmark's per-task memory sentence; sequence 9's P arm did not.
+  - The owner decided on 2026-11-08 to run both framings.
+  - The owner also decided to shrink the deciding run and to stop waiting for the Codex judge.
+
+  **f35 arms.** The deciding run keeps N and F as sequence 9 states them and adds two Exomem arms:
+  - PP (primary): P with CL-Bench's per-task memory sentence pointed at Exomem. This is the same sentence that E receives, in the same place as F's.
+  - P: Exomem as shipped, unchanged. It measures the product gap that a capture change must close. It is description only.
+
+  E and EH remain ablations and do not run in the deciding run.
+
+  **f35 decisions.** The rules of sequence 9 apply to PP in place of P:
+  - Exomem helps when the lower bound of PP − N is above 0.
+  - Exomem is not worse than a plain folder when the lower bound of PP − F is above −0.05.
+  - Exomem beats a plain folder when the lower bound of PP − F is above 0.
+
+  P − F and P − N are reported as the product gap.
+
+  **f35 scale.** The deciding run plays one ordering: the `default` schedule at seed 42 with `run_index` 1. The interval resamples its 40 questions. The post-migration 20 are reported separately.
+  - When an interval contains a decision bound (0 for "helps" and "beats", −0.05 for "not worse"), the run adds `run_index` 2 and 3 in that order, and the statistics of sequence 9 apply to all the runs played.
+  - The run does not add orderings for any other reason.
+  - The deciding run starts only after a product change makes Exomem as shipped capture learned facts without the benchmark's sentence. Its product revision is bound before generation.
+
+  **f36 and f37 judge.** The decision judge is `claude-opus-5-5` on the Claude subscription. It is blind, it uses the same view and JSON schema as before, and it re-judges 20% of items. It is from the same model family as the actor, and every report says so. When Codex has room, `gpt-6.1-sol` re-judges a random 20% sample of the decision items. The report gives the agreement, which is description only and changes no decision. The f36 and f37 runs need no product change and may start once this receipt is acknowledged.
+
+  **No other change.** Sequence 9's held-out inputs, measures, fault rules and loss bounds stand. Until the owner acknowledges this receipt, sequence 9's rules govern, and no run uses the PP arm, the reduced scale or the Opus decision judge as decision evidence.

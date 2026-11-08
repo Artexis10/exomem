@@ -237,6 +237,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_utility_read.set_defaults(func=_cmd_utility_read)
 
+    from membench.outcome.command import register as register_outcome
+
+    register_outcome(sub)
+
     args = parser.parse_args(argv)
     return args.func(args)
 

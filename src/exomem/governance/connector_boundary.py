@@ -438,11 +438,12 @@ def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled:
 
 def _unwritten_capture_slot(root: Path, path: str, who: RequestPrincipal | None) -> bool:
     """Whether `path` is a free slot in this restricted writer's own inbox."""
-    if who is None:
+    # An existing path is never a free slot. Ask that first: every disclosure of an existing page
+    # passes here, and the ceiling and inbox checks re-read host state on each call.
+    if who is None or os.path.lexists(Path(root) / path):
         return False
     ceiling = write_ceiling(root, who)
-    return (ceiling is not None and _in_inbox(root, path, ceiling)
-            and not os.path.lexists(Path(root) / path))
+    return ceiling is not None and _in_inbox(root, path, ceiling)
 
 
 def _capture_destination(current: Snapshot, path: str) -> str | None:

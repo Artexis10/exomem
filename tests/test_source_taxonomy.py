@@ -30,8 +30,10 @@ import yaml
 
 from exomem import add as add_module
 from exomem import commands, mutation_terminal
+from exomem import init as init_module
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
+from exomem.vocabulary import registry as vocabulary_registry
 
 TODAY = dt.date(2026, 8, 17)
 KB = "Knowledge Base"
@@ -759,6 +761,97 @@ def test_nested_sources_count_under_their_kind(
 def test_registration_is_idempotent(vault: Path) -> None:
     assert st.register(vault, kind="field-notebook")
     assert st.register(vault, kind="field-notebook") == ()
+
+
+def test_every_domain_registered_on_a_fresh_vault_lands_under_the_real_heading(
+    tmp_path: Path,
+) -> None:
+    """The scaffold's commented example must not swallow the second domain.
+
+    The scaffolded file mentions `domains:` in its header comment before the real
+    key, so the second registration used to land inside that comment and leave a
+    file that no longer parsed.
+    """
+    vault = tmp_path / "fresh"
+    init_module.init_vault(vault)
+
+    for key in ("a-hiking-club", "tide-tables", "harbour-works"):
+        assert st.register(vault, domain=key)
+
+    registry = yaml.safe_load(st.registry_path(vault).read_text(encoding="utf-8"))
+    assert set(registry["domains"]) == {"a-hiking-club", "tide-tables", "harbour-works"}
+    assert registry["source_kinds"] == {}
+    assert set(st.load_taxonomy(vault).domains) >= set(registry["domains"])
+
+
+@pytest.mark.parametrize(
+    ("section", "newline", "existing", "comment"),
+    [
+        pytest.param(
+            "domains:   # my overrides\n  old-club:\n    label: Old club\n",
+            "\n",
+            {"old-club"},
+            "# my overrides",
+            id="heading-with-trailing-comment",
+        ),
+        pytest.param(
+            "domains:\n  old-club:\n    label: Old club\n",
+            "\r\n",
+            {"old-club"},
+            "",
+            id="crlf-line-endings",
+        ),
+        pytest.param(
+            "domains:\n    old-club:\n      label: Old club\n",
+            "\n",
+            {"old-club"},
+            "",
+            id="four-space-entry-indent",
+        ),
+        pytest.param(
+            "domains: {}  # none yet\n", "\n", set(), "# none yet", id="placeholder-with-comment"
+        ),
+    ],
+)
+def test_a_hand_edited_domains_section_gains_the_entry_and_loses_nothing(
+    tmp_path: Path, section: str, newline: str, existing: set[str], comment: str
+) -> None:
+    """Registering must edit the one real `domains` key, whatever its spelling.
+
+    A text search that missed a hand-edited heading appended a second `domains:`
+    key, which silently replaced the owner's entries on the next load.
+    """
+    vault = tmp_path / "fresh"
+    init_module.init_vault(vault)
+    path = st.registry_path(vault)
+    scaffolded = path.read_text(encoding="utf-8")
+    edited = scaffolded.replace("domains: {}\n", section).replace("\n", newline)
+    path.write_bytes(edited.encode("utf-8"))
+
+    assert st.register(vault, domain="new-club")
+
+    written = path.read_bytes().decode("utf-8")
+    assert yaml.safe_load(written)["domains"].keys() == existing | {"new-club"}
+    assert len([line for line in written.splitlines() if line.startswith("domains:")]) == 1
+    assert comment in written
+    crlf_lines = written.count("\n") if newline == "\r\n" else 0
+    assert written.count("\r\n") == crlf_lines
+
+
+def test_a_flow_map_domains_section_is_refused_and_left_untouched(tmp_path: Path) -> None:
+    """An inline `domains: {...}` is a shape the editor refuses, not one it duplicates."""
+    vault = tmp_path / "fresh"
+    init_module.init_vault(vault)
+    path = st.registry_path(vault)
+    edited = path.read_text(encoding="utf-8").replace(
+        "domains: {}\n", "domains: {old-club: {label: Old club}}\n"
+    )
+    path.write_text(edited, encoding="utf-8")
+
+    with pytest.raises(vocabulary_registry.RegistryError, match="block mapping"):
+        st.register(vault, domain="new-club")
+
+    assert path.read_text(encoding="utf-8") == edited
 
 
 def test_a_registry_override_changes_where_future_captures_land(

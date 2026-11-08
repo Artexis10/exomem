@@ -4641,7 +4641,7 @@ def test_every_command_and_finite_selector_has_total_path_role_metadata() -> Non
             "restore_path",
         },
         "query_dataset": {"path"},
-        "read_media": {"path"},
+        "read_media": {"path", "paths"},
     }
 
     for command in (*commands.COMMANDS, *commands.PRODUCT_COMMANDS):

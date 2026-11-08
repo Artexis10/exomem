@@ -1338,67 +1338,119 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
     return result._replace(items=tuple(items))
 
 
+def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[str], bool] | None) -> list[str]:
+    """Move each live note that compiled a candidate Source ahead of that Source.
+
+    Text ranking can put a short, term-dense recap above the note compiled from it, which
+    sends the agent to an older, partial account first. Coverage is the citation rule that
+    the audit uses (`source_coverage`): the Source names the note in `ingested_into` and the
+    live note cites it back in `sources:`. Only candidates are looked up, so no page outside
+    them moves; a note pulled ahead can push the last candidate past the limit. Without a
+    resident resolver the text order stands, and where the context pack would, the miss
+    schedules the background rebuild that restores it. A restricted caller keeps text order:
+    the broad resolver also sees withheld pages, and a withheld namesake could flip the order.
+    """
+    from . import find, lifecycle_statuses, note_types, source_coverage, vault
+
+    if len(paths) < 2:
+        return paths
+    snapshot = find.borrow_query_resolver(
+        vault_root, visible=visible, schedule_rebuild=vault.inbound_recovery_available(vault_root),
+    )
+    if snapshot is None:
+        return paths
+    candidates = set(paths)
+
+    def lookup(path: str):
+        return find._CACHE.get(vault_root / path, vault_root) if path in candidates else None  # noqa: SLF001
+
+    status_basis, type_basis = lifecycle_statuses.Basis(vault_root), note_types.Basis(vault_root)
+    ordered: list[str] = []
+    for path in paths:
+        page = lookup(path)
+        if page is not None and page.frontmatter.get("ingested_into"):
+            coverage = source_coverage.evaluate(
+                vault_root, page, lookup=lookup, resolver=lambda: snapshot,
+                status_basis=status_basis, type_basis=type_basis,
+            )
+            ordered.extend(
+                item.path for item in coverage.derivatives
+                if item.reason is None and item.path and item.path not in ordered
+            )
+        if path not in ordered:
+            ordered.append(path)
+    return ordered
+
+
 @governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
     snapshot: Any, limit: int,
     index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
+    timings: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Independent bounded recall over catalogue carriers, never anchor evidence."""
+    """Independent bounded recall over catalogue carriers, never anchor evidence.
+
+    Each lane records a child span of `working_set.task_context`, so a slow recall names its stage.
+    """
     from . import (
         bm25,
         collection_claims,
         context_task,
         context_views,
         epistemic_graph,
+        find_types,
         lexstore,
         record_governance,
     )
     from .governance import egress
 
-    page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-    entries = [entry for entry in catalogue.task_entries() if entry.path
-               and context_views._admits(entry, caller.visible)
-               and (page_visible is None or page_visible(entry.path))]
+    with find_types.timing_span(timings, "working_set.task_context_entries"):
+        page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+        entries = [entry for entry in catalogue.task_entries() if entry.path
+                   and context_views._admits(entry, caller.visible)
+                   and (page_visible is None or page_visible(entry.path))]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
     allowed = set(by_path)
-    fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
-    registry = context_roles.load_roles(vault_root)
-    categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
-    restricted = not context_task.full_source_access(vault_root, caller)
     token_corpus = None
     statistics = None
-    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+    with find_types.timing_span(timings, "working_set.task_context_policy"):
+        fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
+        registry = context_roles.load_roles(vault_root)
+        categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
+        restricted = not context_task.full_source_access(vault_root, caller)
+        metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
-        projections = projections if projections is not None else {}
-        token_corpus = {}
-        corpus_bytes = 0
-        for path in sorted(allowed):
+        with find_types.timing_span(timings, "working_set.task_context_released_corpus"):
+            projections = projections if projections is not None else {}
+            token_corpus = {}
+            corpus_bytes = 0
+            for path in sorted(allowed):
+                context_task._deadline_check()
+                source = context_task.project_source(vault_root, path, caller, cache=projections)
+                if source is None:
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                    continue
+                text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
+                # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
+                charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
+                if charge > TASK_CORPUS_MAX_BYTES:
+                    raise RuntimeError("released task corpus preparation allowance exceeded")
+                tokens = bm25.tokenize(text)
+                charge += 64 * len(tokens)
+                if charge > TASK_CORPUS_MAX_BYTES:
+                    raise RuntimeError("released task corpus preparation allowance exceeded")
+                corpus_bytes = charge
+                token_corpus[path] = tokens
+            # The complete released corpus owns N/DF, term selection and result slots.
             context_task._deadline_check()
-            source = context_task.project_source(vault_root, path, caller, cache=projections)
-            if source is None:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-                continue
-            text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
-            # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
-            charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            tokens = bm25.tokenize(text)
-            charge += 64 * len(tokens)
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            corpus_bytes = charge
-            token_corpus[path] = tokens
-        # The complete released corpus owns N/DF, term selection and result slots.
-        context_task._deadline_check()
-        statistics = bm25.CorpusStatistics.of(token_corpus)
-        context_task._deadline_check()
-        allowed = set(token_corpus)
+            statistics = bm25.CorpusStatistics.of(token_corpus)
+            context_task._deadline_check()
+            allowed = set(token_corpus)
 
     def add(path: str, origin: str) -> None:
         if path not in by_path or path not in allowed:
@@ -1415,11 +1467,12 @@ def task_candidates(
             continue
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
-            targets = _routing_targets(
-                vault_root, index_token[1], index_token=index_token,
-                visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
-            )
-            route = collection_claims.route(working_set_index.terms_of(query), targets)
+            with find_types.timing_span(timings, "working_set.task_context_routing"):
+                targets = _routing_targets(
+                    vault_root, index_token[1], index_token=index_token,
+                    visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
+                )
+                route = collection_claims.route(working_set_index.terms_of(query), targets)
             if route is not None:
                 add(str(route["collection"]), origin)
         if restricted:
@@ -1436,11 +1489,12 @@ def task_candidates(
             for path, _score in hits[:limit]:
                 add(path, origin)
             continue
-        result = lexstore.search_bm25_result(
-            vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
-            allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
-            exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
-        )
+        with find_types.timing_span(timings, "working_set.task_context_text"):
+            result = lexstore.search_bm25_result(
+                vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
+                allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
+                exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
+            )
         if not result.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
             continue
@@ -1450,16 +1504,17 @@ def task_candidates(
         for path, _score in hits[:limit]:
             add(path, origin)
         if categories:
-            methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                [], limit + 1, categories, (), "kb", fresh,
-                allowed_parent_paths=allowed,
-                admitted_parent_paths=allowed,
-                # This branch proved FULL source access and filtered this request's catalogue paths.
-                released_parent_paths=allowed,
-                query_units=bm25.token_units(query_text, query=True),
-                term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=checkpoint, allow_delta=False,
-            )
+            with find_types.timing_span(timings, "working_set.task_context_methods"):
+                methods = lexstore.get_store(vault_root).search_semantic_units_result(
+                    [], limit + 1, categories, (), "kb", fresh,
+                    allowed_parent_paths=allowed,
+                    admitted_parent_paths=allowed,
+                    # This branch proved FULL source access and filtered this request's catalogue paths.
+                    released_parent_paths=allowed,
+                    query_units=bm25.token_units(query_text, query=True),
+                    term_budget=working_set_runtime.material_term_budget(),
+                    recall_checkpoint=checkpoint, allow_delta=False,
+                )
             if not methods.readiness.complete:
                 missing.append({"role": "task_context", "reason": "lane_failed"})
             else:
@@ -1472,10 +1527,11 @@ def task_candidates(
         nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
         try:
             for path in list(found)[:MAX_ITEMS_PER_ROLE]:
-                graph = epistemic_graph.graph_context(
-                    vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
-                    traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
-                )
+                with find_types.timing_span(timings, "working_set.task_context_graph"):
+                    graph = epistemic_graph.graph_context(
+                        vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
+                        traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
+                    )
                 if not graph.get("available", True):
                     missing.append({"role": "task_context", "reason": "lane_failed"})
                     break
@@ -1492,7 +1548,11 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_failed"})
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
-    return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    with find_types.timing_span(timings, "working_set.task_context_order"):
+        ordered = list(found.values()) if restricted else [
+            found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
+        ]
+    return ordered[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
 
 
 def _conclusion_pages(
