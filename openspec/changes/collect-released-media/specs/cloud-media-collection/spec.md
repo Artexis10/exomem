@@ -23,11 +23,11 @@ A new protection record SHALL get a fresh random 32-byte object name, written as
 
 ### Requirement: The media bucket deletes only hidden or superseded versions
 
-The media bucket SHALL carry one bucket-wide lifecycle rule. The rule SHALL delete a version a configured number of days after a hide or a newer upload made it non-current. The number of days SHALL come from a variable that has no default. The bucket SHALL NOT hide a version by age. A current version SHALL survive the rule. No process in the cluster SHALL hold a key that deletes versions.
+The media bucket SHALL carry one bucket-wide lifecycle rule. The rule SHALL delete a version a configured number of days after a hide or a newer upload made it non-current. The number of days SHALL come from a variable that has no default for a stack with the media bucket. The bucket SHALL NOT hide a version by age. A current version SHALL survive the rule. No process in the cluster SHALL hold a key that deletes versions.
 
 #### Scenario: The number of days is unset
 
-- **WHEN** the durability stack is planned without a value for the condemned days
+- **WHEN** the durability stack with the media bucket is planned without a value for the condemned days
 - **THEN** the plan fails and no rule changes
 
 #### Scenario: A current version outlives the grace

@@ -45,7 +45,7 @@ Privacy gain: identical plaintexts no longer share a name that the provider can 
 
 ### D2. One bucket-wide lifecycle rule deletes hidden and superseded versions
 
-The media bucket keeps its one rule that cancels unfinished multipart uploads. The rule gains `days_from_hiding_to_deleting`, set from `var.cloud_media_condemned_days`. The variable has no default, so a plan without a value fails. No rule hides a version by age.
+The media bucket keeps its one rule that cancels unfinished multipart uploads. The rule gains `days_from_hiding_to_deleting`, set from `var.cloud_media_condemned_days`. The variable has no default for a stack with the media bucket, so a plan of that bucket without a value fails. A stack without the media bucket needs no value, so its plans do not wait for a grace that it never uses. No rule hides a version by age.
 
 † The provider deletes a version that a hide or a newer upload made non-current once the configured days pass. It keeps a current version. Task 1 confirms both, and confirms that deleting a hide marker keeps the version.
 
