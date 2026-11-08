@@ -22,7 +22,7 @@ The text lives once in the package, beside the prominence constants. Setup, the 
 
 ### Setup asks, and marks what it writes
 
-The instruction file belongs to the user. Setup shows the text and asks before it writes. It writes between named begin and end markers and replaces only that span on a re-run. `install-hook --uninstall` and a setup flag remove only that span. A non-interactive run writes it only with an explicit flag, so a scripted setup never edits a user file silently. While the effective prominence is `off` or `light`, setup does not offer the step: those levels mean "save only when I ask".
+The instruction file belongs to the user. Setup shows the text and asks before it writes. It writes between named begin and end markers and replaces only that span on a re-run. `exomem install-hook --uninstall`, setup's existing removal route, removes only that span. A non-interactive run writes it only with an explicit flag, so a scripted setup never edits a user file silently. While the effective prominence is `off` or `light`, setup does not offer the step: those levels mean "save only when I ask".
 
 Alternatives considered: a forced save turn from the Stop hook, which reaches only Claude Code and Codex and needs no user file, and a user-set learning mode. The forced turn stays a possible later backstop if a measured gap remains after this change.
 
