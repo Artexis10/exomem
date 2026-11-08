@@ -24,26 +24,29 @@ If another import is open, inspect its progress through MCP and agree whether to
 ## Flow
 1. Send the files to the server. Never retype or paste file contents.
    - Local server with a shell: run `exomem import <folder>`. It copies the folder into `_Imports/<id>/` and prints the path to start on.
-   - Exomem Cloud with a shell: start the returned CLI command in the background, never in the foreground. It can run for hours, and it waits for you: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID, and room appears only as you file. The folder or ZIP is encrypted before it leaves the machine.
-     While it runs, file each window once it reaches `done` (steps 3 to 5), and discard it (step 8). Read its output for the window IDs.
+   - Exomem Cloud with a shell: start the returned CLI command in the background, never in the foreground. It can run for hours: a folder larger than the room the cell reports goes as several windows, each an ordinary import with its own ID. The folder or ZIP is encrypted before it leaves the machine.
+     The command files each window itself once it lands, which makes room for the next one, and it never discards. Read its output for the window IDs and for a filing stop. `--no-file` only uploads: then file each landed window yourself (step 3). An older cell refuses `file`: the command says so and leaves the windows staged for you.
      The command waits for room, and it stops with the members not yet sent if the cell cannot take them. Until it finishes, those members are only at the source.
    - Exomem Cloud without a shell: give the person the returned CLI command or Home link. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
 2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `read_import` status lists each landed window's `import_id`, so later windows are found there.
-3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
-4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
-5. While a `start` or later reply carries `next_after`, call `start` again with only `after` set to it, then repeat step 4. Pages file in order and share one collection.
-6. Read the `residual` that the last page's `finish` reports: the files still staged, by reason, with counts and bytes. Its `summary` says in plain words how many files need review. Review those files with the person.
-7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
-8. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
+3. File it: call `import_memory(operation={"kind": "file", "path": "_Imports/<id>"})`. Add `collection` when the person names one. While the reply says `filing: "working"`, call `file` again with the same `path` and the `continuation` from that reply. Stop when `filing` is `done` or `stopped`. The server plans, applies and finishes each page, and starts the next page itself.
+   - `person` lists what only the person can do: `free_space`, `review_residual`, `discard` and `report_to_operator`. Do nothing else for the person without asking.
+   - `filing: "stopped"` with `free_space`: tell the person, and call `file` again with the `continuation` after space is free.
+   - `filing: "stopped"` with another `stop.code`: report the code and the `progress` counts. Files already filed stay filed.
+   - A call that stops because the server is old (it refuses `file` as an unknown kind) uses step 4.
+4. The step path files a page with separate calls. Use it on an older server, for a folder with own-note rules (`adopt_as: "note"`), or to file hidden files with `include_hidden=true`: `file` applies none of these. Call `start` on `_Imports/<id>`, with `collection` when the person names one. Then `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it. While a reply carries `next_after`, call `start` again with only `after` set to it, then repeat this step. Pages file in order and share one collection.
+5. Read the `residual` that the last page's `finish` reports (in `filed.residual` after `file`): the files still staged, by reason, with counts and bytes. Its `summary` says in plain words how many files need review. Review those files with the person.
+6. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
+7. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
    - A discard keeps a residual record of each member that adoption did not file or `finish` did not verify. Status lists those members as "discarded, not filed", with the reason as the `code`.
    - If a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `read_import` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
    - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it, and the person cannot either. Keep the source, tell the person, and leave the stage. Only the operator of Exomem Cloud can discard it, with `--walk-stage`.
-9. Acknowledge residual paths only when the person confirms they no longer need to keep them: `import_memory(operation={"kind": "acknowledge", "import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
+8. Acknowledge residual paths only when the person confirms they no longer need to keep them: `import_memory(operation={"kind": "acknowledge", "import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
 
 ## Stops
-- `apply_stop` with `INSUFFICIENT_SPACE`: stop, even though the reply carries a `continuation`. The next `apply` stops at the same chunk until the volume has the chunk's bytes plus the reserve free. Tell the person, and call `apply` again with the `continuation` after space is free.
+- `apply_stop` with `INSUFFICIENT_SPACE`: stop, even though the reply carries a `continuation`. The next `apply` stops at the same chunk until the volume has the chunk's bytes plus the reserve free. Tell the person, and call `apply` again with the `continuation` after space is free. A `file` call reports the same stop as `filing: "stopped"` with `free_space` in `person`.
 - A file over the adoption ceiling stays staged and is listed in the residual with its code and the ceiling.
 - A file that changed after `plan` is refused for that item, and its neighbours still file.
 
@@ -69,7 +72,7 @@ Other detail views are `inventory`, `selection`, `plan` and `stale`.
 One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
 `view="full"` remains unbounded for the browser and explicit compatibility callers.
 
-On a v0.162.0 or later server, repeat the interrupted `import_memory` apply call exactly once.
+On a v0.162.0 or later server, repeat the interrupted `import_memory` apply call exactly once. Do the same for an interrupted `file` call. The server repeats that call's own `apply` exactly, or runs none when the call never reached one, and the reply says `filing: "working"` with a fresh `continuation`.
 The `view` field in the status schema shows that the server has this repair; an older server cannot reconcile the call.
 Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
 The server reconciles the same abandoned mutation identity before it resumes the retained scope.

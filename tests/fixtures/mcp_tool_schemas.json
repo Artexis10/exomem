@@ -4218,7 +4218,7 @@
     }
   },
   "import_memory": {
-    "description": "Import selected originals and optional draft notes without changing original files. Select folder rules with adopt_as, note_type, project and domain. Carry continuations through plan and apply; finish records coverage. Select one operation.kind.",
+    "description": "Import selected originals and optional draft notes without changing original files. Staged folder: repeat file with its continuation until filing is not working. Other kinds are the step path: select folder rules with adopt_as, note_type, project and domain; carry continuations through plan and apply; finish records coverage. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4311,11 +4311,31 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "file",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "For `file`, the staged folder `_Imports/<id>`. For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
+                  "type": "string",
+                  "default": ""
+                },
+                "collection": {},
+                "continuation": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "start",
                   "type": "string"
                 },
                 "path": {
-                  "description": "For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
+                  "description": "For `file`, the staged folder `_Imports/<id>`. For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
                   "type": "string",
                   "default": ""
                 },
@@ -4329,10 +4349,7 @@
                   "type": "boolean",
                   "default": false
                 },
-                "collection": {
-                  "type": "string",
-                  "description": "For `start`, a name kept across re-imports."
-                },
+                "collection": {},
                 "after": {
                   "type": "string",
                   "description": "For `start` or `status`, the last same-action reply's `next_after`."
@@ -4582,13 +4599,17 @@
               },
               "type": "array"
             },
-            "run_id": {
-              "description": "From `start`; omit only to start or list runs.",
-              "type": "string"
+            "collection": {
+              "type": "string",
+              "description": "For `file` or `start`, a name kept across re-imports."
             },
             "continuation": {
               "type": "string",
-              "description": "For `plan`/`apply`, from the previous result."
+              "description": "For `file`/`plan`/`apply`, from the previous result."
+            },
+            "run_id": {
+              "description": "From `start`; omit only to start or list runs.",
+              "type": "string"
             },
             "why": {
               "type": "string",
@@ -5552,7 +5573,7 @@
     }
   },
   "read_import": {
-    "description": "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then start on the path it prints. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true. Select one operation.kind.",
+    "description": "Scan material without importing it, inspect import runs or read a work item. Stage a folder outside the vault first: `exomem import <folder>` (Cloud: `exomem cloud import <folder>`), then file the path it prints with import_memory file. Without a shell, give the person that command; never upload files yourself. Status without run_id reports windows, budgets, the file limit (`unknown` is not zero) and unfiled members; keep the source while `keep_source.keep` is true. Select one operation.kind.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5614,7 +5635,7 @@
                 },
                 "run_id": {},
                 "path": {
-                  "description": "For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
+                  "description": "For `file`, the staged folder `_Imports/<id>`. For `start`, subtree (default: whole vault; ask which folder). For `status`, count filed originals under it.",
                   "type": "string",
                   "default": ""
                 },
