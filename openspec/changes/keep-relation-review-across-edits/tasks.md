@@ -39,3 +39,23 @@
   review fields removed, against main and the branch, and report refusals by code.
 - [ ] 4.4 Rerun the benchmark's dev round on a build of this change, and report refusals by
   code, calls per saved write, and the per-case score difference with its interval.
+
+## 5. Review findings on the first build
+
+- [x] 5.1 Resume an interrupted existing-page edit of a carried page by reading the
+  pending slot's `carried_from` when the page equals its before side. Evidence:
+  `tests/test_semantic_lifecycle_writers.py` interrupted-edit case.
+- [x] 5.2 Record a decision on the validated route only when the edit needs one, and keep
+  replay exact. Evidence: `tests/test_semantic_lifecycle_writers.py` validated-commit and
+  replay cases.
+- [x] 5.3 State the contract as built: a disconnection that no edit of the page made does
+  not lapse the decision. Evidence: peer and out-of-band cases in
+  `tests/test_semantic_lifecycle_writers.py`.
+- [x] 5.4 Name the missing hash for a generic edit and say in the bootstrap rule texts
+  that generic needs the validated token and hash; read a damaged slot as no carried
+  decision for that page. Evidence: `tests/test_generic_relation_barrier.py`,
+  `tests/test_semantic_lifecycle_writers.py` unreadable-slot case, and the populated-core
+  ceiling.
+- [x] 5.5 Move two curation proposal tests to the contract as built. They asserted that any
+  byte change re-asks a saved review; they now assert that an edit removing the page's last
+  connection needs a review at proposal. Evidence: `tests/test_curation_plan_dependencies.py`.

@@ -643,8 +643,10 @@ class RelationDisposition:
     review_reason: str | None = None
     review_reference: str | None = None
     # True when a reviewed-none decision stays in force although the page's bytes
-    # moved on: the decision binds the page's identity, not its exact content, so
-    # an edit that leaves the page unconnected does not ask for it again.
+    # moved on: the decision binds the page's identity until an edit of the page
+    # removes its last connection, so an edit that leaves the page unconnected does
+    # not ask for it again. A disconnection made by another page's edit or outside
+    # the server does not lapse it.
     review_renewed: bool = False
 
     def __post_init__(self) -> None:
@@ -5204,8 +5206,11 @@ def _relation_disposition(
     ):
         # The edit being judged leaves an unconnected page unconnected. The
         # decision stays in force on what the before state proved; it lapses
-        # only when the page gains and then loses a connection, and that
-        # case never gets here because `prior` is then a qualifying relation.
+        # only when the edit being judged removes the page's last connection,
+        # and that case never gets here because `prior` is then a qualifying
+        # relation. A disconnection that no edit of this page made (a peer's
+        # edit, or one outside the server) is not seen here: the older decision
+        # carries, and the audit reports it as carried.
         return RelationDisposition(
             "reviewed_none",
             True,

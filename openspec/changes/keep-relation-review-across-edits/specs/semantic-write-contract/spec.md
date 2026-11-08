@@ -42,8 +42,8 @@ disposition SHALL carry any reviewed-none reason and reference it was satisfied 
 review decisions are observable rather than write-only. No minimum relation count SHALL be
 imposed in either lane.
 
-A reviewed-none decision SHALL bind the page's stable identity until its connection
-state changes, not its exact bytes. An edit of a page that held a reviewed-none
+A reviewed-none decision SHALL bind the page's stable identity until an edit of the page
+removes its last connection, not its exact bytes. An edit of a page that held a reviewed-none
 decision before the edit SHALL carry that decision forward, and report the disposition
 with `review_renewed: true`, when the page's identity is unique in the identity census,
 the page is an eligible active compiled page before and after, and the operation is not
@@ -53,9 +53,11 @@ held a qualifying relation or connectivity signal before the edit, so an edit th
 removes a page's last connection is refused as before. A bootstrap disposition SHALL NOT
 carry once a second eligible page exists. Audit and watcher evaluation SHALL carry a
 reviewed-none decision that the loader finds for the page and report it as carried, so
-audit and writes agree. A page whose only decision is a lifecycle decision, and whose bytes
-then change outside the writers, has no committed slot that matches and asks for relation
-review once more.
+audit and writes agree. A disconnection that no edit of the page made, whether an edit of
+another page or a change outside the server, SHALL NOT lapse the decision: the older
+decision carries and audit reports it as carried. A page whose only decision is a
+lifecycle decision that no committed slot names, because an edit connected the page or its
+bytes changed outside the writers, asks for relation review once more.
 
 #### Scenario: Superseded predecessor remains a qualifying target
 - **WHEN** an active successor canonically supersedes a governed predecessor and the predecessor is marked `superseded` with an exact backlink to that successor
@@ -70,13 +72,22 @@ review once more.
 #### Scenario: Reviewed none is fingerprint-bound
 - **WHEN** a reviewer records that a page has no qualifying relation candidates
 - **THEN** the decision is recorded against the page identity and the fingerprint of the content reviewed, and that exact match satisfies the disposition on its own
-- **AND** a later edit of the page carries the decision while the page stays without a qualifying connection, commits without asking again and reports `review_renewed: true`
 - **AND** the recorded reason is reported on the disposition rather than discarded
+
+#### Scenario: Reviewed none binds the page identity across edits
+- **WHEN** a page that holds a reviewed-none decision is edited and still has no qualifying connection
+- **THEN** the edit commits without asking for relation review again, writes no new decision and reports `review_renewed: true`
+- **AND** the decision's recorded reason and reference stay on the disposition
 
 #### Scenario: Removing the last connection is refused despite an old decision
 - **WHEN** an edit removes the last qualifying relation of a page that holds an older reviewed-none decision
 - **THEN** the old decision does not satisfy the edited page
 - **AND** the edit is refused with `RELATION_DISPOSITION_STALE` unless it records a fresh reviewed-none decision
+
+#### Scenario: A disconnection that no edit of the page made does not lapse the decision
+- **WHEN** a page with a reviewed-none decision gains a connection, and either an edit of another page or a change outside the server removes its last connection
+- **THEN** audit reports the older decision as carried, with `review_renewed: true` and its recorded reason
+- **AND** the next edit of the page commits without asking for relation review again
 
 #### Scenario: A contested identity does not carry a decision
 - **WHEN** a second path claims the identity of a page that holds a reviewed-none decision
@@ -235,7 +246,7 @@ Review fields SHALL be checked against whether the page needs a relation review,
 - **AND** the same call for a page that needs no review lists the supplied fields under `relation_review_fields.ignored`
 
 ### Requirement: Existing-Page Review Decisions And Transition Recovery Are Separate
-For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. An exact unique UUID plus current-fingerprint decision match SHALL satisfy a reviewed-none disposition. An edit that carries a standing decision forward SHALL record in `carried_from` the lifecycle decision reference it carried and SHALL write no new decision. The loader SHALL read `carried_from` only from a committed slot, that is, when the page's path, source hash and fingerprint equal the slot's after values; a pending slot, a reference to anything other than a lifecycle decision of the same UUID, and a denied reference SHALL read as no decision. A reviewed-none request on an edit with no validated transition SHALL record a decision only when the edit needs one, so a pre-emptive request does not add decision files toward the bound. An edit that names a transition token and sends reviewed-none without `relation_review_hash` SHALL be refused with `INVALID_RELATION_REVIEW`.
+For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. An exact unique UUID plus current-fingerprint decision match SHALL satisfy a reviewed-none disposition. An edit that carries a standing decision forward SHALL record in `carried_from` the lifecycle decision reference it carried and SHALL write no new decision. The loader SHALL read `carried_from` from a committed slot, that is, when the page's path, source hash and fingerprint equal the slot's after values, and from a pending slot when the page's path and source hash equal the slot's before values, because the pending slot copied the pointer from the decision it carried. A pending slot's own decision SHALL NOT review the before state. A slot or decision that cannot be read, a reference to anything other than a lifecycle decision of the same UUID, and a denied reference SHALL read as no decision for that page and SHALL NOT stop the evaluation of other pages. A reviewed-none request on an edit, validated or not, SHALL record a decision only when the edit needs one, so a pre-emptive request does not add decision files toward the bound. An edit that names a transition token and sends reviewed-none without `relation_review_hash` SHALL be refused with `INVALID_RELATION_REVIEW`. A `generic` disposition keeps the validated route: it SHALL be refused with `INVALID_RELATION_REVIEW` and `missing=["relation_review_hash"]` when it lacks the validated hash, and with `LIFECYCLE_TRANSITION_REVIEW_MISMATCH` only when the hash it sends does not match.
 
 Lifecycle decisions and prepared slots SHALL NOT be created or loaded for path-only legacy identities. A legacy page requiring reviewed-none SHALL first acquire a stable UUID through the explicit backfill workflow. Decision lookup SHALL be direct by UUID/current fingerprint, alias/symlink/reparse safe, and bounded to 256 conforming decision files per UUID; overflow or unsafe/malformed exact lifecycle state SHALL fail closed with governed cleanup guidance. The immutable 6D v1/v2 receipt at `relation-reviews/<uuid>.json` SHALL NOT be overwritten, deleted, reinterpreted, or migrated. Any conforming lifecycle artifact SHALL reserve its UUID against later creation even when the page is absent and no creation receipt exists; unsafe or malformed lifecycle state at that exact UUID SHALL likewise fail creation closed as identity-in-use. Trash/delete SHALL preserve that history. Recovery MAY replace the last committed prepared slot only when the trash sidecar, original path, UUID, and trashed bytes exactly prove its committed after state and no live page owns the UUID. Reconcile SHALL preserve and report that `trashed_committed` proof and SHALL remove only a neither-side prepared slot with no exact trash proof.
 
@@ -274,10 +285,12 @@ After an ordinary publication failure, rollback SHALL restore only exact unchang
 #### Scenario: Pending transition does not review the before state
 - **WHEN** an `A -> B` prepared transition exists but the current primary still exactly matches `A`
 - **THEN** the decision for `B` does not satisfy `A`, and a different transition is refused until the exact pending transition is retried or reconciled
+- **AND** a decision that was in force at `A` through the slot's `carried_from` stays in force at `A`
 
 #### Scenario: Interrupted existing-page transition resumes exactly
 - **WHEN** a process stops after preparing the decision, transition slot, or deterministic auxiliaries and an exact retry repeats the same bound transition
 - **THEN** the writer adopts the prepared slot, commits the resulting primary last, and rejects token, reason, content, path, or auxiliary drift
+- **AND** when the page held a carried decision before the interrupted edit, the exact retry commits without asking for relation review
 
 #### Scenario: Committed replay is mutation-free
 - **WHEN** an exact retry finds that the current primary already matches the prepared transition's after state
@@ -300,6 +313,15 @@ After an ordinary publication failure, rollback SHALL restore only exact unchang
 #### Scenario: A pre-emptive reviewed-none request records no decision
 - **WHEN** an edit sends reviewed-none and a reason for a page whose standing decision already covers the edit
 - **THEN** the edit commits and writes no decision file
+
+#### Scenario: A validated reviewed-none request on a carried page records no decision
+- **WHEN** an edit validates, then commits with its `transition_token`, `relation_review_hash`, reviewed-none and a reason, for a page whose standing decision already covers the edit
+- **THEN** the edit commits and writes no decision file, however many times it repeats
+- **AND** an exact replay of that commit is mutation-free
+
+#### Scenario: An unreadable prepared slot does not stop an audit
+- **WHEN** one page's `prepared.json` cannot be read
+- **THEN** that page reads as having no carried decision and the audit still evaluates every other page
 
 #### Scenario: Stale prepared slot is cleaned only without recovery proof
 - **WHEN** current live bytes match neither side of a prepared slot

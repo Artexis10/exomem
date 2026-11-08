@@ -2062,8 +2062,8 @@ def op_bootstrap(
                         "if refused for relation review, re-send the edit with "
                         "relation_disposition reviewed_none and a reason when no truthful "
                         "relation applies; a validated edit adds transition_token and "
-                        "relation_review_hash; generic with a reason serves a generic "
-                        "entity edge"
+                        "relation_review_hash; generic with a reason needs both, for a "
+                        "generic entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2102,7 +2102,8 @@ def op_bootstrap(
                     "rule": (
                         "if refused, re-send the edit with reviewed_none and a bounded "
                         "reason; a validated edit adds semantic.transition_token and "
-                        "semantic.relation_review_hash; generic serves a generic entity edge"
+                        "semantic.relation_review_hash; generic needs both, for a generic "
+                        "entity edge"
                     ),
                 }
             ),

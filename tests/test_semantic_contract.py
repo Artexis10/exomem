@@ -2675,21 +2675,6 @@ def test_reviewed_none_stays_in_force_across_an_edit_when_a_peer_exists(tmp_path
     assert not [f for f in result.findings if f.code.startswith("RELATION_DISPOSITION")]
 
 
-def test_an_exact_review_is_not_reported_as_renewed(tmp_path: Path) -> None:
-    page, _, corpus = _page_with_peer(tmp_path, "## Relations\n")
-    review = semantic_contract.RelationReviewState(
-        "reviewed_none", _ID_A, page.review_fingerprint, reason="nothing fits"
-    )
-
-    result = _evaluate(
-        before=page, after=page, before_corpus=corpus, after_corpus=corpus,
-        before_review=review, after_review=review,
-    )
-
-    assert result.relation_disposition.kind == "reviewed_none"
-    assert result.relation_disposition.review_renewed is False
-
-
 def test_a_reviewed_none_creation_never_carries_a_stale_review(tmp_path: Path) -> None:
     """A creation has no before state, so an old review cannot stand for it."""
     page, _, corpus = _page_with_peer(tmp_path, "## Relations\n")

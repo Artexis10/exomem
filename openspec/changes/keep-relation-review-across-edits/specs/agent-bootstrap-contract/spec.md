@@ -7,7 +7,8 @@ The bootstrap contract SHALL describe reviewed-none using the exact canonical va
 `relation_disposition="reviewed_none"` and an explicit bounded reason when no truthful
 relation applies, that a validated draft also sends its returned `relation_review_hash`,
 and that an edit refused for relation review is re-sent with the same fields, a validated
-edit also sending its `transition_token` and `relation_review_hash`. It MUST NOT refer to a
+edit also sending its `transition_token` and `relation_review_hash`. A `generic` disposition
+needs that token and hash with its reason; the guidance MUST say so. It MUST NOT refer to a
 response field that is not present.
 
 #### Scenario: Generic agent can commit a zero-candidate draft

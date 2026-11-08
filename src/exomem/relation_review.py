@@ -3051,25 +3051,40 @@ def _carried_decision(
     *,
     admission: Callable[[str], bool] | None,
 ) -> LifecycleDecision | None:
-    """The decision the page's last committed edit carried forward, if any.
+    """The decision the page's last edit carried forward, if any.
 
-    Only a committed slot counts: its after side is the page as it stands now.
-    A pending slot describes a transition that may not have happened.
+    A committed slot (the page is its after side) names the decision that carried
+    into this page. A pending slot whose before side is this page names the decision
+    that was in force here, because its writer copied the pointer from the decision it
+    carried; without that read, an interrupted edit could never resume. The pending
+    slot's own decision describes the after side and never reviews this page.
+
+    A slot or decision that cannot be read means no carried decision for this page
+    only; one damaged page must not stop an audit of the others.
     """
     identity = page_state.identity
     if admission is not None and not admission(_lifecycle_reference(identity, "prepared.json")):
         return None
-    prepared = load_lifecycle_prepared(vault_root, identity, admission=admission)
-    if (
-        prepared is None
-        or prepared.after_path != page_state.path
-        or prepared.after_source_hash != page_state.source_hash
-        or prepared.after_fingerprint != page_state.review_fingerprint
-    ):
+    try:
+        prepared = load_lifecycle_prepared(vault_root, identity, admission=admission)
+        if prepared is None:
+            return None
+        is_after_side = (
+            prepared.after_path == page_state.path
+            and prepared.after_source_hash == page_state.source_hash
+            and prepared.after_fingerprint == page_state.review_fingerprint
+        )
+        is_before_side = (
+            prepared.before_path == page_state.path
+            and prepared.before_source_hash == page_state.source_hash
+        )
+        if not (is_after_side or is_before_side):
+            return None
+        return load_lifecycle_decision_at(
+            vault_root, identity, prepared.carried_from, admission=admission
+        )
+    except RelationReviewError:
         return None
-    return load_lifecycle_decision_at(
-        vault_root, identity, prepared.carried_from, admission=admission
-    )
 
 
 def load_relation_review(

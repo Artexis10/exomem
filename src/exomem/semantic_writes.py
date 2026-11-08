@@ -2187,6 +2187,7 @@ def _preflight_existing(
         )
     transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     provenance_server_at = _new_provenance_time(root) if applicability == "full" else None
+    replayed_decision_reference: str | None = None
     if transition_token is not None and applicability == "full" and after.identity_kind == "exomem_id":
         prepared = relation_review.load_lifecycle_prepared(root, after.identity, admission=admission)
         if (
@@ -2202,11 +2203,13 @@ def _preflight_existing(
             and prepared.transition_token_hash == transition_hash
         ):
             provenance_server_at = prepared.provenance_server_at
+            replayed_decision_reference = prepared.decision_reference
     requested_decision: relation_review.LifecycleDecision | None = None
-    # One call: an edit that names no validated transition has no validate result to copy a
-    # hash from, so the server's own `transition_hash` stands in. Whether the page needs the
-    # decision is judged at the contract evaluation below, so a page that needs none records none.
-    one_call = False
+    # A reviewed-none request records a decision only when the page needs one, judged at the
+    # contract evaluation below: a page already in force (carried, or reviewed earlier) records
+    # none, so repeating the request writes no new file. A call that names no validated
+    # transition has no validate result to copy a hash from; the server's own `transition_hash`
+    # stands in for it.
     review_requested: semantic_contract.RelationReviewState | None = None
     if relation_disposition == "reviewed_none":
         if applicability != "full":
@@ -2222,7 +2225,6 @@ def _preflight_existing(
                     hash_source="semantic.relation_review_hash in the validate_only result",
                 )
                 raise SemanticWriteError(absent.code, absent.reason, missing=absent.missing)
-            one_call = True
         elif not validate_only and relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
@@ -2256,10 +2258,18 @@ def _preflight_existing(
             reason=requested_decision.reason,
             reference=requested_decision.reference,
         )
-        if not one_call:
-            after_review = review_requested
     choice = _generic_choice(relation_disposition, relation_review_reason)
     if choice is not None and not validate_only and relation_review_hash != transition_hash:
+        if relation_review_hash is None:
+            # Generic keeps the validated route: the barrier's offers come from the validate
+            # result, so a missing hash is a missing field, not a mismatch.
+            raise SemanticWriteError(
+                "INVALID_RELATION_REVIEW",
+                "generic needs the transition_token and relation_review_hash from the "
+                "validate_only result; send relation_disposition=generic, "
+                "relation_review_reason, transition_token and relation_review_hash together",
+                missing=("relation_review_hash",),
+            )
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
             "review hash does not match the validated transition",
@@ -2320,12 +2330,17 @@ def _preflight_existing(
 
     with mutation_timing_span(timings, "preflight.contract_eval"):
         result = evaluate_with(after_review)
-        if one_call:
+        if requested_decision is not None:
             disposition = result.relation_disposition
             if disposition is not None and not disposition.satisfied:
                 after_review = review_requested
                 result = evaluate_with(after_review)
-            else:
+            elif not (
+                committed_replay
+                and replayed_decision_reference == requested_decision.reference
+            ):
+                # A replay re-presents a transition that already recorded this decision, so
+                # it keeps the decision that transition's slot names.
                 requested_decision = None
     with mutation_timing_span(timings, "preflight.validity_token"):
         census_token = _capture_validity_stamp(
