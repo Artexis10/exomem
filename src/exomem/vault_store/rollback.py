@@ -11,7 +11,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from contextlib import closing, suppress
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import epistemic_graph, lexstore, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
-from . import mode, projection
+from . import migrate, mode, projection
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
 _KEPT_TABLES = ("store_mode", "store_audit")  # nosemgrep: ep-word-set -- Table names that schema 15 fixes.
@@ -33,7 +33,8 @@ class Findings:
     """What stands between a store-mode vault and file mode."""
 
     queued: int = 0
-    #: Paths whose bytes on disk differ from the store's page: a person's edit that no import took in.
+    #: Paths whose bytes on disk differ from the store's page: a person's edit that no import took in,
+    #: or the file beside a held item.
     edited: list[str] = field(default_factory=list)
     #: Paths the store holds that the vault lacks: an outside delete.
     deleted: list[str] = field(default_factory=list)
@@ -65,14 +66,13 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
             "SELECT path, kind, body FROM store_held ORDER BY path"
         )
     ]
-    held_paths = {path for path, _, _ in found.held}
     for rel, sha256 in conn.execute("SELECT path, sha256 FROM store_pages ORDER BY path"):
         try:
             on_disk = vault.read_bytes_without_pinning(vault_root / rel)
         except FileNotFoundError:
             found.deleted.append(rel)
             continue
-        if hashlib.sha256(on_disk).hexdigest() != sha256 and rel not in held_paths:
+        if hashlib.sha256(on_disk).hexdigest() != sha256:
             found.edited.append(rel)
     return found
 
@@ -81,14 +81,20 @@ def dry_run(vault_root: Path) -> dict:
     """What a rollback would find, read-only and without a lease."""
     root = Path(vault_root).resolve()
     admission.require_owner(root, "store-mode rollback")
-    if not mode.store_mode_active(root):
-        recorded = state_migration.recorded_descriptor_ids(root) or ()
-        if state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
-            raise OpError("VAULT_STORE_NOT_ACTIVE", "this vault is not in store mode")
+    current = mode.state(root)
+    if current == mode.FILE_MODE:
+        raise _not_active()
+    if current == mode.INTERRUPTED_ACTIVATION:
         return {
             "status": "dry-run",
             "interrupted_activation": True,
             "note": "the vault is in file mode; the apply step finishes what an earlier run left, such as the recorded id",
+        }
+    if current == mode.INTERRUPTED_ROLLBACK:
+        return {
+            "status": "dry-run",
+            "interrupted_rollback": True,
+            "note": "the store is already in file mode; the apply step drops the recorded id and rebuilds the sidecars",
         }
     reader, _ = connection._open_read_only(connection.store_path(root), connection.BUSY_TIMEOUT_MS)
     with closing(reader):
@@ -105,6 +111,10 @@ def dry_run(vault_root: Path) -> dict:
     }
 
 
+def _not_active() -> OpError:
+    return OpError("VAULT_STORE_NOT_ACTIVE", "this vault is not in store mode")
+
+
 def _named(paths: list[str]) -> dict:
     return {"count": len(paths), "first": paths[:_PATHS_REPORTED]}
 
@@ -115,6 +125,8 @@ def apply_route(vault_root: Path, *, export_to: Path, why: str, export_held: boo
         raise ValueError("a store-mode rollback needs a reason")
     root = Path(vault_root).resolve()
     admission.require_owner(root, "store-mode rollback")
+    if mode.state(root) == mode.FILE_MODE:
+        raise _not_active()
     destination = Path(export_to)
     placement = custody.verify_backup_destination(root, destination)
     if not placement.verified:
@@ -135,6 +147,7 @@ def _rollback(
 ) -> dict:
     conn = writer.connection
     authority_check = lambda: session.require(token)  # noqa: E731 - the one closure both id calls share
+    migrate.remove_stale_staging(root)
     row = conn.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
     if row is None or row[0] != mode.STORE_MODE:
         return _rerun(root, conn, authority_check, committed=row is not None)
@@ -174,7 +187,7 @@ def _rerun(root: Path, conn: sqlite3.Connection, authority_check, *, committed: 
     """
     recorded = state_migration.recorded_descriptor_ids(root) or ()
     if state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
-        raise OpError("VAULT_STORE_NOT_ACTIVE", "this vault is not in store mode")
+        raise _not_active()
     if committed:
         return {"status": "rolled-back", **_finish(root, conn, authority_check, {})}
     _drop_id(root, authority_check)
@@ -205,6 +218,9 @@ def _export(
 ) -> dict:
     """Make the audit trail and each held edit durable in ``destination``, then project the store's version over them.
 
+    A held edit's body goes to ``held/<path>``. A file whose bytes differ from the store's page and from its
+    held body goes to ``on-disk/<path>`` (or to ``held/<path>`` when nothing is held for it), so each version
+    that the projection overwrites stays in the export.
     ``export.json`` is written before the first file is projected, so it lists every edit about to be overwritten.
     A crash during the projection leaves those bytes listed only in that first export directory: a rerun finds
     the files already projected, so its own export names none of them.
@@ -231,16 +247,24 @@ def _export(
         durable=True,
     )
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
+    beside: dict[str, bytes] = {}
     for rel in found.edited:
-        kept.setdefault(rel, vault.read_bytes_without_pinning(root / rel))
+        on_disk = vault.read_bytes_without_pinning(root / rel)
+        if rel not in kept:
+            kept[rel] = on_disk
+        elif kept[rel] != on_disk:
+            beside[rel] = on_disk
     for rel, body in kept.items():
         projection.write_file(destination / "held", rel, body, durable=True)
+    for rel, body in beside.items():
+        projection.write_file(destination / "on-disk", rel, body, durable=True)
     summary = {
         "exported_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": why,
         "store_revision": revision,
         "audit_rows": len(audit),
         "held_edits": sorted(kept),
+        "on_disk_beside_held": sorted(beside),
         "held_deletes": sorted(
             {*found.deleted, *(path for path, kind, _ in found.held if kind == "delete")}
         ),
@@ -259,6 +283,7 @@ def _export(
         "directory": str(destination),
         "audit_rows": len(audit),
         "held_edits": len(kept),
+        "on_disk_beside_held": len(beside),
         "held_deletes": len(summary["held_deletes"]),
     }
 
@@ -292,9 +317,10 @@ def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None
 def _finish(
     root: Path, conn: sqlite3.Connection, authority_check, timings: dict[str, float]
 ) -> dict:
-    """After the commit: drop the id, return the freed pages to the disk, and rebuild the sidecars with their owners.
+    """After the commit: drop the id, return the freed pages to the disk, and bring the sidecars current with their owners.
 
-    Each step's failure is reported and does not undo the rollback, which already committed; a rerun repeats them.
+    Each step's outcome is reported. A failure does not undo the rollback, which already committed; a rerun
+    repeats the id, the vacuum and the rebuilds.
     """
     report: dict = {}
     started = time.perf_counter()
@@ -302,15 +328,37 @@ def _finish(
         _drop_id(root, authority_check)
     except OpError as error:
         report["compatibility_id"] = f"retained: {error.code}"
-    with suppress(sqlite3.Error):
+    try:
         conn.execute("VACUUM")
+        report["vacuum"] = "done"
+    except sqlite3.Error as error:
+        report["vacuum"] = f"failed: {type(error).__name__}"
     timings["vacuum_s"] = time.perf_counter() - started
     started = time.perf_counter()
-    try:
-        lexstore.search_bm25(root, "rebuild", 3, scope="kb", repair=True)
-        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
-        report["sidecars"] = "rebuilt"
-    except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
-        report["sidecars"] = f"pending: {type(error).__name__}"
+    report["sidecars"] = {"lexical": _rebuild_lexical(root), "graph": _rebuild_graph(root)}
     timings["rebuild_s"] = time.perf_counter() - started
     return {**report, "timings": {name: round(seconds, 2) for name, seconds in timings.items()}}
+
+
+def _rebuild_lexical(root: Path) -> str:
+    """Reconcile the lexical sidecar with the files that the projection rewrote, then ask its owner whether it serves them.
+
+    The owner's atomic rebuild trusts the freshness registry, which saw none of the projection's writes, so it
+    declines until something reconciles: its reconcile seam is the one that heals an edit made around the system.
+    """
+    try:
+        lexstore.ensure_fresh(root)
+        proof = lexstore.runtime_retrieval_catalog_proof(
+            root, require_live_projection=False, schedule_repair=False
+        )
+    except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
+        return f"pending: {type(error).__name__}"
+    return "current" if proof else "pending: the index does not yet prove current"
+
+
+def _rebuild_graph(root: Path) -> str:
+    try:
+        built = epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
+        return f"pending: {type(error).__name__}"
+    return "disabled" if built.get("disabled") else "rebuilt"

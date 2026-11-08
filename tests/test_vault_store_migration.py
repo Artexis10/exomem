@@ -378,3 +378,105 @@ def test_a_migration_without_a_single_host_lease_refuses_before_it_takes_any_lea
     assert migrate_apply(vault) == 1
     assert "VAULT_STORE_MULTI_HOST" in capsys.readouterr().err
     assert not mode.store_mode_active(vault)
+
+
+def _stored_page(root, rel, body, *, held=None):
+    """Make the store hold ``body`` for ``rel`` and, when given, a held edit, as a projector and importer would leave them."""
+    with closing(sqlite3.connect(connection.store_path(root))) as store, store:
+        store.execute(
+            "UPDATE store_pages SET body = ?, sha256 = ?, size = ? WHERE path = ?",
+            (body, hashlib.sha256(body).hexdigest(), len(body), rel),
+        )
+        if held is not None:
+            store.execute(
+                "INSERT INTO store_held(path, kind, body, detected_at) "
+                "VALUES (?, 'edit', ?, '2026-01-01T00:00:00Z')",
+                (rel, held),
+            )
+
+
+def test_a_rollback_exports_each_version_it_overwrites_when_the_importer_already_held_the_edit(
+    vault, capsys, tmp_path
+):
+    """A rollback that leaves a held page's file as the person wrote it, or loses the held body when the file
+    has since changed again."""
+    assert migrate_apply(vault) == 0
+    held_where_written, held_then_changed = b"Held, and still on disk.\n", b"Held body.\n"
+    store_alpha, store_beta = b"The store's Alpha.\n", b"The store's Beta.\n"
+    _stored_page(vault, ALPHA, store_alpha, held=held_where_written)
+    _stored_page(vault, BETA, store_beta, held=held_then_changed)
+    (vault / ALPHA).write_bytes(held_where_written)
+    (vault / BETA).write_bytes(b"A third version, written after the importer held the second.\n")
+    on_disk_beta = (vault / BETA).read_bytes()
+    capsys.readouterr()
+    assert rollback_apply(vault, tmp_path / "refused") == 1
+    assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+    assert rollback_apply(vault, tmp_path / "export", "--export-held") == 0
+    result = printed(capsys)
+    assert (vault / ALPHA).read_bytes() == store_alpha
+    assert (vault / BETA).read_bytes() == store_beta
+    assert (tmp_path / "export/held" / ALPHA).read_bytes() == held_where_written
+    assert (tmp_path / "export/held" / BETA).read_bytes() == held_then_changed
+    assert (tmp_path / "export/on-disk" / BETA).read_bytes() == on_disk_beta
+    assert not (tmp_path / "export/on-disk" / ALPHA).exists()
+    assert result["sidecars"] == {"lexical": "current", "graph": "rebuilt"}
+
+
+def test_a_page_with_a_non_text_frontmatter_key_migrates(vault, capsys):
+    """A YAML key that is a number, which JSON cannot hold, must not stop the migration of a vault that holds it."""
+    page = "Knowledge Base/Notes/Year.md"
+    (vault / page).write_text("---\ntitle: Year\n2024: the year of the flood\n---\n# Year\n\nA year page.\n")
+    build_indexes(vault)
+    capsys.readouterr()
+    assert migrate_apply(vault) == 0
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        (frontmatter,) = store.execute(
+            "SELECT frontmatter_json FROM store_pages WHERE path = ?", (page,)
+        ).fetchone()
+    assert json.loads(frontmatter) == {"2024": "the year of the flood", "title": "Year"}
+
+
+def test_an_interrupted_rollback_shows_as_its_own_state_and_the_command_finishes_it(
+    vault, capsys, tmp_path
+):
+    """A status or a dry run that calls a vault with a retained id plain file mode or an interrupted activation."""
+    assert migrate_apply(vault) == 0
+    with closing(sqlite3.connect(connection.store_path(vault))) as store, store:
+        store.execute("UPDATE store_mode SET mode = 'file'")
+    capsys.readouterr()
+    assert store_mode(vault, "status", operator=False) == 0
+    assert printed(capsys)["mode"] == "interrupted-rollback"
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["interrupted_rollback"] is True
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    capsys.readouterr()
+    assert store_mode(vault, "status", operator=False) == 0
+    assert printed(capsys)["mode"] == "file"
+
+
+def test_a_blank_reason_and_a_vault_that_is_not_in_store_mode_refuse_before_any_credential_is_read(
+    vault, capsys, tmp_path
+):
+    """A command that takes the lease, or reaches the store, before it checks what it was asked to do."""
+    assert store_mode(vault, "migrate", "--apply", "--why", "  ") == 2
+    assert "non-blank --why" in capsys.readouterr().err
+    assert (
+        store_mode(
+            vault, "rollback", "--apply", "--export-to", str(tmp_path / "x"), "--why", "r", operator=False
+        )
+        == 1
+    )
+    assert "VAULT_STORE_NOT_ACTIVE" in capsys.readouterr().err
+
+
+def test_a_migration_and_a_rollback_each_remove_the_staging_directory_that_a_killed_run_left(
+    vault, tmp_path
+):
+    """A killed run's private copy of the vault, which stays in the state directory until something removes it."""
+    state_dir = state_paths.vault_state_dir(vault)
+    leftover = state_dir / f"{migrate.STAGING_PREFIX}killed"
+    for command in (lambda: migrate_apply(vault), lambda: rollback_apply(vault, tmp_path / "export")):
+        leftover.mkdir()
+        (leftover / "staged.sqlite").write_bytes(b"half a database")
+        assert command() == 0
+        assert not leftover.exists()

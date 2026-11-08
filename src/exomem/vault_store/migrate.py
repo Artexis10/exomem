@@ -34,7 +34,7 @@ from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from . import availability, mode, ownership, verify
 
-#: A migration's private directory beside the live store; a run that died leaves one, and the next run removes it.
+#: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
 _COPY_BATCH = 5000
 
@@ -155,10 +155,19 @@ def _frontmatter_json(body: bytes) -> str | None:
         return None
     # YAML dates have no JSON form; their text is the form a reader of the page sees.
     return (
-        json.dumps(frontmatter, sort_keys=True, ensure_ascii=False, default=str)
+        json.dumps(_text_keyed(frontmatter), sort_keys=True, ensure_ascii=False, default=str)
         if frontmatter
         else None
     )
+
+
+def _text_keyed(value):
+    """Give every mapping a text key: YAML allows any scalar there, and JSON allows only text."""
+    if isinstance(value, dict):
+        return {str(key): _text_keyed(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_text_keyed(item) for item in value]
+    return value
 
 
 def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -> None:
@@ -167,21 +176,33 @@ def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
         (epistemic_graph.sidecar_path(vault_root), staged.graph_tables),
     )
-    # A trigger would rewrite the revision and stamp rows that the copy carries; the owners' DDL restores them.
+
+    def copy() -> None:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for path, tables in sources:
+                # A read-only connection of its own: ATTACH would parse the graph sidecar's publication
+                # triggers against this schema.
+                with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as source:
+                    for table in tables:
+                        _copy_table(conn, source, table)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+    _copy_rows_without_triggers(conn, staged, copy)
+
+
+def _copy_rows_without_triggers(conn: sqlite3.Connection, staged: Staged, copy) -> None:
+    """Run ``copy`` with the owners' triggers dropped, then restore them with the owners' DDL and prove they match.
+
+    A trigger would rewrite the revision and stamp rows that the copy carries.
+    """
     for name, kind in staged.objects.items():
         if kind == "trigger":
             conn.execute(f'DROP TRIGGER "{name}"')
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for path, tables in sources:
-            # A read-only connection of its own: ATTACH would parse the graph sidecar's publication triggers against this schema.
-            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as source:
-                for table in tables:
-                    _copy_table(conn, source, table)
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
+    copy()
     create_owner_schema(conn)
     if {n: t for n, t in schema_objects(conn).items() if n in staged.objects} != staged.objects:
         raise OpError(
@@ -307,11 +328,10 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
 def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
     """Stage, verify, then install under the lease; the report carries each phase's seconds."""
     state_dir = state_paths.ensure_vault_state_dir(root)
-    for leftover in state_dir.glob(f"{STAGING_PREFIX}*"):
-        shutil.rmtree(leftover, ignore_errors=True)
+    remove_stale_staging(root)
     if authority.pending_create(writer.connection) is not None:
         raise OpError(
-            "VAULT_STORE_NEEDS_COLLECTION_STORE",
+            "VAULT_STORE_COLLECTION_OPERATION_PENDING",
             "a collection store operation is still pending; finish it before entering store mode",
         )
     revision = _next_revision(writer.connection)
@@ -359,6 +379,12 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
         "verified_tables": len(comparison.tables),
         "timings": {name: round(seconds, 2) for name, seconds in timings.items()},
     }
+
+
+def remove_stale_staging(root: Path) -> None:
+    """Remove the private directories that a run killed in the middle left in the vault's state directory."""
+    for leftover in state_paths.ensure_vault_state_dir(root).glob(f"{STAGING_PREFIX}*"):
+        shutil.rmtree(leftover, ignore_errors=True)
 
 
 def _next_revision(conn: sqlite3.Connection) -> int:
@@ -432,12 +458,12 @@ def _install_rows(
             "VAULT_STORE_SCHEMA_DRIFT",
             "the owners' schema differs from the one that was staged and proved",
         )
-    for name, kind in staged.objects.items():
-        if kind == "trigger":
-            conn.execute(f'DROP TRIGGER "{name}"')
-    for table in (*staged.lexical_tables, *staged.graph_tables, "store_pages", "store_binaries"):
-        _copy_table(conn, source, table)
-    create_owner_schema(conn)
+
+    def copy() -> None:
+        for table in (*staged.lexical_tables, *staged.graph_tables, "store_pages", "store_binaries"):
+            _copy_table(conn, source, table)
+
+    _copy_rows_without_triggers(conn, staged, copy)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     pages = _recheck_files(root, source)
     conn.executemany(

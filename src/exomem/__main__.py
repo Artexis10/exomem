@@ -2574,8 +2574,8 @@ def _store_mode_main(argv: list[str]) -> int:
         print("store-mode: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
     applying = getattr(args, "apply", False)
-    if applying and not args.why:
-        print(f"store-mode {args.command}: --apply needs --why", file=sys.stderr)
+    if applying and not (args.why or "").strip():
+        print(f"store-mode {args.command}: --apply needs a non-blank --why", file=sys.stderr)
         return 2
     if args.command == "rollback" and applying and args.export_to is None:
         print("store-mode rollback: --apply needs --export-to", file=sys.stderr)
@@ -2603,7 +2603,13 @@ def _store_mode_main(argv: list[str]) -> int:
             else:
                 result = store_rollback.dry_run(root)
         print(json.dumps(result, sort_keys=True))
-    except (CollectionStoreError, OpError, OSError, state_migration.StateMigrationManifestError) as error:
+    except (
+        CollectionStoreError,
+        OpError,
+        OSError,
+        state_migration.StateMigrationManifestError,
+        state_migration.StateMigrationOfflineRequired,
+    ) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)
         print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
         details = getattr(error, "details", None)

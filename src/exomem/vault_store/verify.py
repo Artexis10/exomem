@@ -17,15 +17,9 @@ from . import projection
 #: How many differing keys a refusal names per table.
 KEYS_REPORTED = 5
 
-# Each sidecar keeps one row of build stamps (freshness triples, checkpoints, a generation counter), which
-# describe the sidecar's own history and not the files.
-_BUILD_STAMP_TABLES = frozenset(
-    {"meta", "graph_meta"}
-)  # nosemgrep: ep-word-set -- Table names that the owners' DDL fixes.
-# Triggers mint a new random revision for a page on every write, so only the row's presence is derived.
-_KEY_ONLY_TABLES = frozenset(
-    {"unit_revisions"}
-)  # nosemgrep: ep-word-set -- A table name that the lexical DDL fixes.
+# The owners name the tables that describe a sidecar's own history, and the table that only its row presence derives.
+_BUILD_STAMP_TABLES = frozenset((*lexstore.BUILD_STAMP_TABLES, *epistemic_graph.BUILD_STAMP_TABLES))
+_KEY_ONLY_TABLES = frozenset(lexstore.KEY_ONLY_TABLES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,9 +152,10 @@ def projection_differences(staged: sqlite3.Connection, scratch_root: Path) -> li
     It writes through the one projection writer, so the check covers the code that later puts pages on disk.
     """
     differing = []
+    # One page body at a time: the cursor streams the rows, so memory holds a page and not the vault.
     for rel, body, sha256 in staged.execute(
         "SELECT path, body, sha256 FROM store_pages ORDER BY path"
-    ).fetchall():
+    ):
         written = projection.write_file(scratch_root, rel, body, durable=False).read_bytes()
         if hashlib.sha256(written).hexdigest() != sha256 or written != body:
             differing.append(rel)

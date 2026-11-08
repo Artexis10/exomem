@@ -4911,7 +4911,17 @@ class _CatchUpPlan:
 
 #: Each full-text table holds one row per row of its parent table, under the parent's rowid. The catalogue DDL
 #: fixes these three tables, so a comparison that cannot join on rowid across databases reads them from here.
-FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "unit_fts": "semantic_units"}  # nosemgrep: ep-word-set -- Table names that the catalogue DDL fixes.
+# nosemgrep: ep-word-set -- Table names that the catalogue DDL fixes.
+FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "unit_fts": "semantic_units"}
+
+#: ``meta`` holds the sidecar's own history (freshness triples, checkpoints, revisions) and no fact derived
+#: from the files, so a comparison with a fresh derivation leaves it out.
+# nosemgrep: ep-word-set -- The one table that the catalogue DDL fixes as build stamps.
+BUILD_STAMP_TABLES = ("meta",)
+
+#: Triggers mint a new random revision for a page on every write, so only the presence of its row is derived.
+# nosemgrep: ep-word-set -- The one table that the catalogue DDL fixes as random revisions.
+KEY_ONLY_TABLES = ("unit_revisions",)
 
 
 def create_catalogue_schema(conn: sqlite3.Connection) -> None:
@@ -6150,11 +6160,9 @@ class LexicalStore:
         self._create_catalog_tables(conn)
         if not self._pages_has_current_columns(conn):
             self._drop_catalog_tables(conn)
-            self._create_catalog_tables(conn)
-        self._create_catalog_indexes(conn)
-        # Optional content-ranking virtual tables — soft, isolated from the
-        # normal-table catalog whose readiness is decided below.
-        self._ensure_fts_schema(conn)
+        # The tables, indexes and (soft, isolated from the catalog whose readiness is decided
+        # below) content-ranking virtual tables: the one DDL that store mode shares.
+        create_catalogue_schema(conn)
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return bool(row and row[0] == str(SCHEMA_VERSION))
 
