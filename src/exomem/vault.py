@@ -3568,33 +3568,26 @@ def replace_tolerating_transient_sharing(
     raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
 
 
-def read_bytes_without_pinning(path: Path) -> bytes:
+def read_bytes_without_pinning(path: Path, vault_root: Path | None = None) -> bytes:
     """The bytes of a canonical file, read as ``read_disk_bytes_without_pinning`` reads them.
 
-    A page that its vault's store owns is read from the store, because there the file is only a
-    projection that may lag. The vault is the folder above the nearest Knowledge Base folder in
-    ``path`` that is a store-mode vault. A page that the store serves but lacks raises
-    ``FileNotFoundError``, as a missing file does.
+    ``vault_root`` is the vault that holds ``path``. A page that this vault's store owns is read
+    from the store, because there the file is only a projection that may lag; a page that the
+    store serves but lacks raises ``FileNotFoundError``, as a missing file does. A caller that
+    reads a file of a vault names the vault: the path alone cannot tell where a vault begins.
+    Without ``vault_root`` the file is no vault page (a state file, say) and the disk answers.
     """
-    from .vault_store import read
+    if vault_root is not None:
+        from .vault_store import read
 
-    for root, rel in _knowledge_base_splits(path):
-        page = read.owned_page(root, rel)
+        try:
+            rel = path.relative_to(vault_root).as_posix()
+        except ValueError:
+            rel = None  # A path outside the vault is no page of its store.
+        page = None if rel is None else read.owned_page(vault_root, rel)
         if page is not None:
             return page.body
     return read_disk_bytes_without_pinning(path)
-
-
-def _knowledge_base_splits(path: Path) -> Iterator[tuple[Path, str]]:
-    """Each way to read ``path`` as a vault root and a path below a Knowledge Base folder.
-
-    The nearest folder comes first.
-    """
-    parts = path.parts
-    kb = kb_dirname()
-    for index in range(len(parts) - 2, 0, -1):
-        if parts[index] == kb:
-            yield Path(*parts[:index]), "/".join(parts[index:])
 
 
 def read_disk_bytes_without_pinning(path: Path) -> bytes:

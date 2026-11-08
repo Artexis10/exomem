@@ -126,17 +126,21 @@ class StoreChange:
     binary_deletes: tuple[BinaryDelete, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        paths = [
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """Every path the change names, a move naming both of its paths."""
+        return (
             *(put.rel for put in self.puts),
             *(delete.rel for delete in self.deletes),
             *(path for move in self.moves for path in (move.src, move.dst)),
             *(record.rel for record in self.binaries),
             *(delete.rel for delete in self.binary_deletes),
-        ]
-        if not paths:
+        )
+
+    def __post_init__(self) -> None:
+        if not self.paths:
             raise ValueError("a store change names no file")
-        if len(set(paths)) != len(paths):
+        if len(set(self.paths)) != len(self.paths):
             raise ValueError("a store change names a path more than once")
 
 
@@ -186,7 +190,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     The statements run in this order, so that a kill at any point leaves the old state whole: the
     expectations, the pages, the binary records and the manifest, one audit row per file, the
     projection intents, and last the revision. One intent stands for each path, and the oldest
-    queue time stays.
+    queue time stays. A move queues one ``move`` intent under its destination path, with the old
+    path in ``from_path``.
     """
     _require_owned(change)
     with writer.handle.transaction() as tx:
@@ -195,6 +200,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
         _check(tx, change.expect)
+        _degrade_moves(tx, change.paths)
         now = _timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
@@ -278,7 +284,8 @@ class _Trail:
         )
         # A person's edit that the importer adopted is an import; any other new content is a write.
         self._entry = "import" if change.origin is Origin.OUTSIDE_EDITOR else "write"
-        self.intents: dict[str, str] = {}
+        #: Each path's queued operation, and the old path of a move.
+        self.intents: dict[str, tuple[str, str | None]] = {}
         self.written: list[str] = []
         self.deleted: list[str] = []
 
@@ -296,13 +303,13 @@ class _Trail:
         self.record(rel, self._entry, sha256)
         self.written.append(rel)
         if queue:
-            self.intents[rel] = "write"
+            self.intents[rel] = ("write", None)
 
     def removed(self, rel: str, sha256: str, *, queue: bool = True) -> None:
         self.record(rel, "delete", sha256)
         self.deleted.append(rel)
         if queue:
-            self.intents[rel] = "delete"
+            self.intents[rel] = ("delete", None)
 
     def moved(self, move: PageMove, sha256: str) -> None:
         # The audit has no column for a move's side, so each row's reason names the other path.
@@ -311,7 +318,7 @@ class _Trail:
         self.deleted.append(move.src)
         self.written.append(move.dst)
         if not move.on_disk:
-            self.intents[move.src], self.intents[move.dst] = "delete", "write"
+            self.intents[move.dst] = ("move", move.src)
 
 
 def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> None:
@@ -391,11 +398,48 @@ def _delete_binary(tx: Connection, rel: str, audit: _Trail) -> None:
     audit.removed(rel, row[0])
 
 
-def _enqueue(tx: Connection, intents: Mapping[str, str], revision: int, now: str) -> None:
+def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
+    """Turn each queued move that touches ``paths`` into the delete and the write it stands for.
+
+    A move intent says that the old file may be renamed. A later change to the new path or to the
+    old one must not leave the old file behind, and must not let the projector rename a page that
+    now lives at the old path. So a touched move becomes a delete of its old path and a write of
+    its new path, and the later change then replaces either row as it would any other.
+    """
+    marks = ",".join("?" * len(paths))
+    touched = tx.execute(
+        "SELECT path, from_path, revision, queued_at FROM store_projection_queue "
+        f"WHERE operation = 'move' AND (path IN ({marks}) OR from_path IN ({marks}))",
+        (*paths, *paths),
+    ).fetchall()
+    for path, from_path, revision, queued_at in touched:
+        tx.execute(
+            "UPDATE store_projection_queue SET operation = 'write', from_path = NULL WHERE path = ?",
+            (path,),
+        )
+        tx.execute(
+            "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
+            "VALUES (?, ?, 'delete', ?)",
+            (from_path, revision, queued_at),
+        )
+
+
+def _enqueue(
+    tx: Connection, intents: Mapping[str, tuple[str, str | None]], revision: int, now: str
+) -> None:
+    # A move vacates its old path, so whatever was queued there no longer has a file to act on.
+    tx.executemany(
+        "DELETE FROM store_projection_queue WHERE path = ?",
+        [(from_path,) for operation, from_path in intents.values() if operation == "move"],
+    )
     # queued_at is left out of the update, so the queue keeps the age of the oldest change.
     tx.executemany(
-        "INSERT INTO store_projection_queue(path, revision, operation, queued_at) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
-        "revision = excluded.revision, operation = excluded.operation",
-        [(rel, revision, operation, now) for rel, operation in intents.items()],
+        "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+        "revision = excluded.revision, operation = excluded.operation, "
+        "from_path = excluded.from_path",
+        [
+            (rel, revision, operation, from_path, now)
+            for rel, (operation, from_path) in intents.items()
+        ],
     )

@@ -107,6 +107,53 @@ def test_the_resolver_entries_are_the_owned_pages_that_a_disk_walk_reaches(store
     assert len(walked) >= 2, "the vault must hold pages for this check to mean anything"
 
 
+def test_a_page_in_a_vault_with_no_wrapper_folder_still_reads_from_the_store(
+    stored, writer, monkeypatch
+):
+    """A byte reader that finds the vault by a wrapper folder in the path serves the lagging
+    projection of a vault whose pages sit at the vault root."""
+    # Only the ownership rule changes for such a vault: a Markdown file below the root is a page.
+    monkeypatch.setattr(ownership, "classify", lambda rel: ownership.Ownership.PAGE)
+    flat = "Notes/Flat.md"
+    (stored / "Notes").mkdir(exist_ok=True)
+    (stored / flat).write_bytes(b"the projection, which lags\n")
+    write.commit(writer, put(flat, EDITED))
+    assert vault_module.read_bytes_without_pinning(stored / flat, stored) == EDITED
+
+
+def test_a_page_committed_but_not_yet_projected_is_listed_among_its_folders_children(
+    stored, writer
+):
+    """A collision check that reads the projection lets a new page take the name of a page that
+    the store holds and the projector has not written."""
+    write.commit(writer, put(NEW, EDITED))
+    assert not (stored / NEW).exists()
+    with read.snapshot(stored) as view:
+        listed = {child.name: child.is_dir for child in view.children("Knowledge Base/Notes")}
+    assert listed["Gamma.md"] is False
+
+
+def test_a_folders_children_are_its_direct_pages_and_folders_each_listed_once(stored, writer):
+    """A listing that shows a deep page as a child, repeats a folder once per page below it, or
+    skips the sibling that sorts right after the folder."""
+    pages = ("Deep/One.md", "Deep/Two.md", "Deep0.md", "Deep.md")
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "test",
+            puts=tuple(write.PagePut(f"Knowledge Base/Notes/{page}", EDITED) for page in pages),
+        ),
+    )
+    with read.snapshot(stored) as view:
+        listed = [(child.name, child.is_dir) for child in view.children("Knowledge Base/Notes")]
+    assert [item for item in listed if item[0].startswith("Deep")] == [
+        ("Deep.md", False),
+        ("Deep", True),
+        ("Deep0.md", False),
+    ]
+
+
 def test_a_projection_that_lags_the_store_is_not_what_the_byte_readers_return(stored, writer):
     """A reader that returns the file that the projector has not yet rewritten, which is the
     previous version of a page that the service acknowledged."""
@@ -116,7 +163,7 @@ def test_a_projection_that_lags_the_store_is_not_what_the_byte_readers_return(st
     assert vault_module.read_bounded_guarded_bytes(stored, ALPHA, limit=LIMIT)[0] == EDITED
     with_generation = vault_module.read_bounded_guarded_bytes_with_generation
     assert with_generation(stored, ALPHA, limit=LIMIT)[0] == EDITED
-    assert vault_module.read_bytes_without_pinning(stored / ALPHA) == EDITED
+    assert vault_module.read_bytes_without_pinning(stored / ALPHA, stored) == EDITED
     assert reserved_paths.read_generic_bytes(stored, ALPHA).data == EDITED
 
 
@@ -133,7 +180,7 @@ def test_a_page_the_store_deleted_reads_as_missing_though_its_file_is_still_on_d
     with pytest.raises(reserved_paths.ReservedPathLeafError, match="MISSING"):
         reserved_paths.read_generic_bytes(stored, BETA)
     with pytest.raises(FileNotFoundError):
-        vault_module.read_bytes_without_pinning(stored / BETA)
+        vault_module.read_bytes_without_pinning(stored / BETA, stored)
 
 
 def test_a_store_guard_refuses_after_a_store_commit_and_ignores_a_change_to_the_projection(
@@ -231,23 +278,42 @@ def test_a_commit_whose_expectation_fails_changes_nothing(stored, writer):
     assert rows(stored, "SELECT path, sha256 FROM store_pages ORDER BY path") == pages
 
 
-def test_a_moved_page_gives_each_side_an_audit_row_and_an_intent(stored, writer):
-    """A move that leaves the old file in the vault, or that records only one of its two paths."""
-    moved = "Knowledge Base/Notes/Moved.md"
+MOVED = "Knowledge Base/Notes/Moved.md"
+
+
+def move(src, dst):
+    return write.StoreChange(write.Origin.GOVERNED, "tidy", moves=(write.PageMove(src, dst),))
+
+
+def queue(root):
+    return rows(root, "SELECT path, operation, from_path FROM store_projection_queue ORDER BY path")
+
+
+def test_a_moved_page_gives_each_side_an_audit_row_and_one_move_intent(stored, writer):
+    """A move that leaves the old file in the vault, records only one of its two paths, or queues
+    the rename as a delete and a write that cannot keep the file's identity."""
     body = stored_body(stored, BETA)
-    write.commit(
-        writer,
-        write.StoreChange(write.Origin.GOVERNED, "tidy", moves=(write.PageMove(BETA, moved),)),
-    )
-    assert rows(stored, "SELECT path, body FROM store_pages WHERE path IN (?, ?)", BETA, moved) == [
-        (moved, body)
-    ]
-    assert dict(rows(stored, "SELECT path, operation FROM store_projection_queue")) == {
-        BETA: "delete",
-        moved: "write",
-    }
+    write.commit(writer, move(BETA, MOVED))
+    assert rows(
+        stored, "SELECT path, body FROM store_pages WHERE path IN (?, ?)", BETA, MOVED
+    ) == [(MOVED, body)]
+    assert queue(stored) == [(MOVED, "move", BETA)]
     audited = rows(stored, "SELECT path FROM store_audit WHERE operation = 'move' ORDER BY seq")
-    assert [path for (path,) in audited] == [BETA, moved]
+    assert [path for (path,) in audited] == [BETA, MOVED]
+
+
+def test_a_later_change_to_a_moved_page_leaves_its_old_file_to_be_deleted(stored, writer):
+    """A queue that forgets the old path once the new page changes, so the old file survives."""
+    write.commit(writer, move(BETA, MOVED))
+    write.commit(writer, put(MOVED, EDITED))
+    assert queue(stored) == [(BETA, "delete", None), (MOVED, "write", None)]
+
+
+def test_a_new_page_at_a_moved_pages_old_path_is_never_renamed_away(stored, writer):
+    """A queue that keeps the move, so the projector renames the page that now lives at the old path."""
+    write.commit(writer, move(BETA, MOVED))
+    write.commit(writer, put(BETA, EDITED))
+    assert queue(stored) == [(BETA, "write", None), (MOVED, "write", None)]
 
 
 def test_a_put_of_bytes_already_on_disk_records_the_manifest_and_queues_nothing(stored, writer):

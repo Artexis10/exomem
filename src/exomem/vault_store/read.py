@@ -63,6 +63,14 @@ class BinaryMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class Child:
+    """One direct child of a folder: a page, or a folder that holds at least one page."""
+
+    name: str
+    is_dir: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StoreSnapshot:
     """One read-only view of the store at ``revision``; it ends when ``snapshot`` returns.
 
@@ -99,6 +107,28 @@ class StoreSnapshot:
             rows = self.connection.execute(f"{select} ORDER BY path")
         for row in rows:
             yield PageMeta(*row)
+
+    def children(self, dir_rel: str) -> Iterator[Child]:
+        """The direct children of a folder, in name order: the pages and the folders that hold pages.
+
+        A page that a commit stored counts at once, whether or not the projector has written its
+        file, so a collision check reads the store and not the projection. ``dir_rel`` is the
+        folder's vault-relative path, or "" for the vault root. The scan runs on the primary key and
+        jumps from one child to the next, so a folder's own pages are not visited.
+        """
+        prefix = f"{dir_rel}/" if dir_rel else ""
+        lower = prefix
+        while True:
+            row = self.connection.execute(
+                "SELECT path FROM store_pages WHERE path >= ? AND path < ? ORDER BY path LIMIT 1",
+                (lower, prefix + _AFTER),
+            ).fetchone()
+            if row is None:
+                return
+            name, slash, _ = row[0][len(prefix) :].partition("/")
+            yield Child(name, is_dir=bool(slash))
+            # "0" is the code point after "/", so every path below "name/" sorts before it.
+            lower = prefix + name + ("0" if slash else "\x00")
 
     def binary(self, rel: str) -> BinaryMeta | None:
         """The record of one binary, or None when the store records no such path."""

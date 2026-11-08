@@ -1049,8 +1049,8 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
     the same stat as a file read. It starts from the projection manifest's value.
     ``store_pages_meta`` lets a metadata read (path, revision, hash, size, mtime, frontmatter) skip
     the page body, and ``store_audit_by_path`` lets an audit read by path skip the whole trail.
-    Nothing here changes a row's meaning, so every vault keeps its data and every older reader of
-    the tables keeps working.
+    The projection queue gains the ``move`` operation, which names the file's old path in
+    ``from_path``, so a rename is one intent. Every vault keeps its rows.
     """
     conn.execute("ALTER TABLE store_pages ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
     conn.execute(
@@ -1062,6 +1062,25 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
         "store_pages(path, revision, sha256, size, mtime_ns, frontmatter_json)"
     )
     conn.execute("CREATE INDEX store_audit_by_path ON store_audit(path, revision)")
+    # SQLite cannot widen a CHECK in place, so the queue is rebuilt and its rows carried over.
+    conn.execute("ALTER TABLE store_projection_queue RENAME TO store_projection_queue_v15")
+    conn.execute("DROP INDEX store_projection_queue_by_age")
+    # The operation column is a closed set that this schema fixes: the projector writes, deletes or
+    # renames a file. Only a rename has an old path.
+    conn.execute("""CREATE TABLE store_projection_queue(
+      path TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('write', 'delete', 'move')),
+      from_path TEXT,
+      queued_at TEXT NOT NULL,
+      CHECK((operation = 'move') = (from_path IS NOT NULL))
+    ) STRICT""")
+    conn.execute(
+        "INSERT INTO store_projection_queue(path, revision, operation, queued_at) "
+        "SELECT path, revision, operation, queued_at FROM store_projection_queue_v15"
+    )
+    conn.execute("DROP TABLE store_projection_queue_v15")
+    conn.execute("CREATE INDEX store_projection_queue_by_age ON store_projection_queue(queued_at)")
 
 
 _MIGRATION_PATH = Path(__file__).with_name("migrations")

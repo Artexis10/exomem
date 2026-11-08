@@ -566,10 +566,22 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
                 conn.execute(
                     "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision)"
                     " VALUES ('Knowledge Base/Notes/c.md', x'00', ?, 1, NULL, 1)", (H,))
+                conn.execute(
+                    "INSERT INTO store_projection_queue(path, revision, operation, queued_at)"
+                    " VALUES (?, 1, 'write', 't1')", (pages[0][0],))
 
     with connection.open_writer(path, lease_check=_allow) as writer:
         conn = writer.connection
         assert schema.schema_version(conn) == 16
+        assert conn.execute("SELECT * FROM store_projection_queue").fetchall() == [
+            (pages[0][0], 1, "write", None, "t1")]
+        with writer.transaction() as tx:
+            tx.execute("INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at)"
+                       " VALUES ('Knowledge Base/Notes/d.md', 2, 'move', ?, 't2')", (pages[1][0],))
+            for operation, from_path in (("move", None), ("write", pages[1][0])):
+                with pytest.raises(sqlite3.IntegrityError):
+                    tx.execute("INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at)"
+                               " VALUES ('Knowledge Base/Notes/e.md', 2, ?, ?, 't2')", (operation, from_path))
         assert conn.execute("SELECT path, mtime_ns, body FROM store_pages ORDER BY path").fetchall() == [
             (pages[0][0], pages[0][1], b"body"), (pages[1][0], pages[1][1], b"body"),
             ("Knowledge Base/Notes/c.md", 0, b"\x00")]
