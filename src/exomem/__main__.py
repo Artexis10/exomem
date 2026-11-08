@@ -24,6 +24,10 @@ Subcommands:
   cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `cell-media-census` — Exomem Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
+- `cell-media-manifest` — Exomem Cloud backup Job: the media manifest that each
+  snapshot carries, or an unknown manifest when the census cannot say
+- `cell-media-collect` — Exomem Cloud backup Job: condemn the released media
+  names that no retained snapshot's manifest reaches
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -150,6 +154,15 @@ def main(argv: list[str] | None = None) -> int:
         from .cell_media_census import main as census_main
 
         return census_main(raw[1:])
+    if raw[:1] == ["cell-media-manifest"]:
+        # The backup Job runs this on a read-only clone: it reads the vault and the media ledger, nothing more.
+        from .media_manifest import main as manifest_main
+
+        return manifest_main(raw[1:])
+    if raw[:1] == ["cell-media-collect"]:
+        from .media_collect import main as collect_main
+
+        return collect_main(raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()

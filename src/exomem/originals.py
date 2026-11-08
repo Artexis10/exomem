@@ -126,12 +126,13 @@ def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
 
 
 def referenced_binding(
-    fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
+    fields: dict[str, object], *, sidecar_path: str, store: StoreBinding | None,
 ) -> tuple[BinaryBinding, StoredObject] | None:
     """Read a canonical reference without requiring the original's physical presence.
 
     A caller supplies the companion's authoritative path before any Trash relocation.
     Missing or foreign references count as none; malformed selected-store custody raises.
+    A `store` of None selects every store, as the backup's media manifest needs (collect-released-media D5).
     """
     from . import reserved_paths
     from .governance.raw_protection import marked
@@ -143,7 +144,7 @@ def referenced_binding(
     reference = stored_reference(fields["stored_object"])
     if reference is None:
         raise ValueError("stored reference is malformed")
-    if reference.store != store.store:
+    if store is not None and reference.store != store.store:
         return None
     binary = binary_binding(fields)
     if binary is None or reserved_paths.classify_logical(binary.path).blocked:

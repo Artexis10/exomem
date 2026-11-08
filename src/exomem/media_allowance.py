@@ -124,7 +124,7 @@ def admission(
 
 
 def _binding(
-    fields: dict[str, object], path: str, store: originals.StoreBinding,
+    fields: dict[str, object], path: str, store: originals.StoreBinding | None,
     metadata: dict[str, str], vault: Path, placements: dict[str, dict[str, object]],
     placement_versions: dict[str, held_fs.FileVersion],
 ) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
@@ -171,9 +171,12 @@ def _binding(
 
 
 def bound_references(
-    vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
+    vault: Path, store: originals.StoreBinding | None, *,
+    unreadable: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
     """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
+
+    A `store` of None reads the references to every store.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
