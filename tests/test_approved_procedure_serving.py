@@ -411,3 +411,27 @@ def test_a_page_without_a_stable_ref_reports_no_approval(vault: Path) -> None:
     """Only a page that reports a ref can hold an approval, so an ordinary read gains no field."""
     rel = _procedure(vault, ref_id=None)
     assert "approval" not in _read(vault, rel)
+
+
+def test_a_read_checks_the_owner_only_for_a_held_ref_and_a_failed_check_never_blocks_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner check reads the egress policy. An ordinary note must not pay for it, and a check that fails
+    must leave the page readable, with no endorsement that nobody could check."""
+    ordinary = _page(vault, "plain-note", "exomem_id: 3a9d5b71-6c2e-4f08-8d14-0e7b2c9a5f13\n", body="Neutral observation.\n")
+    rel = _procedure(vault)
+    _index(vault)
+    _approve(vault, rel)
+    checks = []
+
+    def failing_check(*args, **_kwargs):
+        checks.append(args)
+        raise OSError("egress policy unreadable")
+
+    monkeypatch.setattr(procedure_approval, "owner_view", failing_check)
+    plain = _read(vault, ordinary)
+    assert "Neutral observation." in plain["body"] and "approval" not in plain
+    assert checks == []
+    approved = _read(vault, rel)
+    assert STEP in approved["body"] and "approval" not in approved
+    assert len(checks) == 1

@@ -323,12 +323,15 @@ def approval_fields(vault_root: Path, result: GetResult, *, ref: str, full_relea
     A page whose approval cannot be checked reads `unapproved`: approval only ever adds an endorsement, and
     the page content stays readable. `ref` is the reference index's ref for this path, which the index gives
     only to the single valid owner of an id. So the page is its own holder, and the verdict needs no second index.
+    The owner check runs only for a ref whose ledger holds something, so an ordinary read never pays for it, and
+    a check that fails reads as not the owner.
     """
-    owner = procedure_approval.owner_view(vault_root, principal.effective_principal())
+    owner = False
     try:
         ref_ledger = procedure_approval.ledger(vault_root, ref)
         if not ref_ledger.held:
             return {}
+        owner = procedure_approval.owner_view(vault_root, principal.effective_principal())
         outcome = procedure_approval.served_verdict(
             vault_root, result.path, ref_ledger, owner=owner, full_release=full_release,
             read=lambda: result.content.encode("utf-8"), holders=lambda: (result.path,),
