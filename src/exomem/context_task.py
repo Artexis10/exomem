@@ -294,13 +294,20 @@ def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[
     flag lets the packet say so. The page's holders come from the reference index that every read already
     consults for a page's ref: one indexed read, only when a ledger entry makes holders matter, and never a
     walk of the vault. That index follows each write, so a page approved a moment ago reads `approved` here.
+    The owner check runs only when a ledger holds an entry, and a check that fails leaves every source unchecked.
     """
     values = dict.fromkeys(projections, procedure_approval.UNAPPROVED)
     refs = {path: source.ref for path, source in projections.items() if source.ref}
     if not refs:
         return values, True
-    owner = procedure_approval.owner_view(root, principal.effective_principal())
     ledgers = procedure_approval.ledgers(root, refs.values())
+    owner = False
+    if any(ledgers[ref].held for ref in refs.values()):
+        try:
+            owner = procedure_approval.owner_view(root, principal.effective_principal())
+        except Exception:  # noqa: BLE001 - a failed owner check leaves the sources unapproved and keeps the packet
+            log.warning("approval owner check unavailable", exc_info=True)
+            return values, False
     named: dict[str, str | None] | None = None
     # A ledger that cannot be read leaves its source unchecked, even though its verdict reads unapproved.
     complete = not any(ledgers[ref].unavailable for ref in refs.values())

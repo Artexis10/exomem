@@ -442,3 +442,30 @@ def test_a_read_checks_the_owner_only_for_a_held_ref_and_a_failed_check_never_bl
     approved = _read(vault, rel)
     assert STEP in approved["body"] and "approval" not in approved
     assert len(checks) == 1
+
+
+def test_an_activation_checks_the_owner_only_with_a_ledger_entry_and_a_failed_check_keeps_the_task_context(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner check reads the egress policy. A packet with no ledger entry must not pay for it, and a check
+    that fails must still serve the methods, none endorsed, with the lane reported as failed."""
+    rel = _procedure(vault)
+    _index(vault)
+    checks = []
+
+    def failing_check(*args, **_kwargs):
+        checks.append(args)
+        raise OSError("egress policy unreadable")
+
+    monkeypatch.setattr(procedure_approval, "owner_view", failing_check)
+    plain = _activate(vault, turn=TURN, max_chars=8000)["task_context"]
+    assert "approval" not in _method({"task_context": plain}, rel)
+    assert {"role": "task_context", "reason": "lane_failed"} not in plain["missing"]
+    assert checks == []
+
+    _approve(vault, rel)
+    task = _activate(vault, turn=TURN, max_chars=8000)["task_context"]
+
+    assert "approval" not in _method({"task_context": task}, rel)
+    assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
+    assert len(checks) == 1
