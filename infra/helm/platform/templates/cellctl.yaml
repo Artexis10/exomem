@@ -676,17 +676,30 @@ spec:
     - name: podLabels
       expression: >-
         has(variables.target.spec.template.metadata.labels) ? variables.target.spec.template.metadata.labels : {}
-    # add-cloud-media-store D8: the cell Secret's media keys each pod template may name. The
-    # runtime holds the store keys, the export's pack the two it reads evicted originals with
-    # (job-egress gives it no public egress), and a backup the collector credential.
+    # add-cloud-media-store D8: the media keys of the cell Secret, and the ones each pod
+    # template may name. The runtime holds the store keys, the export's pack the two it reads
+    # evicted originals with (job-egress gives it no public egress), and a backup the collector
+    # credential. A StatefulSet with a Job's label would get job-egress, so it gets no key.
+    - name: packMediaKeys
+      expression: >-
+        ['media-age-identity', 'media-edge-credential']
+    - name: runtimeMediaKeys
+      expression: >-
+        variables.packMediaKeys + ['media-name-key']
+    - name: backupMediaKeys
+      expression: >-
+        ['media-edge-collector-credential']
+    - name: mediaKeys
+      expression: >-
+        variables.runtimeMediaKeys + variables.backupMediaKeys
     - name: mediaKeysAllowed
       expression: >-
         request.resource.resource == 'statefulsets'
-          ? ['media-age-identity', 'media-edge-credential', 'media-name-key']
+          ? (!('exomem.io/cell-job' in variables.podLabels) ? variables.runtimeMediaKeys : [])
           : 'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'export-pack'
-            ? ['media-age-identity', 'media-edge-credential']
+            ? variables.packMediaKeys
             : 'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'backup'
-              ? ['media-edge-collector-credential']
+              ? variables.backupMediaKeys
               : []
   validations:
     # 1. Every write cellctl makes must land inside a namespace named
@@ -774,21 +787,19 @@ spec:
         ((!has(variables.podSpec.volumes) || variables.podSpec.volumes.all(v,
             (!has(v.secret) || v.secret.?secretName.orValue('') != 'cell-credentials' ||
               (has(v.secret.items) && v.secret.items.all(i,
-                !(i.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
-                  'media-edge-collector-credential']) || i.key in variables.mediaKeysAllowed))) &&
+                !(i.key in variables.mediaKeys) || i.key in variables.mediaKeysAllowed))) &&
             (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s,
               !has(s.secret) || s.secret.?name.orValue('') != 'cell-credentials' ||
               (has(s.secret.items) && s.secret.items.all(i,
-                !(i.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
-                  'media-edge-collector-credential']) || i.key in variables.mediaKeysAllowed)))))) &&
+                !(i.key in variables.mediaKeys) || i.key in variables.mediaKeysAllowed)))))) &&
           (variables.podSpec.containers +
             (has(variables.podSpec.initContainers) ? variables.podSpec.initContainers : [])).all(c,
             (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || e.secretRef.?name.orValue('') != 'cell-credentials')) &&
             (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
               e.valueFrom.secretKeyRef.?name.orValue('') != 'cell-credentials' ||
-              !(e.valueFrom.secretKeyRef.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
-                'media-edge-collector-credential']) || e.valueFrom.secretKeyRef.key in variables.mediaKeysAllowed))))
-      message: cellctl may give a media key of the cell Secret only to the runtime, the export pack's two read keys only to the export pack, and the collector credential only to a backup, each as a listed key.
+              !(e.valueFrom.secretKeyRef.key in variables.mediaKeys) ||
+              e.valueFrom.secretKeyRef.key in variables.mediaKeysAllowed))))
+      message: cellctl may give a media key of the cell Secret only to the runtime without a Job label, the export pack's two read keys only to the export pack, and the collector credential only to a backup, each as a listed key.
     # 4c. Only chart-selected cells may select their own reserved agent.
     # Absent placement permits stop/change/start transitions. A StatefulSet
     # uses the separately rendered PVC, never volumeClaimTemplates.

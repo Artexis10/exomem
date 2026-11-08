@@ -415,10 +415,6 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         "!has(variables.podSpec.runtimeClassName)",
         f"'{JOB_KIND_EXPORT_PACK}'",
         f"'{JOB_KIND_EXPORT_PAUSE}'",
-        f"'{MEDIA_IDENTITY_KEY}'",
-        f"'{MEDIA_CREDENTIAL_KEY}'",
-        f"'{MEDIA_NAME_KEY_KEY}'",
-        f"'{MEDIA_COLLECTOR_CREDENTIAL_KEY}'",
     ):
         assert literal in expressions, literal
     variables = "\n".join(v["expression"] for v in policy["spec"]["variables"])

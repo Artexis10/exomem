@@ -2427,6 +2427,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
         render_export_staging_claim,
         render_namespace,
         render_network_policies,
+        render_statefulset,
     )
 
     from .test_media_edge import _spec
@@ -2460,6 +2461,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
                                     part_urls=["https://storage.example/part"], media_mode="served")
             for step in (PAUSE, PACK, UPLOAD)}
     staging = render_export_staging_claim(spec, item, size_gib=13, storage_class="exomem-cloud-encrypted")
+    runtime = render_statefulset(spec)
     cellctl = "--as=system:serviceaccount:exomem-cloud:cellctl"
 
     def dry_run(document: dict) -> subprocess.CompletedProcess[str]:
@@ -2476,7 +2478,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
         return dry_run(jobs[PACK]).returncode == 0
 
     _wait_for(policy_settled, timeout=60, description="admission to admit the export pack")
-    for document in (*jobs.values(), staging, policies["job-egress"]):
+    for document in (*jobs.values(), staging, policies["job-egress"], runtime):
         admitted = dry_run(document)
         assert admitted.returncode == 0, (document["metadata"]["name"], admitted.stderr)
 
@@ -2491,6 +2493,11 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
         {"name": "forged", "secret": {"secretName": "cell-credentials"}})
     relabelled_pack = copy.deepcopy(jobs[PACK])
     relabelled_pack["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] = "export"
+    # job-egress selects any pod with a Job's label, so a runtime with one would hold its keys with public egress.
+    labelled_runtime = copy.deepcopy(runtime)
+    labelled_runtime["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] = "export"
+    assert any(item["key"] == MEDIA_IDENTITY_KEY for volume in runtime["spec"]["template"]["spec"]["volumes"]
+               for item in volume.get("secret", {}).get("items", []))
     public_pack = copy.deepcopy(policies["job-egress"])
     public_pack["spec"]["podSelector"]["matchExpressions"] = public_pack["spec"]["podSelector"]["matchExpressions"][:1]
     retained_staging = copy.deepcopy(staging)
@@ -2505,6 +2512,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
         ("the pack holding the name key", with_key(jobs[PACK], MEDIA_NAME_KEY_KEY), key_rule),
         ("the upload mounting the whole cell Secret", whole_secret, key_rule),
         ("the pack relabelled into job-egress", relabelled_pack, key_rule),
+        ("a runtime StatefulSet with a Job's label", labelled_runtime, key_rule),
         ("job-egress that selects the pack and the pause", public_pack, "for every Job but the export pause and pack"),
         ("a staging claim on the class that retains volumes", retained_staging, "on a configured cell class"),
         ("the upload with the pack's affinity", upload_with_affinity, "an export pack's to its own upload"),
