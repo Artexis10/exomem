@@ -12,6 +12,10 @@ are thin adapters over it. The caller of a write function holds the vault mutati
 boundary and the dispatcher's `approve_procedure` owner authority; the module reads
 the latest entry of a ref and appends after it, so two writers of one ref must not
 overlap.
+
+The key lives in the vault's state directory, which follows the vault's path. A vault
+that moves to another path gets a new key, so its entries read foreign, with one owner
+finding per ref, until the owner approves each page again.
 """
 
 from __future__ import annotations
@@ -73,6 +77,34 @@ _FIELDS = frozenset(
 )
 
 # The three finding kinds this module raises. They are closed and carry no customer vocabulary.
+#: What to change for each failed eligibility test, so a refusal names its own fix.
+_CONDITION_FIX = {
+    NOT_COMPILED: (
+        "This page is not a compiled note. Approve a compiled procedure page; captured "
+        "material stays a source and is never approved."
+    ),
+    NOT_LIVE: (
+        "The page has no live status. Set a live status with the ordinary editor, read "
+        "the page again, then approve its new content_hash."
+    ),
+    NO_METHOD_UNIT: (
+        "The page has no method unit. Add a procedure or method block with the ordinary "
+        "editor, read the page again, then approve its new content_hash."
+    ),
+    NO_STABLE_ID: (
+        "The page has no stable exomem_id. Run maintain_memory with mode backfill-ids and "
+        "apply its plan, then approve the page by the ref it now holds."
+    ),
+    ID_UNRESOLVED: (
+        "No page holds this ref, or the page is not readable here. Check the ref in the "
+        "page's frontmatter, then approve again."
+    ),
+    DUPLICATE_ID: (
+        "More than one page repeats this exomem_id. Give the copy a new exomem_id, then "
+        "approve the page again."
+    ),
+}
+
 _FINDING_TEXT = {
     FOREIGN: (
         "Its approval entries do not verify with this host's approval key. They may come "
@@ -556,6 +588,13 @@ def _require_owner_authority() -> None:
         raise RuntimeError("approvals are written only under the approve_procedure authority")
 
 
+def _committed() -> None:
+    """Tell the dispatcher that a durable ledger change happened, so the result is a committed one."""
+    from .writer_lease import mark_active_mutation_committed
+
+    mark_active_mutation_committed()
+
+
 def _quarantine_ref(vault_root: Path, ref: str, *, include_foreign: bool) -> tuple[Moved, ...]:
     """Move one ref's unreadable entry files, and its foreign ones when asked, aside."""
     root = Path(vault_root)
@@ -588,6 +627,7 @@ def _quarantine_ref(vault_root: Path, ref: str, *, include_foreign: bool) -> tup
                 f"An unreadable approval entry could not be moved aside ({name}). Remove that "
                 "file from the ledger by hand, then try again.",
             ) from error
+        _committed()
         moved.append(Moved(ref, name, kind, destination_name))
     return tuple(moved)
 
@@ -645,6 +685,7 @@ def _append(
     reserved_paths._publish_owner_bytes(  # noqa: SLF001 - owner-bound create
         root, entry_path(root, ref, entry.entry_id), LEDGER_DESCRIPTOR, data
     )
+    _committed()
     return entry
 
 
@@ -668,12 +709,7 @@ def approve(
     if facts is None or not facts.eligible or facts.ref != ref:
         # No facts means that no page holds the ref.
         condition = facts.condition if facts is not None and facts.ref == ref else ID_UNRESOLVED
-        raise ApprovalRefused(
-            "ineligible",
-            f"This page cannot be approved ({condition}). A procedure page needs a compiled "
-            "type, a live status, a method unit and one unique exomem_id.",
-            condition=condition,
-        )
+        raise ApprovalRefused("ineligible", _CONDITION_FIX[condition], condition=condition)
     if expected_version != facts.version:
         raise ApprovalRefused(
             "stale_version",
