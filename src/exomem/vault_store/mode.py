@@ -60,7 +60,9 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
     """The manifest's identity and change marks, or None when it is absent: one stat, no read.
 
     An atomic replace changes the inode and an in-place rewrite changes ``st_ctime_ns``, which no caller can
-    set back, so an unchanged signature means the same bytes.
+    set back, so an unchanged signature means the same bytes. On Windows ``st_ctime_ns`` is the creation
+    time, so only the file ID covers a rewrite there; Exomem writes the manifest by ``os.replace``, which
+    gives it a new ID, and only a hand edit that restores the mtime would go unseen.
     """
     try:
         found = manifest.stat()
