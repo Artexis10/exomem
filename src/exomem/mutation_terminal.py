@@ -858,8 +858,10 @@ _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
 _MAX_UNCLASSIFIED_FOLDERS = 4
 
 
-#: Longest question text a compiled write may carry. The text is one constant in
-#: `note_cohesion`; this bound only stops a malformed payload from widening the wire.
+#: Longest question text a compiled write may carry: `note_cohesion.QUESTION` plus the
+#: keep-whole call spelled for the serving surface. A longer question drops the whole
+#: advisory, so `tests/test_note_cohesion.py` writes it on every tool shape against
+#: this bound. It only stops a malformed payload from widening the wire.
 _MAX_COHESION_QUESTION_CHARS = 800
 
 

@@ -24,6 +24,7 @@ from . import (
 )
 from . import find as find_module
 from .audit import AuditFinding
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import content_hash, find_body_wikilinks, kb_root
 
 ACTIVATION_CATEGORIES: tuple[str, ...] = (
@@ -33,8 +34,6 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
     "relation_debt",
 )
 
-_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
-_SKIP_TAGS = frozenset({"hub", "snapshot"})
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
 _PROVENANCE_RELATIONS = frozenset({"derived_from", "evidenced_by", "cites"})
 _FRONTMATTER_TYPED_FIELDS: dict[str, str] = {
@@ -307,12 +306,12 @@ def structurally_placed(
     if access.access_tier(vault_root, page.rel_path) not in tiers:
         return False
     stem = page.path.stem.lower()
-    if any(stem.endswith(suffix) for suffix in _SKIP_SLUG_SUFFIXES):
+    if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
         return False
     normalized_tags = {
         str(tag).strip().casefold().lstrip("#") for tag in page.tags
     }
-    if _SKIP_TAGS & normalized_tags:
+    if BREADTH_TAGS & normalized_tags:
         return False
     return True
 

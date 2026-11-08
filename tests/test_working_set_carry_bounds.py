@@ -549,6 +549,31 @@ def test_an_admitted_ranking_after_a_write_equals_the_ranking_of_a_fresh_process
     assert ranked()[0] == warm
 
 
+def test_two_admitted_views_that_alternate_each_rebuild_from_their_own_pages(vault: Path) -> None:
+    """A wide and a narrow admitted view ranked in turn, then one shared page edited: the wide view's rebuild
+    tokenizes that page alone. With one base per scope it started from the narrow view's pages and read
+    every page the narrow view withholds again."""
+    held = _seed_ranked(vault)
+    shown = f"{RESEARCH}/ranked-plimsett-0.md"
+    narrow_hidden = {path for path in held if path != shown}
+
+    def tokenized(hidden: set[str]) -> int:
+        context = lexstore.RequestQueryContext(
+            vault, lambda path: path not in hidden, lifecycle_statuses.Basis(vault)
+        )
+        with call_spans.meter(call_spans.PAGES_TOKENIZED) as measured:
+            _ranked(vault, 1000, query_context=context)
+        return int(measured[call_spans.PAGES_TOKENIZED])
+
+    assert tokenized(set()) > len(held)
+    tokenized(narrow_hidden)
+    _research_page(vault, "ranked-plimsett-0", "plimsett quaddle revised for both views")
+    _settle(vault)
+
+    assert tokenized(set()) == 1
+    assert tokenized(narrow_hidden) == 1
+
+
 def test_snapshot_aliases_do_not_evict_another_readers_unchanged_statistics(vault: Path) -> None:
     held = _seed_ranked(vault)
     common = f"{RESEARCH}/ranked-plimsett-0.md"

@@ -58,6 +58,7 @@ from . import (
 from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
+from .find_types import ParsedPage
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -2262,6 +2263,157 @@ def derive_row_tables(vault_root: Path, conn: sqlite3.Connection) -> int:
     """
     resolver = find_module.recall_resolver_snapshot(vault_root)
     return EpistemicGraphIndex(vault_root)._derive_pages(conn, resolver)
+
+
+def _is_graph_page(rel: str) -> bool:
+    """Whether the graph indexes a page at this path: Markdown outside the scan-excluded folders."""
+    return rel.lower().endswith(".md") and not vault_module.in_excluded_scan_dir(rel)
+
+
+@dataclass(frozen=True, slots=True)
+class PageGraphRows:
+    """Every graph row one page derives, as plain data; `write_page_graph_rows` writes them.
+
+    ``nodes`` is the file node, then the page's unit nodes. ``dependencies`` are
+    `(lookup_key, raw_target)` pairs. ``source_hash`` is the hash of the bytes the rows derive from.
+    """
+
+    rel: str
+    nodes: tuple[GraphNode, ...]
+    parent_ref: str | None
+    edges: tuple[GraphEdge, ...]
+    dependencies: tuple[tuple[str, str], ...]
+    source_hash: str
+
+
+def graph_registry_stamps(vault_root: Path) -> tuple[tuple[str, str], ...]:
+    """The `graph_meta` pairs that name the registries a graph's rows derive under.
+
+    They hold for a whole pass, so a pass reads them once and `write_page_graph_rows` stores them
+    with each page. This reads the vault's traversal-profiles file.
+    """
+    registry = relation_registry.core_registry()
+    return (
+        ("core_registry_version", str(registry.core_version)),
+        ("extension_registry_hash", registry.extension_hash),
+        (
+            "traversal_profile_hash",
+            traversal_profiles.load_profiles(vault_root, registry=registry).content_hash,
+        ),
+    )
+
+
+def page_graph_rows(
+    vault_root: Path,
+    rel: str,
+    raw: bytes,
+    *,
+    page: ParsedPage,
+    state: semantic_index.SemanticParentIndexState,
+    resolver: vault_module.WikilinkResolver,
+    type_basis: note_types.Basis,
+    target_exists: Callable[[str], bool],
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
+) -> PageGraphRows | None:
+    """The graph rows of one page, derived from ``raw`` and the inputs below.
+
+    ``rel`` is the page's vault-relative path and ``raw`` its exact UTF-8 bytes. ``page`` is
+    ``find._parse_page(..., content=raw, resolved_relative=rel)`` of those bytes. ``state`` is
+    ``semantic_index.current_parent_index_state(vault_root, rel, source=<raw decoded>)``.
+    ``resolver`` decides which page each link names. Two callables answer for the pages a link
+    names, so the rows never depend on which files are on disk:
+    ``target_exists(target_rel)`` says whether the page at that vault-relative path exists, and
+    ``landing(canonical, fragment)`` returns the `(dst_key, dst_page_key, metadata)` of a link
+    to ``canonical`` with that ``#fragment``. File mode passes answers read from disk.
+
+    Beyond those inputs this reads only the vault's access rules under ``vault_root``, never
+    another page. Returns None when the graph holds no rows for the page: its path is not a
+    graph page, or recall policy does not admit ``raw`` there. The caller proves the destination
+    file itself.
+    """
+    if not _is_graph_page(rel) or not recall_policy.admits_markdown_content(vault_root, rel, raw):
+        return None
+    file_node = _file_node(
+        vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis
+    )
+    unit_nodes = [
+        _candidate_node(page, unit, state)
+        for unit in semantic_units.candidate_units(state.candidates)
+    ]
+    edges = _structural_edges_for_page(
+        vault_root,
+        page,
+        state,
+        source_hash=file_node.source_hash,
+        resolver=resolver,
+        target_exists=target_exists,
+        landing=landing,
+    )
+    return PageGraphRows(
+        rel=rel,
+        nodes=(file_node, *unit_nodes),
+        parent_ref=state.parent_ref,
+        edges=tuple(edges),
+        dependencies=tuple(_dependency_records(state.body, state.candidates)),
+        source_hash=file_node.source_hash,
+    )
+
+
+def write_page_graph_rows(
+    conn: sqlite3.Connection,
+    rows: PageGraphRows,
+    registry_stamps: Iterable[tuple[str, str]],
+) -> None:
+    """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
+
+    ``registry_stamps`` is `graph_registry_stamps` of the pass. The caller owns the transaction.
+    """
+    rel = rows.rel
+    conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
+    conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
+    conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
+    conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
+    conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,))
+    for key, value in registry_stamps:
+        conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", (key, value))
+    for node in rows.nodes:
+        _insert_node(conn, node)
+    if rows.parent_ref is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) VALUES (?, ?)",
+            (rel, rows.parent_ref),
+        )
+    for edge in rows.edges:
+        _insert_edge(conn, edge)
+    conn.executemany(
+        "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES (?, ?, ?)",
+        [(rel, lookup_key, raw_target) for lookup_key, raw_target in rows.dependencies],
+    )
+    conn.execute(
+        "INSERT INTO graph_dependency_coverage("
+        "source_path, source_hash, dependency_format, expected_count"
+        ") VALUES (?, ?, ?, ?)",
+        (rel, rows.source_hash, _DEPENDENCY_FORMAT, len(rows.dependencies)),
+    )
+    _bump_generation(conn)
+
+
+def dependent_paths(
+    conn: sqlite3.Connection,
+    rels: Iterable[str],
+    resolvers: Iterable[vault_module.WikilinkResolver],
+) -> set[str]:
+    """The pages, outside ``rels``, whose links depend on a key that ``rels`` add, remove or rename.
+
+    Reads the stored `graph_dependencies` of ``conn`` by every path, stem and title key that a
+    change to ``rels`` can move. A shared stem over-matches and a dependent is never missed.
+    Each resolver names the titles of ``rels`` in one state of the vault. Pass the state that
+    holds a new page and the state that held a removed or renamed page.
+    """
+    changed = set(rels)
+    keys = _dependency_changed_keys(changed, *resolvers)
+    sources = EpistemicGraphIndex._dependency_sources_for_keys(conn, keys)
+    return {source for source, _raw_target in sources} - changed
 
 
 class EpistemicGraphIndex:
@@ -5621,7 +5773,8 @@ class EpistemicGraphIndex:
         """Index every Knowledge Base page into ``conn`` without committing; return the count."""
         indexed = 0
         kb = self.vault_root / kb_dirname()
-        type_basis = _producer_type_basis(self.vault_root)
+        type_basis = producer_type_basis(self.vault_root)
+        registry_stamps = graph_registry_stamps(self.vault_root)
         if kb.is_dir():
             for md in find_module._walk_md(kb):
                 # The pass writes only its private sidecar, so a
@@ -5629,7 +5782,12 @@ class EpistemicGraphIndex:
                 # rebuild-owner claim a joining writer already waits on.
                 foreground_priority.yield_to_foreground()
                 if self._index_path(
-                    conn, md, resolver=resolver, commit=False, type_basis=type_basis
+                    conn,
+                    md,
+                    resolver=resolver,
+                    commit=False,
+                    type_basis=type_basis,
+                    registry_stamps=registry_stamps,
                 ):
                     indexed += 1
         return indexed
@@ -7655,7 +7813,8 @@ class EpistemicGraphIndex:
     ) -> dict[str, int]:
         conn = self._connect()
         indexed = 0
-        type_basis = _producer_type_basis(self.vault_root)
+        type_basis = producer_type_basis(self.vault_root)
+        registry_stamps = graph_registry_stamps(self.vault_root)
         touched = {
             rel for path in paths if (rel := _vault_rel(self.vault_root, Path(path))) is not None
         }
@@ -7670,6 +7829,7 @@ class EpistemicGraphIndex:
                             commit=False,
                             indexed_versions=indexed_versions,
                             type_basis=type_basis,
+                            registry_stamps=registry_stamps,
                         ):
                             indexed += 1
                 if resolver_fingerprint is not None:
@@ -8246,11 +8406,19 @@ class EpistemicGraphIndex:
         commit: bool = True,
         indexed_versions: dict[str, GraphSourceSignature] | None = None,
         type_basis: note_types.Basis | None = None,
+        registry_stamps: tuple[tuple[str, str], ...] | None = None,
     ) -> bool:
+        """Index one file into ``conn``: the file-mode driver of `page_graph_rows`.
+
+        It admits the path on disk, reads the page's bytes once and hands them to the pure
+        derivation, with the vault's files as the answer for link targets. It then rebinds to
+        the file's current bytes before `write_page_graph_rows` writes the rows. A pass hands in
+        its `type_basis` and `registry_stamps` so each is read once.
+        """
         rel = _vault_rel(self.vault_root, path)
         if rel is None:
             return False
-        if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
+        if not _is_graph_page(rel):
             return False
         if not path.exists():
             # Own rows only, as a rebuild leaves them: a drain or refresh re-derives
@@ -8285,25 +8453,21 @@ class EpistemicGraphIndex:
             path,
             source=raw,
         )
-        file_node = _file_node(
+        rows = page_graph_rows(
             self.vault_root,
-            page,
-            raw,
+            rel,
+            raw_bytes,
+            page=page,
             state=state,
-            type_basis=type_basis or _producer_type_basis(self.vault_root),
-        )
-        unit_nodes = [
-            _candidate_node(page, unit, state)
-            for unit in semantic_units.candidate_units(state.candidates)
-        ]
-        edges = _structural_edges_for_page(
-            self.vault_root,
-            page,
-            state,
-            source_hash=file_node.source_hash,
             resolver=resolver,
+            type_basis=type_basis or producer_type_basis(self.vault_root),
+            target_exists=_target_exists_on_disk(self.vault_root),
+            landing=_landing_on_disk(self.vault_root),
         )
-        dependencies = _dependency_records(state.body, state.candidates)
+        if rows is None:
+            # The disk gate admitted the file, but the bytes read since are not admitted.
+            self._delete_path(conn, rel, commit=commit)
+            return False
         with conn if commit else nullcontext():
             # Direct editors can replace a file while parsing/edge resolution is
             # in flight.  Rebind to the exact source immediately before the
@@ -8320,52 +8484,9 @@ class EpistemicGraphIndex:
             ):
                 self._delete_path(conn, rel, commit=commit)
                 return False
-            conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
-            conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
-            conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
-            conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
-            conn.execute(
-                "DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,)
+            write_page_graph_rows(
+                conn, rows, registry_stamps or graph_registry_stamps(self.vault_root)
             )
-            conn.execute(
-                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                ("core_registry_version", str(self.registry.core_version)),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                ("extension_registry_hash", self.registry.extension_hash),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                (
-                    "traversal_profile_hash",
-                    traversal_profiles.load_profiles(
-                        self.vault_root, registry=self.registry
-                    ).content_hash,
-                ),
-            )
-            for node in [file_node, *unit_nodes]:
-                _insert_node(conn, node)
-            if state.parent_ref is not None:
-                conn.execute(
-                    "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) VALUES (?, ?)",
-                    (rel, state.parent_ref),
-                )
-            for edge in edges:
-                _insert_edge(conn, edge)
-            conn.executemany(
-                "INSERT INTO graph_dependencies("
-                "source_path, lookup_key, raw_target"
-                ") VALUES (?, ?, ?)",
-                [(rel, lookup_key, raw_target) for lookup_key, raw_target in dependencies],
-            )
-            conn.execute(
-                "INSERT INTO graph_dependency_coverage("
-                "source_path, source_hash, dependency_format, expected_count"
-                ") VALUES (?, ?, ?, ?)",
-                (rel, source_signature[3], _DEPENDENCY_FORMAT, len(dependencies)),
-            )
-            _bump_generation(conn)
             if indexed_versions is not None:
                 indexed_versions[rel] = current_signature
         return True
@@ -11915,7 +12036,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     return drift
 
 
-def _producer_type_basis(vault_root: Path) -> note_types.Basis:
+def producer_type_basis(vault_root: Path) -> note_types.Basis:
     """One indexing pass's note types.
 
     The stored bit is never served, so it reads the owner's view.
@@ -12125,6 +12246,7 @@ def _structural_edges_for_page(
     visible: Callable[[str], bool] | None = None,
     check: Callable[[], None] | None = None,
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
+    target_exists: Callable[[str], bool] | None = None,
 ) -> list[GraphEdge]:
     """Every edge some interpretation of `page` authors, as shared neutral rows.
 
@@ -12167,7 +12289,7 @@ def _structural_edges_for_page(
         for relation in unit.relations:
             destination = _relation_target(
                 vault_root, relation.target, resolver, visible,
-                source_path=rel, check=check, landing=landing,
+                source_path=rel, check=check, landing=landing, target_exists=target_exists,
             )
             if destination is None:
                 continue
@@ -12196,7 +12318,7 @@ def _structural_edges_for_page(
     for relation in notes.relations:
         destination = _relation_target(
             vault_root, relation.target, resolver, visible,
-            source_path=rel, check=check, landing=landing,
+            source_path=rel, check=check, landing=landing, target_exists=target_exists,
         )
         if destination is None:
             continue
@@ -12232,11 +12354,13 @@ def _relation_target(
     source_path: str,
     check: Callable[[], None] | None = None,
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
+    target_exists: Callable[[str], bool] | None = None,
 ) -> tuple[str, str, str, dict[str, Any]] | None:
     """Where one authored relation target lands: (dst, dst page, kind, metadata).
 
     A local fragment uses its already-known source parent. Page names still
-    resolve through the ordinary audience-aware vault resolver.
+    resolve through the ordinary audience-aware vault resolver. `landing` and
+    `target_exists` answer for the target page; without them the vault's files do.
     """
     if check is not None:
         check()
@@ -12274,7 +12398,7 @@ def _relation_target(
             _relation_destination(vault_root, canonical, fragment)
             if landing is None else landing(canonical, fragment)
         )
-    return dst_key, dst_page_key, _target_kind(vault_root, canonical), {
+    return dst_key, dst_page_key, _target_kind(vault_root, canonical, target_exists), {
         "target_resolution": "unresolved" if warning else "resolved",
         **fragment_metadata,
     }
@@ -12574,6 +12698,11 @@ def _split_target_fragment(raw: str) -> tuple[str, str]:
     return page, fragment.strip()
 
 
+def _landing_on_disk(vault_root: Path) -> Callable[[str, str], tuple[str, str, dict[str, str]]]:
+    """File mode's answer to "where does a link to this page and fragment land"."""
+    return lambda canonical, fragment: _relation_destination(vault_root, canonical, fragment)
+
+
 def _relation_destination(
     vault_root: Path, canonical: str, fragment: str
 ) -> tuple[str, str, dict[str, str]]:
@@ -12688,8 +12817,16 @@ def _page_project(frontmatter: dict[str, Any]) -> str | None:
     return None
 
 
-def _target_kind(vault_root: Path, target: str) -> str:
-    return "file" if (Path(vault_root) / _page_rel(target)).exists() else "unresolved"
+def _target_exists_on_disk(vault_root: Path) -> Callable[[str], bool]:
+    """File mode's answer to "does the page at this vault-relative path exist"."""
+    return lambda rel: (Path(vault_root) / rel).exists()
+
+
+def _target_kind(
+    vault_root: Path, target: str, exists: Callable[[str], bool] | None = None
+) -> str:
+    exists = exists or _target_exists_on_disk(vault_root)
+    return "file" if exists(_page_rel(target)) else "unresolved"
 
 
 def _file_key(rel_path: str) -> str:

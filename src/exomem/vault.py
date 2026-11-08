@@ -5167,14 +5167,17 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
         relative = Path(os.path.abspath(directory)).relative_to(os.path.abspath(vault_root))
     except ValueError:
         return []
+    from .capabilities import active_call_text
+
     warnings: list[str] = []
     current = Path(vault_root)
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
+            audit_call = active_call_text("review_memory", {"mode": "audit", "categories": ["path_variants"]})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
-                "run maintain_memory(mode='audit', categories=['path_variants']) to see the split"
+                f"run {audit_call} to see the split"
             )
         current = current / part
     return warnings

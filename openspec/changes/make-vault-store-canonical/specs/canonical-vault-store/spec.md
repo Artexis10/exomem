@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: One canonical store per vault
-In store mode, each vault SHALL have one SQLite database, the per-vault collection store database, that is the single source of truth for every text file a governed write commits: pages, navigation indexes, logs, compiled history and the governed schema overlay. The database SHALL hold each such file's exact bytes, its parsed frontmatter, the structured collection tables, the lexical catalogue rows, the epistemic graph rows, an audit trail and a projection manifest. Binary media SHALL stay files that the store references by path and content hash. Dataset files that the structured-collections contract keeps file-canonical, and vault content outside the managed Knowledge Base, SHALL stay outside the store.
+In store mode, each vault SHALL have one SQLite database, the per-vault collection store database, that is the single source of truth for every text file a governed write commits: pages, navigation indexes, logs, compiled history and the governed schema overlay. The database SHALL hold each such file's exact bytes, its parsed frontmatter, the structured collection tables, the lexical catalogue rows, the epistemic graph rows, an audit trail and a projection manifest. Binary media SHALL stay files that the store references by path and content hash. Dataset files that the structured-collections contract keeps file-canonical, and vault content outside the managed root, SHALL stay outside the store.
 
 #### Scenario: A page has one authoritative copy
 - **WHEN** a reader asks for a page in a store-mode vault
@@ -100,7 +100,7 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail and the canonicity records, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the path alias table, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
@@ -108,7 +108,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 
 #### Scenario: Reverting rebuilds file mode from the projection
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
-- **THEN** the audit trail and canonicity records are exported as files
+- **THEN** the audit trail, the canonicity records and the path alias table are exported as files
 - **AND** file mode rebuilds its lexical catalogue and graph from the projected Markdown
 - **AND** search and graph answers match the store's answers for the same pages
 
@@ -138,6 +138,14 @@ For files the store owns, the requirements that keep derived sidecars in step wi
 - **AND** no sidecar reindex or graph correction runs against the on-disk bytes outside that check
 
 #### Scenario: Vault content outside the store stays fresh
-- **WHEN** a note outside the managed Knowledge Base changes on disk in a store-mode vault
+- **WHEN** a note outside the managed root changes on disk in a store-mode vault
 - **THEN** its vault-scope lexical rows refresh as they do in file mode
 - **AND** the note is not imported into the store
+
+### Requirement: Store-mode names read the store
+In store mode, the collision check for a new page name SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
+
+#### Scenario: Two quick creates that differ only in case
+- **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page
+- **THEN** the second page gets a numbered suffix
+- **AND** the first page keeps its name
