@@ -65,7 +65,7 @@ In `root` layout, a page path SHALL hold an area, the group folders that the pag
 - **AND** its metadata records the new domain
 
 ### Requirement: Derived names are unique across the vault
-A new page name derived under `title` style in a `root` vault SHALL be unique among the Markdown pages that Exomem owns, across the whole vault, compared after NFC normalisation and casefolding. On a collision the writer SHALL append ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix SHALL count toward the filename length cap. A name that is not derived SHALL never be renamed or suffixed: that covers an Evidence original, a Records or Planning recipe name and a name the caller pinned. A derived name SHALL yield to such a name whatever the path order. A relayout SHALL resolve collisions among derived names in ascending order of the pages' current paths, so that the same plan input gives the same names. A slug name, and a `title` name in a `nested` vault, SHALL keep the collision contract of `add-readable-note-filenames`.
+A new page name derived under `title` style in a `root` vault SHALL be unique among the Markdown pages that Exomem owns, across the whole vault, compared after NFC normalisation and casefolding. On a collision the writer SHALL append ` (2)`, ` (3)` and so on, taking the lowest number that no page holds. The suffix SHALL count toward the filename length cap. A name is pinned when a caller chose it explicitly at create, move or rename time, and the store SHALL record the pin with the page. A caller-chosen name that another page already holds SHALL be refused and name that page. Every name that is neither pinned nor set by its type's own rule is derived, including a name that the naming rule or a relayout produced, with or without a suffix or truncation. A pinned name, and a name that its type's own rule sets (an Evidence original, a Records or Planning recipe name), SHALL never be renamed or suffixed. A derived name SHALL yield to such a name whatever the path order. A relayout SHALL resolve collisions among derived names in ascending order of the pages' current paths, so that the same plan input gives the same names. A slug name, and a `title` name in a `nested` vault, SHALL keep the collision contract of `add-readable-note-filenames`.
 
 #### Scenario: Two pages with one title get distinct names
 - **WHEN** a second page is created in a `root` vault with a title whose derived name an existing page already holds
@@ -107,25 +107,36 @@ A writer SHALL emit the shortest trailing path of the target page, cut at a fold
 - **THEN** the body carries `[[alpha/receipts/Scan]]`
 - **AND** the body does not carry `[[Evidence/Scan]]`, which is not a path suffix of either page
 
-### Requirement: A retitle renames a derived name
-In store mode, when a governed write changes a page's title and its filename was derived from the old title, the same write SHALL rename the page to the name derived from the new title. A filename is derived from the old title when it equals what the naming rule produces for that title, including any suffix or truncation. One transaction SHALL move the page's rows, repoint every inbound link that uses the old name, re-derive the pages it repoints and record the old path as an alias. A filename that is not derived from the old title, including one the caller pinned, SHALL NOT change. An outside-edit import that changes a title SHALL NOT rename the file.
+### Requirement: A governed write renames a derived name to match the title
+In store mode, a governed write to a page SHALL rename the page when its name is derived and differs from the name that the naming rule gives the page's title after the write. The write SHALL do so in the same transaction as the page's own change. In that collision check the page's own current name SHALL count as free. One transaction SHALL move the page's rows, repoint every inbound link that uses the old name, re-derive the pages it repoints and record the old path as an alias. A pinned name SHALL NOT change, and a name that its type's own rule sets SHALL NOT change. A page with no title has no name to derive and SHALL keep its name. An outside-edit import SHALL NOT rename a file, even when it changes a title. The next governed write to that page SHALL rename a derived name to match the page's current title.
 
 #### Scenario: A derived name follows the title
-- **WHEN** a governed write changes the title of a page whose name was derived from its old title
-- **THEN** the page's file is renamed in the same transaction
+- **WHEN** a governed write changes the title of a page whose name is derived
+- **THEN** the page's file is renamed in the same transaction to the name derived from the new title
 - **AND** every page that linked the old name now links the new name and still resolves to the page
 
-#### Scenario: A pinned name stays
-- **WHEN** a governed write changes the title of a page whose filename differs from the name derived from its old title
-- **THEN** the page keeps its path
-
-#### Scenario: A suffixed derived name follows the title
-- **WHEN** a governed write changes the title of a page whose name is the derived name plus ` (2)`
+#### Scenario: A suffixed derived name still follows the title
+- **WHEN** a governed write changes the title of a page whose derived name carries a ` (2)` suffix
 - **THEN** the page is renamed to the name derived from the new title, with a suffix only if that name collides
+
+#### Scenario: A pinned name never renames
+- **WHEN** a caller created a page with an explicit filename and a governed write later changes its title
+- **THEN** the page keeps its path
+- **AND** the store still records the pin
 
 #### Scenario: An outside edit to a title keeps the file name
 - **WHEN** a person edits a page's title in an editor and the edit imports as a governed write with outside-editor provenance
 - **THEN** the page keeps its path
+
+#### Scenario: The next governed write renames to match the outside edit
+- **WHEN** a governed write touches a page with a derived name after an outside edit changed its title
+- **THEN** the page is renamed to the name derived from its current title
+- **AND** every page that linked the old name now links the new name
+
+#### Scenario: A matching name stays
+- **WHEN** a governed write changes neither the title nor the name of a page whose derived name already matches its title, with or without a suffix that its own collision requires
+- **THEN** the page keeps its path
+- **AND** no link is repointed
 
 ### Requirement: Old paths keep resolving
 In store mode, a path alias table SHALL map each old path of a page to its current path. Every move SHALL update the table in the same transaction. The resolver SHALL read it after exact paths and before stems. `store_pages.path` SHALL remain the store key, and the page's `exomem_id` and the store's identities table SHALL carry its move-safe identity.
@@ -187,12 +198,17 @@ In store mode, a path alias table SHALL map each old path of a page to its curre
 - **AND** no page moves
 
 ### Requirement: Relayout places every page by rule
-The relayout SHALL keep a page in an exempt or unregistered folder at its path relative to the managed root, so that only the wrapper segment drops. It SHALL flatten a partition folder below the group level into the group folder, or into the area when the area has no group folder. It SHALL keep every name that is not derived. `--plan` SHALL list each Markdown file at the vault root outside the old wrapper that becomes owned when the managed root becomes the vault root. `--apply` SHALL refuse and name any page that the plan cannot map to exactly one new path.
+The relayout SHALL keep a page in an exempt or unregistered folder at its path relative to the managed root, so that only the wrapper segment drops. It SHALL flatten a partition folder below the group level into the group folder, or into the area when the area has no group folder. It SHALL keep every pinned name and every name that its type's own rule sets, and SHALL give every other name the `title` form of its page's title. A page with no title SHALL keep its name. `--plan` SHALL list each Markdown file at the vault root outside the old wrapper that becomes owned when the managed root becomes the vault root. `--apply` SHALL refuse and name any page that the plan cannot map to exactly one new path.
 
 #### Scenario: The plan lists pages that become owned
 - **WHEN** `--plan` runs on a vault with Markdown files at the vault root outside the old wrapper
 - **THEN** the plan lists each of those files as becoming owned
 - **AND** the plan writes nothing
+
+#### Scenario: A relayout keeps a pinned name and renames a derived one
+- **WHEN** a relayout plans a page with a pinned name and a page whose slug name is derived
+- **THEN** the pinned page keeps its filename
+- **AND** the derived page takes the `title` form of its title
 
 #### Scenario: Pages outside the placement rules keep their folder
 - **WHEN** a relayout plans a page in an exempt folder and a page with a partition folder below its group
