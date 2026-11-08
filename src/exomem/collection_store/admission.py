@@ -835,7 +835,7 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
     root = Path(vault_root).resolve()
     if retire_local:
         # Reading the fence needs only the writer credential, and the step changes this host alone.
-        return _offline_owner(root, "export", _refusing_page_loss(export.retire_local), operator=False)
+        return _offline_owner(root, "export", export.retire_local, operator=False)
     if plan_id is None:
         if abandon:
             raise ValueError("abandoning an export needs its plan_id")
@@ -848,24 +848,10 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
             "COLLECTION_STORE_SERVICE_ACTIVE",
             "an export applies only offline: stop the service, then run `exomem collections export --plan-id ID "
             "--why REASON` with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
-    step = export.abandon if abandon else _refusing_page_loss(export.apply)
+    step = export.abandon if abandon else export.apply
     # Abandon queues view recovery, so its closing owner must not publish those views.
     return _offline_owner(root, "export", lambda session, manager, fence_client: step(
         session, manager, fence_client, plan_id=plan_id, why=why), drain_views=not abandon)
-
-
-def _refusing_page_loss(step):
-    """``step`` behind the page-loss refusal, which runs inside the owner's session so that it holds the lease it checks under.
-
-    Applying an export and retiring the local store both drop the store, and in store mode that store holds the pages.
-    """
-    def guarded(session, manager, fence_client, **options):
-        from ..vault_store import availability
-
-        availability.refuse_page_loss(session.root, "exporting the collections to files")
-        return step(session, manager, fence_client, **options)
-
-    return guarded
 
 
 def require_summary_manifest(root, manifest_path, manifest_text):

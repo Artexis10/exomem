@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -132,31 +133,44 @@ def test_a_write_to_a_healthy_store_mode_vault_refuses_until_the_store_takes_pag
     assert _vault_bytes(store_mode_vault) == before
 
 
-@pytest.fixture
-def export_steps(monkeypatch):
-    """The owner's offline session as a stub that runs the route's callback, with each export step recording itself."""
+class _Boundary:
+    """A manager that offers only the mutation boundary, so any later use of the manager raises AttributeError."""
+
+    def __init__(self):
+        self.entered = []
+
+    @contextmanager
+    def consistency_guard(self, _root, *, operation):
+        self.entered.append(operation)
+        yield
+
+
+@pytest.mark.parametrize("step, options, boundary", [
+    (export.apply, {"plan_id": "any-plan", "why": "return to files"}, "collection_store_export"),
+    (export.retire_local, {}, "collection_store_export_retire_local"),
+], ids=["apply", "retire_local"])
+def test_the_reverse_export_refuses_under_the_mutation_boundary_before_any_step(
+        store_mode_vault, monkeypatch, step, options, boundary):
+    """Defect: exporting the collections to files drops the store that holds the pages, or checks outside the boundary."""
+    monkeypatch.setattr(admission._ProducerSession, "bind", lambda *_args: None)
+    monkeypatch.setattr(admission, "_bind_fence_client", lambda *_args: None)
+    manager = _Boundary()
+    session = SimpleNamespace(root=store_mode_vault, verify_custody=lambda: None)
+    with pytest.raises(CollectionStoreError) as refused:
+        step(session, manager, None, **options)
+    assert refused.value.code == availability.PAGES_AT_RISK
+    assert manager.entered == [boundary]
+
+
+def test_abandoning_an_export_still_runs_in_store_mode(store_mode_vault, monkeypatch):
+    """Defect: the page-loss refusal blocks the step that gives up an unfinished export, which drops no store."""
     ran = []
     monkeypatch.setattr(admission, "_offline_owner",
                         lambda root, operation, work, **_options: work(SimpleNamespace(root=root), None, None))
-    for name in ("apply", "retire_local", "abandon"):
-        monkeypatch.setattr(export, name, lambda *_args, _name=name, **_kwargs: ran.append(_name))
-    return ran
-
-
-@pytest.mark.parametrize("flags", [{"retire_local": True}, {"plan_id": "any-plan", "why": "return to files"}])
-def test_the_reverse_export_refuses_inside_the_owners_session_before_any_step(store_mode_vault, export_steps, flags):
-    """Defect: exporting the collections to files retires the store that holds the pages, or checks outside the lease."""
-    with library_scope(), pytest.raises(CollectionStoreError) as refused:
-        admission.export_route(store_mode_vault, **flags)
-    assert refused.value.code == availability.PAGES_AT_RISK
-    assert export_steps == []
-
-
-def test_abandoning_an_export_still_runs_in_store_mode(store_mode_vault, export_steps):
-    """Defect: the page-loss refusal blocks the step that gives up an unfinished export, which drops no store."""
+    monkeypatch.setattr(export, "abandon", lambda *_args, **_kwargs: ran.append("abandon"))
     with library_scope():
         admission.export_route(store_mode_vault, plan_id="any-plan", why="stop", abandon=True)
-    assert export_steps == ["abandon"]
+    assert ran == ["abandon"]
 
 
 @pytest.mark.parametrize("primitive", [
@@ -225,7 +239,9 @@ def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_r
         _create_store_without_mode_row(vault)
     with caplog.at_level(logging.WARNING, logger=availability.log.name):
         availability.require_servable(vault)
-    assert [record.getMessage() for record in caplog.records] == [availability.marker_inconsistency(vault)]
+    # Creating the store runs Alembic, which logs at INFO whenever an earlier test left the root logger there.
+    warnings = [record.getMessage() for record in caplog.records if record.name == availability.log.name]
+    assert warnings == [availability.marker_inconsistency(vault)]
     assert "exomem store-mode rollback" in caplog.text
     assert availability.write_refusal(vault) is None
     check = doctor._check_vault_store_records(vault)
