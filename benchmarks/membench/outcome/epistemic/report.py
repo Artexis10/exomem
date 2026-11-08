@@ -23,7 +23,7 @@ from ..faults import books
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
 from .cases import is_stable
-from .judge import BEHAVIOURS, HISTORY_ARM, behaviours_asked, scored
+from .judge import BEHAVIOURS, HISTORY_ARM, STORE_NAMES, behaviours_asked, scored
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -39,10 +39,6 @@ PAIR_ROLES = {
     "P-E": "description only: what the plugin, skills and instruction add",
 }
 NO_CROSS_CHECK = "none ran: the harness has no parser cross-check of the judge"
-#: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
-#: A closed set of the harness's own literals, not a reading of what an answer means; it counts how often the
-#: answer text names a store, which can show the blind judge the arm.
-STORE_NAMES = ("memory/", "exomem")
 
 Unit = tuple[str, str]  # (project, probe id)
 
@@ -191,7 +187,7 @@ def harm(outcomes: list[dict]) -> dict:
 
 
 def store_mentions(outcomes: list[dict], arms: list[str]) -> dict:
-    """Per arm, the answers that name a memory store (``STORE_NAMES``) out of the answers the judge read."""
+    """Per arm, the raw answers that name a memory store (``STORE_NAMES``); the judge read each one masked."""
     rows = {}
     for arm in arms:
         texts = [o["answer"] for o in outcomes if o["arm"] == arm and o["state"] == "answered"]
@@ -419,7 +415,7 @@ def build(
             "behaviours": behaviour_rates(play, meta, arms),
             "harm": harm(play) if {"N", "P"} <= set(arms) else None,
             "answers_naming_a_store": {
-                "scope": f"share of the answers the judge read that contain any of {list(STORE_NAMES)}, case-folded",
+                "scope": f"share of the raw answers that contain any of {list(STORE_NAMES)}, case-folded; the judge read them masked",
                 "arms": store_mentions(play, arms),
             },
             "window_scores": window_scores(play, counted, meta, arms),

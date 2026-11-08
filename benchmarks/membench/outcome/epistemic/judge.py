@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
@@ -19,6 +20,11 @@ from . import layout
 from .cases import BEHAVIOURS, is_stable
 
 SEED = 20261108
+#: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
+#: A closed set of the harness's own literals, not a reading of what an answer means. The judge reads them as
+#: STORE_MARK, so an answer's wording cannot show it the arm; the report still counts the raw mentions.
+STORE_NAMES = ("memory/", "exomem")
+STORE_MARK = "[store]"
 JUDGE_TIMEOUT_SECONDS = 600
 #: The label of an answer given with the whole history in its prompt (the solvable gate).
 HISTORY_ARM = "N-history"
@@ -36,6 +42,8 @@ VERDICT_SCHEMA = {
 }
 
 RUBRIC = """You grade one answer against a key. You see the task, the key, the answer and the files the answering call changed. You see nothing else.
+
+The mark [store] stands where the answerer named the place it keeps notes; it is not part of the task and says nothing about correctness.
 
 The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has one, a trap: the outdated, refuted, unverified or out-of-scope value that a wrong answer relies on. When the value is null, the answer is not one value, and the rubric alone states what a correct answer does.
 
@@ -141,6 +149,8 @@ def items(
     for i, e in enumerate(pool):
         e["item"] = f"it-{i:04d}"
         shown = {k: e[k] for k in ("task", "key", "answer", "changed")}
+        shown["answer"] = hide_store_names(shown["answer"])
+        shown["changed"] = hide_store_names(shown["changed"])
         lines.append(json.dumps({"id": e["item"], **shown}) + "\n")
     items_file = judge_run / "judge" / "items.jsonl"
     if items_file.exists():
@@ -154,10 +164,20 @@ def items(
     items_file.write_text("".join(lines))
     # The arm key lives apart from the items; judge processes never receive it.
     kept = {"task", "key", "answer", "changed"}
-    (judge_run / "unblinding" / "items.json").write_text(
-        json.dumps([{k: v for k, v in e.items() if k not in kept} for e in entries], indent=2)
-    )
+    unblinding = [
+        {**{k: v for k, v in e.items() if k not in kept}, "raw_answer": e.get("answer")}
+        for e in entries
+    ]
+    (judge_run / "unblinding" / "items.json").write_text(json.dumps(unblinding, indent=2))
     print(f"{len(pool)} items", flush=True)
+
+
+def hide_store_names(text: str) -> str:
+    """``text`` with every store name the harness introduces replaced by ``STORE_MARK``, case-folded."""
+    for name in STORE_NAMES:
+        mark = STORE_MARK + "/" if name.endswith("/") else STORE_MARK
+        text = re.sub(re.escape(name), mark, text, flags=re.IGNORECASE)
+    return text
 
 
 def build_prompt(item: dict) -> str:
@@ -226,14 +246,12 @@ def scored(judge_run: Path) -> tuple[list[dict], list[str], dict]:
     entries = json.loads((judge_run / "unblinding" / "items.json").read_text())
     judge_dir = judge_run / "judge"
     first = verdicts_of(judge_dir / "verdicts.jsonl")
-    answers = {
-        row["id"]: row["answer"]
-        for row in map(json.loads, (judge_dir / "items.jsonl").read_text().splitlines())
-    }
     outcomes = []
     for entry in entries:
         verdict = UNANSWERED_VERDICT if entry["state"] == "unanswered" else first.get(entry["item"])
-        outcomes.append({**entry, "verdict": verdict, "answer": answers.get(entry["item"])})
+        raw = entry.pop("raw_answer", None)
+        answer = raw if entry["state"] == "answered" else None
+        outcomes.append({**entry, "verdict": verdict, "answer": answer})
     again = agreement(first, verdicts_of(judge_dir / "rejudge.jsonl"))
     return outcomes, failed_judgements(judge_dir), again
 

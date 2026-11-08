@@ -439,6 +439,45 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
             assert leak not in text, f"a judge input contains {leak!r}"
 
 
+def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
+    """Every folder and Exomem answer in a smoke run named its store, which would show the judge the arm."""
+    entries = [
+        {
+            "state": "answered",
+            "arm": "F",
+            "item": None,
+            "task": "t",
+            "key": {"value": "8443"},
+            "answer": "Port 8443, from my note in memory/web.md.",
+            "changed": "memory/web.md\n+port 8443",
+        },
+        {
+            "state": "answered",
+            "arm": "P",
+            "item": None,
+            "task": "t",
+            "key": {"value": "8443"},
+            "answer": "Port 8443, as Exomem recalled.",
+            "changed": "",
+        },
+    ]
+    monkeypatch.setattr(epistemic_judge, "collect", lambda *_: [dict(e) for e in entries])
+    judge_run = tmp_path / "judged"
+    epistemic_judge.items(tmp_path, {}, judge_run, ["F", "P"])
+
+    shown = (judge_run / "judge" / "items.jsonl").read_text()
+    assert "memory/" not in shown and "exomem" not in shown.casefold()
+    assert shown.count("[store]") == 3
+
+    rows = [json.loads(line) for line in shown.splitlines()]
+    (judge_run / "judge" / "verdicts.jsonl").write_text(
+        "".join(json.dumps({"id": r["id"], "verdict": {"correct": True}}) + "\n" for r in rows)
+    )
+    outcomes, _, _ = epistemic_judge.scored(judge_run)
+    mentions = report.store_mentions(outcomes, ["F", "P"])
+    assert mentions["F"]["naming_a_store"] == 1 and mentions["P"]["naming_a_store"] == 1
+
+
 def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
     tmp_path,
 ):
