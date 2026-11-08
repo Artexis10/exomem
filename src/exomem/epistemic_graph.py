@@ -9203,7 +9203,7 @@ class EpistemicGraphIndex:
             generic = relation_registry.generic_relation_key()
             unit_relations = _unit_relation_rows(conn, view, sources=selected)
             selected_registries = {source: view.registry_for(source) for source in selected}
-            sources_field, sources_relation = _declared_sources_binding()
+            sources_field, sources_relation = declared_sources_binding()
             sources_labels = sorted(_labels_of(view, [sources_relation]))
             authored_json = json.dumps(
                 [
@@ -13568,6 +13568,11 @@ class GraphView:
         parent = self.parent(rel_path)
         return parent.relations if parent is not None else relation_registry.core_registry()
 
+    def behaviours(self, edge: dict[str, Any]) -> frozenset[str]:
+        """What the served edge's relation does, read through its authoring page's registry."""
+        registry = self.registry_for(str(edge.get("source_path") or ""))
+        return registry.behaviours_of(str(edge.get("relation_type") or ""))
+
     def serve(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """A stored node as this operation serves it; None when it is no unit here."""
         path = str(row.get("path") or "")
@@ -13670,6 +13675,8 @@ class GraphView:
         `exomem_edge_relation(EDGE_COLUMNS)` and `exomem_edge_status(...)`
         return the served relation type and registry status, or NULL for a
         candidate its page does not author, so grouping follows interpretation.
+        `exomem_edge_behaves(EDGE_COLUMNS, behaviour)` returns 1 or 0 for whether the served
+        relation has that behaviour, and NULL on the same candidates.
         """
         # SQLite asks for a row's relation and status back to back; keeping only
         # the last row serves both without holding one object per edge.
@@ -13689,9 +13696,15 @@ class GraphView:
             edge = interpret(*row)
             return None if edge is None else edge.get("registry_status")
 
+        def behaves(*args: Any) -> int | None:
+            *row, behaviour = args
+            edge = interpret(*row)
+            return None if edge is None else int(behaviour in self.behaviours(edge))
+
         width = len(_EDGE_FIELDS)
         self.conn.create_function("exomem_edge_relation", width, relation)
         self.conn.create_function("exomem_edge_status", width, status)
+        self.conn.create_function("exomem_edge_behaves", width + 1, behaves)
 
     def node(self, key: str) -> dict[str, Any] | None:
         if key not in self._nodes:
@@ -14273,7 +14286,7 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
 _SOURCES_FIELD = "sources"
 
 
-def _declared_sources_binding() -> tuple[str, str]:
+def declared_sources_binding() -> tuple[str, str]:
     """(field, relation) for the Sources a page declares in its frontmatter."""
     binding = relation_registry.core_registry().frontmatter_relation(_SOURCES_FIELD)
     if binding is None:
@@ -14282,7 +14295,7 @@ def _declared_sources_binding() -> tuple[str, str]:
 
 
 def _frontmatter_source_candidates(page) -> list[dict[str, Any]]:
-    field, relation = _declared_sources_binding()
+    field, relation = declared_sources_binding()
     return [
         {
             "from": page.rel_path,
@@ -14303,7 +14316,7 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
     try:
         src_key = _file_key(rel_path)
         view = GraphView(vault_root, conn)
-        _field, relation = _declared_sources_binding()
+        _field, relation = declared_sources_binding()
         labels = sorted(_labels_of(view, [relation]))
         # Every edge that states the Sources relation, whatever its origin. An extension of it
         # is stored by its raw label, so the label list finds it and the authoring page's own
@@ -14966,12 +14979,6 @@ def _question_matches(
     return matches
 
 
-def _settles(view: GraphView, edge: dict[str, Any]) -> bool:
-    """True when the edge's relation settles its target, read through the authoring page."""
-    registry = view.registry_for(str(edge["source_path"]))
-    return "settles" in registry.behaviours_of(str(edge["relation_type"]))
-
-
 def _resolution_matches(
     conn: sqlite3.Connection,
     view: GraphView,
@@ -14990,14 +14997,14 @@ def _resolution_matches(
     labels = _resolution_labels(view)
     if unit_relations is None:
         unit_relations = _unit_relation_rows(conn, view, sources=sources, labels=labels)
-    mine = [edge for edge in unit_relations if _settles(view, edge)]
+    mine = [edge for edge in unit_relations if "settles" in view.behaviours(edge)]
     if not mine:
         return []
     theirs = [
         edge for edge in _unit_relation_rows(
             conn, view, labels=labels, target_pages={edge["dst_page_key"] for edge in mine},
         )
-        if _settles(view, edge)
+        if "settles" in view.behaviours(edge)
     ]
     authored = authored or {}
     generic = relation_registry.generic_relation_key()

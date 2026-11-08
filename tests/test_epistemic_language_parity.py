@@ -106,6 +106,9 @@ SOURCES = "Knowledge Base/Sources"
 # Pages that name one entity, by the relation each uses.
 CONTRIBUTOR_RELATIONS = {
     "supports": "supports",
+    # A second core contributor: a hydration proposal needs two independent origins,
+    # and the Source citations below leave the list.
+    "corroborates": "supports",
     "cites": "cites",
     "evidenced": "evidenced_by",
     "derived": "derived_from",
@@ -637,33 +640,31 @@ def test_hydration_counts_a_supported_entity_and_skips_a_derived_one(
     assert "hy-derived" not in hydrated  # CORE: `derived_from` is provenance, not a link
 
 
-def test_hydration_counts_a_citation_and_an_evidence_edge_as_content_links(
+def test_hydration_skips_a_citation_and_an_evidence_edge_as_content_links(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 11: only `derived_from` is skipped today.
+    """FLIPS 11: only `derived_from` was skipped, so `cites` and `evidenced_by` counted.
 
-    After intended change 11 every `sources` relation is skipped, so `cites`
-    and `evidenced_by` stop counting.
+    Every `sources` relation is skipped now.
     """
     build_graph(fixture_vault)
 
     hydrated = _hydrated(fixture_vault, "hy-page")
 
-    assert "hy-cites" in hydrated  # FLIPS 11
-    assert "hy-evidenced" in hydrated  # FLIPS 11
+    assert "hy-cites" not in hydrated  # FLIPS 11
+    assert "hy-evidenced" not in hydrated  # FLIPS 11
 
 
-def test_hydration_counts_an_extension_of_derived_from_as_a_content_link(
+def test_hydration_skips_an_extension_of_derived_from_as_a_content_link(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 2: the skip reads the key `derived_from`, so `x.based_on` counts today.
+    """FLIPS 2: the skip read the key `derived_from`, so `x.based_on` counted.
 
-    After intended change 2 the extension is provenance through its parent and
-    is skipped.
+    The extension is provenance through its parent and is skipped.
     """
     build_graph(fixture_vault)
 
-    assert "hy-based" in _hydrated(fixture_vault, "hy-page")  # FLIPS 2
+    assert "hy-based" not in _hydrated(fixture_vault, "hy-page")  # FLIPS 2
 
 
 # ---------------------------------------------------------------------------
@@ -1385,26 +1386,28 @@ def test_a_page_that_supports_an_entity_contributes_and_one_derived_from_it_does
     assert "ct-derived" not in contributors  # CORE
 
 
-def test_a_page_that_cites_or_is_evidenced_by_an_entity_contributes(fixture_vault: Path) -> None:
-    """FLIPS 11: only `derived_from` is skipped, so a citation or evidence edge contributes.
+def test_a_page_that_cites_or_is_evidenced_by_an_entity_does_not_contribute(
+    fixture_vault: Path,
+) -> None:
+    """FLIPS 11: only `derived_from` was skipped, so a citation or evidence edge contributed.
 
-    After intended change 11 `ct-cites` and `ct-evidenced` leave the list.
+    `ct-cites` and `ct-evidenced` are out of the list now.
     """
     build_graph(fixture_vault)
 
     contributors = _contributors(fixture_vault)
 
-    assert "ct-cites" in contributors  # FLIPS 11
-    assert "ct-evidenced" in contributors  # FLIPS 11
+    assert "ct-cites" not in contributors  # FLIPS 11
+    assert "ct-evidenced" not in contributors  # FLIPS 11
 
 
-def test_a_page_that_is_based_on_an_entity_through_an_extension_contributes(
+def test_a_page_that_is_based_on_an_entity_through_an_extension_does_not_contribute(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 2: the skip reads the key `derived_from`, so `x.based_on` contributes today."""
+    """FLIPS 2: the skip read the key `derived_from`, so `x.based_on` contributed."""
     build_graph(fixture_vault)
 
-    assert "ct-based" in _contributors(fixture_vault)  # FLIPS 2
+    assert "ct-based" not in _contributors(fixture_vault)  # FLIPS 2
 
 
 def test_a_link_counts_as_authored_unless_it_is_a_derivation(fixture_vault: Path) -> None:
@@ -1420,9 +1423,9 @@ def test_a_link_counts_as_authored_unless_it_is_a_derivation(fixture_vault: Path
 
     assert "hy-supports" in linked  # CORE
     assert "hy-derived" not in linked  # CORE
-    assert "hy-cites" in linked  # FLIPS 11
-    assert "hy-evidenced" in linked  # FLIPS 11
-    assert "hy-based" in linked  # FLIPS 2
+    assert "hy-cites" not in linked  # FLIPS 11
+    assert "hy-evidenced" not in linked  # FLIPS 11
+    assert "hy-based" not in linked  # FLIPS 2
 
 
 # ---------------------------------------------------------------------------
