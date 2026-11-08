@@ -282,6 +282,43 @@ def test_compact_projection_preserves_approved_bounded_adoption_outcomes() -> No
     assert _artifact_receipt_projection(result) == result
 
 
+def test_compact_projection_reports_a_repeat_hand_over_as_already_stored() -> None:
+    """A repeat hand-over must not read as nothing stored and nothing failed."""
+    from exomem.mutation_terminal import _artifact_receipt_projection
+
+    existing = "Knowledge Base/Evidence/project/deliverables/final.png"
+    result = {
+        "files": [
+            {
+                "file_id": "again",
+                "path": existing,
+                "stored_path": existing,
+                "sidecar_path": existing + ".md",
+                "ref": "exomem://memory/00000000-0000-4000-8000-000000000001",
+                "state": "already_stored",
+                "outcome": "stored",
+                "duplicate_of": {
+                    "path": existing,
+                    "ref": "exomem://memory/00000000-0000-4000-8000-000000000001",
+                },
+                "warnings": [],
+                "size": 3,
+                "hash": "a" * 64,
+                "hash_algorithm": "sha256",
+                "media_id": "sha256:" + "a" * 64,
+                "content_type": "image/png",
+            }
+        ],
+        "summary": {"stored": 0, "already_stored": 1, "replayed": 0, "failed": 0, "unselected": 0},
+    }
+
+    projected = _artifact_receipt_projection(result)
+
+    assert projected["summary"] == result["summary"]
+    assert projected["files"][0]["state"] == "already_stored"
+    assert projected["files"][0]["duplicate_of"] == result["files"][0]["duplicate_of"]
+
+
 def test_compact_projection_preserves_logical_counts_when_malformed_rows_are_bounded() -> None:
     """Detail repair must not rewrite the core's logical overflow summary."""
     from exomem.mutation_terminal import _artifact_receipt_projection

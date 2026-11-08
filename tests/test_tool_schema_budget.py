@@ -63,7 +63,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The caller now chooses the image size up to "original" and a crop `region`, instead of a fixed
 # count and size range in code: read_media measures 1,747 B and its ceiling rounds to 1,750 B. The
 # complete local wire measures 168,585 B, so the budget rises 150 B.
-TOTAL_BUDGET = 168_600
+# The description on the adoption envelope's `key` adds 59 B to capture_source and to
+# preserve_artifacts, so an agent gives each hand-over its own key: capture_source measures 3,395 B
+# and its ceiling rounds to 3,400 B. The complete local wire measures 168,705 B, so the budget rises 150 B.
+TOTAL_BUDGET = 168_750
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -71,7 +74,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "adoption_studio": 3800,
     "bootstrap": 1450,
     "browse_memory": 6700,
-    "capture_source": 3350,
+    "capture_source": 3400,
     "import_memory": 6100,
     "change_connections": 3250,
     "change_files": 7100,
