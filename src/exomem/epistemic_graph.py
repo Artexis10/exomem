@@ -9167,6 +9167,7 @@ class EpistemicGraphIndex:
                 "(SELECT COUNT(*) FROM graph_nodes ids WHERE ids.kind = 'file' "
                 "AND ids.exomem_id = d.exomem_id) END"
             )
+            # Debt (wikilink producer): the authored-match check names the plain link's raw label.
             wiki_and_authored_rows = conn.execute(
                 "WITH combined AS ("
                 "SELECT 0 AS candidate_kind, e.source_path AS source_path, "
@@ -9456,6 +9457,7 @@ class EpistemicGraphIndex:
                 {
                     "from": str(source),
                     "to": target_rel,
+                    # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                     "relation_type": "links_to",
                     "method": "wikilink",
                     "evidence": evidence,
@@ -9651,9 +9653,9 @@ class EpistemicGraphIndex:
                 {
                     "from": str(source),
                     "to": target_rel,
-                    "relation_type": "derived_from",
+                    "relation_type": sources_relation,
                     "method": "frontmatter_sources",
-                    "evidence": {"source_path": str(source), "field": "sources"},
+                    "evidence": {"source_path": str(source), "field": sources_field},
                     "_authored": bool(authored_match),
                 }
             )
@@ -12468,6 +12470,7 @@ def _page_level_edges(
         edges.append(
             page_edge(
                 file_key,
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                 _file_key(observation["target_path"]),
                 "links_to",
                 "wikilink",
@@ -14273,6 +14276,7 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
             {
                 "from": rel_path,
                 "to": _page_rel(canonical),
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"source_path": rel_path, "target": target},
@@ -14318,6 +14322,7 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
         view = GraphView(vault_root, conn)
         _field, relation = declared_sources_binding()
         labels = sorted(_labels_of(view, [relation]))
+        # Debt (drifted copy): the relation_queue copy reads the field only; a fold changes suggestions.
         # Every edge that states the Sources relation, whatever its origin. An extension of it
         # is stored by its raw label, so the label list finds it and the authoring page's own
         # registry decides what it means.
@@ -15084,6 +15089,7 @@ def _draft_wikilink_candidates(
             {
                 "from": pseudo,
                 "to": _page_rel(canonical),
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"target": target},

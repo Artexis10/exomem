@@ -212,6 +212,7 @@ def _resolved(index: Mapping[str, Any], page: Mapping[str, Any]) -> tuple[dict, 
             dependencies.add(path)
             if ref:
                 exact.append(ref)
+            # Debt (page-type keys): `source` is a note-type key; the note-type `role` states the fact.
             if index["pages"][path]["type"] == "source":
                 documents.append(path)
         links[unit["ref"]] = tuple(sorted(set(exact)))

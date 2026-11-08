@@ -70,6 +70,8 @@ def _read_cursor(continuation: str, *, kind: str, generation: str) -> dict[str, 
 
 
 def _source_rows(connection, path: str, after: str = ""):
+    # Debt (K14): the Sources binding's key and field by name, as in relation_queue; both convert together.
+    # Debt (page-type keys): `source` and `evidence` are note-type keys; the note-type `role` states it.
     rows = connection.execute(
         "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
         "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_key "

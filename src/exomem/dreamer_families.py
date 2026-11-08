@@ -620,6 +620,7 @@ _HYDRATION_ROUTE_PAGES = 7
 _HYDRATION_UNITS_PER_PAGE = 8
 
 
+# Debt (page-type keys): `entity` is a note-type key; the note-type `role` states the fact.
 _ENTITY_TARGETS_SQL = (
     "SELECT d.path, {edge} FROM graph_edges e JOIN graph_nodes d "
     "ON d.node_key = e.dst_page_key "

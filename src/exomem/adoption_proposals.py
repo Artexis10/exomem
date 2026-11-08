@@ -445,6 +445,7 @@ def _validate(root: Path, kind: str, payload: dict, run: dict) -> list[dict]:
                 _finding("DUPLICATE_NOT_FOUND", "duplicate_of", f"{duplicate} does not exist")
             )
         if resolution == "relate":
+            # Debt (K19): a producer default that writes one core key; a vault cannot remove a core key.
             _validate_relation_type(root, payload.get("relation_type") or "duplicates", findings)
         elif resolution == "supersede":
             _validate_supersession_target(root, subject, findings)
@@ -1324,6 +1325,7 @@ def _route_apply(
                 edit_module,
                 from_path=_clean(payload.get("subject_path")),
                 to_path=_clean(payload.get("duplicate_of")),
+                # Debt (K19): the same producer default as the validation above.
                 relation_type=str(payload.get("relation_type") or "duplicates"),
                 why=why,
                 expected_hash=expected_hash,

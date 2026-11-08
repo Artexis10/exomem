@@ -6371,6 +6371,7 @@ def _check_supersession_integrity(
                     continue
                 older, newer = (
                     (page.rel_path, target)
+                    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
                     if pointer == "superseded_by"
                     else (target, page.rel_path)
                 )
@@ -7057,6 +7058,7 @@ def _asserted_contradictions(
                     + _page_signal_version(eligible[b])
                 )[:16],
                 "provenance": "asserted",
+                # Debt (K18): a label on the finding; the pairs come from `opposes`, an extension is labelled by its parent.
                 "relation_type": "contradicts",
             },
             )

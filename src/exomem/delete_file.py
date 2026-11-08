@@ -227,6 +227,7 @@ def _delete_file_local(
             text = snapshot.data.decode("utf-8")
             prior_markdown = text
             fm, _, _ = parse_frontmatter(text)
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             if fm.get("superseded_by") and not force_superseded:
                 raise DeleteFileError(
                     code="SUPERSEDED_HISTORY",

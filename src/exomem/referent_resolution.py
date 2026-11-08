@@ -521,6 +521,7 @@ def resolve_referents(
                     "graph",
                     {
                         "seed": edge.seed_path,
+                        # Debt (K16): an edge with no registered relation is shown as the plain link.
                         "relation_type": edge.relation_type or "links_to",
                         "direction": edge.direction,
                         "tier": 0 if edge.typed else 1,

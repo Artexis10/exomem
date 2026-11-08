@@ -4634,6 +4634,7 @@ def _derive_relation_facts(
                 raw_facts.append(
                     {
                         "authored": state,
+                        # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                         "raw_relation": "links_to",
                         "raw_target": raw_target,
                         "line": line,
@@ -4794,6 +4795,7 @@ def _structural_relation_reasons(
         and target_page.status_class == "superseded"
         and any(
             _dependency_key(raw) == expected_successor
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             for raw in _frontmatter_targets(target_page.frontmatter.get("superseded_by"))
         )
     )

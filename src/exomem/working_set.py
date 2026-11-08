@@ -477,6 +477,7 @@ def _without_lede_repeats(
             and not any(item.provenance.get(key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS)
             and not item.provenance.get("corrects")
             and not item.provenance.get("supersedes_targets")
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             and not item.provenance.get("superseded_by")
             and (item.ref, str(item.provenance.get("source_hash") or "")) not in qualified_sources
         ):
@@ -1160,6 +1161,7 @@ def _provenance(item: LaneItem) -> dict[str, Any]:
 
 
 def _superseded_targets(item: LaneItem) -> tuple[str, ...]:
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     raw = item.provenance.get("superseded_by")
     if isinstance(raw, str):
         return (raw,)
@@ -2684,6 +2686,7 @@ def _is_current_page(
         return False
     if page is None:
         return False
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
