@@ -1338,21 +1338,26 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
     return result._replace(items=tuple(items))
 
 
-@governance_policy.request_policy_snapshot()
 def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[str], bool] | None) -> list[str]:
     """Move each live note that compiled a candidate Source ahead of that Source.
 
     Text ranking can put a short, term-dense recap above the note compiled from it, which
     sends the agent to an older, partial account first. Coverage is the citation rule that
     the audit uses (`source_coverage`): the Source names the note in `ingested_into` and the
-    live note cites it back in `sources:`. Only candidates are looked up, so the order changes
-    and the set does not. Without a resident resolver the text order stands, and the miss
-    schedules the background rebuild that restores it, as the context pack does.
+    live note cites it back in `sources:`. Only candidates are looked up, so no page outside
+    them moves; a note pulled ahead can push the last candidate past the limit. Without a
+    resident resolver the text order stands, and where the context pack would, the miss
+    schedules the background rebuild that restores it. A restricted caller keeps text order:
+    the broad resolver also sees withheld pages, and a withheld namesake could flip the order.
     """
-    from . import find, lifecycle_statuses, note_types, source_coverage
+    from . import find, lifecycle_statuses, note_types, source_coverage, vault
 
-    snapshot = find.borrow_query_resolver(vault_root, visible=visible)
-    if snapshot is None or len(paths) < 2:
+    if len(paths) < 2:
+        return paths
+    snapshot = find.borrow_query_resolver(
+        vault_root, visible=visible, schedule_rebuild=vault.inbound_recovery_available(vault_root),
+    )
+    if snapshot is None:
         return paths
     candidates = set(paths)
 
@@ -1377,6 +1382,7 @@ def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[st
     return ordered
 
 
+@governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
     snapshot: Any, limit: int,
@@ -1530,7 +1536,9 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_failed"})
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
-    ordered = [found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)]
+    ordered = list(found.values()) if restricted else [
+        found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
+    ]
     return ordered[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
 
 

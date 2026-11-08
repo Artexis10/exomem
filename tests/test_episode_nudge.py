@@ -65,7 +65,7 @@ def test_it_fires_at_the_eighth_activation_without_a_record(
         "activations": episode_nudge.EPISODE_NUDGE_ACTIVATIONS,
     }
     # The client sees the public tool name; the leaf name is not a tool it can call.
-    assert "record_episode" in episode_nudge.EPISODE_RULE
+    assert "record_episode" in episode_nudge.EPISODE_RULE and "episode_memory" not in episode_nudge.EPISODE_RULE
     assert episode_nudge.EPISODE_NUDGE_ACTIVATIONS == 8
 
 
@@ -210,7 +210,8 @@ def test_the_ledger_is_bounded(vault: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_the_server_instructions_ask_for_a_record_and_stay_short() -> None:
     text = server.SERVER_INSTRUCTIONS
     assert "record_episode" in text and "episode_memory" not in text
-    assert "each landing" in text and "`episode` key" in text and "left open" in text
+    assert "stopping points" in text and "reuse `episode`" in text and "left open" in text
+    assert "not authority" in text
     assert len(text) <= 900, len(text)
 
 
