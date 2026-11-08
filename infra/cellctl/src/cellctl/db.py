@@ -479,6 +479,13 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
     return rows
 
 
+async def read_packing_export_cells(connection: asyncpg.Connection) -> set[str]:
+    """The cells with an export in packing, each of which holds its node's export slot (D8)."""
+
+    records = await connection.fetch("SELECT DISTINCT cell_id FROM exomem_cloud_exports WHERE observed_state='packing'")
+    return {str(record["cell_id"]) for record in records}
+
+
 # C6 column grants fix this controller-owned subset.
 EXPORT_COLUMNS = frozenset({
     "observed_state", "error_code", "archive_bytes", "archive_sha256", "archive_version_id", "upload_id",

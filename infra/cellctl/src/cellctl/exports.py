@@ -1,12 +1,16 @@
 """C6 owner exports: decisions and S3 transport, scoped to one immutable cell.
 
-An export packs the cell's vault into the canonical ZIP under an `export`
-hold that stops the runtime, the same way an import or a nightly backup
-holds the volume. The cell's own Job uploads the ZIP to part URLs that
-cellctl presigned with the cell's prefix-restricted key; cellctl checks the
-parts against the Job's report before it completes the upload, keeps the
-object for the export TTL, presigns short download links on request, and
-deletes every version at expiry or supersede.
+An export runs in three steps of the cell image (add-cloud-media-store D8,
+amendment of 2026-11-08). The pause copies the vault's present members into
+the export's own staging claim under an `export` hold that stops the
+runtime, the same way an import or a nightly backup holds the volume. The
+hold ends at the pause report. The upload and the pack then run beside the
+serving runtime: the pack writes the canonical ZIP into a spool on staging,
+and the upload sends it to part URLs that cellctl presigned with the cell's
+prefix-restricted key. cellctl checks the parts against the upload's report
+before it completes the upload, keeps the object for the export TTL,
+presigns short download links on request, and deletes every version at
+expiry or supersede.
 """
 from __future__ import annotations
 
@@ -14,6 +18,8 @@ import hashlib
 import json
 import re
 import uuid
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -33,19 +39,39 @@ EXPORT_INTERRUPTED = "EXPORT_INTERRUPTED"
 EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
 CASE_COLLISION = "CASE_COLLISION"
-# The codes the cell's export Job itself reports; any other report is EXPORT_FAILED.
+EXPORT_MEDIA_UNREACHABLE = "EXPORT_MEDIA_UNREACHABLE"
+# The codes the cell's export Jobs themselves report; any other report is EXPORT_FAILED.
 JOB_FAILURE_CODES = frozenset({
     EXPORT_FAILED, EXPORT_TOO_LARGE, EXPORT_UPLOAD_FAILED, SOURCE_CHANGED_DURING_EXPORT, CASE_COLLISION,
+    EXPORT_MEDIA_UNREACHABLE,
 })
-# C6: the part URLs cover the cell's whole size plus 2% for the ZIP's own headers.
+# The cell command's own phases (`exomem cell-export --phase`), and the step
+# that verifies the completed version. Each names one Job of the export.
+PAUSE, PACK, UPLOAD, VERIFY = "pause", "pack", "upload", "verify"
+# The step the row records once the pause reported: the upload and the pack run without a hold.
+TRANSFER = "transfer"
+# The diagnostics a failed export records in its packing report, cellctl's own
+# identifiers that carry no vault content.
+STAGING_NOT_RUNNING = "staging_not_running"
+PAUSE_BELOW_COPY_FLOOR = "pause_below_copy_floor"
+TRANSFER_DEADLINE = "transfer_deadline"
+# C6: the part URLs cover the planned archive plus 2% for what the plan cannot count.
 SIZE_MARGIN_PERCENT = 102
 # One presigned URL is one Job argument; this keeps a Job object far inside the
-# API server's request size limit. A larger cell gets larger parts instead.
+# API server's request size limit. A larger archive gets larger parts instead.
 MAX_PARTS = 1000
+# D8: the pack holds at most two parts on staging, so a part stays at most 1 GiB,
+# and the archive bound is MAX_PARTS of them, near 1 TiB.
+MAX_PART_BYTES = GIB
+ARCHIVE_BOUND = MAX_PARTS * MAX_PART_BYTES * 100 // SIZE_MARGIN_PERCENT
+# D8: staging holds the copied members (at most the cell's used bytes plus 10%
+# for filesystem overhead) and the pack's two-part spool.
+STAGING_MARGIN_PERCENT = 110
+STAGING_SPOOL_BYTES = 2 * MAX_PART_BYTES
 _MIB = 1024 * 1024
 # C6: CELLCTL_EXPORT_DEADLINE_MINUTES is the deadline for each started 10 GiB of
-# an export's cap, the size of a default cell, so a larger cell gets the time
-# that packing and uploading more bytes takes.
+# the planned archive, the size of a default cell, so a larger archive gets the
+# time that packing, uploading and verifying more bytes takes.
 DEADLINE_STEP_BYTES = 10 * GIB
 _HEX64 = re.compile(r"[0-9a-f]{64}")  # SHA-256 wire format; always fullmatch
 
@@ -93,18 +119,40 @@ class ExportJob:
     report: dict = field(default_factory=dict)
     pods_present: bool = False
     finished_at: datetime | None = None
+    # When the Job was created and when its container first ran: the pause's own deadline counts from them.
+    created_at: datetime | None = None
+    running_at: datetime | None = None
 
     @property
     def present(self) -> bool:
         return self.exists or self.active or self.pods_present
 
 
-def job_name(export_id: str, *, verify: bool = False) -> str:
-    return f"export-{uuid.UUID(export_id).hex}" + ("-verify" if verify else "")
+def job_name(export_id: str, step: str) -> str:
+    return f"export-{uuid.UUID(export_id).hex}-{step}"
+
+
+# The single Job an export ran before the three steps. cellctl still removes it.
+def legacy_job_name(export_id: str) -> str:
+    return f"export-{uuid.UUID(export_id).hex}"
+
+
+def staging_claim_name(export_id: str) -> str:
+    return f"export-staging-{uuid.UUID(export_id).hex}"
 
 
 def verification_secret_name(export_id: str) -> str:
-    return job_name(export_id, verify=True) + "-get"
+    return job_name(export_id, VERIFY) + "-get"
+
+
+def export_state(item: ExportRow) -> dict:
+    """The step the export's packing report records, cellctl's own JSON; {} before the pause starts."""
+
+    try:
+        value = json.loads(item.packing_report or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def etag_digest(etags: list[str]) -> str:
@@ -131,6 +179,17 @@ def accepted_report(report: dict) -> dict | None:
     return {"bytes": size, "sha256": sha256, "parts": parts, "etag_digest": digest}
 
 
+def accepted_pause_report(report: dict) -> dict | None:
+    """The pause's numbers-only plan report, or None when any count is missing or malformed."""
+
+    keys = ("members", "member_bytes", "evicted", "evicted_bytes", "unreadable_companions")
+    counts = {key: _count(report.get(key), minimum=0) for key in keys}
+    planned = _count(report.get("planned_bytes"), minimum=1)
+    if report.get("phase") != PAUSE or planned is None or planned > ARCHIVE_BOUND or None in counts.values():
+        return None
+    return {**counts, "planned_bytes": planned}
+
+
 def report_usage(report: dict, observed_at: datetime) -> dict[str, object]:
     """The C1 usage columns an export Job's statvfs report carries, or none."""
 
@@ -145,33 +204,72 @@ class ExportSize:
     parts: int
 
 
-def export_size(row: CellRow) -> ExportSize:
-    """C6: an export may pack everything the cell can hold, its size or its
-    measured filesystem when that is larger, so only one file above the
-    per-file limit makes a vault too large. The parts are 64 MiB, or larger in
-    whole MiB, so that at most MAX_PARTS cover it with the ZIP margin."""
+def export_size(planned_bytes: int) -> ExportSize:
+    """D8: the archive's limits follow the pause's plan, not the cell size. The
+    pack may write the planned bytes, and the parts are 64 MiB, or larger in
+    whole MiB, so that at most MAX_PARTS cover them with the margin. The pause
+    refuses a plan above ARCHIVE_BOUND, so a part stays within MAX_PART_BYTES."""
 
-    max_bytes = max(row.size_gib * GIB, row.filesystem_bytes or 0)
-    covered = -(-max_bytes * SIZE_MARGIN_PERCENT // 100)
+    covered = -(-planned_bytes * SIZE_MARGIN_PERCENT // 100)
     part_bytes = max(PART_BYTES, -(-covered // (MAX_PARTS * _MIB)) * _MIB)
-    return ExportSize(max_bytes=max_bytes, part_bytes=part_bytes, parts=-(-covered // part_bytes))
+    return ExportSize(max_bytes=planned_bytes, part_bytes=part_bytes, parts=-(-covered // part_bytes))
 
 
-def export_deadline(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> timedelta:
-    """The export hold's deadline, which the Job's activeDeadlineSeconds and the
-    part URLs' expiry share: the configured deadline per started 10 GiB of cap."""
+def export_deadline(planned_bytes: int, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> timedelta:
+    """The deadline after the pause, which the pack, the upload, the verification
+    and the part URLs' expiry share: the configured deadline per started 10 GiB
+    of the planned archive."""
 
-    return config.export_deadline * -(-export_size(row).max_bytes // DEADLINE_STEP_BYTES)
+    return config.export_deadline * max(1, -(-planned_bytes // DEADLINE_STEP_BYTES))
+
+
+def _copied_bytes(row: CellRow) -> int:
+    # The pause copies at most what the filesystem holds; a cell never measured counts its whole size.
+    return row.used_bytes if row.used_bytes is not None else max(row.size_gib * GIB, row.filesystem_bytes or 0)
+
+
+def pause_copy_time(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> timedelta:
+    """D8: how long the pause may run once its pod runs: one start allowance for
+    its listing and its plan, then the used bytes at the configured floor rate."""
+
+    rate = config.export_pause_copy_floor_mib * _MIB
+    return config.export_pause_start + timedelta(seconds=-(-_copied_bytes(row) // rate))
+
+
+def pause_window(row: CellRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> timedelta:
+    """The export hold's whole length, which the pause Job's deadline shares: the
+    runtime stops and the pause pod runs, each within the start allowance, then
+    the pause copies at the floor rate."""
+
+    return 2 * config.export_pause_start + pause_copy_time(row, config)
+
+
+def staging_gib(used_bytes: int | None, storage_gib: int) -> int:
+    """D8: the staging claim holds the copied members and the spool, in whole
+    GiB. It never exceeds staging_bound_gib, which the cell quota admits."""
+
+    bound = staging_bound_gib(storage_gib)
+    if used_bytes is None:
+        return bound
+    return min(bound, -(-(used_bytes * STAGING_MARGIN_PERCENT // 100 + STAGING_SPOOL_BYTES) // GIB))
+
+
+def staging_bound_gib(storage_gib: int) -> int:
+    """The largest staging claim of a cell of this size: a full volume plus the spool."""
+
+    return -(-(storage_gib * GIB * STAGING_MARGIN_PERCENT // 100 + STAGING_SPOOL_BYTES) // GIB)
 
 
 def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation, job: ExportJob, *,
                   now: datetime, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG,
-                  volume_unavailable: bool = False) -> Decision | None:
-    """One pass of the export being packed, or of the newest one while its hold
-    is still on. Returns None when the export leaves the cell to routine
-    reconciliation this pass. `volume_unavailable` says the cell's volume is due
-    to relocate or move, so decide() owns it this pass. reconcile.py never asks
-    while a cell that has had a volume has no claim."""
+                  volume_unavailable: bool = False, slot_free: bool = True) -> Decision | None:
+    """One pass of the export's pause, or of the newest export while its hold
+    is still on. `job` is the pause Job. Returns None when the export leaves
+    the cell to routine reconciliation this pass, which it does for good once
+    the pause reported (transfer_step continues it). `volume_unavailable` says
+    the cell's volume is due to relocate or move, so decide() owns it this
+    pass. `slot_free` says its node has room for one more export (D8).
+    reconcile.py never asks while a cell that has had a volume has no claim."""
 
     if item.cell_id != row.cell_id:
         raise ValueError("export cell mismatch")
@@ -187,6 +285,7 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
     start = start or (row.hold_started_at if row.hold_kind == HOLD else None)
     if start is None or start < item.created_at:
         start = now
+    state = export_state(item)
 
     def hold(**fields: object) -> Decision:
         return Decision(apply_manifests=bool(image), replicas=0, image=image,
@@ -194,17 +293,20 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
                         row_updates={"hold_kind": HOLD, "hold_started_at": start,
                                      "ready": False, "observed_state": "stopping"}, **fields)
 
-    def release() -> Decision:
+    def release(**fields: object) -> Decision:
         desired = 0 if row.desired_state == "stopped" else 1
         return Decision(apply_manifests=bool(image), replicas=desired, image=image,
                         read_only=row.desired_state == "read_only", hold_kind=None, hold_started_at=None,
                         row_updates={"hold_kind": None, "hold_started_at": None, "ready": False,
-                                     "observed_state": "stopping"})
+                                     "observed_state": "stopping"}, **fields)
 
-    def end(terminal: str, code: str | None) -> Decision:
-        # The outcome is recorded before the upload is removed; a removal that
-        # fails is retried from the row's upload_id and never holds the cell.
-        updates = {"observed_state": terminal, "error_code": code}
+    def end(terminal: str, code: str | None, diagnostic: str | None = None) -> Decision:
+        # The outcome is recorded before the upload and the staging claim are
+        # removed; a removal that fails is retried from the row's upload_id and
+        # never holds the cell.
+        updates: dict[str, object] = {"observed_state": terminal, "error_code": code}
+        if diagnostic is not None:
+            updates["packing_report"] = json.dumps({**state, "diagnostic": diagnostic})
         if not held:
             return Decision(export_transport="remove", export_updates=updates, stop_export_job=job.present)
         return hold(export_transport="remove", export_updates=updates, stop_export_job=job.present)
@@ -215,11 +317,11 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
             return Decision(export_transport="remove",
                             export_updates={"observed_state": "failed", "error_code": EXPORT_INTERRUPTED})
         return None
-    if item.observed_state not in (None, "packing"):
+    if item.observed_state not in (None, "packing") or state.get("step") == TRANSFER:
         if not held:
             return None
         if job.present:
-            # The Job and its pod drain before the runtime may take the volume back.
+            # The pause Job and its pod drain before the runtime may take the volume back.
             return hold(stop_export_job=True)
         return release()
     if item.requested_state == "superseded":
@@ -233,27 +335,23 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
             # The export waits for the volume the cell serves from, and a
             # predecessor's leftover hold is released, not kept.
             return release() if held else None
-        return hold(export_transport="create", export_updates={"observed_state": "packing"})
+        if not slot_free:
+            # D8: the node's export slot is taken; the hold starts once it frees, so the vault never waits paused.
+            return release() if held else None
+        # D8: the pack and the upload run the image the pause runs.
+        return hold(export_transport="create", export_updates={
+            "observed_state": "packing", "packing_report": json.dumps({"step": PAUSE, "image": image})})
 
     if job.succeeded:
-        if item.archive_version_id is not None:
-            report = job.report
-            if (report.get("verified") is not True or report.get("bytes") != item.archive_bytes
-                    or report.get("sha256") != item.archive_sha256
-                    or report.get("version") != item.archive_version_id):
-                return end("failed", EXPORT_FAILED)
-            return hold(export_updates={"observed_state": "ready", "error_code": None,
-                        "ready_at": now, "expires_at": now + config.export_ttl, "upload_id": None})
-        report = accepted_report(job.report)
+        report = accepted_pause_report(job.report)
         if report is None:
             return end("failed", EXPORT_FAILED)
-        decision = hold(export_transport="complete", export_updates={
-            "observed_state": "packing", "error_code": None, "archive_bytes": report["bytes"],
-            "archive_sha256": report["sha256"], "packing_report": json.dumps(report),
-        })
+        transfer = {"step": TRANSFER, "image": state.get("image") or image, "paused_at": now.isoformat(), **report}
+        # The hold ends at the pause report, once the pause pod has left the volume.
+        decision = hold(stop_export_job=True, export_updates={"packing_report": json.dumps(transfer)})
         decision.row_updates.update(report_usage(job.report, job.finished_at or now))
         return decision
-    if held and now - start >= export_deadline(row, config):
+    if held and now - start >= pause_window(row, config):
         return end("failed", EXPORT_HOLD_EXPIRED)
     if job.failed:
         reported = job.report.get("error")
@@ -261,10 +359,110 @@ def decide_export(row: CellRow, item: ExportRow, observation: ClusterObservation
         # A refused export still measured the volume, and C1 keeps the measurement.
         decision.row_updates.update(report_usage(job.report, job.finished_at or now))
         return decision
+    if job.created_at is not None:
+        # D8: the short pause. The staging claim binds and attaches before the pod runs.
+        if job.running_at is None and now - job.created_at >= config.export_pause_start:
+            return end("failed", EXPORT_FAILED, STAGING_NOT_RUNNING)
+        if job.running_at is not None and now - job.running_at >= pause_copy_time(row, config):
+            return end("failed", EXPORT_FAILED, PAUSE_BELOW_COPY_FLOOR)
     decision = hold()
     if annotation == HOLD and not observation.pod_uses_volume and not job.present:
         decision.run_export_job = True
     return decision
+
+
+@dataclass
+class TransferStep:
+    """What one pass does to an export after its pause: run one step Job, complete
+    or remove the upload, record the outcome, and remove Jobs and staging."""
+
+    export_updates: dict = field(default_factory=dict)
+    transport: str | None = None
+    run: str | None = None
+    stop: tuple[str, ...] = ()
+    remove_staging: bool = False
+
+
+class ExportSlots:
+    """D8: how many exports each node runs at once, counted from the exports that
+    hold a slot when the pass starts. A node not known counts as free: a cell's
+    node is an eventually consistent observation, and an export must not wait on it."""
+
+    def __init__(self, limit: int, busy_nodes: Iterable[str | None]):
+        self.limit = limit
+        self.busy = Counter(node for node in busy_nodes if node is not None)
+
+    def free(self, node: str | None) -> bool:
+        return node is None or self.busy[node] < self.limit
+
+    def take(self, node: str | None) -> None:
+        if node is not None:
+            self.busy[node] += 1
+
+
+def transfer_deadline(item: ExportRow, config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> datetime | None:
+    """When the pack, the upload and the verification must have finished, or None before the pause reported."""
+
+    state = export_state(item)
+    if state.get("step") != TRANSFER:
+        return None
+    return datetime.fromisoformat(state["paused_at"]) + export_deadline(state["planned_bytes"], config)
+
+
+def transfer_step(row: CellRow, item: ExportRow, jobs: dict[str, ExportJob], *, now: datetime,
+                  config: ReconcileConfig = DEFAULT_RECONCILE_CONFIG) -> TransferStep | None:
+    """One pass of an export whose pause reported, beside the serving runtime.
+    The upload Job starts first, so on a Hetzner volume the pack can join its
+    node. cellctl completes the upload from the upload's report, then verifies
+    the completed version. Returns None when nothing changes this pass."""
+
+    state = export_state(item)
+    if item.observed_state != "packing" or state.get("step") != TRANSFER or row.desired_state == "deleted":
+        return None
+    upload, pack, verify = (jobs.get(step, ExportJob()) for step in (UPLOAD, PACK, VERIFY))
+
+    def end(terminal: str, code: str | None, diagnostic: str | None = None) -> TransferStep:
+        # Removing the export removes its Jobs and its staging claim too.
+        updates: dict[str, object] = {"observed_state": terminal, "error_code": code}
+        if diagnostic is not None:
+            updates["packing_report"] = json.dumps({**state, "diagnostic": diagnostic})
+        return TransferStep(export_updates=updates, transport="remove")
+
+    if item.requested_state == "superseded":
+        return end("expired", None)
+    if item.archive_version_id is not None:
+        if verify.succeeded:
+            report = verify.report
+            if (report.get("verified") is not True or report.get("bytes") != item.archive_bytes
+                    or report.get("sha256") != item.archive_sha256
+                    or report.get("version") != item.archive_version_id):
+                return end("failed", EXPORT_FAILED)
+            return TransferStep(stop=(VERIFY,), export_updates={
+                "observed_state": "ready", "error_code": None, "ready_at": now,
+                "expires_at": now + config.export_ttl, "upload_id": None})
+        if verify.failed:
+            return end("failed", EXPORT_FAILED)
+    elif upload.succeeded:
+        report = accepted_report(upload.report)
+        if report is None:
+            return end("failed", EXPORT_FAILED)
+        # The upload read the pack's end record, so the spool and staging are done with.
+        return TransferStep(transport="complete", stop=(UPLOAD, PACK), remove_staging=True, export_updates={
+            "error_code": None, "archive_bytes": report["bytes"], "archive_sha256": report["sha256"],
+            "packing_report": json.dumps({**state, **report})})
+    elif upload.failed or pack.failed:
+        # The upload passes on the pack's failure code; a pack that died without one fails the upload too.
+        reported = [job.report.get("error") for job in (pack, upload) if job.failed]
+        return end("failed", next((code for code in reported if code in JOB_FAILURE_CODES), EXPORT_FAILED))
+    if now >= transfer_deadline(item, config):
+        return end("failed", EXPORT_FAILED, TRANSFER_DEADLINE)
+    if item.archive_version_id is not None:
+        return None if verify.present else TransferStep(run=VERIFY)
+    if not upload.present:
+        return TransferStep(run=UPLOAD)
+    if not pack.present:
+        return TransferStep(run=PACK)
+    return None
 
 
 def settle_step(row: CellRow, item: ExportRow, *, now: datetime,

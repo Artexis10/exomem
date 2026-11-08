@@ -11,6 +11,8 @@ import jwt
 import pytest
 
 from cellctl import backup_source, db, manifests, media_edge
+from cellctl.capacity import GIB
+from cellctl.exports import PACK, PAUSE, UPLOAD, ExportRow, export_size
 from cellctl.manifests import MEDIA_COLLECTOR_CREDENTIAL_KEY, MEDIA_CREDENTIAL_KEY, namespace_name
 from cellctl.state import MediaCollection
 
@@ -136,6 +138,48 @@ def test_each_edge_credential_reaches_only_its_own_workload(store: str) -> None:
     backup_env = {entry["name"] for entry in backup["containers"][0]["env"]}
     assert manifests.MEDIA_EDGE_CREDENTIAL_ENV not in backup_env
     assert manifests.MEDIA_COLLECTOR_CREDENTIAL_ENV in backup_env
+
+
+def _selects(selector: dict, labels: dict) -> bool:
+    """A NetworkPolicy podSelector, for matchLabels and the expression operators the cell's policies use."""
+    if any(labels.get(key) != value for key, value in selector.get("matchLabels", {}).items()):
+        return False
+    for expression in selector.get("matchExpressions", []):
+        value = labels.get(expression["key"])
+        assert expression["operator"] in ("Exists", "NotIn"), "a selector operator this check does not read"
+        if value is None if expression["operator"] == "Exists" else value in expression["values"]:
+            return False
+    return True
+
+
+def test_the_media_identity_never_shares_a_pod_with_public_egress() -> None:
+    """Defect: the key that decrypts every stored original sits in a pod that can reach the internet, so one
+    compromised step sends the store out; the pause beside the live vault gets public egress; or the pack
+    loses the key and cannot read evicted originals."""
+    spec = _spec(**COLLECTING, hold_kind="export", hold_started_at=NOW.isoformat())
+    policies = manifests.render_network_policies(spec)
+    item = ExportRow("00000000-0000-4000-8000-000000000001", spec.cell_id, "requested", NOW)
+    templates = {
+        "runtime": manifests.render_statefulset(spec)["spec"]["template"],
+        "backup": manifests.render_backup_job(spec, bucket_name="b", endpoint="https://s3.example")["spec"]["template"],
+        **{step: manifests.render_export_job(spec, item, step, deadline_seconds=60, size=export_size(GIB),
+                                             part_urls=["https://storage.example/part"])["spec"]["template"]
+           for step in (PAUSE, PACK, UPLOAD)},
+    }
+
+    def public_peers(name: str) -> list[dict]:
+        # A rule without `to`, or with an IP block, reaches beyond the cluster's own pods.
+        labels = templates[name]["metadata"]["labels"]
+        return [peer for policy in policies if "Egress" in policy["spec"]["policyTypes"]
+                and _selects(policy["spec"]["podSelector"], labels)
+                for rule in policy["spec"].get("egress", []) for peer in rule.get("to", [{}])
+                if not peer or "ipBlock" in peer]
+
+    holders = {name for name, template in templates.items()
+               if _secret_keys(template["spec"]) & {manifests.MEDIA_IDENTITY_KEY, "the whole Secret"}}
+    assert holders == {"runtime", PACK}
+    assert [name for name in templates if public_peers(name)] == ["backup", UPLOAD]
+    assert manifests.MEDIA_NAME_KEY_KEY not in _secret_keys(templates[PACK]["spec"])  # the pack names no new object
 
 
 COLLECTING = dict(media_collector_url=URL, media_collector_credential="collector")

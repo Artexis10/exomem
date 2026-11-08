@@ -289,6 +289,10 @@ spec:
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
             - name: CELLCTL_EXPORT_DEADLINE_MINUTES
               value: {{ .Values.cellctl.exportDeadlineMinutes | quote }}
+            - name: CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB
+              value: {{ .Values.cellctl.exportPauseCopyFloorMiB | quote }}
+            - name: CELLCTL_EXPORT_CONCURRENCY_PER_NODE
+              value: {{ .Values.cellctl.exportConcurrencyPerNode | quote }}
             - name: EXOMEM_EXPORT_TTL_HOURS
               value: {{ .Values.cellctl.exportTtlHours | quote }}
             # D8: nightly backup window and stagger.

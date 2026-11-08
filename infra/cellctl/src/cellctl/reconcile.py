@@ -53,13 +53,24 @@ from .decide import (
 from .errors import describe_error as _describe_error
 from .exports import (
     EXPORT_UPLOAD_FAILED,
+    PACK,
+    PAUSE,
+    TRANSFER,
+    UPLOAD,
+    VERIFY,
     ExportRow,
+    ExportSlots,
     ExportStorage,
-    accepted_report,
+    TransferStep,
     decide_export,
-    export_deadline,
     export_size,
+    export_state,
+    legacy_job_name,
+    pause_window,
     settle_step,
+    staging_gib,
+    transfer_deadline,
+    transfer_step,
     verification_secret_name,
 )
 from .exports import HOLD as EXPORT_HOLD
@@ -89,6 +100,7 @@ from .manifests import (
     render_cell_namespace,
     render_clone_claim,
     render_export_job,
+    render_export_staging_claim,
     render_export_verification_secret,
     render_import_job,
     render_restore_job,
@@ -627,7 +639,8 @@ class ClusterGateway:
     def delete_family_secret(self, local: LocalStorage, *, cell_id: str, request: FamilyRequest) -> bool: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
-    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False): ...  # pragma: no cover
+    def observe_export_job(self, namespace: str, export_id: str, *, step: str): ...  # pragma: no cover
+    def delete_export_staging(self, namespace: str, export_id: str) -> None: ...  # pragma: no cover
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
     def retain_volume(self, name: str) -> None: ...  # pragma: no cover
     def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
@@ -1583,6 +1596,11 @@ async def reconcile_once(
         or render_digest_candidate is not None
         or any(_in_transition(row, observations[row.cell_id], row.cell_id in parked) for row in rows)
     )
+    # add-cloud-media-store D8: each node runs a bounded number of exports at
+    # once, counted from the exports that hold a slot (packing) at the pass start.
+    packing_cells = await db.read_packing_export_cells(connection)
+    export_slots = ExportSlots(config.export_concurrency_per_node, [
+        _export_node(row, observations[row.cell_id]) for row in rows if row.cell_id in packing_cells])
     for row in rows:
         try:
             fast |= await _reconcile_row(
@@ -1608,6 +1626,7 @@ async def reconcile_once(
                 media_active=media_active,
                 local_capacity=local_capacity,
                 backup_listing=backup_listing,
+                export_slots=export_slots,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -2275,6 +2294,7 @@ async def _reconcile_row(
     media_active: ActiveSet | None = None,
     local_capacity: LocalCapacityObservation | None = None,
     backup_listing=None,
+    export_slots: ExportSlots | None = None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2376,6 +2396,12 @@ async def _reconcile_row(
     if export_item is None and exports and EXPORT_HOLD in (row.hold_kind, _active_hold(row, observation)):
         export_item = exports[-1]
     export_job = export_decision = None
+    transfer_run: str | None = None
+    # D8: the staging claim takes the cell's own class, so a local pause finds both
+    # volumes on one node. Every configured cell class deletes its volumes on release
+    # (the platform chart's StorageClasses), and the identity check below already
+    # refuses a cell whose volume has any other class.
+    staging_class = cluster_config.storage.claim_class(observation.pvc_storage_class or observation.pv_storage_class)
     # An import holding or claiming the volume goes first; the export waits.
     # A cell that has had a volume and lost its claim is decide()'s to report:
     # any apply from the export path would create an empty claim in its place.
@@ -2383,19 +2409,35 @@ async def _reconcile_row(
     if export_item is not None and import_decision is None and not _identity_conflict(
             row, observation, cluster_config.storage) and not (
             claim_missing(observation) and row.volume_id is not None and row.desired_state != "deleted"):
-        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id,
-                                                verify=export_item.archive_version_id is not None)
+        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id, step=PAUSE)
         volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
             or planned_move_volume(row, observation, cluster_config.storage) is not None
         )
+        node = _export_node(row, observation)
+        slot_free = export_slots is None or export_slots.free(node)
         export_decision = decide_export(row, export_item, observation, export_job, now=now, config=config,
-                                        volume_unavailable=volume_unavailable)
+                                        volume_unavailable=volume_unavailable, slot_free=slot_free)
+        if export_decision is not None and export_decision.export_transport == "create" and export_slots is not None:
+            export_slots.take(node)
+        if export_decision is None and export_item.observed_state is None and not slot_free:
+            await _note_export_waiting(connection, row, export_item)
+    if (export_decision is None and export_item is not None and export_item.observed_state == "packing"
+            and export_state(export_item).get("step") == TRANSFER and row.desired_state != "deleted"):
+        # D8: after the pause, the upload and the pack run beside the serving
+        # runtime, so routine reconciliation decides the cell meanwhile.
+        jobs = {step: cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id, step=step)
+                for step in (UPLOAD, PACK, VERIFY)}
+        transfer = transfer_step(row, export_item, jobs, now=now, config=config)
+        if transfer is not None:
+            transfer_run = await _apply_transfer(connection, cluster, row, export_item, transfer, secrets_config,
+                                                 cluster_config)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
         import_decision is None
         and export_decision is None
+        and transfer_run is None
         and _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade
@@ -2572,10 +2614,8 @@ async def _reconcile_row(
             await db.write_observed(connection, row.cell_id,
                                     {"hold_kind": "import", "hold_started_at": decision.hold_started_at})
 
-    export_storage = None
     if export_decision is not None:
-        export_storage = await _export_transport(
-            connection, cluster, row, export_item, export_job, decision, secrets_config, cluster_config)
+        await _export_transport(connection, cluster, row, export_item, decision, secrets_config, cluster_config)
 
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
@@ -2862,7 +2902,7 @@ async def _reconcile_row(
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
-        steps = (decision.import_action or decision.run_export_job or decision.run_backup_job
+        steps = (decision.import_action or decision.run_export_job or transfer_run or decision.run_backup_job
                  or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone)
         local = cluster_config.storage.local
         if jobs_parked and steps:
@@ -2882,17 +2922,17 @@ async def _reconcile_row(
                                                 deadline_seconds=int((config.import_deadline if decision.import_action == "import"
                                                                       else config.import_cleanup_deadline).total_seconds())), job_refused)
             if decision.run_export_job:
-                deadline = int(export_deadline(row, config).total_seconds())
-                size = export_size(row)
-                part_urls = ([] if export_item.archive_version_id else
-                             await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
-                                                     expires_in=deadline))
-                verify_url = (await asyncio.to_thread(export_storage.link, export_item,
-                                                      expires_in=deadline) if export_item.archive_version_id else None)
-                if verify_url:
-                    cluster.apply_all([render_export_verification_secret(spec, export_item, verify_url)])
+                # D8: the pause, under the hold, into the export's own staging claim.
+                _run_cell_job(cluster, row.cell_id, render_export_staging_claim(
+                    spec, export_item, size_gib=staging_gib(row.used_bytes, spec.storage_gib),
+                    storage_class=staging_class), job_refused)
                 _run_cell_job(cluster, row.cell_id, render_export_job(
-                    spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
+                    spec, export_item, PAUSE, deadline_seconds=int(pause_window(row, config).total_seconds()),
+                    media_mode=("served" if media_mode in MEDIA_KEYED else
+                                "retained" if media_mode == MEDIA_RETAINED else None)), job_refused)
+            if transfer_run is not None:
+                await _run_transfer_job(cluster, row, export_item, transfer_run, spec, now, config, secrets_config,
+                                        cluster_config, job_refused)
             if family is not None:
                 cluster.apply_all([render_backup_family_secret(spec, namespace=local.reservation_namespace, token=family["token"],
                     physical_uuid=family["physicalSourceUUID"])])
@@ -3006,15 +3046,21 @@ async def _remove_export(
     connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, storage: ExportStorage,
     updates: dict[str, object],
 ) -> None:
-    """Deletes every version of the export's object and aborts its uploads,
-    then records `updates` with the upload released. A failure keeps
+    """Deletes the export's Jobs, staging claim and verification Secret, every
+    version of its object and its uploads, then records `updates` with the
+    upload released. A failure keeps
     upload_id, so every later pass retries the abort. On a deleted cell the
     outcome is recorded anyway; the staging bucket's lifecycle removes a
     leftover object."""
 
+    namespace = namespace_name(row.cell_id)
     try:
-        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
-                                     cell_id=row.cell_id):
+        # D8: an ended export leaves no step Job and no staging claim; a retry repeats each removal.
+        for name in (*(export_job_name(item.export_id, step) for step in (PAUSE, UPLOAD, PACK, VERIFY)),
+                     legacy_job_name(item.export_id)):
+            cluster.delete_job(namespace, name)
+        cluster.delete_export_staging(namespace, item.export_id)
+        if not cluster.delete_secret(namespace, verification_secret_name(item.export_id), cell_id=row.cell_id):
             return
         await asyncio.to_thread(storage.remove, item)
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
@@ -3050,43 +3096,95 @@ async def _settle_exports(
 
 
 async def _export_transport(
-    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, job,
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow,
     decision: Decision, secrets_config: SecretsConfig, cluster_config: ClusterConfig,
-) -> ExportStorage | None:
-    """The export decision's object-storage step and C6 write, journalled
+) -> None:
+    """The pause decision's object-storage step and C6 write, journalled
     before the hold is written and the StatefulSet applied."""
 
-    storage = None
-    if decision.export_transport or decision.run_export_job:
-        storage = _export_storage(secrets_config, cluster_config)
+    namespace = namespace_name(row.cell_id)
+    storage = _export_storage(secrets_config, cluster_config) if decision.export_transport else None
     if decision.export_transport == "create":
         decision.export_updates["upload_id"] = await asyncio.to_thread(storage.create, item)
-    elif decision.export_transport == "complete":
-        try:
-            version = await asyncio.to_thread(storage.complete, item, accepted_report(job.report))
-        except ValueError as error:
-            # A part that is not the one the Job uploaded never completes.
-            logger.warning("cellctl: cell %s's export %s upload was refused: %s", row.cell_id, item.export_id, error)
-            decision.export_updates = {"observed_state": "failed", "error_code": EXPORT_UPLOAD_FAILED}
-            decision.export_transport = "remove"
-            decision.stop_export_job = True
-        else:
-            decision.export_updates.update(archive_version_id=version)
-            cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
     await db.write_export(connection, item.export_id, decision.export_updates)
     if decision.export_transport == "remove":
         await _remove_export(connection, cluster, row, item, storage, {})
-    if decision.stop_export_job:
-        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
-                                     cell_id=row.cell_id):
-            return storage
-        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
-        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id, verify=True))
+    elif decision.stop_export_job:
+        cluster.delete_job(namespace, export_job_name(item.export_id, PAUSE))
+        cluster.delete_job(namespace, legacy_job_name(item.export_id))
     # The row hold survives a crash before the StatefulSet has been stopped.
     if decision.hold_kind == EXPORT_HOLD and (row.hold_kind != EXPORT_HOLD or row.hold_started_at != decision.hold_started_at):
         await db.write_observed(connection, row.cell_id,
                                 {"hold_kind": EXPORT_HOLD, "hold_started_at": decision.hold_started_at})
-    return storage
+
+
+async def _apply_transfer(
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, transfer: TransferStep,
+    secrets_config: SecretsConfig, cluster_config: ClusterConfig,
+) -> str | None:
+    """One transfer step's object-storage work, C6 write and removals, in that
+    order. Returns the step Job this pass still has to run, if any."""
+
+    namespace = namespace_name(row.cell_id)
+    updates, transport = dict(transfer.export_updates), transfer.transport
+    storage = _export_storage(secrets_config, cluster_config) if transport else None
+    if transport == "complete":
+        try:
+            version = await asyncio.to_thread(storage.complete, item, json.loads(updates["packing_report"]))
+        except ValueError as error:
+            # A part that is not the one the upload sent never completes.
+            logger.warning("cellctl: cell %s's export %s upload was refused: %s", row.cell_id, item.export_id, error)
+            updates, transport = {"observed_state": "failed", "error_code": EXPORT_UPLOAD_FAILED}, "remove"
+        else:
+            updates["archive_version_id"] = version
+    await db.write_export(connection, item.export_id, updates)
+    if transport == "remove":
+        await _remove_export(connection, cluster, row, item, storage, {})
+        return None
+    for step in transfer.stop:
+        cluster.delete_job(namespace, export_job_name(item.export_id, step))
+    if transfer.remove_staging:
+        cluster.delete_export_staging(namespace, item.export_id)
+    if VERIFY in transfer.stop:
+        cluster.delete_secret(namespace, verification_secret_name(item.export_id), cell_id=row.cell_id)
+    return transfer.run
+
+
+async def _run_transfer_job(
+    cluster: ClusterGateway, row: CellRow, item: ExportRow, step: str, spec: CellManifestSpec, now: datetime,
+    config: ReconcileConfig, secrets_config: SecretsConfig, cluster_config: ClusterConfig,
+    refused: list[tuple[str, str]],
+) -> None:
+    """Start the upload, the pack or the verification on the image the pause
+    ran (D8), with a deadline and part URLs that last until the transfer deadline."""
+
+    state = export_state(item)
+    size = export_size(state["planned_bytes"])
+    deadline = max(1, int((transfer_deadline(item, config) - now).total_seconds()))
+    job_spec = dataclass_replace(spec, image=state["image"])
+    part_urls: list[str] = []
+    if step == UPLOAD:
+        part_urls = await asyncio.to_thread(_export_storage(secrets_config, cluster_config).part_urls, item,
+                                            size.parts, expires_in=deadline)
+    elif step == VERIFY:
+        url = await asyncio.to_thread(_export_storage(secrets_config, cluster_config).link, item, expires_in=deadline)
+        cluster.apply_all([render_export_verification_secret(job_spec, item, url)])
+    _run_cell_job(cluster, row.cell_id, render_export_job(job_spec, item, step, deadline_seconds=deadline, size=size,
+                                                          part_urls=part_urls), refused)
+
+
+def _export_node(row: CellRow, observation: ClusterObservation) -> str | None:
+    """The node an export's staging lands on: a local volume's own node, else the node the cell last ran on."""
+
+    return observation.pv_node or row.node
+
+
+async def _note_export_waiting(connection: asyncpg.Connection, row: CellRow, item: ExportRow) -> None:
+    """D8: an export that waits for its node's slot says so in its row."""
+
+    if export_state(item).get("waiting") != "node_export_slot":
+        logger.info("cellctl: cell %s's export %s waits for its node's export slot", row.cell_id, item.export_id)
+        await db.write_export(connection, item.export_id, {"packing_report": json.dumps({"waiting": "node_export_slot"})})
 
 
 def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservation, decision) -> None:

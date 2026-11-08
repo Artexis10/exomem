@@ -85,6 +85,7 @@ from kubernetes import config as k8s_config
 
 from cellctl.capacity import CapacityConfig
 from cellctl.decide import ReconcileConfig
+from cellctl.exports import PACK, PAUSE, UPLOAD, VERIFY
 from cellctl.imports import PHASES, job_name
 from cellctl.k8s_client import ClusterClient
 from cellctl.manifests import (
@@ -860,9 +861,10 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
     k3s: K3sCluster, cell_db: CellDatabase, import_storage: dict[str, Any],
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, desired_state: str,
 ) -> None:
-    """C6: the real export Job reads the cell's volume under the export hold and
-    uploads through the real job egress; only the verified version is served,
-    a stopped cell's runtime never starts, and expiry deletes every version."""
+    """C6: the real pause Job copies the cell's volume under the export hold, and
+    the pack and upload Jobs stream the copy through the real job egress; only
+    the verified version is served, a stopped cell's runtime never starts, and
+    expiry deletes every version."""
     image = import_storage["image"]
     documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml", settings=(
                                      "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
@@ -956,21 +958,18 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
             return export_row()["observed_state"] in ("ready", "failed")
 
         _wait_for(packed, timeout=360, interval=2, description="actual export Job and verified completion")
-        job = cluster.observe_export_job(namespace, str(export_id), verify=True)
-        print(f"[export] {desired_state}: actual termination {json.dumps(job.report, sort_keys=True)}")
         ready = export_row()
+        print(f"[export] {desired_state}: actual report {ready['packing_report']}")
+        # cellctl marks the row ready only after the verify Job's report matched it, and removes that Job.
         assert (ready["observed_state"], ready["error_code"]) == ("ready", None)
-        assert job.succeeded and job.report["bytes"] == ready["archive_bytes"] == storage.head_object(
+        assert ready["archive_bytes"] == storage.head_object(
             Bucket=BUCKET_NAME, Key=f"cells/{cell_id}/exports/{export_id}.zip",
             VersionId=ready["archive_version_id"])["ContentLength"]
-        assert job.report["verified"] is True
-        assert job.report["version"] == ready["archive_version_id"]
-        assert job.report["sha256"] == ready["archive_sha256"]
         measured = cell()
         assert 0 <= measured["used_bytes"] <= measured["filesystem_bytes"] and measured["usage_observed_at"]
         _wait_for(settled(desired_state), timeout=360, description="export hold released, desired state again")
-        assert not cluster.observe_export_job(namespace, str(export_id)).present
-        assert not cluster.observe_export_job(namespace, str(export_id), verify=True).present
+        assert not [step for step in (PAUSE, UPLOAD, PACK, VERIFY)
+                    if cluster.observe_export_job(namespace, str(export_id), step=step).present]
         if desired_state == "stopped":
             assert {replicas for replicas, _pod in seen} == {0} and not any(pod for _replicas, pod in seen)
             print(f"[export] stopped: {len(seen)} passes, StatefulSet replicas always 0, no runtime pod")
