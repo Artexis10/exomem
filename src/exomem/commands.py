@@ -9155,10 +9155,6 @@ def op_approve_procedure(
     leaves the page readable. quarantine moves damaged approval entries aside. A repeat
     changes nothing.
 
-    Approvals are checked with a key kept beside the vault, not inside it. If the vault
-    moved to a new path, its old approvals read foreign: approve again, or run quarantine
-    with the ref to move them aside.
-
     Args:
         action: approve, revoke or quarantine.
         ref: `exomem://memory/<uuid>` of the page. quarantine without it covers every ref.

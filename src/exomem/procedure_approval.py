@@ -2,8 +2,8 @@
 
 The owner endorses one exact version of a page. The endorsement is one entry file
 under the reserved `_Approvals/<ref>/` tree. Only the owner-only `approve_procedure`
-operation writes that tree, and each entry carries an HMAC made with a per-owner
-key that lives outside the vault. A copied vault therefore carries entries that
+operation writes that tree, and each entry carries an HMAC made with a key kept in
+the vault's state directory, outside the vault. A copied vault therefore carries entries that
 fail their MAC and approves nothing on another host.
 
 This module owns the entry format, the key, the crash-safe write, the eligibility
