@@ -226,7 +226,6 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": False,
                 "retain_cpu_caches": False,
-                "idle_cpu_cache_release": "after_idle",
                 "defer_expensive_indexes": True,
                 "watcher_policy": {
                     "debounce_seconds": 2.0,
@@ -244,7 +243,6 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": False,
                 "retain_cpu_caches": False,
-                "idle_cpu_cache_release": "under_memory_pressure",
                 "defer_expensive_indexes": False,
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
@@ -262,7 +260,6 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
             {
                 "preload_cpu_caches": True,
                 "retain_cpu_caches": True,
-                "idle_cpu_cache_release": "never",
                 "defer_expensive_indexes": False,
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
@@ -360,7 +357,6 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
         "preload_models": False,
         "preload_cpu_caches": False,
         "retain_cpu_caches": False,
-        "idle_cpu_cache_release": "after_idle",
         "defer_expensive_indexes": True,
         "watcher_policy": {
             "debounce_seconds": 2.0,
@@ -558,3 +554,22 @@ def test_config_path_windows_programdata_fallback(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("EXOMEM_CONFIG_PATH", raising=False)
     monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "PD"))
     assert mode.config_path() == tmp_path / "PD" / "exomem" / "config.json"
+
+
+@pytest.mark.parametrize(
+    "m, release_env, expected",
+    [
+        ("performance", None, "never"),
+        ("normal", None, "under_memory_pressure"),
+        ("quiet", None, "after_idle"),
+        # With the reaper off nothing is released, whatever the mode says.
+        ("normal", "0", "never"),
+    ],
+)
+def test_idle_cpu_cache_release_names_what_the_reaper_does(
+    monkeypatch: pytest.MonkeyPatch, m: str, release_env: str | None, expected: str
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", m)
+    if release_env is not None:
+        monkeypatch.setenv("EXOMEM_RELEASE_GPU_WHEN_IDLE", release_env)
+    assert mode.idle_cpu_cache_release() == expected

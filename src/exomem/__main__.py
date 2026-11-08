@@ -1527,6 +1527,7 @@ def _mode_main(argv: list[str]) -> int:
             else "default"
         )
         policy = mode_mod.resolved()
+        policy["idle_cpu_cache_release"] = mode_mod.idle_cpu_cache_release()
         policy["source"] = source
         policy["config_path"] = str(mode_mod.config_path())
         if args.json:
