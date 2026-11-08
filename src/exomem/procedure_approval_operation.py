@@ -32,6 +32,8 @@ _DIFF_CHARS = 8000
 #: Retained history is read newest first, a page of this many entries at a time, a few pages deep.
 _HISTORY_PAGES = 4
 _DEFAULT_LISTING_LIMIT = 25
+#: Each listed ref reads its page, so one listing call stays bounded.
+_MAX_LISTING_LIMIT = 100
 
 
 def _invalid(message: str, remediation: str) -> OpError:
@@ -110,12 +112,17 @@ class _Page:
     unique: bool = False
 
 
-def _resolve(vault_root: Path, ref: str, who: RequestPrincipal) -> _Page:
-    """Read the page that holds `ref`. A page withheld from this caller reads as absent."""
-    identifier = memory_refs.parse_memory_ref(ref)
-    holders = tuple(
-        sorted(memory_refs.paths_for_ids_read_only(vault_root, [identifier]).get(identifier, ()))
+def _holders(vault_root: Path, refs: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    """Every page that holds each ref, from one read of the reference index."""
+    identifiers = {ref: memory_refs.parse_memory_ref(ref) for ref in refs}
+    found = memory_refs.paths_for_ids_read_only(
+        vault_root, [identifier for identifier in identifiers.values() if identifier is not None]
     )
+    return {ref: tuple(sorted(found.get(identifier, ()))) for ref, identifier in identifiers.items()}
+
+
+def _resolve(vault_root: Path, holders: tuple[str, ...], who: RequestPrincipal) -> _Page:
+    """Read the page that holds a ref, given its holders. A page withheld from this caller reads as absent."""
     if not holders:
         return _Page()
     path = holders[0]
@@ -234,7 +241,7 @@ def run(
             moved = procedure_approval.quarantine(root, canonical)
             return _quarantine_result(canonical, moved)
         assert canonical is not None
-        page = _resolve(root, canonical, who)
+        page = _resolve(root, _holders(root, (canonical,))[canonical], who)
         principal, client = who.principal_kind, _client_label(who)
         if action == procedure_approval.APPROVE:
             assert expected_version is not None
@@ -295,16 +302,22 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
     root = Path(vault_root)
     _require_owner(root, who)
     cap = _DEFAULT_LISTING_LIMIT if limit is None else limit
+    if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= _MAX_LISTING_LIMIT:
+        raise _invalid(
+            f"limit {limit!r} is not a whole number from 1 to {_MAX_LISTING_LIMIT}.",
+            f"Pass a limit from 1 to {_MAX_LISTING_LIMIT}, or omit it to list {_DEFAULT_LISTING_LIMIT}.",
+        )
     try:
         refs = tuple(sorted(procedure_approval.listed_refs(root)))
     except procedure_approval.ApprovalRefused as error:
         raise _refusal(error) from error
     shown = refs[:cap]
     ledgers = procedure_approval.ledgers(root, shown)
+    holders = _holders(root, shown)
     approvals: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     for ref in shown:
-        page = _resolve(root, ref, who)
+        page = _resolve(root, holders[ref], who)
         result = procedure_approval.verdict(
             page.facts, ledgers[ref], owner=True, full_release=page.facts is not None
         )

@@ -35,6 +35,7 @@ from test_procedure_approval import (
 from exomem import (
     call_ledger,
     commands,
+    memory_refs,
     procedure_approval,
     procedure_approval_operation,
     writer_lease,
@@ -437,17 +438,37 @@ def test_a_revoke_still_works_when_a_second_page_repeats_the_id(vault, mcp) -> N
     assert revoked["user_summary"].startswith("Revoked the approval.")
 
 
-def test_the_listing_pages_by_limit_and_says_when_it_is_empty(vault, mcp) -> None:
+def test_the_listing_pages_by_limit_and_says_when_it_is_empty(vault, mcp, monkeypatch) -> None:
     assert listing(mcp)["outcome"] == "No procedure has approval entries."
     first = write_page(vault, "release-steps")
     second = write_page(vault, "rollback-steps", OTHER_ID)
     approve(mcp, REF, facts_of(vault, first).version)
     approve(mcp, f"exomem://memory/{OTHER_ID}", facts_of(vault, second).version)
+    lookups: list[list[str]] = []
+    index_lookup = memory_refs.paths_for_ids_read_only
+
+    def counted(root, ids, **kwargs):
+        lookups.append(list(ids))
+        return index_lookup(root, ids, **kwargs)
+
+    monkeypatch.setattr(memory_refs, "paths_for_ids_read_only", counted)
 
     page = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": 1})
+    whole = listing(mcp)
 
     assert (page["returned"], page["total"], page["truncated"]) == (1, 2, True)
     assert "showing 1" in page["outcome"]
+    assert [row["verdict"] for row in whole["approvals"]] == ["approved", "approved"]
+    # Each listing resolves all its refs in one index read, never one read per ref.
+    assert [len(ids) for ids in lookups] == [1, 2]
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_the_listing_refuses_a_limit_outside_its_bounds(vault, mcp, limit) -> None:
+    refused = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": limit})
+
+    assert refused["error"]["code"] == "APPROVE_PROCEDURE_INVALID"
+    assert "Pass a limit from 1 to 100" in refused["error"]["remediation"]
 
 
 def test_quarantine_moves_a_damaged_entry_aside_and_the_listing_stops_reporting_it(vault, mcp) -> None:
