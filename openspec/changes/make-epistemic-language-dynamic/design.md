@@ -1,6 +1,8 @@
 ## Context
 
-The rule in `AGENTS.md` is that every category set lives in a vocabulary registry. Code branches only on closed attribute values that a registry schema declares and code implements. Relation types follow the rule in part: they are registry entries, but their `family` attribute is a free string, and code branches on particular free values. Kinds and verdicts do not follow the rule at all.
+The rule in `AGENTS.md` is that every category set lives in a vocabulary registry. Code branches only on closed attribute values that a registry schema declares and code implements (`family`, `role`, status `class`). It never branches on an entry key.
+
+Relation types follow the rule in part. They are registry entries, and a namespaced extension must name one core parent and inherit its family (`family_mismatch`). But code branches on particular family values and relation keys. Kinds and verdicts do not follow the rule at all.
 
 This change applies the rule to the whole epistemic language.
 
@@ -8,90 +10,120 @@ This change applies the rule to the whole epistemic language.
 
 ### Three layers: words, behaviours, dimensions
 
-- **A word** is a registry entry: a relation type, a kind, a verdict, a mood, a belief level. It has a key, labels per language, a description and examples. It keeps its own meaning. `refines` and `qualifies` both narrow a claim, but they say different things and stay distinct entries.
-- **A behaviour** is something code does. The registry schema declares the closed set, and code implements each behaviour:
-  - `replaces`: hide the target as no longer current.
-  - `lifts`: may promote a unit relation to a page proposal.
-  - `propagates`: a change to the target puts the source at risk.
-  - `membership`: the source belongs to the target.
-  - `needs_check`: schedule a revisit by `check_by`.
-  - `undercuts`: lower trust in the target.
-  - `narrows`: limit the target's scope.
-  - `orders`: place the source before or after the target in time.
-  - `defines`: the source states what the target means.
-  - `cites`: context carries the claim's source with the claim.
-  Each word names zero or more behaviours. Adding a behaviour is a code change and a schema change, and that is the point: a behaviour is a promise code keeps.
-- **A dimension** groups words by the question they answer. Dimensions are registry data. Each relation family, kind and verdict names one dimension. A vault can add a dimension, and the f38 report and retrieval profiles read dimensions from the registry.
+- **A word** is a registry entry: a relation type, a kind, a verdict, a mood, a belief level, an inference mode. It has a key, labels per language, a description and examples. It keeps its own meaning. `refines` and `contradicts` both bear on a claim, but they say different things and stay distinct entries.
+- **A behaviour** is something code does. The registry schema declares each closed set, and code implements each member. Adding one is a code change and a schema change, and that is the point: a behaviour is a promise code keeps. There are three sets, because each has its own target: relation behaviours, kind traits and dimension display behaviours.
+- **An epistemic dimension** groups words by the question they answer. Dimensions are registry data, and a vault can add one.
 
-**Why this split:** the owner asked whether the language can be fully dynamic. It can be dynamic in everything except what code does with a meaning. Making behaviours data too would mean code that runs arbitrary rules from a registry, and that turns a vocabulary into a programming language. A small closed behaviour set keeps the code honest, and every word above it stays free.
+**Why this split:** the owner asked whether the language can be fully dynamic. It can be dynamic in everything except what code does with a meaning. Making behaviours data too would mean code that runs arbitrary rules from a registry, and that turns a vocabulary into a programming language. Small closed sets keep the code honest, and every word above them stays free.
 
-### Family stays, and gains behaviours and a dimension
+### Relation behaviours live on core relation entries
 
-A relation family stays the grouping of near-synonyms (`causes` and `caused_by` are both causality). A family entry names its behaviours and its dimension. Today's hard-coded family sets become behaviour declarations in the shipped pack:
+A core relation entry gains a `behaviours` list, beside its existing `presentation_role`. An extension inherits its parent's behaviours and cannot set its own, just as it inherits the parent's family. Vaults do not create families.
 
-- `_LIFT_RELATION_FAMILIES` becomes `lifts` on answer, resolution, question, support, contradiction, refinement, evidence and duplication.
-- `MEMBERSHIP_FAMILY` becomes `membership` on membership.
+Behaviours sit on relations, not families, because today's sets are keyed both ways. Each behaviour replaces one set:
 
-The shipped pack reproduces today's behaviour exactly. A test pins that before and after.
+| Behaviour | What code does | Replaces | Core relations |
+|---|---|---|---|
+| `lifts` | A unit relation may become a page proposal. | `_LIFT_RELATION_FAMILIES` | answers, resolves, raises_question, supports, contradicts, refines, evidenced_by, duplicates |
+| `membership` | The source belongs to the target. | `MEMBERSHIP_FAMILY` | member_of |
+| `bears_on` | An edge into a prediction or question counts toward settling it. | `_PREDICTION_RESOLVING_RELATIONS`, `_QUESTION_ANSWERING_RELATIONS` | supports, contradicts, resolves, evidenced_by |
+| `settles` | The graph reads the edge as resolving a question. | `_RESOLUTION_RELATION_TYPES` | answers, resolves |
+| `sources` | Activation counts the edge as provenance. | `_PROVENANCE_RELATIONS` | derived_from, evidenced_by, cites |
+| `replaces` | The target is no longer the current view. | `kind == "supersedes"` tests | supersedes |
+| `orders` | The source comes before the target in time. | new | precedes, follows |
 
-### Kinds and verdicts get one source
+Slice 2 starts with an inventory of every branch on a relation key or family value in `src/exomem`. Each branch maps to a behaviour above, or to a new behaviour added with its code, or is named as debt. A before-and-after test over a fixture vault compares lift proposals, membership answers, prediction and question audits, resolution, activation counts and role review.
 
-Built-in kinds and verdicts move from code into the shipped pack. Every code list reads it:
+### Kind traits are a separate closed set
 
-- `sensing.py` `UNITS_V1`;
-- `semantic_blocks.py` `BLOCK_TYPES`;
-- `activation.py`;
-- `context_pack.py`;
-- `collection_candidate.py`;
-- `semantic_units.py` `EPISTEMIC_OUTCOMES`.
+Kinds need their own set, because a relation behaviour has a source and a target and a kind has neither. A kind entry gains a `traits` list:
 
-Kinds carry behaviours:
+| Trait | What code does | Replaces | Shipped kinds |
+|---|---|---|---|
+| `assertion` | Activation counts the unit as an assertion. | `_ASSERTION_BLOCK_TYPES` | claim, finding, inference, hypothesis, result |
+| `page_claim` | The claims reader takes the first such unit as the page's claim. | `kind == "claim"` in `claims.py` | claim |
+| `procedure` | Role review reads the unit as a procedure. | `kind == "procedure"` in `artifact_role_review.py` | procedure |
+| `outcome` | Role review reads the unit as an outcome. | `kind == "result"` in `artifact_role_review.py` | result |
 
-- hypothesis, prediction and assumption carry `needs_check`;
-- decision and constraint carry `narrows`;
-- a new definition kind carries `defines`.
+The slice-3 inventory adds any further kind branch the same way.
 
-Verdicts carry behaviours:
+A trait never schedules a check. `check_by` already does that on any unit, so a trait for it would duplicate the governed key.
 
-- refuted carries `undercuts`;
-- qualified carries `narrows`;
-- confirmed and inconclusive carry none;
-- abandoned withdraws the claim from active reasoning but keeps it readable.
+The 27 built-in kinds in `semantic_blocks.py` move into the shipped pack. `definition` and `procedure` are among them already.
 
-A refuted claim still keeps active standing, as the commitments require. `undercuts` lowers trust when a reader weighs it. It does not hide the claim.
+### Verdicts are state
 
-### Degree of belief, sourced
+Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
 
-The owner chose this shape on 2026-11-08:
+### Epistemic dimensions
 
-- Belief levels are registry words that any claim may carry: speculative, plausible, likely and near-certain by default.
-- A numeric probability is governed unit metadata (`belief: 0.7`). It is valid only beside a `holder` (whose belief) and a `basis` (the evidence or the method).
-- Predictions with a probability and a `check_by` can be scored for calibration when their verdict arrives.
-- Exomem does not arbitrate belief. A belief belongs to its holder. The basis can be anything the holder gives, including intuition. Several holders' beliefs about one claim sit side by side. Any belief Exomem computes from evidence is a separate value, labelled as derived.
-- **Dimensions drive code at two levels.**
-  - Every dimension, shipped or added, gets the generic operations: retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it.
-  - A dimension may also name behaviours from the same closed set. The shipped dimensions do. `currency` names `replaces`, so the context compiler leads with the current view and marks replaced ones. `provenance` names `cites`, so context carries each claim's source. `uncertainty` names `needs_check`, so open questions are flagged and scheduled.
-  - A dimension a user adds can name any existing behaviour and gains it at once. A new behaviour is a code change, and once it exists any dimension can use it.
-  - No code names a particular dimension. Shipped dimensions are more capable by default only because the shipped pack gives them behaviours.
-- The commitment "a judgment MUST NOT be recorded as a number" becomes "a judgment MUST NOT be recorded as a number without a holder and a basis".
+A dimension entry has a key, labels, a description, its members and its display behaviours. Members are relation families, unit kinds and governed metadata keys. One member may sit in several dimensions, because a word can answer more than one question.
+
+**Every dimension gets the generic operations:** retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it. No code names a particular dimension.
+
+**A dimension may also name display behaviours** from a closed set:
+
+- `lead_with_current`: put current members before replaced ones, and mark the replaced ones;
+- `show_origin`: show beside each member where it came from and whose it is;
+- `flag_open`: mark members that have no closing verdict or answer as open;
+- `order_in_time`: present members in time order.
+
+Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. A dimension change takes effect only after a reviewed registry save, as every registry change does.
+
+The shipped dimensions:
+
+| Key | Question | Members | Display |
+|---|---|---|---|
+| `currency` | Is it still current? | supersession | `lead_with_current` |
+| `correction` | Was it corrected? | contradiction, testing, `verdict` | none |
+| `provenance` | Where did it come from? | derivation, evidence, citation, observation | `show_origin` |
+| `attribution` | Whose is it? | `asserted_by`, kind belief | `show_origin` |
+| `kind` | What kind of statement is it? | every kind, `mood`, `inference_mode` | none |
+| `argument` | What is the case for and against? | support, contradiction | none |
+| `dependency` | What does it rest on? | dependency, causality, blocking, implementation, mitigation, use, production | none |
+| `entities` | What and whom is it about? | entity, membership, kinship, affiliation, ownership, operation, supply, location, composition | none |
+| `identity` | Is it the same thing? | duplication, specialization | none |
+| `scope` | Where does it hold? | refinement | none |
+| `uncertainty` | How sure are we? | question, answer, resolution, assessment, kinds hypothesis, assumption, prediction, open_question and risk, `check_by` | `flag_open` |
+| `order` | When did it happen? | order, kind timeline_event, `at` | `order_in_time` |
+
+The generic families mention, link and relation belong to no dimension.
+
+### Degree of belief, owned by its holder
+
+The owner chose this shape on 2026-11-08: belief levels, plus numbers only with a source. The owner added that Exomem must not arbitrate belief.
+
+1. A belief is a unit of the new kind `belief`. Its governed keys are `holder` (an entity), `belief` (the value) and `basis` (free text).
+2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`.
+3. The value is a key or label of the belief-level registry (speculative, plausible, likely and near-certain by default), or a probability from 0 to 1.
+4. Every belief names a holder. A probability also needs a basis, and the basis can be anything the holder gives, including intuition.
+5. Exomem keeps the stated value as written. A label resolves to its level key for matching, but the stored text is unchanged, and a probability is never rounded.
+6. Several holders' beliefs about one claim sit side by side, and none replaces another.
+7. Calibration reads a probability against the assessed prediction's `check_by` and verdict.
+
+`holder` names whose belief it is. `asserted_by` names whose claim a unit is. They are different keys, because the two questions differ: a vendor asserts an uptime figure, and the team believes it is likely wrong.
+
+Exomem writes no belief in this change. A later change that computes one must label it derived and must not replace a holder's belief.
 
 The rejected alternatives were levels only, which keeps the old rule but gives up calibration, and free numbers on any claim, which is the most exposed to unsupported precision.
 
-### Mood, holder, order, definitions, quantities, procedures
+### New governed metadata keys
 
-- **Mood** is registry data: is, should, must, may by default. It is a unit attribute, so a norm and a fact about the same subject never merge.
-- **Holder** is a unit attribute that names an entity. It generalises "attributed accounts versus established facts": a claim with a holder is that holder's view.
-- **Order:** `precedes` and `follows` join the core relations with the `orders` behaviour. The existing `timeline_event` kind gains a governed `at` metadata key.
-- **Definitions:** a `definition` kind, plus the `defines` and `is_a` relations.
-- **Quantities:** the governed unit metadata keys `value`, `unit` and `uncertainty`. Records remain the place for a series.
-- **Procedures:** a `procedure` kind. Approved procedures as skills stay in their own change, which reads this kind.
+- `asserted_by` names an entity. Context presents a unit with it as that party's claim.
+- `mood` takes a mood-registry key: is, should, must, may. Retrieval and context never merge units whose moods differ.
+- `at` is a date or a date and time on a `timeline_event`.
+- `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series. The names are long so that they do not collide with ordinary rows such as `- value:`.
+- `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
+
+Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release.
 
 ### Multilingual labels
 
-Each registry entry carries `labels: {language: text}`. Keys stay language-neutral. Parsing accepts any label as an alias of its key, so a unit written in Finnish and one written in English resolve to the same meaning.
+Each registry entry carries `labels: {language: text}`. Keys stay language-neutral. Parsing accepts a label as an alias of its key, so `## Väite` and `## Claim` are one kind. The registry check refuses a label that collides with another entry's key or label.
 
 ## Risks
 
-- **A behaviour change hides in a data migration.** The shipped pack must reproduce today's sets exactly. A before-and-after test over a fixture vault compares lift proposals, membership and verdict handling.
-- **Agents misuse the new words.** Each slice proves on real models that an agent picks the right word for realistic and hostile inputs. f38's dimension rows measure the whole.
-- **Unsourced numbers creep in.** Validation refuses a `belief` number without `holder` and `basis`, with an error that names both.
+- **A behaviour change hides in a data migration.** The shipped pack must reproduce today's sets exactly. The before-and-after fixture test guards each cutover.
+- **Agents misuse the new words.** Each slice proves on real models that an agent picks the right word for realistic and hostile inputs.
+- **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
+- **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.
