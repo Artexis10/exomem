@@ -199,7 +199,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   large image again, so to inspect detail pass `"region": [x, y, width, height]`
   (fractions of the upright image) and the server crops at full resolution first.
   A view too large for the inline limit comes back smaller with an `original_link`;
-  images past a call's limit are listed in `not_shown` for another call. A camera
+  images past a call's size or time limit are listed in `not_shown` for another call. A camera
   raw file such as DNG, or an image too large to decode, cannot be shown: recover it
   with `transfer_artifact` download instead. Personal servers show images; Exomem
   Cloud does not yet.

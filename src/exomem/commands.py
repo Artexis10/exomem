@@ -9748,12 +9748,15 @@ def _show_images(
         if item.shrunk_to_fit:
             # The client's per-image limit cut the view below the size asked for: link the original.
             entry["shrunk_to_fit"] = True
-            entry["original_link"] = _original_link(vault_root, item.path)
+            link = _original_link(vault_root, item.path)
+            if link is not None:
+                entry["original_link"] = link
         images.append(entry)
     names = ", ".join(item.file_name for item in shown)
     outcome = f"Showing {len(shown)} image{'s' if len(shown) != 1 else ''} below: {names}."
     if result.not_shown:
-        outcome += f" {len(result.not_shown)} more did not fit in this call; show them in another call."
+        cause = "ran out of request time" if result.not_shown_reason == "time" else "did not fit in this call"
+        outcome += f" {len(result.not_shown)} more {cause}; show them in another call."
     meta = {
         "outcome": outcome,
         "images": images,
@@ -9771,15 +9774,15 @@ def _show_images(
     )
 
 
-def _original_link(vault_root: Path, path: str) -> str:
-    """The original's short HTTPS download link, or the download route when none can be minted."""
+def _original_link(vault_root: Path, path: str) -> str | None:
+    """The original's short HTTPS download link, or None when none can be minted."""
     from . import artifact_recovery
 
     try:
         https = artifact_recovery.prepare(vault_root, path).get("deliveries", {}).get("https")
-    except ValueError:  # Includes RecoveryUnavailable: a refused or unsigned original keeps the route.
+    except ValueError:  # Includes RecoveryUnavailable: a refused or unsigned original gets no link.
         https = None
-    return https["url"] if https else "transfer_artifact operation=download"
+    return https["url"] if https else None
 
 
 def _review_question_submission(path: Any, query: Any, family: Any) -> bool:

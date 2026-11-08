@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import artifact_recovery, image_codecs, media_types, mode, reserved_paths
+from . import artifact_recovery, image_codecs, media_types, mode, request_budget, reserved_paths
 
 #: `max_side` value that keeps the original resolution.
 ORIGINAL = "original"
@@ -29,20 +29,30 @@ ORIGINAL = "original"
 # this default. The long side a call gets when it names none ("original" keeps the original size).
 MAX_SIDE_SETTING = "image_view_max_side"
 DEFAULT_MAX_SIDE = 1568
-# The largest image one inline result may carry. The default is the 5 MB per-image limit of the
-# Claude API; a larger view is shrunk until it fits and the reply links the original.
+# The largest image one inline result may carry, as the base64 an image block sends. The default is
+# the Claude API's per-image limit (5 MiB of base64); a larger view is shrunk until it fits and the
+# reply links the original.
 INLINE_BYTES_SETTING = "image_view_inline_max_bytes"
-DEFAULT_INLINE_BYTES = 5 * 1000 * 1000
-# The encoded images one call holds in memory and returns; images past it are listed, not shown.
+DEFAULT_INLINE_BYTES = 5 * 1024 * 1024
+# The longest side one inline image may have. The default is the Claude API's per-image pixel limit;
+# a larger view is shrunk to it and the reply links the original.
+INLINE_SIDE_SETTING = "image_view_inline_max_side"
+DEFAULT_INLINE_SIDE = 8000
+# The base64 one call returns; images past it are listed, not shown. The default keeps a call well
+# inside the Claude API's 32 MB request limit, which the rest of the conversation shares.
 CALL_BYTES_SETTING = "image_view_max_call_bytes"
-DEFAULT_CALL_BYTES = 48 * 1024 * 1024
+DEFAULT_CALL_BYTES = 20 * 1024 * 1024
+# Request time kept for one more image before a call stops and lists the rest: a 12 MP phone photo
+# decodes and encodes in under 2 s on a desktop, and the response still has to be sent.
+_IMAGE_RESERVE_SECONDS = 5.0
 _JPEG_QUALITY = 85
 # Re-encodes at a smaller size before an oversized view is given up as too large to inline.
 _SHRINK_ATTEMPTS = 4
 # A larger original is read into memory to decode; past this, the person downloads it instead.
 MAX_ORIGINAL_BYTES = 128 * 1024 * 1024
-# Decoded pixels, after JPEG's reduced-scale decode. 50 MP covers 48 MP phone HEIF photos
-# (about 150 MB as RGB in the serving process); a 50 MP camera JPEG decodes at a quarter
+# Decoded pixels, after JPEG's reduced-scale decode. 50 MP covers 48 MP phone HEIF photos; at
+# "original" one such image peaks at about 0.6 GB in the serving process while it is turned,
+# converted and encoded. A 50 MP camera JPEG asked for at a smaller size decodes at a quarter
 # scale, and a 13,000 px PNG is refused.
 MAX_DECODE_PIXELS = 50_000_000
 # One decode at a time bounds the memory that concurrent image reads can take.
@@ -88,8 +98,15 @@ class ShownImage:
 @dataclass(frozen=True, slots=True)
 class Shown:
     images: list[ShownImage]
-    #: Requested paths left out because the call's byte limit was reached, in request order.
+    #: Requested paths left out, in request order, because the call reached its byte limit
+    #: (`not_shown_reason` "size") or its request time (`"time"`).
     not_shown: list[str]
+    not_shown_reason: str | None = None
+
+
+def wire_bytes(jpeg: bytes) -> int:
+    """What an image block sends for these bytes: their base64 length."""
+    return 4 * math.ceil(len(jpeg) / 3)
 
 
 def _setting(name: str, default: int, *, original: bool = False) -> int | None:
@@ -125,6 +142,7 @@ def resolve_region(region: Sequence[float] | None) -> Region | None:
         x, y, width, height = (float(value) for value in region)
     except (TypeError, ValueError):
         x = y = width = height = math.nan
+    # The tolerance lets a client's float sum, such as 0.7 + 0.3, end at the edge.
     if not (
         0 <= x < 1 and 0 <= y < 1 and 0 < width <= 1 - x + 1e-9 and 0 < height <= 1 - y + 1e-9
     ):
@@ -167,7 +185,7 @@ def _rgb(image):
 
 
 def _render(
-    data: bytes, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int
+    data: bytes, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int, inline_side: int
 ) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes, bool]:
     from PIL import Image, ImageOps
 
@@ -176,9 +194,14 @@ def _render(
         stored = opened.size
         if max_side is not None:
             # JPEG decodes directly at a reduced scale; other formats ignore the draft request.
-            # A region keeps its own detail: the decode must hold max_side across the crop.
-            need = max_side if region is None else math.ceil(max_side / min(region.width, region.height))
-            opened.draft("RGB", (need, need))
+            if region is None:
+                opened.draft("RGB", (max_side, max_side))
+            else:
+                # The crop's long side must keep max_side pixels. It spans at least the larger region
+                # fraction of the stored short side, so that bounds the reduction from below.
+                scale = max_side / (max(region.width, region.height) * min(stored))
+                if scale < 1:
+                    opened.draft("RGB", (math.ceil(stored[0] * scale), math.ceil(stored[1] * scale)))
         # The header names the decode size. Check it before anything that loads pixels:
         # Pillow decodes a whole PNG to read EXIF that follows the image data.
         if opened.size[0] * opened.size[1] > MAX_DECODE_PIXELS:
@@ -195,29 +218,31 @@ def _render(
             image = image.convert("RGBA" if "transparency" in image.info else "RGB")
         if region is not None:
             width, height = image.size
-            left, top = round(region.x * width), round(region.y * height)
+            left = min(round(region.x * width), width - 1)
+            top = min(round(region.y * height), height - 1)
             image = image.crop((
-                min(left, width - 1), min(top, height - 1),
-                max(left + 1, round((region.x + region.width) * width)),
-                max(top + 1, round((region.y + region.height) * height)),
+                left, top,
+                min(width, max(left + 1, round((region.x + region.width) * width))),
+                min(height, max(top + 1, round((region.y + region.height) * height))),
             ))
         # Shrink before the remaining conversions, so they copy the small image.
         if max_side is not None:
             image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        shrunk = max(image.size) > inline_side
+        image.thumbnail((inline_side, inline_side), Image.Resampling.LANCZOS)
         image = _rgb(image)
         jpeg = _jpeg(image)
-        shrunk = False
         for _ in range(_SHRINK_ATTEMPTS):
-            if len(jpeg) <= inline_bytes:
+            if wire_bytes(jpeg) <= inline_bytes:
                 break
             # JPEG size grows about with the pixel count; aim a little under the limit.
-            scale = math.sqrt(inline_bytes / len(jpeg)) * 0.9
+            scale = math.sqrt(inline_bytes / wire_bytes(jpeg)) * 0.9
             image.thumbnail(
                 (max(1, int(image.size[0] * scale)), max(1, int(image.size[1] * scale))),
                 Image.Resampling.LANCZOS,
             )
             jpeg, shrunk = _jpeg(image), True
-        if len(jpeg) > inline_bytes:
+        if wire_bytes(jpeg) > inline_bytes:
             raise _TooLarge
         return original, image.size, taken_at, jpeg, shrunk
 
@@ -233,7 +258,31 @@ class _TooLarge(Exception):
 
 
 def _download_instead(path: str) -> str:
-    return f"{path} is too large to show; download the original with transfer_artifact operation=download"
+    return (
+        f"{path} is too large to show at this size; ask for a smaller max_side or a region, "
+        "or download the original with transfer_artifact operation=download"
+    )
+
+
+def _read_original(vault_root: Path, path: str, who) -> tuple[str, str, str, bytes]:
+    """The stored path, file name, suffix and verified bytes of one requested image."""
+    # The recovery slot covers the verified read only; downloads share the two slots.
+    with artifact_recovery.stage(vault_root, path, who) as (copied, descriptor):
+        original_path = descriptor["path"]
+        suffix = Path(original_path).suffix.lower()
+        kind = media_types.media_type_for(original_path)
+        if kind == "video":
+            raise ImageViewError("NOT_AN_IMAGE", f"{path} is a video; read it with read_media kind=video")
+        if kind != "image":
+            raise ImageViewError(
+                "IMAGE_FORMAT_UNSUPPORTED",
+                f"{path} ({suffix or 'no extension'}) cannot be shown as an image; "
+                "download the original with transfer_artifact operation=download",
+            )
+        if copied.size > MAX_ORIGINAL_BYTES:
+            raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path))
+        # `stage` hands over a held handle; read_held refuses bytes read across a change.
+        return original_path, descriptor["file_name"], suffix, reserved_paths.read_held(copied, 0, copied.size)
 
 
 def show(
@@ -252,35 +301,29 @@ def show(
     side = resolve_side(max_side)
     crop = resolve_region(region)
     inline_bytes = _setting(INLINE_BYTES_SETTING, DEFAULT_INLINE_BYTES)
+    inline_side = _setting(INLINE_SIDE_SETTING, DEFAULT_INLINE_SIDE)
     call_bytes = _setting(CALL_BYTES_SETTING, DEFAULT_CALL_BYTES)
     who = artifact_recovery.delegated_principal()
     shown: list[ShownImage] = []
     held = 0
     for index, path in enumerate(selected):
         if shown and held >= call_bytes:
-            return Shown(shown, list(selected[index:]))
-        # The recovery slot covers the verified read only; downloads share the two slots.
-        with artifact_recovery.stage(vault_root, path, who) as (copied, descriptor):
-            original_path = descriptor["path"]
-            suffix = Path(original_path).suffix.lower()
-            kind = media_types.media_type_for(original_path)
-            if kind == "video":
-                raise ImageViewError("NOT_AN_IMAGE", f"{path} is a video; read it with read_media kind=video")
-            if kind != "image":
-                raise ImageViewError(
-                    "IMAGE_FORMAT_UNSUPPORTED",
-                    f"{path} ({suffix or 'no extension'}) cannot be shown as an image; "
-                    "download the original with transfer_artifact operation=download",
-                )
-            if copied.size > MAX_ORIGINAL_BYTES:
-                raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path))
-            # `stage` hands over a held handle; read_held refuses bytes read across a change.
-            data = reserved_paths.read_held(copied, 0, copied.size)
+            return Shown(shown, list(selected[index:]), "size")
+        # A call that would outrun the request returns what it has and lists the rest.
+        if shown and not request_budget.can_afford(_IMAGE_RESERVE_SECONDS):
+            return Shown(shown, list(selected[index:]), "time")
+        try:
+            original_path, file_name, suffix, data = _read_original(vault_root, path, who)
+        except artifact_recovery.RecoveryUnavailable:
+            # The request's deadline also ends a staged read; past it, return what was shown.
+            if shown and not request_budget.can_afford(0):
+                return Shown(shown, list(selected[index:]), "time")
+            raise
         from PIL import Image
 
         try:
             with _DECODE:
-                original, size, taken_at, jpeg, shrunk = _render(data, suffix, side, crop, inline_bytes)
+                original, size, taken_at, jpeg, shrunk = _render(data, suffix, side, crop, inline_bytes, inline_side)
         except ImportError as error:
             raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
         except (_TooLarge, Image.DecompressionBombError) as error:
@@ -289,8 +332,8 @@ def show(
             raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error
         finally:
             del data
-        if shown and held + len(jpeg) > call_bytes:
-            return Shown(shown, list(selected[index:]))
-        held += len(jpeg)
-        shown.append(ShownImage(original_path, descriptor["file_name"], original, size, taken_at, jpeg, shrunk))
+        if shown and held + wire_bytes(jpeg) > call_bytes:
+            return Shown(shown, list(selected[index:]), "size")
+        held += wire_bytes(jpeg)
+        shown.append(ShownImage(original_path, file_name, original, size, taken_at, jpeg, shrunk))
     return Shown(shown, [])

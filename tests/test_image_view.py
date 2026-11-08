@@ -303,17 +303,52 @@ def _noise(width: int, height: int) -> bytes:
 
 
 def test_a_view_over_the_clients_image_limit_is_shrunk_and_links_the_original(served, monkeypatch):
-    """A client that rejects a large inline image still gets a view, and the original's link for its own crop."""
-    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_INLINE_MAX_BYTES", "60000")
+    """A client that rejects a large inline image still gets a view, and the original's link for its own crop.
+
+    The client's limit applies to the base64 an image block carries, a third larger than the JPEG: a
+    view whose JPEG fits but whose base64 does not must still be shrunk.
+    """
     mcp, client = served
     path = _upload(client, "IMG_0014.jpg", _noise(600, 400), "image/jpeg")
+    full = _call(mcp, {"kind": "image", "path": path, "max_side": "original"})
+    sent = len(full.content[1].data)
+    limit = sent - 1000
+    assert limit > len(base64.b64decode(full.content[1].data)), "the JPEG alone must fit the limit"
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_INLINE_MAX_BYTES", str(limit))
 
     result = _call(mcp, {"kind": "image", "path": path, "max_side": "original"})
 
     [shown] = result.structured_content["images"]
     assert shown["shrunk_to_fit"] is True and max(shown["shown_pixels"]) < 600
-    assert len(base64.b64decode(result.content[1].data)) <= 60000
+    assert len(result.content[1].data) <= limit
     assert shown["original_link"].startswith("https://archive.example/download?grant=")
+
+
+def test_a_view_longer_than_the_clients_pixel_limit_is_shrunk_and_links_the_original(served, monkeypatch):
+    """A client rejects an image past its pixel limit however few bytes it has."""
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_INLINE_MAX_SIDE", "300")
+    mcp, client = served
+    path = _upload(client, "IMG_0015.jpg", _photo(800, 600), "image/jpeg")
+
+    [shown] = _call(mcp, {"kind": "image", "path": path, "max_side": "original"}).structured_content["images"]
+
+    assert shown["shown_pixels"] == [300, 225] and shown["shrunk_to_fit"] is True
+    assert shown["original_link"].startswith("https://archive.example/download?grant=")
+
+
+def test_a_call_that_runs_out_of_request_time_returns_what_it_showed(served, monkeypatch):
+    """Past the request's time, a call keeps the images it has and names the rest, never fails whole."""
+    from exomem import request_budget
+
+    mcp, client = served
+    paths = [_upload(client, f"IMG_003{n}.jpg", _photo(400, 300), "image/jpeg") for n in range(3)]
+    monkeypatch.setattr(request_budget, "can_afford", lambda reserve: False)
+
+    meta = _call(mcp, {"kind": "image", "paths": paths}).structured_content
+
+    assert [item["path"] for item in meta["images"]] == paths[:1]
+    assert meta["not_shown"] == paths[1:]
+    assert "2 more ran out of request time" in meta["outcome"]
 
 
 def test_images_past_the_calls_byte_limit_are_listed_not_dropped(served, monkeypatch):
