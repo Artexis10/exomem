@@ -94,8 +94,10 @@ The script deletes only keys that the provider lists with the exact prefix `cell
 For `cell-data` it hides the cell's current backup files and never deletes a file version: the bucket's
 compliance lock keeps every version until its retention ends. For `founder` it deletes only versions that the
 provider lists under that prefix. Every step is safe to repeat.
-For unfinished large files, the provider's [delete-file-version API](https://www.backblaze.com/apidocs/b2-delete-file-version)
-cancels the upload, so the same command also removes their uploaded parts.
+For `founder`, the listing includes unfinished large files, and the script sends the same
+[delete-file-version call](https://www.backblaze.com/apidocs/b2-delete-file-version) for each of them.
+This runbook does not rely on that call to cancel an unfinished upload, because that provider behaviour
+is unverified here. The final dry run counts unfinished files in `files_found`, so it shows any that remain.
 If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
 
 ## Media bucket of a deleted cell
@@ -118,7 +120,7 @@ so the same 7-day grace applies, counted from your own first dry run.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id> --first-dry-run <date> --apply`
 5. Expect `delete=due`, `files_deleted` equal to `files_found` and `unfinished_cancelled` equal to `unfinished_found`.
    The script deletes every file version under `cells/<cell_id>/`, hidden versions included. It cancels each unfinished
-   large file with the provider's cancel call, because the delete call does not replace it for an upload that never finished.
+   large file with the provider's cancel call. It does not rely on the delete call for an upload that never finished.
 6. Run the dry run again. The clean-up is complete when it shows `files_found=0` and `unfinished_found=0`.
 
 Every step is safe to repeat. An upload that the edge started for this cell before its revocation stays unfinished until

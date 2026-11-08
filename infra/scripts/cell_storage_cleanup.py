@@ -17,8 +17,8 @@ the founder account's media bucket (`add-cloud-media-store` D9), which holds no 
   `cells/<cell id>/` in the bucket named by `--bucket-id`, hidden ones included, with no grace.
 - media: the media bucket has no lock and its objects are the only copy, so it has the same 7-day grace
   as cell-data. `--apply` after the grace deletes every file version under `cells/<cell id>/` and
-  cancels every unfinished large file there with the provider's cancel call, which the delete call does
-  not replace for an upload that never finished. It counts unfinished files apart from versions. It lists
+  cancels every unfinished large file there with the provider's cancel call. It does not rely on the
+  delete call for an upload that never finished. It counts unfinished files apart from versions. It lists
   no key and deletes none.
 
 The grace starts at the operator's own first dry run, never at a time that cellctl or the
