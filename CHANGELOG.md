@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.164.1](https://github.com/Artexis10/exomem/compare/v0.164.0...v0.164.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **episodes:** name record_episode in recap-kind refusals ([#2529](https://github.com/Artexis10/exomem/issues/2529)) ([fcad3b6](https://github.com/Artexis10/exomem/commit/fcad3b6df19518506bc673f8293ffb4b2fa62d4d))
+
+
+### Performance
+
+* **recall:** time each task-context stage so a slow recall names its cause ([#2528](https://github.com/Artexis10/exomem/issues/2528)) ([20c444c](https://github.com/Artexis10/exomem/commit/20c444c068b10d667c2e38e7f337ab584fac611c))
+
 ## [0.164.0](https://github.com/Artexis10/exomem/compare/v0.163.1...v0.164.0) (2026-11-08)
 
 
