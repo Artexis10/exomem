@@ -4,8 +4,9 @@
 
 This procedure turns the media edge on for one canary Cloud cell, checks it, and
 turns it off again. It implements `add-cloud-media-store`; it does not authorize a
-live rollout. The edge is the only workload that holds the bucket credential. A
-cell holds its own key bundle and a credential that names only that cell.
+live rollout. The edge is the only workload that holds a key that can write to the
+media bucket. cellctl holds a second key that can only list it. A cell holds its own
+key bundle and a credential that names only that cell.
 
 Do not set `mediaEdge.allCells` here. Turn the fleet switch on later, after the
 canary has served real traffic.

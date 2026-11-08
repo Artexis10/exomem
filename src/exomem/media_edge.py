@@ -1,4 +1,4 @@
-"""Media edge: the only holder of the media bucket credential (design D6).
+"""Media edge: the only holder of a write credential for the media bucket (design D6).
 
 It moves ciphertext between cells and one B2 bucket. A cell proves itself with a
 credential that cellctl signs, and the credential alone selects the cell's object
