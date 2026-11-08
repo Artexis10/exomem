@@ -8,7 +8,8 @@ pytestmark = pytest.mark.reads_repository_docs
 
 ROOT = Path(__file__).resolve().parents[2]
 def _text(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8").lower()
+    # One line, no code ticks: a carrier wraps its sentences, and the rule must read the same in each.
+    return " ".join((ROOT / path).read_text(encoding="utf-8").lower().replace("`", "").split())
 
 
 def _active_capture_carriers(vault: Path) -> dict[str, str]:
@@ -25,10 +26,10 @@ def _active_capture_carriers(vault: Path) -> dict[str, str]:
     }
 
 
-def test_every_active_non_hosted_capture_carrier_teaches_draft_to_adoption(vault: Path) -> None:
+def test_every_active_non_hosted_capture_carrier_teaches_handover_to_adoption(vault: Path) -> None:
     for name, carrier in _active_capture_carriers(vault).items():
-        assert "generated draft" in carrier, name
-        assert "selected" in carrier or "selection" in carrier, name
+        assert "every generated file you hand the user" in carrier, name
+        assert "ephemeral" in carrier, name
         assert "exact" in carrier and "bytes" in carrier, name
         assert "source" in carrier and "evidence" in carrier, name
         assert "mime" in carrier, name
@@ -50,7 +51,8 @@ def test_every_active_non_hosted_capture_carrier_maps_adoption_authority(vault: 
     for name, carrier in _active_capture_carriers(vault).items():
         assert "proactive_capture" in carrier, name
         assert "structural_suggestions" in carrier, name
-        assert "not write consent" in carrier or "not write confirmation" in carrier, name
+        # The hand-over rule runs under the live capture policy, never as a standing write permission.
+        assert "under proactive_capture" in carrier, name
 
 
 def test_off_and_light_remain_explicit_request_only() -> None:
@@ -59,7 +61,7 @@ def test_off_and_light_remain_explicit_request_only() -> None:
     for level in ("off", "light"):
         capture = prominence.CONTRACTS[level].capture.lower()
         assert ("only when" in capture or "unless" in capture) and "asks" in capture
-        assert "generated draft" not in capture
+        assert "every generated file" not in capture
         assert "proactive_capture" not in capture
 
 
@@ -81,7 +83,7 @@ def test_scaffold_and_deployed_claude_code_copies_match() -> None:
 def test_public_guides_teach_exact_adoption_and_honest_handoff() -> None:
     for path in ("QUICKSTART.md", "docs/ai-assistant-guide.md", "docs/prominence.md"):
         text = _text(path)
-        assert "generated draft" in text, path
+        assert "every generated file" in text and "hand" in text, path
         assert "exact" in text and "bytes" in text, path
         assert "non-committing" in text and "handoff" in text, path
         assert "proactive_capture" in text, path

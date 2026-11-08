@@ -797,7 +797,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             recomputed["already_stored"] = counts["already_stored"]
         return {"files": projected, "summary": recomputed}
     projected_summary: dict[str, int] = {}
-    for outcome in ("stored", "replayed", "failed", "unselected"):
+    for outcome in ("stored", "already_stored", "replayed", "failed", "unselected"):
         value = summary.get(outcome)
         if value is None and outcome not in {"stored", "failed"}:
             continue

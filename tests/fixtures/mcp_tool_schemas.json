@@ -451,6 +451,7 @@
           "additionalProperties": false,
           "properties": {
             "key": {
+              "description": "One per hand-over: file name plus version.",
               "maxLength": 512,
               "minLength": 1,
               "type": "string"
@@ -472,7 +473,7 @@
             "selected_file_id"
           ],
           "type": "object",
-          "description": "Select one handle; not write consent."
+          "description": "The handle handed to the user; proactive_capture applies."
         },
         "raw_protection": {
           "default": false,
@@ -4941,6 +4942,7 @@
           "additionalProperties": false,
           "properties": {
             "key": {
+              "description": "One per hand-over: file name plus version.",
               "maxLength": 512,
               "minLength": 1,
               "type": "string"
@@ -4962,7 +4964,7 @@
             "selected_file_id"
           ],
           "type": "object",
-          "description": "Selected handle: eligibility, not write consent; proactive_capture applies."
+          "description": "The handle handed to the user; proactive_capture applies."
         },
         "transcriptions": {
           "default": [],

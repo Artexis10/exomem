@@ -529,7 +529,12 @@ _OptionalArtifactAdoption = Annotated[
                     "additionalProperties": False,
                     "required": ["key", "trigger", "selected_file_id"],
                     "properties": {
-                        "key": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "key": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "description": "One per hand-over: file name plus version.",
+                        },
                         "trigger": {"type": "string", "minLength": 1, "maxLength": 64},
                         "selected_file_id": {
                             "type": "string",
@@ -8741,7 +8746,7 @@ def op_capture_source(
         domain: Subject slug.
         projects: Projects.
         files: Original handles.
-        adoption: Select one handle; not write consent.
+        adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Owner-only original.
         source_identity: Durable text-capture identity.
         expected_sha256: Original SHA-256 (UTF-8 for content).
@@ -9181,7 +9186,7 @@ def op_preserve_artifacts(
     Args:
         scope: Case/project key; one path segment.
         category: One path segment.
-        adoption: Selected handle: eligibility, not write consent; proactive_capture applies.
+        adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Keep originals owner-only until whole-artifact release.
     """
     from . import client_artifacts
