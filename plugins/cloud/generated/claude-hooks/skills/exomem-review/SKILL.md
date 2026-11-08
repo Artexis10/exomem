@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: b1bad0cbe569a778cfe642a2cf1f3d217747853552286519928b2cab629bfdc3
+  skill_contract: 412422c322d279450a5070c9bcb1eb23253ff06eb6f45dbc8362e8ec49b1f66a
   version: "0.2.0"
 ---
 

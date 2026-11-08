@@ -361,6 +361,58 @@ def test_suggest_relations_says_so_when_the_queue_cannot_confirm_a_candidate(
     assert any("review" in warning for warning in suggested["warnings"]), suggested["warnings"]
 
 
+def test_suggest_relations_does_not_echo_the_cause_when_the_queue_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import relation_queue
+
+    _vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
+
+    def unreadable(*_args: object, **_kwargs: object) -> None:
+        raise OSError(13, "Permission denied", "/private/state/review-state.json")
+
+    monkeypatch.setattr(relation_queue, "open_reviews", unreadable)
+
+    suggested = call(
+        "read_connections", {"operation": {"kind": "suggest-relations", "path": person}}
+    )
+
+    assert any(c["to"] == organization for c in suggested["candidates"])
+    assert any("review fields unavailable" in w for w in suggested["warnings"]), suggested
+    assert not any("/private" in w or "Permission" in w for w in suggested["warnings"])
+
+
+def test_suggest_relations_warns_for_a_candidate_beyond_the_queues_generator_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import relation_queue
+
+    vault, call = _served(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    person = _entity(call, "person", "Ada Marsh")["path"]
+    organizations = [
+        _entity(call, "organization", title)["path"] for title in ("Birch Works", "Cedar Works")
+    ]
+    source = call(
+        "capture_source",
+        {"title": "Shared source", "source_kind": "session", "content": "Three pages cite this."},
+    )["path"]
+    for page in (person, *organizations):
+        _cite(vault, page, source)
+    _rebuild(vault, monkeypatch)
+    # Two pages share the source, but the queue's shared-source generator now stops at one.
+    monkeypatch.setattr(relation_queue, "_MAX_GENERATED_PER_METHOD", 1)
+
+    suggested = call(
+        "read_connections", {"operation": {"kind": "suggest-relations", "path": person}}
+    )
+
+    shared = [c for c in suggested["candidates"] if c["method"] == "shared_sources"]
+    assert {c["to"] for c in shared} == set(organizations)
+    assert sorted("review" in c for c in shared) == [False, True], shared
+    assert any("1 candidate(s)" in w for w in suggested["warnings"]), suggested["warnings"]
+
+
 def test_suggest_relations_carries_the_fitting_relations_for_the_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -444,6 +496,51 @@ def test_a_candidate_between_two_plain_notes_still_accepts_without_naming_a_rela
     assert f"- relates_to [[{pages[1].removesuffix('.md')}]]" in (vault / pages[0]).read_text(
         encoding="utf-8"
     )
+
+
+def test_a_candidate_that_offers_no_relation_refuses_a_named_one_and_says_to_accept_it_as_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    source = call(
+        "capture_source",
+        {"title": "Shared source", "source_kind": "session", "content": "Two notes cite this."},
+    )["path"]
+    pages = []
+    for title in ("Acorn notes", "Birch notes"):
+        page = f"{NOTES}/{title.lower().replace(' ', '-')}.md"
+        (vault / page).parent.mkdir(parents=True, exist_ok=True)
+        (vault / page).write_text(
+            f"---\ntype: insight\nstatus: active\nsources:\n  - {source}\n---\n# {title}\n\n"
+            f"{title} are an invented note.\n",
+            encoding="utf-8",
+        )
+        pages.append(page)
+    _rebuild(vault, monkeypatch)
+    group, item = _shared_source_item(call, *pages)
+    assert "options" not in item
+    before = (vault / pages[0]).read_bytes()
+
+    refused = call(
+        "change_connections",
+        {
+            "operation": {
+                "kind": "accept-relation",
+                "ref": item["ref"],
+                "path": group["path"],
+                "expected_hash": group["content_hash"],
+                "expected_fingerprint": item["fingerprint"],
+                "why": "Reviewed the shared source.",
+                "requested_relation": "supports",
+            }
+        },
+    )
+
+    assert refused["error"]["code"] == "VOCABULARY_APPLICATION_INVALID", refused
+    assert "without requested_relation" in refused["error"]["remediation"]
+    assert "choose one of the offered" not in refused["error"]["remediation"]
+    assert (vault / pages[0]).read_bytes() == before
 
 
 def _entity_pair_in_fixture_vault(

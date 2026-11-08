@@ -867,7 +867,7 @@ function openRelationTriage(item, action) {
 
 // A row whose item carries `options` offers a choice, not Accept. A refusal still arrives when the
 // item had none at read time. The owner then reads the relations that fit with the server's own
-// remediation; naming one through accept is a vocabulary decision that Studio does not make.
+// remediation. Studio writes a chosen relation as its own audited edit, not through accept.
 function choiceRefusal(error, item) {
   if (!(error instanceof ApiError) || error.code !== "RELATION_CHOICE_REQUIRED") return error;
   const fitting = fittingRelations(item);
