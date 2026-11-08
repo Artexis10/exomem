@@ -311,14 +311,14 @@ def _enrol_store(
 ) -> None:
     """The owner's offline `exomem collections create`, in the coordinator database a run will use."""
     from test_collection_store_s1_gate import coordinator
-    from test_collection_store_summary import summary_text
+    from test_collection_store_summary import sqlite_text
     from test_collection_store_writer import manifest_path
 
     from exomem import __main__ as cli
 
     state_dir.mkdir(parents=True)
     manifest = state_dir / "store-collection.md"
-    manifest.write_text(summary_text(), encoding="utf-8")
+    manifest.write_text(sqlite_text(), encoding="utf-8")
     for name, value in {
         "EXOMEM_STATE_ROOT": str(state_dir / "product"),
         "EXOMEM_WRITER_LEASE_URL": "http://localhost",

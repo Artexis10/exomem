@@ -65,7 +65,8 @@ from exomem.governance.principal import library_scope, owner_principal, request_
 DERIVED = "88888888-8888-4888-8888-888888888888"
 PATH = manifest_path().replace("Work", "Samples")
 ROLLUP = "rollups:\n  daily:\n    bucket: day\n    timestamp: local_date\n    values:\n      value: [sum, max]\n"
-TEXT = manifest_text(DERIVED, "Samples", FIELDS).replace(
+# A new collection keeps its rows in the store (storage.strategy sqlite); a derived one keeps them beside it.
+TEXT = manifest_text(DERIVED, "Samples", FIELDS).replace("strategy: markdown-items\n", "strategy: sqlite\n").replace(
     "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n").removesuffix("---\n") + ROLLUP + "---\n"
 # Four hourly samples on each of three November days: values in tenths, local Tallinn (+02:00) time.
 DAYS = {

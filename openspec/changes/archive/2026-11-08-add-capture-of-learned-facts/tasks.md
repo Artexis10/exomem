@@ -19,4 +19,4 @@
 
 ## 5. Delivery
 
-- [ ] 5.1 Review, merge and release.
+- [x] 5.1 Review, merge and release.

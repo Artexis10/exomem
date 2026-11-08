@@ -189,6 +189,13 @@ jobs:
           fi
           bwrap --unshare-all --new-session --die-with-parent \
             --ro-bind / / -- /usr/bin/true
+      - name: Restore the age release archive
+        # GitHub release downloads failed in most core shards on 2026-11-08.
+        # Keyed on the script, which pins the version and checksum.
+        uses: actions/cache@v4
+        with: &age-archive-cache
+          path: ${{ runner.temp }}/age-archive
+          key: age-archive-${{ hashFiles('scripts/ci-install-age.sh') }}
       - name: Install age encryption tools
         # The protected-import suite skips without the real age and age-keygen.
         # The script bounds its download retries at three minutes.
@@ -571,6 +578,10 @@ jobs:
       - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         if: steps.scope.outputs.docs_only != 'true'
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 330 --request-timeout 20
+      - name: Restore the age release archive
+        if: steps.scope.outputs.docs_only != 'true'
+        uses: actions/cache@v4
+        with: *age-archive-cache
       - name: Install retained-original encryption tools
         # The script bounds its download retries at three minutes.
         timeout-minutes: 5

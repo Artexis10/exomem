@@ -1097,7 +1097,8 @@ def render_view(conn, identity, projection, manifest, *, root=None, cache=None,
     if projection["kind"] == "summary":
         generation, head = conn.execute("SELECT generation,audit_head FROM collections WHERE collection_id=?",
                                         (projection["collection_id"],)).fetchone()
-        return generation, summary.render_page(conn, manifest, stamp(identity, generation, head))
+        return generation, summary.render_page(conn, manifest, stamp(identity, generation, head),
+                                               projection["path"])
     if projection["kind"] == "log":
         generation, frame = conn.execute("SELECT generation,log_frame_json FROM collections WHERE collection_id=?",
                                          (projection["collection_id"],)).fetchone()

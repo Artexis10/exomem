@@ -92,12 +92,28 @@ class CollectionTypeError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class Reference:
+    """A field through which one item names another item of its collection."""
+
+    field: str
+    #: `(collection_id, value)`: the item key that a stored value names in that collection, or None.
+    target: Callable[[str, Any], str | None]
+    #: `(collection_id, item_key)`: half-open text ranges `(lower, upper)`, None unbounded, whose union
+    #: holds every stored value that names the item, so an index range read finds its referrers.
+    spellings: Callable[[str, str], tuple[tuple[str | None, str | None], ...]]
+
+
+@dataclass(frozen=True, slots=True)
 class NamedValidator:
     """One product-owned rule a declaration can opt into by name."""
 
     name: str
     #: `(manifest, plans, *, write)`; `write` is the item a write changes, None for a read.
     validate: Callable[..., None]
+    #: The references the rule follows, when it judges a write only through them. A write can then
+    #: change only the item, the items it names and the items that name it, so a writer may pass that
+    #: neighbourhood instead of every item (`references.neighbourhood`). Empty: pass every item.
+    references: Callable[[], tuple[Reference, ...]] = tuple
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,9 +150,18 @@ def _planning_hierarchy_v1(
     planning.validate_hierarchy(manifest, plans, write=write)
 
 
+def _planning_hierarchy_references() -> tuple[Reference, ...]:
+    from .. import planning
+
+    return tuple(Reference(name, collections.plan_ref_target, collections.plan_ref_spellings)
+                 for name in planning.HIERARCHY_FIELDS)
+
+
 _NAMED_VALIDATORS: Mapping[str, NamedValidator] = MappingProxyType(
     {
-        "planning.hierarchy.v1": NamedValidator("planning.hierarchy.v1", _planning_hierarchy_v1),
+        "planning.hierarchy.v1": NamedValidator(
+            "planning.hierarchy.v1", _planning_hierarchy_v1, _planning_hierarchy_references
+        ),
     }
 )
 

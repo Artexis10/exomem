@@ -154,7 +154,8 @@ def test_a_non_owner_is_refused_before_any_collection_is_read(tmp_path, monkeypa
 
 def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch):
     """A public check_memory schema that offers no way to call the preflight: the handler wanted
-    dry_run=true, which the schema never offered, so every call failed."""
+    dry_run=true, which the schema never offered, so every call failed. Or one that offers no
+    cursor, so an agent cannot read the inventory past its first page."""
     import asyncio
 
     from fastmcp import Client
@@ -173,11 +174,43 @@ def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch)
         async with Client(server) as client:
             report = await client.call_tool("check_memory", {"operation": {"kind": "collections-store"}},
                                             raise_on_error=False)
-            return report
+            foreign = await client.call_tool(
+                "check_memory", {"operation": {"kind": "collections-store", "cursor": "bm90LWEtY3Vyc29y"}},
+                raise_on_error=False)
+            return report, foreign
 
     try:
-        report = asyncio.run(run())
+        report, foreign = asyncio.run(run())
     finally:
         writer_lease.reset_managers_for_tests()
     assert report.structured_content["verdict"] == "blocked"
     assert report.structured_content["blocked"] == [BROKEN]
+    # The cursor reaches the inventory, which names the remedy, rather than failing the tool's schema.
+    assert "cursor is not a next_cursor" in foreign.content[0].text
+
+
+def test_an_item_stamped_with_its_note_identity_stays_importable_and_is_counted(tmp_path):
+    """A preflight that blocks a collection because an ID backfill stamped the vault's own note
+    identity on an item file, or that hides how many items carry that stamp."""
+    root = tmp_path / "vault"
+    init_vault(root)
+    ledger(root, batches=1)
+    item = sorted((root / LEDGER_COLLECTION_PATH).parent.glob("Entries/*.md"))[0]
+    # The stamp an ID backfill writes: the note's identity key, outside the item schema.
+    item.write_text(item.read_text().replace("---\n", "---\nexomem_id: 0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d\n", 1))
+    row = by_path(call(root, dry_run=True))[LEDGER_COLLECTION_PATH]
+    assert (row["status"], row.get("blocker"), row.get("rows"), row.get("stamped_items")) == ("ready", None, 2, 1)
+
+
+def test_a_sqlite_manifest_that_no_store_holds_is_blocked_not_skipped(tmp_path):
+    """A preflight that reads a sqlite manifest without a store as a skipped dataset, so the
+    owner never learns that the collection's rows are missing."""
+    from test_collection_store_sqlite_only import PATH, SQLITE
+
+    root = tmp_path / "vault"
+    init_vault(root)
+    (root / PATH).parent.mkdir(parents=True)
+    (root / PATH).write_text(SQLITE)
+    report = call(root, dry_run=True)
+    assert report["blocked"] == [PATH]
+    assert by_path(report)[PATH]["blocker"]["code"] == "COLLECTION_STORE_REQUIRED"

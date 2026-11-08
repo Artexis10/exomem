@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from test_collection_store_s1_gate import _until, coordinator
 from test_collection_store_service import ON, Service, call, offline_create
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import manifest_path
 from test_curation_execution import _create_step, _seed_note
 from test_writer_lease import StoreClient
@@ -148,7 +148,7 @@ def test_service_release_cannot_revoke_a_cli_curation_grant(
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(capability, "RELEASED", ON)
     manifest = tmp_path / "collection.md"
-    manifest.write_text(summary_text())
+    manifest.write_text(sqlite_text())
     database = tmp_path / "coordinator.sqlite"
     plan = {"version": 1, "title": "Shared grant proposal",
             "steps": [_create_step("conclusion", "shared-grant-conclusion")]}

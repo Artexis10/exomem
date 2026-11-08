@@ -136,6 +136,7 @@ from . import provenance as provenance_module
 from . import review_state as review_state_module
 from . import vault as vault_module
 from .collection_store import ownership
+from .collection_store.aliases import link_target as retired_link_target
 from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
@@ -2648,6 +2649,8 @@ def _check_wikilinks(
             if normalized in kb_stripped_paths:
                 continue
             if target_for_resolve.lstrip("/") in full_paths:
+                continue
+            if "/" in target_for_resolve and retired_link_target(vault_root, target_for_resolve):
                 continue
             # Bare-name lookup: Obsidian resolves [[name]] by filename anywhere
             # in the vault. Only attempt if no path separator.

@@ -137,6 +137,8 @@ class AdapterSnapshot:
     path_guards: tuple[vault.PathGuard, ...] = ()
     directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
     source_bytes: tuple[tuple[str, bytes], ...] = ()
+    # Item files that carry the vault's note identity outside the item schema (counted, never imported).
+    note_identity_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +436,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
         directory_guards_list: list[vault.DirectoryCensusGuard] = [root_guard]
         path_guards: list[vault.PathGuard] = []
         source_bytes: list[tuple[str, bytes]] = []
+        stamped: list[str] = []
         pending = [root_guard]
         candidates = 0
         public_candidates = 0
@@ -523,6 +526,13 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
             compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
+            # A record item is a vault note, so ID backfill may stamp the note's own identity on it.
+            # That key belongs to the vault, not to the item schema, unless the schema declares it.
+            note_identity = (
+                {memory_refs.ID_FIELD}
+                if memory_refs.ID_FIELD not in self.manifest.schema.fields
+                else set()
+            )
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
@@ -533,8 +543,11 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     profile.item_id_property,
                     "schema_version",
                     *compatibility_envelope,
+                    *note_identity,
                 }
             }
+            if note_identity & frontmatter.keys():
+                stamped.append(rel)
             self._validate_values(values)
             identity = collections.ItemIdentity(collection_id, item_id)
             values = self._project_values(values)
@@ -583,6 +596,7 @@ class MarkdownItemsAdapter(_BaseAdapter):
             path_guards=tuple(path_guards),
             directory_guards=directory_guards,
             source_bytes=tuple(source_bytes),
+            note_identity_paths=tuple(stamped),
         )
 
 
@@ -677,14 +691,17 @@ def load_adapter(
         return MarkdownItemsAdapter(Path(vault_root), manifest, authorize_path, project_values)
     if manifest.storage.strategy == "dataset":
         return DatasetAdapter(Path(vault_root), manifest, authorize_path, project_values)
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        # A routed store collection refuses before this point.
+        raise collections.sqlite_store_required()
     raise collections.CollectionError("UNSUPPORTED_STORAGE", "collection storage is unsupported")
 
 
 def validate_storage_contract(manifest: collections.CollectionManifest) -> None:
     """Validate strategy-specific descriptor grammar without opening canonical data."""
     descriptor = manifest.storage.descriptor
-    if manifest.storage.strategy == "markdown-items":
-        return
+    if manifest.storage.item_rows:
+        return  # An item-row strategy declares no descriptor grammar.
     if manifest.storage.strategy == "dataset":
         record_path = descriptor.get("record_path")
         if record_path is not None and (not isinstance(record_path, str) or not record_path):
@@ -1926,7 +1943,8 @@ def inspection_diagnostics(
     diagnostics: Sequence[collections.CollectionDiagnostic] = (),
 ) -> tuple[collections.CollectionDiagnostic, ...]:
     """Compose bounded parse and saved-view diagnostics for the current snapshot."""
-    findings = list((*manifest.view_diagnostics, *diagnostics)[:64])
+    ignored = collections.ignored_recipes_diagnostic(manifest)
+    findings = list((*(() if ignored is None else (ignored,)), *manifest.view_diagnostics, *diagnostics)[:64])
     for name in manifest.views:
         if len(findings) >= 64:
             break
@@ -2365,7 +2383,7 @@ def _staged_store_projection_safe(
     system = _profile_system_fields(manifest)
     fields = manifest.schema.fields
     if (aggregate is not None or expand_children or expand_child is not None
-            or manifest.record_presentation is not None or set(fields) & system):
+            or manifest.child_tables or set(fields) & system):
         return False
     roots: set[str] = set()
     for column in (sort_by, date_column):
@@ -3327,11 +3345,8 @@ def _safe_presentation_values(
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None,
 ) -> dict[str, Any]:
     """Apply the declared child allowlist before any query operation can observe it."""
-    recipe = manifest.record_presentation
-    if recipe is None:
-        return dict(values)
     result = dict(values)
-    for table in recipe.tables:
+    for table in manifest.child_tables:
         rows = _presentation_table_rows(manifest, values, table)
         safe_rows: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
@@ -3364,10 +3379,8 @@ def _resolve_child_selector(
             raise collections.CollectionError(
                 "INVALID_RECORD_QUERY", "expand_child must name a declared child field"
             )
-        if manifest.storage.strategy == "markdown-items":
-            if manifest.record_presentation is None or expand_child not in {
-                table.field for table in manifest.record_presentation.tables
-            }:
+        if manifest.storage.item_rows:
+            if expand_child not in {table.field for table in manifest.child_tables}:
                 raise collections.CollectionError(
                     "INVALID_RECORD_QUERY", "expand_child is not a declared presentation table"
                 )
@@ -3384,8 +3397,8 @@ def _resolve_child_selector(
         )
     if not expand_children:
         return None
-    if manifest.storage.strategy == "markdown-items":
-        tables = () if manifest.record_presentation is None else manifest.record_presentation.tables
+    if manifest.storage.item_rows:
+        tables = manifest.child_tables
         if len(tables) != 1:
             if tables:
                 raise collections.CollectionError(
@@ -3428,7 +3441,7 @@ def _validate_query_projection_fields(
             "ambiguous",
             "parent_record_id",
         },
-        collections._saved_view_child_shapes(manifest.storage, manifest.record_presentation),
+        collections._saved_view_child_shapes(manifest.storage, manifest.child_tables),
         selected_child,
     )
 
@@ -3460,16 +3473,7 @@ def _enforce_selected_child_cap(
     if selected_child is None:
         return
     presentation_table = next(
-        (
-            table
-            for table in (
-                ()
-                if manifest.record_presentation is None
-                else manifest.record_presentation.tables
-            )
-            if table.field == selected_child
-        ),
-        None,
+        (table for table in manifest.child_tables if table.field == selected_child), None
     )
     total = 0
     for record in records:

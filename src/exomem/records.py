@@ -10,11 +10,14 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, NotRequired
 
@@ -52,9 +55,8 @@ _MAX_AUDIT_SOURCE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIT_MARKERS = 10_000
 _MAX_AUDIT_ARCHIVE_ENTRIES = 128
 _MAX_AUDIT_SEGMENT_BYTES = 2_000_000
-_MAX_AUDIT_HISTORY_BYTES = 8_000_000
-_MAX_AUDIT_EVENTS = 10_000
 _AUDIT_ARCHIVE_NAME = re.compile(r"log-[0-9a-f]{20}\.md", re.ASCII)
+_SPOOL_AUDIT_EVENTS = "INSERT INTO history(transition,parent,collection,original) VALUES (?,?,?,?)"
 _MAX_AGENT_AUDIT_HISTORY = 50
 _LIFECYCLE_EVENT_VERSION = 2
 _LIFECYCLE_RECEIPT_VERSION = 2
@@ -134,9 +136,16 @@ class _AuditMarker:
 
 @dataclass(frozen=True, slots=True)
 class _AuditEvents:
+    """One collection's captured audit events, in log order.
+
+    ``events`` holds only what can change that collection's audit result; ``conflicts``
+    names every transition whose occurrences differ anywhere in the history read.
+    """
+
     events: tuple[dict[str, Any], ...]
     parsed: bool
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
+    conflicts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1192,7 +1201,9 @@ def _bulk_used_depth(
 
     The flag is False when the history was not fully parsed, so the count is unknown.
     """
-    history = _audit_events(root, semantic_profile=manifest.semantic_profile)
+    history = _audit_events(
+        root, semantic_profile=manifest.semantic_profile, collection_id=manifest.collection_id
+    )
     used = sum(1 for event in history.events if event["collection_id"] == manifest.collection_id)
     return used, history.parsed
 
@@ -2110,6 +2121,7 @@ def create_collection(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
         manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
+        _refuse_file_view_mode(manifest)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
         )
@@ -2235,13 +2247,67 @@ def validate_collection_create(
     scaffold: bool = True,
 ) -> dict[str, Any]:
     """Preflight collection creation without writer authority or vault mutation."""
+
     return _validate_collection_create_for_profile(
         vault_root,
         manifest_path,
         manifest_text,
         semantic_profile="records",
         scaffold=scaffold,
+        require=partial(require_create_manifest, vault_root),
     )
+
+
+def require_create_manifest(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+    """Every facade's rule for a NEW collection: the vault's storage, and one view per row in a file."""
+    require_create_storage(vault_root, manifest)
+    if manifest.storage.strategy != collections.SQLITE_STORAGE:
+        _refuse_file_view_mode(manifest)
+
+
+def require_file_create(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+    """Every facade's gate before a file create: the vault's storage, and no sqlite collection.
+
+    The serving store thread creates a sqlite collection, so one that reaches the file create
+    had no store thread to run it.
+    """
+    require_create_storage(vault_root, manifest)
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        from .collection_store import ownership, runtime
+
+        runtime.refuse_unserved_create(vault_root, ownership.current(vault_root).marker)
+
+
+def require_create_storage(vault_root: Path, manifest: collections.CollectionManifest) -> None:
+    """Refuse a NEW collection's storage that this vault does not create.
+
+    A vault with an enrolled collection store creates only sqlite collections. A vault without
+    one keeps file-canonical create until the cutover enrolls its store, and a sqlite create
+    there names that enrolment step.
+    """
+    from .collection_store import ownership, runtime
+
+    if not ownership.file_only(vault_root):
+        require_store_storage(manifest)
+    elif manifest.storage.strategy == collections.SQLITE_STORAGE:
+        runtime.refuse_unserved_create(vault_root, None)
+
+
+def require_store_storage(manifest: collections.CollectionManifest) -> None:
+    """Refuse a NEW store collection whose rows would live in Markdown files; it declares sqlite."""
+    if manifest.storage.strategy in collections.MARKDOWN_ROW_STORAGE:
+        raise collections.CollectionError(
+            "SQLITE_STORAGE_REQUIRED",
+            "this vault has a collection store, so a new collection keeps its rows there: declare "
+            f"storage.strategy: {collections.SQLITE_STORAGE}; existing "
+            f"{manifest.storage.strategy} collections stay readable",
+            {
+                "field": "storage.strategy",
+                "received": manifest.storage.strategy,
+                "allowed": sorted(collections.SUPPORTED_STORAGE - collections.MARKDOWN_ROW_STORAGE),
+                "example": f"strategy: {collections.SQLITE_STORAGE}",
+            },
+        )
 
 
 def _validate_collection_create_for_profile(
@@ -2251,8 +2317,13 @@ def _validate_collection_create_for_profile(
     *,
     semantic_profile: str,
     scaffold: bool = True,
+    require: Callable[[collections.CollectionManifest], None] | None = None,
 ) -> dict[str, Any]:
-    """Shared create preflight with one explicit product-profile boundary."""
+    """Shared create preflight with one explicit product-profile boundary.
+
+    ``require`` is the facade's own rule for what its create accepts: a file collection by
+    default; the Records facade's rule depends on whether the vault has a collection store.
+    """
     root = Path(vault_root)
     if not isinstance(manifest_text, str) or not manifest_text:
         raise collections.CollectionError(
@@ -2268,15 +2339,19 @@ def _validate_collection_create_for_profile(
             else "PLANNING_PROFILE_REQUIRED",
             f"{semantic_profile.title()} collection is required",
         )
+    (require or _refuse_file_view_mode)(manifest)
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
         for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}/log.md")
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-    would_create = [manifest.path]
-    warnings: list[dict[str, str]] = []
-    if scaffold and manifest.storage.strategy in {"markdown-items", "markdown-log"}:
+    from .collection_store import summary
+
+    # The store's create receipt names the same paths: the manifest, its summary pages, then the source.
+    would_create = [manifest.path, *summary.page_paths(manifest)]
+    warnings = ignored_recipe_warnings(manifest)
+    if scaffold and manifest.storage.strategy in {*collections.MARKDOWN_ROW_STORAGE, collections.SQLITE_STORAGE}:
         would_create.append(manifest.storage.source)
     elif scaffold and manifest.storage.strategy == "dataset":
         warnings.append(
@@ -2343,11 +2418,11 @@ def _validate_collection_revision_for_profile(
         snapshot,
         semantic_profile=semantic_profile,
     )
-    return {
+    return _with_warnings({
         "valid": True,
         "lifecycle_guards": lifecycle_guards(current, snapshot),
         "normalized_contract": _normalized_manifest_contract(proposed),
-    }
+    }, ignored_recipe_warnings(proposed))
 
 
 def revise_collection(
@@ -2507,7 +2582,12 @@ def export_checkpoint(
             gap_fingerprint=gap_fingerprint,
             checkpoint_snapshot_hash=checkpoint_fingerprint,
         )
-        history = _audit_events(root, semantic_profile=before.semantic_profile)
+        history = _audit_events(
+            root,
+            semantic_profile=before.semantic_profile,
+            collection_id=before.collection_id,
+            transition_ids=(transition_id,),
+        )
         if not history.parsed:
             raise collections.CollectionError(
                 "RECORD_AUDIT_UNAVAILABLE", "the activity log could not be read"
@@ -3112,7 +3192,6 @@ def _preflight_collection_create(
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-    _refuse_file_view_mode(manifest)
     record_formats.validate_storage_contract(manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
@@ -3358,6 +3437,8 @@ def _reconstruct_audit_chain(
     history = _audit_events(
         root,
         semantic_profile=manifest.semantic_profile,
+        collection_id=manifest.collection_id,
+        transition_ids=() if head is None else (head,),
         history_guard=history_guard,
         authorize_path=authorize_path,
     )
@@ -3405,14 +3486,9 @@ def _reconstruct_captured_audit_chain(
     if not history.parsed:
         return _incomplete_audit_chain()
     all_by_id: dict[str, dict[str, Any]] = {}
-    gaps: list[str] = []
+    gaps = ["conflicting-transition:" + transition for transition in history.conflicts]
     for event in events:
-        transition = event["transition_id"]
-        old = all_by_id.get(transition)
-        if old is None:
-            all_by_id[transition] = event
-        elif old != event:
-            gaps.append("conflicting-transition:" + transition)
+        all_by_id.setdefault(event["transition_id"], event)
     by_id = {
         transition: event
         for transition, event in all_by_id.items()
@@ -3776,10 +3852,20 @@ def _audit_events(
     root: Path,
     *,
     semantic_profile: str = "records",
+    collection_id: str,
+    transition_ids: Iterable[str] = (),
     history_guard: vault.DirectoryCensusGuard | None = None,
     authorize_path: Callable[[str], bool] | None = None,
 ) -> _AuditEvents:
-    """Read bounded ordinary log segments without following untrusted archive entries."""
+    """Read one collection's audit history from bounded log segments, without following untrusted archive entries.
+
+    Every event in every segment is validated, so one malformed line anywhere still makes the
+    history unparsed. The events stream through a private temporary database one segment at a
+    time, and only those that can change this collection's audit result are returned (see
+    `_select_audit_history`), so memory follows one segment and this collection's history, not
+    the whole vault's. ``transition_ids`` names further transitions whose every occurrence the
+    caller needs.
+    """
     live = f"{vault.kb_prefix()}log.md"
     archive = f"{vault.kb_prefix()}_archive/logs"
     candidates = [live]
@@ -3799,36 +3885,56 @@ def _audit_events(
             )
     except vault.PathGuardError:
         return _AuditEvents((), False)
-    events: list[dict[str, Any]] = []
     file_guards: list[vault.PathGuard] = []
-    total = 0
-    for relative in candidates:
-        if authorize_path is not None and not authorize_path(relative):
-            return _AuditEvents((), False)
-        try:
-            data, file_guard = vault.read_bounded_guarded_bytes(
-                root, relative, limit=_MAX_AUDIT_SEGMENT_BYTES
-            )
-            text = data.decode("utf-8")
-        except (vault.PathGuardError, UnicodeDecodeError):
-            return _AuditEvents((), False)
-        total += len(data)
-        file_guards.append(file_guard)
-        if total > _MAX_AUDIT_HISTORY_BYTES:
-            return _AuditEvents((), False)
-        prefix = profile_for(semantic_profile).activity_prefix
-        for line in text.splitlines():
-            if not line.startswith(prefix):
-                continue
+    prefix = profile_for(semantic_profile).activity_prefix
+    # An empty name opens a private temporary database that SQLite deletes on close; it
+    # spills to a temporary file past its small page cache.
+    with closing(sqlite3.connect("")) as spool:
+        spool.execute("PRAGMA cache_size=-2048")
+        spool.execute(
+            "CREATE TABLE history(seq INTEGER PRIMARY KEY, transition TEXT NOT NULL, "
+            "parent TEXT NOT NULL, collection TEXT NOT NULL, original TEXT NOT NULL)"
+        )
+        for relative in candidates:
+            if authorize_path is not None and not authorize_path(relative):
+                return _AuditEvents((), False)
             try:
-                event = json.loads(line.removeprefix(prefix))
-            except json.JSONDecodeError:
+                data, file_guard = vault.read_bounded_guarded_bytes(
+                    root, relative, limit=_MAX_AUDIT_SEGMENT_BYTES
+                )
+                text = data.decode("utf-8")
+            except (vault.PathGuardError, UnicodeDecodeError):
                 return _AuditEvents((), False)
-            if not _valid_audit_event(event, semantic_profile):
-                return _AuditEvents((), False)
-            events.append(event)
-            if len(events) > _MAX_AUDIT_EVENTS:
-                return _AuditEvents((), False)
+            del data
+            file_guards.append(file_guard)
+            rows: list[tuple[str, str, str, str]] = []
+            for line in text.splitlines():
+                if not line.startswith(prefix):
+                    continue
+                original = line.removeprefix(prefix)
+                try:
+                    event = json.loads(original)
+                except json.JSONDecodeError:
+                    return _AuditEvents((), False)
+                if not _valid_audit_event(event, semantic_profile):
+                    return _AuditEvents((), False)
+                rows.append(
+                    (event["transition_id"], event["parent_id"], event["collection_id"], original)
+                )
+                if len(rows) == 1024:
+                    spool.executemany(_SPOOL_AUDIT_EVENTS, rows)
+                    rows.clear()
+            spool.executemany(_SPOOL_AUDIT_EVENTS, rows)
+        spool.execute("CREATE INDEX history_transition ON history(transition)")
+        spool.execute("CREATE INDEX history_collection ON history(collection)")
+        spool.execute("CREATE INDEX history_parent ON history(parent)")
+        events, conflicts = _select_audit_history(
+            spool.execute,
+            "SELECT seq,transition,parent,collection,original FROM history",
+            "seq",
+            collection_id=collection_id,
+            named=transition_ids,
+        )
     try:
         if archive_guard is not None:
             archive_guard.recheck(root)
@@ -3837,7 +3943,7 @@ def _audit_events(
     except vault.PathGuardError:
         return _AuditEvents((), False)
     return _AuditEvents(
-        tuple(events),
+        events,
         True,
         tuple(
             (
@@ -3845,7 +3951,60 @@ def _audit_events(
                 *(guard for guard in file_guards if guard.target != live),
             )
         ),
+        conflicts,
     )
+
+
+def _select_audit_history(
+    rows: Callable[..., Iterable[Sequence[Any]]],
+    source: str,
+    order: str,
+    parameters: Sequence[Any] = (),
+    *,
+    collection_id: str,
+    named: Iterable[str] = (),
+) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+    """Select, from every captured event, the ones that can change one collection's audit result.
+
+    ``source`` is a query over the captured events of one semantic profile, with columns
+    transition, parent, collection, original and the ``order`` columns that give log order;
+    ``parameters`` bind it, and ``rows`` runs a statement. The live reader and the legacy
+    import spool both read through this one rule.
+
+    The selection keeps every occurrence of a transition that this collection holds, that
+    ``named`` names, or whose parent this collection holds: the chain walk, the first-occurrence
+    rule, foreign children and the paths a request must be allowed to see need no other event.
+    A conflicting transition is a gap wherever it occurs, so the second result names every
+    transition whose later occurrence differs from its first.
+    """
+    named = tuple(dict.fromkeys(named))
+    marks = ",".join("?" * len(named)) or "NULL"
+    selected = rows(
+        f"WITH h AS NOT MATERIALIZED ({source}), "
+        "ours AS (SELECT transition FROM h WHERE collection=?) "
+        "SELECT original FROM h WHERE transition IN (SELECT transition FROM ours) "
+        f"OR transition IN ({marks}) "
+        "OR transition IN (SELECT transition FROM h WHERE parent IN (SELECT transition FROM ours)) "
+        f"ORDER BY {order}",
+        (*parameters, collection_id, *named),
+    )
+    events = tuple(json.loads(original) for (original,) in selected)
+    conflicts: list[str] = []
+    current: str | None = None
+    first: Any = None
+    for transition, original in rows(
+        f"WITH h AS NOT MATERIALIZED ({source}) "
+        "SELECT transition,original FROM h WHERE transition IN "
+        "(SELECT transition FROM h GROUP BY transition HAVING COUNT(*) > 1) "
+        f"ORDER BY transition,{order}",
+        tuple(parameters),
+    ):
+        event = json.loads(original)
+        if transition != current:
+            current, first = transition, event
+        elif event != first and conflicts[-1:] != [transition]:
+            conflicts.append(transition)
+    return events, tuple(conflicts)
 
 
 def _valid_audit_event(event: Any, semantic_profile: str = "records") -> bool:
@@ -4370,10 +4529,11 @@ def _collect_representation_issues(
     """Judge representability against the collection's own storage strategy.
 
     Markdown-log rendering puts values into headings, notes and delimited child
-    rows, none of which can carry a line break. Markdown-item frontmatter can:
-    the writer's own quoting escapes one, and the round trip below proves it.
+    rows, none of which can carry a line break. An item row can: Markdown-item
+    frontmatter quotes one, which the round trip below proves, and a store row
+    keeps the value whole.
     """
-    line_breaks_allowed = manifest.storage.strategy == "markdown-items"
+    line_breaks_allowed = manifest.storage.item_rows
     already = {issue.field for issue in issues}
     for name, value in values.items():
         if name in already:
@@ -5045,7 +5205,13 @@ def _resumed_body(resumed: HeldCandidate | None, body: str | None) -> str:
     return stored if isinstance(stored, str) else ""
 
 
-def _with_warnings(result: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+def ignored_recipe_warnings(manifest: collections.CollectionManifest) -> list[dict[str, str]]:
+    """``collections.ignored_recipes_diagnostic`` in validate's warning shape; empty when there is none."""
+    diagnostic = collections.ignored_recipes_diagnostic(manifest)
+    return [] if diagnostic is None else [{"code": diagnostic.code, "message": diagnostic.reason}]
+
+
+def _with_warnings(result: dict[str, Any], warnings: list[Any]) -> dict[str, Any]:
     """Attach warnings only when there are any, so the ordinary shape is unchanged."""
     return {**result, "warnings": list(warnings)} if warnings else result
 

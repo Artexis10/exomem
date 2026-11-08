@@ -164,6 +164,29 @@ def test_planning_hierarchy_and_triage_are_validated_inside_transaction(store):
         store.update_record(CID, **{**args, "changes": {"title": "Bad triage"}})
 
 
+def test_a_parent_archive_finds_its_active_child_by_index_in_a_json_encoded_collection(store, monkeypatch):
+    """Defect: in a collection whose rows the store keeps as JSON (each migrated collection), the
+    indexed lookup of the items that name a parent misses them, so archiving that parent leaves an
+    active child behind."""
+    from exomem.collection_store import typed_storage
+
+    create(store, "planning")
+    assert typed_storage.collection_encoding(store.connection, CID) == typed_storage.JSON_V1
+    parent = store.append_record(CID, item={"title": "Outcome", "kind": "outcome"}, item_key=KEY, why="capture")
+    child = store.append_record(CID, item={"title": "Initiative", "kind": "initiative",
+                                           "parent": f"exomem://plan/{CID}/{KEY}"}, item_key=OTHER, why="capture")
+
+    def every_row(*args, **kwargs):
+        raise AssertionError("the hierarchy check read every row")
+
+    monkeypatch.setattr(typed_storage, "collection_values", every_row)
+    archive = dict(item_key=KEY, changes={"lifecycle": "archived", "status": "cancelled"},
+                   expected_container_hash=child["after_container_hash"],
+                   expected_item_version=parent["after_item_hash"], why="close the outcome")
+    with pytest.raises(collections.CollectionError, match="INVALID_PLAN_RELATION"):
+        store.update_record(CID, **archive)
+
+
 @pytest.mark.parametrize("profile", ["records", "planning"])
 def test_revise_is_guarded_and_keeps_manifest_history(store, profile):
     made = create(store, profile)
