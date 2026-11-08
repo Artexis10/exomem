@@ -24,7 +24,7 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and his
 
 Hosted candidate tasks 4.1–4.4 and 4.6 are superseded, not current release obligations.
 
-- [ ] 4.5 Capture clean supported-client traces for all four behavior families and their positive and negative fixtures.
+- [x] 4.5 Capture clean supported-client traces for all four behavior families and their positive and negative fixtures. Evidence: the behavior families and their positive and negative fixtures (cases B1 to B9) passed in the real-model client-trace acceptance of 2026-11-08 (16 sessions on a75947aaa, plus the advisory-variant rerun on the #2553 head).
 
 ## 5. Verification and delivery
 
