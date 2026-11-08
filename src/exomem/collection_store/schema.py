@@ -1048,7 +1048,8 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
     ``store_pages.mtime_ns`` is the modification time of the projected file, so a page read answers
     the same stat as a file read. It starts from the projection manifest's value.
     ``store_pages_meta`` lets a metadata read (path, revision, hash, size, mtime, frontmatter) skip
-    the page body, and ``store_audit_by_path`` lets an audit read by path skip the whole trail.
+    the page body, ``store_audit_by_path`` lets an audit read by path skip the whole trail, and
+    ``store_binaries_by_sha`` lets a read by hash find the binaries that hold those bytes.
     The projection queue gains the ``move`` operation, which names the file's old path in
     ``from_path``, so a rename is one intent, and the audit trail gains the same column for a move's
     new-path row. Every vault keeps its rows.
@@ -1063,6 +1064,8 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
         "store_pages(path, revision, sha256, size, mtime_ns, frontmatter_json)"
     )
     conn.execute("CREATE INDEX store_audit_by_path ON store_audit(path, revision)")
+    # "Which paths hold these bytes" is a seek: vault-wide dedup of identical binary originals asks it.
+    conn.execute("CREATE INDEX store_binaries_by_sha ON store_binaries(sha256)")
     # A move's row at its new path names the old path; every other row leaves it NULL. The append-only
     # triggers belong to the table, so they survive the added column.
     conn.execute("ALTER TABLE store_audit ADD COLUMN from_path TEXT")

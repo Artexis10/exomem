@@ -593,8 +593,11 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
         with pytest.raises(sqlite3.IntegrityError, match="append-only"), writer.transaction() as tx:
             tx.execute("UPDATE store_audit SET from_path = 'x'")
         indexes = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('store_pages_meta', 'store_audit_by_path')")}
-        assert indexes == {"store_pages_meta", "store_audit_by_path"}
+            "SELECT name FROM sqlite_master WHERE type='index' AND name IN "
+            "('store_pages_meta', 'store_audit_by_path', 'store_binaries_by_sha')")}
+        assert indexes == {"store_pages_meta", "store_audit_by_path", "store_binaries_by_sha"}
+        plan = conn.execute("EXPLAIN QUERY PLAN SELECT path FROM store_binaries WHERE sha256 = ?", (H,)).fetchall()
+        assert any("store_binaries_by_sha" in row[3] for row in plan)
         plan = conn.execute("EXPLAIN QUERY PLAN SELECT path, revision, sha256, size, mtime_ns, frontmatter_json "
                             "FROM store_pages ORDER BY path").fetchall()
         assert any("COVERING INDEX store_pages_meta" in row[3] for row in plan)
