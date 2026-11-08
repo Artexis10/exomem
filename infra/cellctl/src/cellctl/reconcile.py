@@ -81,6 +81,7 @@ from .manifests import (
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     HOURLY_RETENTION_ARGS,
+    JOB_EGRESS_POLICY,
     RENDER_VERSION,
     RETENTION_ARGS,
     SNAPSHOT_NAME,
@@ -2930,7 +2931,11 @@ async def _reconcile_row(
                     spec, export_item, PAUSE, deadline_seconds=int(pause_window(row, config).total_seconds()),
                     media_mode=("served" if media_mode in MEDIA_KEYED else
                                 "retained" if media_mode == MEDIA_RETAINED else None)), job_refused)
-            if transfer_run is not None:
+            if transfer_run == PACK and ("NetworkPolicy", JOB_EGRESS_POLICY) in refused:
+                # D8: the pack holds the media key, so it starts only in a pass whose job-egress,
+                # which keeps it off public egress, landed. The transfer deadline ends a lasting refusal.
+                logger.error("cellctl held back the pack of export %s: job-egress was refused", export_item.export_id)
+            elif transfer_run is not None:
                 await _run_transfer_job(cluster, row, export_item, transfer_run, spec, now, config, secrets_config,
                                         cluster_config, job_refused)
             if family is not None:

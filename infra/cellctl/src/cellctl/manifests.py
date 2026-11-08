@@ -112,6 +112,7 @@ JOB_KIND_EXPORT = "export"
 JOB_KIND_EXPORT_PAUSE = "export-pause"
 JOB_KIND_EXPORT_PACK = "export-pack"
 NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)
+JOB_EGRESS_POLICY = "job-egress"
 EXPORT_STAGING_DIR = "/staging"
 INIT_CONTAINER_NAME = "cell-init"
 POD_SECURITY_VERSION = "v1.35"
@@ -583,7 +584,7 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
         "metadata": {
-            "name": "job-egress",
+            "name": JOB_EGRESS_POLICY,
             "namespace": spec.namespace,
             "labels": _labels(spec),
         },

@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import asyncpg
 import pytest
 from botocore.exceptions import ClientError
+from kubernetes.client.exceptions import ApiException
 
 from cellctl import db, reconcile
 from cellctl.capacity import GIB
@@ -32,7 +33,7 @@ from cellctl.exports import (
     pause_window,
     staging_claim_name,
 )
-from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
+from cellctl.manifests import JOB_EGRESS_POLICY, CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
@@ -528,6 +529,31 @@ async def test_a_second_export_on_one_node_waits_until_the_first_one_ends(cell_d
         await harness.run()
         assert (await harness.export(exports[second]))["observed_state"] == "packing"
         assert (await harness.cell(second)).hold_kind == "export"
+
+
+async def test_the_pack_waits_until_the_job_egress_that_keeps_it_off_public_egress_lands(cell_db, monkeypatch):
+    """Defect: a cell namespace keeps a job-egress from before the split, which gives every Job
+    public egress, and cellctl starts the pack, which holds the media key, under it."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        export_id = await harness.request(CELL)
+        await harness.pause(CELL, export_id)
+        await harness.run()  # starts the upload
+        harness.jobs[(export_id, UPLOAD)] = ExportJob(exists=True, active=True, pods_present=True)
+        apply_all = harness.cluster.apply_all
+
+        def refuse_job_egress(manifests: list[dict]) -> None:
+            if any(m["kind"] == "NetworkPolicy" and m["metadata"]["name"] == JOB_EGRESS_POLICY for m in manifests):
+                raise ApiException(status=403, reason="Forbidden")
+            apply_all(manifests)
+
+        harness.cluster.apply_all = refuse_job_egress
+        await harness.run()
+        assert job_name(export_id, PACK) not in {job["metadata"]["name"] for job in harness.cluster.jobs}
+
+        harness.cluster.apply_all = apply_all
+        await harness.run(NOW + timedelta(minutes=3))  # past the refusal's backoff
+        assert harness.created(export_id, PACK)
 
 
 async def test_every_export_goes_through_the_staging_key_under_its_own_cells_prefix(cell_db, monkeypatch):

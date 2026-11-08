@@ -673,6 +673,21 @@ spec:
     - name: np
       expression: >-
         variables.target.spec
+    - name: podLabels
+      expression: >-
+        has(variables.target.spec.template.metadata.labels) ? variables.target.spec.template.metadata.labels : {}
+    # add-cloud-media-store D8: the cell Secret's media keys each pod template may name. The
+    # runtime holds the store keys, the export's pack the two it reads evicted originals with
+    # (job-egress gives it no public egress), and a backup the collector credential.
+    - name: mediaKeysAllowed
+      expression: >-
+        request.resource.resource == 'statefulsets'
+          ? ['media-age-identity', 'media-edge-credential', 'media-name-key']
+          : 'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'export-pack'
+            ? ['media-age-identity', 'media-edge-credential']
+            : 'exomem.io/cell-job' in variables.podLabels && variables.podLabels['exomem.io/cell-job'] == 'backup'
+              ? ['media-edge-collector-credential']
+              : []
   validations:
     # 1. Every write cellctl makes must land inside a namespace named
     # exo-cell-<16 lowercase base32> (D4, D5's namespace_name convention),
@@ -752,6 +767,28 @@ spec:
           'exomem.io/cloud-cell' in namespaceObject.metadata.labels &&
           namespaceObject.metadata.labels['exomem.io/cloud-cell'] == variables.namespaceName.substring(9))
       message: cellctl may run a StatefulSet or Job only in a namespace whose exomem.io/cloud-cell label names its own cell.
+    # 4e. add-cloud-media-store D8: a pod template names a media key of the cell Secret only
+    # where mediaKeysAllowed lets it, as a listed item or one env key, never the whole Secret.
+    - expression: >-
+        !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        ((!has(variables.podSpec.volumes) || variables.podSpec.volumes.all(v,
+            (!has(v.secret) || v.secret.?secretName.orValue('') != 'cell-credentials' ||
+              (has(v.secret.items) && v.secret.items.all(i,
+                !(i.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
+                  'media-edge-collector-credential']) || i.key in variables.mediaKeysAllowed))) &&
+            (!has(v.projected) || !has(v.projected.sources) || v.projected.sources.all(s,
+              !has(s.secret) || s.secret.?name.orValue('') != 'cell-credentials' ||
+              (has(s.secret.items) && s.secret.items.all(i,
+                !(i.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
+                  'media-edge-collector-credential']) || i.key in variables.mediaKeysAllowed)))))) &&
+          (variables.podSpec.containers +
+            (has(variables.podSpec.initContainers) ? variables.podSpec.initContainers : [])).all(c,
+            (!has(c.envFrom) || c.envFrom.all(e, !has(e.secretRef) || e.secretRef.?name.orValue('') != 'cell-credentials')) &&
+            (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) ||
+              e.valueFrom.secretKeyRef.?name.orValue('') != 'cell-credentials' ||
+              !(e.valueFrom.secretKeyRef.key in ['media-age-identity', 'media-edge-credential', 'media-name-key',
+                'media-edge-collector-credential']) || e.valueFrom.secretKeyRef.key in variables.mediaKeysAllowed))))
+      message: cellctl may give a media key of the cell Secret only to the runtime, the export pack's two read keys only to the export pack, and the collector credential only to a backup, each as a listed key.
     # 4c. Only chart-selected cells may select their own reserved agent.
     # Absent placement permits stop/change/start transitions. A StatefulSet
     # uses the separately rendered PVC, never volumeClaimTemplates.
@@ -805,10 +842,24 @@ spec:
               !has(variables.podSpec.tolerations[0].tolerationSeconds))
             {{- end }}
           ) &&
-          !has(variables.podSpec.affinity) &&
+          {{- /* add-cloud-media-store D8: on a Hetzner volume an export's pack joins its own upload's node, so the one attachable staging volume serves both. */}}
+          (!has(variables.podSpec.affinity) ||
+            (request.resource.resource == 'jobs' &&
+              variables.target.metadata.name.matches('^export-[0-9a-f]{32}-pack$') &&
+              !has(variables.podSpec.affinity.nodeAffinity) && !has(variables.podSpec.affinity.podAntiAffinity) &&
+              has(variables.podSpec.affinity.podAffinity) &&
+              !has(variables.podSpec.affinity.podAffinity.preferredDuringSchedulingIgnoredDuringExecution) &&
+              has(variables.podSpec.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution) &&
+              size(variables.podSpec.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution) == 1 &&
+              variables.podSpec.affinity.podAffinity.requiredDuringSchedulingIgnoredDuringExecution.all(t,
+                t.topologyKey == 'kubernetes.io/hostname' &&
+                !has(t.namespaces) && !has(t.namespaceSelector) && !has(t.matchLabelKeys) && !has(t.mismatchLabelKeys) &&
+                has(t.labelSelector) && !has(t.labelSelector.matchExpressions) &&
+                t.labelSelector.matchLabels ==
+                  {'batch.kubernetes.io/job-name': variables.target.metadata.name.substring(0, 39) + '-upload'}))) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, without nodeName, affinity, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates.
+      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, without nodeName, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates, and without affinity but an export pack's to its own upload's node.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -818,11 +869,14 @@ spec:
       message: cellctl may create or update a Service only as ClusterIP with no externalIPs.
     # 6. cellctl deletes only namespaces (D10) and hold Jobs (D8). Every
     # other object, a NetworkPolicy above all, goes only with its namespace.
+    # An export's staging claim goes when the export ends (add-cloud-media-store D8).
     # With local storage, an hourly backup's clone and snapshot go after it
     # (D3), and relocation deletes the cell's claim once its volume is
     # retained (D4, the exomem-cellctl-retained-delete policy).
     - expression: >-
         request.operation != 'DELETE' || request.resource.resource in ['namespaces', 'jobs'] ||
+        (request.resource.resource == 'persistentvolumeclaims' &&
+          variables.target.metadata.name.matches('^export-staging-[0-9a-f]{32}$')) ||
         (request.resource.resource == 'secrets' && (variables.target.metadata.name == 'cell-credentials' ||
           variables.target.metadata.name.matches('^export-[0-9a-f]{32}-verify-get$'))){{ if and $local $storage.local.reservations }} ||
         {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
@@ -835,7 +889,7 @@ spec:
         (request.resource.resource == 'volumesnapshots' &&
           variables.target.metadata.name.matches('^cell-snapshot-{{ if $storage.local.reservations }}[a-z2-7]{16}-[0-9a-f]{32}{{ else }}[0-9a-f]{10}{{ end }}$'))
         {{- end }}
-      message: cellctl may delete only a cell namespace, its child Secret, a hold Job, or an admitted retained claim.
+      message: cellctl may delete only a cell namespace, its child Secret, a hold Job, an export staging claim, or an admitted retained claim.
     # UUID-derived export Secret names fix the verification capability protocol.
     # 7. The Secret is an Opaque cell credential or export capability, never a
     # service-account-token Secret the token controller would fill in.
@@ -847,7 +901,9 @@ spec:
         {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
       message: cellctl may write only Opaque cell credentials or an export verification capability.
     # 8. The PVC is the cell's one volume, provisioned fresh on a configured
-    # cell class: no data source and no pre-bound volume. With local storage,
+    # cell class: no data source and no pre-bound volume. An export's staging
+    # claim takes the same terms; every cell class deletes its volume on
+    # release (add-cloud-media-store D8). With local storage,
     # an hourly backup's clone is the other (D3): on the clone class, from the
     # same hold's snapshot in the cell's own namespace.
     - expression: >-
@@ -855,7 +911,8 @@ spec:
         ((!has(variables.target.spec.volumeName) ||
             (request.operation == 'UPDATE' && has(oldObject.spec.volumeName) &&
               oldObject.spec.volumeName == variables.target.spec.volumeName)) &&
-          ((variables.target.metadata.name == 'cell-data' &&
+          (((variables.target.metadata.name == 'cell-data' ||
+                variables.target.metadata.name.matches('^export-staging-[0-9a-f]{32}$')) &&
               variables.target.spec.storageClassName in [{{ join ", " $cellClasses }}] &&
               !has(variables.target.spec.dataSource) && !has(variables.target.spec.dataSourceRef))
           {{- if $local }} ||
@@ -871,18 +928,21 @@ spec:
                   variables.target.spec.dataSource.kind == 'VolumeSnapshot' &&
                   variables.target.spec.dataSource.name == variables.target.spec.dataSourceRef.name)))
           {{- end }}))
-      message: cellctl may write only the PVC cell-data, on a configured cell class with no data source or pre-bound volume{{ if $local }}, or a backup clone of the same hold's snapshot{{ end }}.
-    # 9. The ResourceQuota is the cell's own, with one PVC and two pods and
-    # no other kind of limit.
+      message: cellctl may write only the PVC cell-data or an export staging claim, on a configured cell class with no data source or pre-bound volume{{ if $local }}, or a backup clone of the same hold's snapshot{{ end }}.
+    # 9. The ResourceQuota is the cell's own and limits only claims, storage,
+    # pods and compute. It admits the serving pod, an export's staging claim,
+    # upload and pack, and a hold transition slot (add-cloud-media-store D8);
+    # with local storage, a backup's clone and Job too. The narrower counts
+    # stay admitted for the cellctl a chart upgrade replaces.
     - expression: >-
         request.resource.resource != 'resourcequotas' || request.operation == 'DELETE' ||
         (variables.target.metadata.name == 'cell-quota' &&
           !has(variables.target.spec.scopes) && !has(variables.target.spec.scopeSelector) &&
           variables.target.spec.hard.all(k, k in ['persistentvolumeclaims', 'requests.storage', 'pods',
             'requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory']) &&
-          variables.target.spec.hard['persistentvolumeclaims'] {{ if $local }}in ['1', '2']{{ else }}== '1'{{ end }} &&
-          variables.target.spec.hard['pods'] == '2')
-      message: cellctl may write only the ResourceQuota cell-quota, with {{ if $local }}one PVC, or two for a backup clone,{{ else }}one PVC{{ end }} and two pods.
+          variables.target.spec.hard['persistentvolumeclaims'] in ['1', '2'{{ if $local }}, '3'{{ end }}] &&
+          variables.target.spec.hard['pods'] in ['2', '4'{{ if $local }}, '5'{{ end }}])
+      message: cellctl may write only the ResourceQuota cell-quota, with at most {{ if $local }}three PVCs and five pods{{ else }}two PVCs and four pods{{ end }}.
     # 10. NetworkPolicies are exactly the three cellctl renders (D5, D11),
     # each pinned to its rendered shape, so a policy can never open egress
     # or ingress. The cell id in runtime-ingress's selector is the one the
@@ -980,9 +1040,15 @@ spec:
         variables.target.metadata.name != 'job-egress' ||
         (variables.np.policyTypes == ['Egress'] &&
           !has(variables.np.podSelector.matchLabels) &&
-          size(variables.np.podSelector.matchExpressions) == 1 &&
+          {{- /* add-cloud-media-store D8: the export's pause and pack, which holds the media key, never get public egress. */}}
+          size(variables.np.podSelector.matchExpressions) == 2 &&
           variables.np.podSelector.matchExpressions[0].key == 'exomem.io/cell-job' &&
           variables.np.podSelector.matchExpressions[0].operator == 'Exists' &&
+          variables.np.podSelector.matchExpressions[1].key == 'exomem.io/cell-job' &&
+          variables.np.podSelector.matchExpressions[1].operator == 'NotIn' &&
+          size(variables.np.podSelector.matchExpressions[1].values) == 2 &&
+          'export-pack' in variables.np.podSelector.matchExpressions[1].values &&
+          'export-pause' in variables.np.podSelector.matchExpressions[1].values &&
           (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
           {{- if .Values.mediaEdge.enabled }}
           {{- /* collect-released-media D3: a collecting cell's Jobs may also reach the edge port; the edge's own ingress admits only backup Jobs. */}}
@@ -1010,7 +1076,7 @@ spec:
           !has(variables.np.egress[1].to[0].podSelector.matchExpressions) &&
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
-      message: cellctl may write job-egress only as Job egress to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
+      message: cellctl may write job-egress only as egress for every Job but the export pause and pack to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
     {{- if $relocation }}
     # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
     # cell volume's reclaim policy to Retain before relocation deletes its

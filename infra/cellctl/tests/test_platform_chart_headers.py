@@ -207,7 +207,7 @@ def test_cellctl_admission_policy_allowlists_projected_sources_and_denies_csi_vo
 
     documents = _helm_template()
     policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
-    rules = [v for v in policy["spec"]["validations"] if "projected" in v["expression"]]
+    rules = [v for v in policy["spec"]["validations"] if "projected volume sources" in v["message"]]
     assert len(rules) == 1
     expression = rules[0]["expression"]
     assert "['statefulsets', 'jobs']" in expression
@@ -366,7 +366,12 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
     # Security MED-1: the policy pins NetworkPolicies, the Secret, the PVC,
     # the quota and pod-template placement to cellctl's own renderer, and
     # cellctl deletes only namespaces and Jobs. Its literals must match the
-    # renderer's constants, or every cell's apply would be refused.
+    # renderer's constants, or every cell's apply would be refused, and a
+    # renamed media key or export Job kind would slip past the key-mount rule.
+    import re
+    import uuid
+
+    from cellctl.exports import PACK, UPLOAD, job_name, staging_claim_name
     from cellctl.manifests import (
         CELL_HEALTH_PORT,
         CELL_PORT,
@@ -374,7 +379,14 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         GATEWAY_NAMESPACE,
         GATEWAY_POD_LABEL,
         GATEWAY_POD_LABEL_VALUE,
+        JOB_KIND_BACKUP,
+        JOB_KIND_EXPORT_PACK,
+        JOB_KIND_EXPORT_PAUSE,
         JOB_KIND_LABEL,
+        MEDIA_COLLECTOR_CREDENTIAL_KEY,
+        MEDIA_CREDENTIAL_KEY,
+        MEDIA_IDENTITY_KEY,
+        MEDIA_NAME_KEY_KEY,
         STORAGE_CLASS,
         CellManifestSpec,
     )
@@ -401,8 +413,26 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         "has(v.persistentVolumeClaim) || has(v.emptyDir)",
         "!has(variables.podSpec.nodeName)",
         "!has(variables.podSpec.runtimeClassName)",
+        f"'{JOB_KIND_EXPORT_PACK}'",
+        f"'{JOB_KIND_EXPORT_PAUSE}'",
+        f"'{MEDIA_IDENTITY_KEY}'",
+        f"'{MEDIA_CREDENTIAL_KEY}'",
+        f"'{MEDIA_NAME_KEY_KEY}'",
+        f"'{MEDIA_COLLECTOR_CREDENTIAL_KEY}'",
     ):
         assert literal in expressions, literal
+    variables = "\n".join(v["expression"] for v in policy["spec"]["variables"])
+    # The key-mount rule reads which pod may hold which media key from the policy's variables.
+    for literal in (MEDIA_IDENTITY_KEY, MEDIA_CREDENTIAL_KEY, MEDIA_NAME_KEY_KEY, MEDIA_COLLECTOR_CREDENTIAL_KEY,
+                    JOB_KIND_EXPORT_PACK, JOB_KIND_BACKUP):
+        assert f"'{literal}'" in variables, literal
+    # The staging claim and the pack's affinity to its own upload follow the renderer's names.
+    export_id = str(uuid.uuid4())
+    assert "'^export-staging-[0-9a-f]{32}$'" in expressions
+    assert re.fullmatch("export-staging-[0-9a-f]{32}", staging_claim_name(export_id))
+    assert "'^export-[0-9a-f]{32}-pack$'" in expressions and ".substring(0, 39) + '-upload'" in expressions
+    assert re.fullmatch("export-[0-9a-f]{32}-pack", job_name(export_id, PACK))
+    assert job_name(export_id, PACK)[:39] + "-upload" == job_name(export_id, UPLOAD)
     values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
     import json
 
