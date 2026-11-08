@@ -18,14 +18,18 @@ A core relation entry SHALL carry a `behaviours` list whose values come from the
 - **AND** an extension of `supports` in the fixture now counts toward settling a prediction, as its parent does
 
 ### Requirement: Precedes and follows order events
-The core registry SHALL include `precedes` and `follows` as one inverse pair in family `order`, each carrying the `orders` behaviour. The `order_in_time` display behaviour SHALL read `orders` edges and `occurred_at` values; no other rule orders events.
+The core registry SHALL include `precedes` and `follows` as one inverse pair in family `order`. `precedes` SHALL carry the `earlier_than_target` behaviour and `follows` SHALL carry the `later_than_target` behaviour. The `order_in_time` display behaviour SHALL read edges with either behaviour and `occurred_at` values; no other rule orders events.
 
 #### Scenario: Stated order survives compilation
 - **WHEN** context is grouped by dimension `order`, and one timeline event `precedes` another
 - **THEN** compiled context presents the first event before the second
 
+#### Scenario: A follows edge orders the same way
+- **WHEN** context is grouped by dimension `order`, and event B `follows` event A
+- **THEN** compiled context presents A before B
+
 ### Requirement: Epistemic dimensions are registry data
-The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. A dimension entry SHALL carry a key, labels per language, a description, its members and its display behaviours. Members SHALL be relation families, unit kinds and governed metadata keys, and one member MAY belong to several dimensions. A unit SHALL belong to a dimension when its kind is a member, when it carries a member key, or when it is an endpoint of an edge whose family is a member. Retrieval SHALL filter by any dimension, the context compiler SHALL group by any dimension, and reviews and reports SHALL queue by any dimension. A display behaviour SHALL apply only within its own dimension's group, and a unit that belongs to several requested dimensions SHALL appear in full once and as a ref in the other groups. Display behaviours SHALL come from a closed set that the registry schema declares: `lead_with_current`, `show_origin`, `flag_open` and `order_in_time`. A display behaviour SHALL change only the order and annotation of compiled context. It SHALL NOT hide a unit, change a unit's standing or change what a word means. Code SHALL NOT hold a dimension list or branch on a dimension key.
+The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. A dimension entry SHALL carry a key, labels per language, a description, its members and its display behaviours. Members SHALL be relation families, unit kinds and governed metadata keys, and one member MAY belong to several dimensions. A unit SHALL belong to a dimension when its kind is a member, when it carries a member key, or when it is an endpoint of an edge whose family is a member. Retrieval SHALL filter by any dimension, the context compiler SHALL group by any dimension, and reviews and reports SHALL queue by any dimension. A display behaviour SHALL apply only within its own dimension's group, and a unit that belongs to several requested dimensions SHALL appear in full in the first requested dimension and as a ref in the others. Display behaviours SHALL come from a closed set that the registry schema declares: `lead_with_current`, `show_origin`, `flag_open` and `order_in_time`. A display behaviour SHALL change only the order and annotation of compiled context. It SHALL NOT hide a unit, change a unit's standing or change what a word means. Code SHALL NOT hold a dimension list or branch on a dimension key.
 
 #### Scenario: A vault adds a dimension
 - **WHEN** a reviewed registry save adds dimension `regulation` with kinds `constraint` and `requirement` as members

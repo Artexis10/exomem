@@ -9,7 +9,7 @@
 - [ ] 2.1 Inventory every branch on a relation key or family value in `src/exomem`. Map each to a behaviour, add a behaviour with its code, or name it as debt.
 - [ ] 2.2 Declare the closed relation-behaviour set, give the core relations their behaviours, and make extensions inherit them.
 - [ ] 2.3 Replace the hard-coded lift, membership, resolution, prediction-evidence, provenance and supersession sets with behaviour reads. Prove identical output on a fixture vault.
-- [ ] 2.4 Add `precedes` and `follows` with the `orders` behaviour, and order them in compiled context.
+- [ ] 2.4 Add `precedes` and `follows` with their opposite order behaviours, and order them in compiled context.
 
 ## 3. Kinds and verdicts
 
@@ -34,7 +34,7 @@
 ## 6. Language and teaching
 
 - [ ] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases.
-- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic.
+- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, `judge_categorically` and the verdict-set comment, and say that `credence` is a unit row, never frontmatter.
 
 ## 7. Proof and delivery
 

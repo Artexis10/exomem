@@ -20,17 +20,18 @@ This change applies the rule to the whole epistemic language.
 
 A core relation entry gains a `behaviours` list, beside its existing `presentation_role`. An extension inherits its parent's behaviours and cannot set its own, just as it inherits the parent's family. Vaults do not create families.
 
-Behaviours sit on relations, not families, because today's sets are keyed both ways. Each behaviour replaces one set:
+Behaviours sit on relations, not families, because today's sets are keyed both ways. The two members of an inverse pair can need different behaviours: the graph stores each edge as written, so `precedes` and `follows` carry opposite order behaviours, and code never has to ask which key it holds. Each behaviour replaces one set:
 
 | Behaviour | What code does | Replaces | Core relations |
 |---|---|---|---|
 | `lifts` | A unit relation may become a page proposal. | `_LIFT_RELATION_FAMILIES` | answers, resolves, raises_question, supports, contradicts, refines, evidenced_by, duplicates |
 | `membership` | The source belongs to the target. | `MEMBERSHIP_FAMILY` | member_of |
-| `bears_on` | An edge into a prediction or question counts toward settling it. | `_PREDICTION_RESOLVING_RELATIONS`, `_QUESTION_ANSWERING_RELATIONS` | supports, contradicts, resolves, evidenced_by |
+| `bears_on` | A relation authored on a prediction or question unit counts toward settling it. Inbound edges and edges from elsewhere on the page do not. | `_PREDICTION_RESOLVING_RELATIONS`, `_QUESTION_ANSWERING_RELATIONS` | supports, contradicts, resolves, evidenced_by |
 | `settles` | The graph reads the edge as resolving a question. | `_RESOLUTION_RELATION_TYPES` | answers, resolves |
 | `sources` | Activation counts the edge as provenance. | `_PROVENANCE_RELATIONS` | derived_from, evidenced_by, cites |
 | `replaces` | The target is no longer the current view. | `kind == "supersedes"` tests | supersedes |
-| `orders` | The source comes before the target in time. | new | precedes, follows |
+| `earlier_than_target` | The source comes before the target in time. | new | precedes |
+| `later_than_target` | The source comes after the target in time. | new | follows |
 
 `presentation_role` stays renderer metadata: it tells a viewer how to draw an edge. Behaviours decide what code does with the edge. `supersedes` carries both, for those two different reasons.
 
@@ -46,6 +47,7 @@ Kinds need their own set, because a relation behaviour has a source and a target
 | `page_claim` | The claims reader takes the first such unit as the page's claim. | `kind == "claim"` in `claims.py` | claim |
 | `procedure` | Role review reads the unit as a procedure. | `kind == "procedure"` in `artifact_role_review.py` | procedure |
 | `outcome` | Role review reads the unit as an outcome. | `kind == "result"` in `artifact_role_review.py` | result |
+| `closable` | A verdict or an answer closes the unit, so `flag_open` marks it while none exists. | new | open_question, hypothesis, prediction, assumption |
 
 The slice-3 inventory adds any further kind branch the same way.
 
@@ -55,7 +57,7 @@ The 27 built-in kinds in `semantic_blocks.py` move into the shipped pack. `defin
 
 ### Verdicts are state
 
-Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. An experiment page's `outcome:` shares the verdict vocabulary today through one constant, so it follows the registry too: a vault-added verdict is a valid outcome. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
+Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. An experiment page's `outcome:` shares the verdict vocabulary today through one constant, so it follows the registry too: a vault-added verdict is a valid outcome. Outcomes take keys only, and unit verdicts also accept labels, which resolve to the same keys. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
 
 ### Epistemic dimensions
 
@@ -67,10 +69,10 @@ A dimension entry has a key, labels, a description, its members and its display 
 
 - `lead_with_current`: put current members before replaced ones, and mark the replaced ones;
 - `show_origin`: show beside each member where it came from and whose it is;
-- `flag_open`: mark members that have no closing verdict or answer as open;
-- `order_in_time`: present members in time order, read from `orders` edges and `occurred_at`. It is the only rule that orders events.
+- `flag_open`: mark members whose kind has the `closable` trait and that have no verdict or answer yet;
+- `order_in_time`: present members in time order, read from edges with `earlier_than_target` or `later_than_target` and from `occurred_at`. It is the only rule that orders events.
 
-A display behaviour applies only within its own dimension's group. When a request groups by several dimensions, a unit that belongs to more than one appears in full once and as a ref in the other groups, so orders cannot conflict.
+A display behaviour applies only within its own dimension's group. When a request groups by several dimensions, a unit that belongs to more than one appears in full in the first requested dimension and as a ref in the others, so orders cannot conflict.
 
 Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. When the budget is short, a replaced unit becomes a ref, as context activation already allows. A dimension change takes effect only after a reviewed registry save, as every registry change does.
 
@@ -119,9 +121,11 @@ The rejected alternatives were levels only, which keeps the old rule but gives u
 - `modality` takes a modality-registry key: is, should, must, may. Retrieval and context never merge units whose modalities differ.
 - `occurred_at` is a date or a date and time on a `timeline_event`.
 - `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series.
+- `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
 
 Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `basis` and `mood` are common words in existing notes, and `credence`, `occurred_at` and `modality` are not.
-- `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
+
+`credence` is a unit row on a belief unit, never a frontmatter field. The canonical rule that confidence is not a frontmatter field still holds. Today's teaching says Exomem keeps no credence or numeric confidence anywhere. Slice 6 rewrites those sites: the scaffold's frontmatter, skill and vault-care references, `judge_categorically` in `commands.py`, and the comment beside the verdict set in `semantic_units.py`.
 
 Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
@@ -134,5 +138,5 @@ Each registry entry carries `labels: {language: text}`. Keys stay language-neutr
 - **A behaviour change hides in a data migration.** The shipped pack must reproduce today's sets exactly. The before-and-after fixture test guards each cutover.
 - **Agents misuse the new words.** Each slice proves on real models that an agent picks the right word for realistic and hostile inputs.
 - **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
-- **Display annotations add noise.** `flag_open` marks every risk and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
+- **Display annotations add noise.** `flag_open` marks every open question, hypothesis, prediction and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
 - **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.

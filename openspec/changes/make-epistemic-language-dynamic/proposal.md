@@ -36,7 +36,7 @@ On 2026-11-08 the owner asked for this language to be dynamic and first-class. E
   - `quantity_value`, `quantity_unit` and `quantity_error`: a measured quantity;
   - `inference_mode`: deduction, induction, abduction, analogy, statistical inference or testimony by default.
   New reserved keys warn for one release on pages that already use them as ordinary rows, and the warning names the repair.
-- **Order in time:** `precedes` and `follows` join the core relations as one inverse pair with the `orders` behaviour.
+- **Order in time:** `precedes` and `follows` join the core relations as one inverse pair, with opposite order behaviours so that code reads direction without naming a key.
 - **Multilingual labels:** every registry entry carries labels per language over one key and one meaning. Parsing accepts a label as an alias of its key.
 - **Teaching surfaces:** bootstrap and the skill teach the language from the registry, never from a code list.
 
