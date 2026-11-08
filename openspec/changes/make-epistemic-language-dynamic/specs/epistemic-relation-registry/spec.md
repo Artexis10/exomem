@@ -17,8 +17,12 @@ Every relation family in the registry SHALL name zero or more behaviours from th
 - **THEN** lift proposals and membership answers over a fixture vault are identical before and after
 
 ### Requirement: Dimensions are registry data
-The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. Each dimension SHALL carry a key, labels per language and a description. Relation families, unit kinds and verdicts SHALL each name one dimension. Reports and retrieval profiles SHALL read dimensions from the registry and SHALL NOT hold a dimension list in code.
+The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. Each dimension SHALL carry a key, labels per language, a description and zero or more behaviours from the closed behaviour set. Retrieval, the context compiler, reviews and reports SHALL filter, group and queue by any dimension key, and SHALL apply a dimension's behaviours to the words in it. Relation families, unit kinds and verdicts SHALL each name one dimension. Reports and retrieval profiles SHALL read dimensions from the registry and SHALL NOT hold a dimension list in code.
 
 #### Scenario: A vault adds a dimension
 - **WHEN** a vault adds dimension `regulation` and moves family `constraint` into it
 - **THEN** a per-dimension report shows a `regulation` row with no code change
+
+#### Scenario: An added dimension borrows a shipped behaviour
+- **WHEN** a vault adds dimension `regulation` that names behaviour `cites`
+- **THEN** the context compiler carries the source with every claim in that dimension, with no code change

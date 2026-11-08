@@ -19,6 +19,7 @@ This change applies the rule to the whole epistemic language.
   - `narrows`: limit the target's scope.
   - `orders`: place the source before or after the target in time.
   - `defines`: the source states what the target means.
+  - `cites`: context carries the claim's source with the claim.
   Each word names zero or more behaviours. Adding a behaviour is a code change and a schema change, and that is the point: a behaviour is a promise code keeps.
 - **A dimension** groups words by the question they answer. Dimensions are registry data. Each relation family, kind and verdict names one dimension. A vault can add a dimension, and the f38 report and retrieval profiles read dimensions from the registry.
 
@@ -67,7 +68,11 @@ The owner chose this shape on 2026-11-08:
 - A numeric probability is governed unit metadata (`belief: 0.7`). It is valid only beside a `holder` (whose belief) and a `basis` (the evidence or the method).
 - Predictions with a probability and a `check_by` can be scored for calibration when their verdict arrives.
 - Exomem does not arbitrate belief. A belief belongs to its holder. The basis can be anything the holder gives, including intuition. Several holders' beliefs about one claim sit side by side. Any belief Exomem computes from evidence is a separate value, labelled as derived.
-- **Dimensions do drive code, but generically.** Retrieval can filter by dimension, context can group by dimension, and reviews and reports can queue by dimension. Each of those operations works for any dimension key. No code names a particular dimension.
+- **Dimensions drive code at two levels.**
+  - Every dimension, shipped or added, gets the generic operations: retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it.
+  - A dimension may also name behaviours from the same closed set. The shipped dimensions do. `currency` names `replaces`, so the context compiler leads with the current view and marks replaced ones. `provenance` names `cites`, so context carries each claim's source. `uncertainty` names `needs_check`, so open questions are flagged and scheduled.
+  - A dimension a user adds can name any existing behaviour and gains it at once. A new behaviour is a code change, and once it exists any dimension can use it.
+  - No code names a particular dimension. Shipped dimensions are more capable by default only because the shipped pack gives them behaviours.
 - The commitment "a judgment MUST NOT be recorded as a number" becomes "a judgment MUST NOT be recorded as a number without a holder and a basis".
 
 The rejected alternatives were levels only, which keeps the old rule but gives up calibration, and free numbers on any claim, which is the most exposed to unsupported precision.

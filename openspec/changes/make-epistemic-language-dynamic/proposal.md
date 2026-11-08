@@ -39,7 +39,7 @@ On 2026-11-08 the owner asked for this language to be dynamic and first-class. E
   - how sure are we;
   - is it a fact or a norm;
   - when did it happen.
-  Every family names one dimension, and the registry check refuses a family without one. The name is "dimension", because "family" already has four other meanings in the code.
+  Every family names one dimension, and the registry check refuses a family without one. Every dimension gets generic retrieval, context and reporting. A dimension may also name behaviours: the shipped ones do, so currency leads with the current view and provenance carries sources. A dimension a user adds can borrow any existing behaviour. The name is "dimension", because "family" already has four other meanings in the code.
 - **Degree of belief becomes first-class.** The owner chose this shape on 2026-11-08:
   - belief levels (speculative, plausible, likely, near-certain) are registry data that any claim may carry;
   - a numeric probability is allowed only with a holder and a basis, mainly on predictions and hypotheses, so it can be scored for calibration;
