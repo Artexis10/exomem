@@ -11,7 +11,7 @@ from cloud_rehearsal import host_speed, large_import
 
 OUT = {
     "phases": {"notes.generate": 27.2, "media.generate": 8.0},
-    "folders": {"notes": {"pages": [{"page": 1, "apply_seconds": 40.0}, {"page": 2, "apply_seconds": 10.0}]},
+    "folders": {"notes": {"pages": [{"page": 1, "file_seconds": 40.0}, {"page": 2, "file_seconds": 10.0}]},
                 "media": {}},
 }
 
@@ -45,7 +45,7 @@ def test_the_calibration_is_recorded_and_the_scaled_timings_follow_from_it(monke
     assert slow["calibration_scale"]["calibration_ratio"] == 2.0
     assert slow["calibration_scale"]["basis"] == "zlib"
     assert slow["phase_seconds_per_calibration"] == {"notes.generate": 13.6, "media.generate": 4.0}
-    assert slow["page_1_apply"]["notes"] == {"apply_seconds": 40.0, "apply_seconds_per_calibration": 20.0}
+    assert slow["page_1_file"]["notes"] == {"file_seconds": 40.0, "file_seconds_per_calibration": 20.0}
 
 
 def test_the_calibration_that_calibrate_writes_is_the_one_the_large_import_report_reads(monkeypatch):
@@ -73,11 +73,11 @@ def test_a_run_without_a_calibration_keeps_the_raw_seconds_and_scales_nothing_to
 
         assert timings["calibration_scale"]["calibration_ratio"] is None
         assert timings["phase_seconds_per_calibration"] == {"notes.generate": None, "media.generate": None}
-        assert timings["page_1_apply"]["notes"] == {"apply_seconds": 40.0, "apply_seconds_per_calibration": None}
+        assert timings["page_1_file"]["notes"] == {"file_seconds": 40.0, "file_seconds_per_calibration": None}
 
-    # A folder that never reached its first page has no apply seconds to scale, with or without a calibration.
-    assert large_import.calibrated_timings(OUT, _environment(1.0))["page_1_apply"]["media"] == {
-        "apply_seconds": None, "apply_seconds_per_calibration": None}
+    # A folder that never reached its first page has no file seconds to scale, with or without a calibration.
+    assert large_import.calibrated_timings(OUT, _environment(1.0))["page_1_file"]["media"] == {
+        "file_seconds": None, "file_seconds_per_calibration": None}
 
 
 def test_the_measurements_keep_the_raw_phase_seconds_next_to_the_scaled_ones():
