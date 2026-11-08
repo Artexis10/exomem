@@ -517,6 +517,21 @@ def test_a_short_key_string_warns_as_a_whole_token_and_never_refuses():
     )
 
 
+def test_a_probe_whose_answer_is_not_one_value_loads_with_a_null_value():
+    """Attribution, argument and open-question probes have no single value; their rubric carries the answer."""
+    project = invented_project()
+    project["probes"][0]["key"].update(
+        value=None, accept=["unverified per vendor"], trap="settled fact"
+    )
+
+    assert cases.structure_problems(project) == []
+    refusals, _, checked = cases.check_probes(project)
+    assert refusals == []
+    assert checked == 4, (
+        "the null value is skipped; its accepted phrasing, its trap and the other probes' values are checked"
+    )
+
+
 def test_a_held_out_epistemic_run_refuses_while_f38_is_not_registered(scratch):
     """No gate can pass an unregistered family, so a decision run must not start."""
     write_case_set(scratch.root, {"proj-a": invented_project()}, heldout=("proj-a",))

@@ -88,8 +88,9 @@ def structure_problems(project: dict) -> list[str]:
             problems.append(f"probe {name} needs a `task` string and a `files` object")
         elif bad := unsafe_paths(p["files"]):
             problems.append(f"probe {name} has unsafe or reserved file paths: {bad}")
-        if not isinstance(key, dict) or not isinstance(key.get("value"), str):
-            problems.append(f"probe {name} needs a `key` with a `value` string")
+        # `value` is null when the answer is not one thing (an attribution, an open question); the rubric carries it.
+        if not isinstance(key, dict) or not isinstance(key.get("value"), (str, type(None))):
+            problems.append(f"probe {name} needs a `key` whose `value` is a string or null")
         elif not all(isinstance(key.get(f), list) for f in ("accept", "rubric", "behaviours")):
             problems.append(
                 f"probe {name}: key.accept, key.rubric and key.behaviours must be lists"
@@ -104,7 +105,7 @@ def structure_problems(project: dict) -> list[str]:
 
 def key_strings(key: dict) -> list[tuple[str, str]]:
     """``(field, string)`` for the key's value, each accepted phrasing and its trap, as authored."""
-    found = [("key.value", key["value"])]
+    found = [("key.value", key["value"])] if key["value"] is not None else []
     found += [(f"key.accept[{i}]", text) for i, text in enumerate(key["accept"])]
     if key.get("trap"):
         found.append(("key.trap", key["trap"]))

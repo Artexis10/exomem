@@ -45,12 +45,12 @@ VERDICT_SCHEMA = {
 
 RUBRIC = """You grade one answer against a key. You see the task, the key, the answer and the files the answering call changed. You see nothing else.
 
-The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has one, a trap: the outdated, refuted, unverified or out-of-scope value that a wrong answer relies on.
+The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has one, a trap: the outdated, refuted, unverified or out-of-scope value that a wrong answer relies on. When the value is null, the answer is not one value, and the rubric alone states what a correct answer does.
 
 Judge the answer and the changed files together, for what the key's fact needs. A correct answer in other words is correct. An answer that holds the right value and also relies on the trap is not correct.
 
 Return:
-- correct: true when the answer meets the key's value or an accepted phrasing, as the rubric describes, and does not rely on the trap.
+- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on the trap.
 - uses_current: "yes" when the answer relies on the current value and not on the one it replaced, "no" when it does not, "n/a" when the task has no replaced value.
 - flags_conflict: "yes" when the answer tells the reader that sources disagree, that a value changed or that something was corrected, "no" when it should and does not, "n/a" otherwise.
 - cites_source: "yes" when the answer names where the value it uses comes from, "no" when it should and does not, "n/a" when no source matters.
