@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.165.0](https://github.com/Artexis10/exomem/compare/v0.164.1...v0.165.0) (2026-11-08)
+
+
+### Features
+
+* **capture:** keep every generated file the agent hands the user ([#2537](https://github.com/Artexis10/exomem/issues/2537)) ([ef5a6a9](https://github.com/Artexis10/exomem/commit/ef5a6a9343610d9703d660c86acbde85d0f5cdc7))
+* **cloud:** fit media cleanup to list-only key custody and propose collection of released media ([#2507](https://github.com/Artexis10/exomem/issues/2507)) ([29445f9](https://github.com/Artexis10/exomem/commit/29445f9e47fff942f1937168aabd518a6f7c1dd6))
+* **context:** find paraphrased and misspelled pages in task discovery ([#2544](https://github.com/Artexis10/exomem/issues/2544)) ([9fe39c1](https://github.com/Artexis10/exomem/commit/9fe39c1ae6ec7325a0eb0fce52ef07763d2d3265))
+* **context:** give task candidates their links instead of a fixed graph hop ([#2549](https://github.com/Artexis10/exomem/issues/2549)) ([00e6553](https://github.com/Artexis10/exomem/commit/00e6553b1f0cd14223cb02f76f84b9b6e8bcbd19))
+* **media:** let the caller choose image size up to the original and crop a region ([#2535](https://github.com/Artexis10/exomem/issues/2535)) ([d840c9d](https://github.com/Artexis10/exomem/commit/d840c9d064c67c96d7f7e3a4de3960246fe6520f))
+* **media:** name the notes behind an unknown media allowance and report the two storage meters ([#2482](https://github.com/Artexis10/exomem/issues/2482)) ([49033a4](https://github.com/Artexis10/exomem/commit/49033a4cbf6e9d2ada19bf13917dd8b530402d1d))
+* **setup:** ship a learning instruction so agents recall and save what they learn ([#2543](https://github.com/Artexis10/exomem/issues/2543)) ([d791a26](https://github.com/Artexis10/exomem/commit/d791a26b4b77c3043a06143a7f306e4d51550d3f))
+* **vault-store:** add the store-mode contract behind an off release gate ([#2541](https://github.com/Artexis10/exomem/issues/2541)) ([4c1e9d8](https://github.com/Artexis10/exomem/commit/4c1e9d885cb3bc7cf1fe6317cca857efb364c16e))
+* **vault-store:** keep pages out of the collection replica and refuse stale Markdown in store mode ([#2542](https://github.com/Artexis10/exomem/issues/2542)) ([3d7ca55](https://github.com/Artexis10/exomem/commit/3d7ca55d9948a33a34ad3b51616976a97ac64e1f))
+
+
+### Bug Fixes
+
+* **capture:** save a stated affiliation when the queued match is unconfirmed ([#2547](https://github.com/Artexis10/exomem/issues/2547)) ([a75947a](https://github.com/Artexis10/exomem/commit/a75947aaa663b3edde5eb49149119f12c744d5ac))
+* **collection-store:** break the wait cycle between a tick and a boundary holder ([#2512](https://github.com/Artexis10/exomem/issues/2512)) ([665fc74](https://github.com/Artexis10/exomem/commit/665fc74a363cd2396c7cb56e1b7a6910815c8b0e))
+* **dreamer:** keep upkeep running under a slow index backlog ([#2538](https://github.com/Artexis10/exomem/issues/2538)) ([5ef0b6a](https://github.com/Artexis10/exomem/commit/5ef0b6a8a174801aac716021c178a428bcf67132))
+* **relations:** accept a confirmed queued relation from its suggestion ([#2536](https://github.com/Artexis10/exomem/issues/2536)) ([0fbf395](https://github.com/Artexis10/exomem/commit/0fbf3953376bef724d031d2e36db29e99054a704))
+
+
+### Performance
+
+* **governance:** check that a path exists before a restricted writer's inbox ([#2475](https://github.com/Artexis10/exomem/issues/2475)) ([79f880b](https://github.com/Artexis10/exomem/commit/79f880b0dad91730c6af227a4d49317fc315945f))
+* **lexstore:** rebuild unit ranking statistics only for parents that changed ([#2531](https://github.com/Artexis10/exomem/issues/2531)) ([923190c](https://github.com/Artexis10/exomem/commit/923190c29e9a056e0533e1c1b4ef6a225dc2eb8a))
+
 ## [0.164.1](https://github.com/Artexis10/exomem/compare/v0.164.0...v0.164.1) (2026-11-08)
 
 
