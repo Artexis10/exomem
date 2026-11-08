@@ -126,6 +126,95 @@ def test_restricted_unit_statistics_retire_after_unit_only_repairs(tmp_path: Pat
         connection.close()
 
 
+def test_structure_only_repair_retires_unit_statistics_with_the_parent_hash_fixed(tmp_path: Path) -> None:
+    """A repaired page summary changes a unit's public ref, so the warm statistics must not survive it."""
+    import json
+
+    _write(tmp_path, "- [fact] harbor gauges ^gauges\n- [fact] harbor tides ^tides\n")
+    lexstore.ensure_fresh(tmp_path)
+
+    def ranked():
+        with call_spans.meter(call_spans.STATS_REBUILT) as measured:
+            hits = lexstore.search_semantic_units(
+                tmp_path, "harbor", 5, scope="kb", admitted_parent_paths={_REL},
+                _validate_current=False, repair=False,
+            )
+        assert hits is not None
+        return {hit.anchor: hit.unit_ref for hit in hits}, int(measured[call_spans.STATS_REBUILT])
+
+    before, rebuilt = ranked()
+    assert sorted(before) == ["gauges", "tides"] and rebuilt == 1
+    assert ranked() == (before, 0)
+    connection = lexstore.get_store(tmp_path)._connect()
+    try:
+        stored = json.loads(connection.execute(
+            "SELECT structure_json FROM pages WHERE path = ?", (_REL,)
+        ).fetchone()[0])
+        for item in stored["structure"]["compact"]:
+            if item["anchor"] == "tides":
+                item["anchor"] = None
+        with connection:
+            connection.execute(
+                "UPDATE pages SET structure_json = ? WHERE path = ?",
+                (json.dumps(stored, sort_keys=True), _REL),
+            )
+        repaired, rebuilt = ranked()
+        assert repaired["gauges"] == before["gauges"] and repaired["tides"] != before["tides"]
+        assert rebuilt == 1
+        assert ranked() == (repaired, 0)
+    finally:
+        connection.close()
+
+
+def test_rewriting_one_note_interprets_only_that_parent_and_ranks_as_a_fresh_store(tmp_path: Path) -> None:
+    """A write must cost the changed parent's interpretation, never a whole-corpus one, and never move a score."""
+    import uuid
+
+    def write(name: str, content: str) -> str:
+        path = tmp_path / "Knowledge Base/Notes" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\nexomem_id: {uuid.uuid5(uuid.NAMESPACE_URL, name)}\n---\n# {name}\n\n{content}\n",
+            encoding="utf-8",
+        )
+        find_module.clear_cache()
+        return path.relative_to(tmp_path).as_posix()
+
+    parents = {
+        write("tides", "- [fact] harbor tides rise ^rise\n- [fact] harbor tides fall slowly ^fall"),
+        write("gauges", "- [fact] harbor gauges read depth ^depth"),
+        write("moorings", "- [fact] mooring chains hold boats ^chains"),
+    }
+    lexstore.ensure_fresh(tmp_path)
+
+    def ranked():
+        with call_spans.meter(
+            call_spans.STATS_REBUILT, call_spans.UNIT_PARENTS_INTERPRETED
+        ) as measured:
+            hits = lexstore.search_semantic_units(
+                tmp_path, "harbor depth", 5, scope="kb", admitted_parent_paths=parents,
+                _validate_current=False, repair=False,
+            )
+        assert hits is not None
+        return (
+            [(hit.parent_path, hit.anchor, hit.lexical_score) for hit in hits],
+            int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.UNIT_PARENTS_INTERPRETED]),
+        )
+
+    assert ranked()[1:] == (1, 3)
+    assert ranked()[1:] == (0, 0)
+    write("moorings", "- [fact] harbor depth chains hold boats ^chains\n- [fact] harbor depth moorings ^moorings")
+    lexstore.ensure_fresh(tmp_path)
+
+    after_write, rebuilt, interpreted = ranked()
+    assert (rebuilt, interpreted) == (1, 1)
+    lexstore.clear_stores()
+    cold, rebuilt, interpreted = ranked()
+    assert (rebuilt, interpreted) == (1, 3)
+    assert after_write == cold
+    assert {parent for parent, _anchor, _score in cold} == parents
+
+
 def test_warm_restricted_duplicates_keep_baseline_tokens_and_last_eligible_occurrence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

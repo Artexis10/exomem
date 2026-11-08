@@ -3168,11 +3168,13 @@ class _AdmittedBase:
     frequency: Mapping[str, int]
 
 
-#: Token references that one scope's unit base may keep: 8 bytes for the pointer to an interned token, and
-#: about 250 for the unit's rowid, two ids and tuple headers, so about 40 MiB, which holds about 60,000
-#: units of 12 tokens, a vault's size here at 12,000 parents. A corpus past it keeps no base, and its next
-#: build interprets every parent.
-_UNIT_BASE_TOKENS_MAX = 2_000_000
+#: Bytes that one scope's unit base may keep, by the estimate below: a unit costs about 370 bytes (its tuples,
+#: rowid and two ids; measured at 505 for a unit of 12 tokens) and 8 for each token it holds, as the tokens
+#: are interned. 64 MiB holds about 130,000 units of 12 tokens, twice a live vault's 62,000 units. A corpus
+#: past it keeps no base, and its next build interprets every parent.
+_UNIT_BASE_BYTES_MAX = 64 << 20
+_UNIT_BYTES = 370
+_TOKEN_BYTES = 8
 
 
 class _UnitContribution(NamedTuple):
@@ -10423,7 +10425,7 @@ class LexicalStore:
             representatives: dict[int, str] = {}
             occurrences: dict[str, list[tuple[int, str, str]]] = {}
             kept_parents: dict[str, _ParentUnits] = {}
-            kept_tokens = 0
+            kept_bytes = 0
             for path, revision in revisions.items():
                 parent = held.get(path)
                 if parent is None or parent.revision != revision:
@@ -10443,7 +10445,7 @@ class LexicalStore:
                     # belongs to the original candidate SQL traversal.
                     occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
                     if parent is not None:
-                        kept_tokens += len(unit.tokens)
+                        kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
                 if parent is not None:
                     kept_parents[path] = parent
             entry = _AdmittedStatisticsEntry(
@@ -10451,7 +10453,7 @@ class LexicalStore:
                 MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
             )
             with self._term_frequency_cache_lock:
-                if kept_tokens <= _UNIT_BASE_TOKENS_MAX:
+                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
                     self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
                 else:
                     self._unit_bases.pop(scope, None)
