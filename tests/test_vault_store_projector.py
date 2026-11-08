@@ -1,9 +1,9 @@
-"""Store mode's projector: a committed page reaches the disk, and a person's file is never overwritten.
+"""Store mode's projector: a committed page reaches the disk, and a person's file is never lost.
 
-OpenSpec make-vault-store-canonical task 4.1. The vault is the migration suite's generated vault, moved
-into store mode by ``store-mode migrate``. Commits go through the real ``write.commit`` on a real store
-writer, and the projector runs its real passes on the real files. The interpreters that die in the kill
-trial are real child processes, killed by the operating system.
+OpenSpec make-vault-store-canonical task 4.1. The vault is the migration suite's generated vault,
+moved into store mode by ``store-mode migrate``. Commits go through the real ``write.commit`` on a
+real store writer, and the projector runs its real passes on the real files. The interpreters that
+die in the kill trial are real child processes, killed by the operating system.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def writer(stored):
 
 @pytest.fixture
 def projecting(stored, writer):
-    """A projector whose bookkeeping runs on this thread's writer, as the store thread would run it."""
+    """A projector whose bookkeeping runs on this thread's writer, as the store thread runs it."""
     return projector.Projector(stored, run=lambda work: work(writer))
 
 
@@ -80,14 +80,17 @@ def temporaries(root):
 
 
 def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, writer, projecting):
-    """A projector that leaves a committed page, delete or move off the disk, writes other bytes than
-    the store holds, or records a manifest that differs from the file it wrote."""
+    """A projector that leaves a committed page, delete or move off the disk, writes other bytes
+    than the store holds, or records a manifest that differs from the file it wrote."""
     drifter = b"# Drifter\n\nA page that moves to another folder.\n"
     commit(writer, **put(MOVE_FROM, drifter))
     assert projecting.run_pass().projected == 1
     commit(
         writer,
-        puts=(write.PagePut(NEW, b"# Gamma\n\nA page with no file yet.\n"), write.PagePut(ALPHA, EDITED)),
+        puts=(
+            write.PagePut(NEW, b"# Gamma\n\nA page with no file yet.\n"),
+            write.PagePut(ALPHA, EDITED),
+        ),
         deletes=(write.PageDelete(BETA),),
         moves=(write.PageMove(MOVE_FROM, MOVE_TO),),
     )
@@ -101,7 +104,9 @@ def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, w
         on_disk = stored / rel
         assert on_disk.read_bytes() == read.owned_bytes(stored, rel)
         manifest = rows(
-            stored, "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", rel
+            stored,
+            "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?",
+            rel,
         )
         stat = on_disk.stat()
         # The page's own mtime is what a stat of its file says, so a reader of either agrees.
@@ -109,7 +114,9 @@ def test_committed_pages_a_delete_and_a_move_reach_the_disk_byte_exact(stored, w
         assert meta.mtime_ns == stat.st_mtime_ns
     assert (stored / MOVE_TO).read_bytes() == drifter
     assert not (stored / MOVE_FROM).exists() and not (stored / BETA).exists()
-    assert rows(stored, "SELECT path FROM store_manifest WHERE path IN (?, ?)", BETA, MOVE_FROM) == []
+    assert (
+        rows(stored, "SELECT path FROM store_manifest WHERE path IN (?, ?)", BETA, MOVE_FROM) == []
+    )
     assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
     assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
     assert temporaries(stored) == []
@@ -127,7 +134,9 @@ def test_a_persons_edit_is_held_and_kept_while_newer_store_bytes_wait(stored, wr
     assert (report.held, report.projected) == (1, 1), "the held path must not block the other one"
     assert (stored / ALPHA).read_bytes() == PERSON
     held = rows(stored, "SELECT kind, body, sha256, base_revision, store_revision FROM store_held")
-    manifest_revision = rows(stored, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[0][0]
+    manifest_revision = rows(stored, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[
+        0
+    ][0]
     page_revision = rows(stored, "SELECT revision FROM store_pages WHERE path = ?", ALPHA)[0][0]
     assert held == [
         ("edit", PERSON, hashlib.sha256(PERSON).hexdigest(), manifest_revision, page_revision)
@@ -304,7 +313,8 @@ def test_the_service_starts_the_projector_only_for_a_store_mode_vault(vault, mon
 
     monkeypatch.setattr(projector, "store_thread_runner", lambda _root: on_a_writer_of_its_own)
     monkeypatch.setattr(projector, "POLL_SECONDS", 0.05)
-    # The store has one writer connection, so the commit finishes before the projector thread opens its own.
+    # The store has one writer connection, so the commit finishes before the projector thread
+    # opens its own.
     with connection.open_writer(path, lease_check=lambda: True) as handle:
         commit(CollectionWriter(vault, handle), **put(NEW, b"# Gamma\n"))
     worker = server_runtime._start_vault_projector(vault)
@@ -336,8 +346,9 @@ def body_of(rel, version=1):
 def _project_and_die(environment, root, where, countdown):
     """One projector start in a fresh interpreter that the operating system kills partway through.
 
-    ``publication`` kills it with a page's temporary written and its rename not yet done. ``manifest``
-    kills it after a page's file is installed and before the manifest row that records it.
+    ``publication`` kills it with a page's temporary written and its rename not yet done.
+    ``manifest`` kills it after a page's file is installed and before the manifest row that
+    records it.
     """
     os.environ.clear()
     os.environ.update(environment)
@@ -391,10 +402,12 @@ def die_in_a_child(root, where, countdown):
 
 
 def unrecorded(root):
-    """The pages whose file already holds the store's bytes while the manifest does not record them."""
+    """The pages whose file holds the store's bytes while the manifest does not record them."""
     found = []
     with read.snapshot(root) as view:
-        manifested = {path for (path,) in view.connection.execute("SELECT path FROM store_manifest")}
+        manifested = {
+            path for (path,) in view.connection.execute("SELECT path FROM store_manifest")
+        }
         for meta in view.pages(NOTES):
             file = root / meta.path
             if meta.path not in manifested and file.is_file():
@@ -404,9 +417,12 @@ def unrecorded(root):
 
 
 def test_a_killed_projector_drains_on_restart_to_identical_files_and_no_held_rows(stored):
-    """A restart that reads a torn projection as a person's edit, leaves a temporary behind, leaves a
-    page unprojected, or overwrites or removes a file without the store's bytes behind it."""
-    pages = [bulk(folder, number) for folder in range(FOLDERS) for number in range(PAGES_PER_FOLDER)]
+    """A restart that reads a torn projection as a person's edit, leaves a temporary behind,
+    leaves a page unprojected, or overwrites or removes a file without the store's bytes behind
+    it."""
+    pages = [
+        bulk(folder, number) for folder in range(FOLDERS) for number in range(PAGES_PER_FOLDER)
+    ]
     assert len(pages) >= 500
     timings = {"pages": len(pages)}
     path = connection.store_path(stored)
@@ -442,7 +458,9 @@ def test_a_killed_projector_drains_on_restart_to_identical_files_and_no_held_row
         commit(CollectionWriter(stored, handle), deletes=(write.PageDelete(deleted),))
 
     with connection.open_writer(path, lease_check=lambda: True) as handle:
-        restarted = projector.Projector(stored, run=lambda work: work(CollectionWriter(stored, handle)))
+        restarted = projector.Projector(
+            stored, run=lambda work: work(CollectionWriter(stored, handle))
+        )
         began = time.monotonic()
         swept = restarted.sweep_temporaries()
         timings["restart_sweep_seconds"] = time.monotonic() - began

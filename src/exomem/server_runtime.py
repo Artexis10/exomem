@@ -1169,7 +1169,7 @@ def _start_file_watcher(vault_root: Path) -> Any | None:
 def _start_vault_projector(vault_root: Path) -> Any | None:
     """Start the projector that writes a store-mode vault's committed pages to disk.
 
-    A file-mode vault, and a vault whose mode records disagree, starts nothing: its files are canonical.
+    A file-mode vault, and a vault whose mode records disagree, starts nothing: its files stand.
     """
     from .vault_store import mode
 

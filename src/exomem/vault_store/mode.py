@@ -105,9 +105,9 @@ def _stored_mode(vault_root: Path) -> str | None:
     return None if row is None else row[0]
 
 
-#: What ``status`` reports for a record it cannot read: never a zero, which would pass for an empty store.
+#: What ``status`` reports for a record it cannot read: never a zero, which would pass for empty.
 UNKNOWN = "unknown"
-#: The report's own field names for a store-mode vault: the figures that it adds to the mode and the gate.
+#: The report's own field names for a store-mode vault: the figures that it adds to mode and gate.
 STORE_FIGURES = (
     "revision",
     "release",
@@ -127,13 +127,14 @@ def status(vault_root: Path) -> dict:
 
     A file-mode vault reports only the mode and the release gate. A crash window reports its own state. A
     store-mode vault adds the figures that an operator checks before a rollback: stored pages and binaries,
-    queued projections with the age in seconds of the oldest one (None when nothing is queued), and held
-    items in total and by kind. A store that cannot be read gives "unknown", for the mode or for each
-    figure, with the error's name in ``unreadable``: an unreadable store never reports zeros. A damaged
-    state manifest raises instead, so that the command refuses and names it.
+    queued projections with the age in seconds of the oldest one (None when nothing is queued), and
+    held items in total and by kind. A store that cannot be read gives "unknown", for the mode or
+    for each figure, with the error's name in ``unreadable``: an unreadable store never reports
+    zeros. A damaged state manifest raises instead, so that the command refuses and names it.
     """
     report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
-    if not state_migration.vault_store_recorded(vault_root):  # a damaged manifest raises: the command refuses
+    # A damaged manifest raises here, so the command refuses and names it.
+    if not state_migration.vault_store_recorded(vault_root):
         return {**report, "mode": FILE_MODE}
     try:
         current = state(vault_root)
@@ -165,7 +166,7 @@ def _store_figures(vault_root: Path) -> dict:
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
         }
-        # The queue stamps whole seconds in UTC, which SQLite's own clock reads, so no format lives here.
+        # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
         (age,) = reader.execute(
             "SELECT CAST(strftime('%s', 'now') AS INTEGER) "
             "- CAST(strftime('%s', MIN(queued_at)) AS INTEGER) FROM store_projection_queue"
