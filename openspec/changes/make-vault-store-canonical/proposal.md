@@ -29,7 +29,7 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 ### New Capabilities
 
 - `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified, reversible migration.
-- `vault-layout`: the managed root, areas named by registries, flat page paths, unique readable names, short links, renames that keep derived names matching titles, path aliases and the verified relayout.
+- `vault-layout`: the managed root, areas named by registries, flat page paths, unique readable names, short links, renames that keep derived names matching titles in `root` vaults, path aliases and the verified relayout.
 
 ### Modified Capabilities
 
