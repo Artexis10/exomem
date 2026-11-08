@@ -27,10 +27,10 @@ Is the artifact something you reason from (input to your thinking)?
   │         (a markdown source-note in Sources/<type>/ captures the analytical surface;
   │          the binary lives alongside as the original reference)
   │
-  └─ No → is this a selected/approved final deliverable or proof-bearing output?
+  └─ No → is this a file you generated and hand the user, or a proof-bearing output?
            │
            ├─ Yes → Evidence/<scope>/<category>/
-           │         (the exact adopted final; drafts and revised-away siblings stay ephemeral)
+           │         (the exact bytes you handed over; drafts you never hand over stay ephemeral)
            │
            └─ No → was the artifact produced by your own compiled note?
                     │
@@ -45,13 +45,13 @@ Is the artifact something you reason from (input to your thinking)?
 **Worked examples:**
 
 - An article or PDF you found that informs a project → `Sources/Articles/_attachments/` with a markdown capture in `Sources/Articles/`. You reason from it.
-- A selected social image, approved report, or published export → `Evidence/<scope>/<category>/`. Preserve the exact adopted final, not its draft siblings.
-- Supporting output from a compiled note that was never adopted as a deliverable → `Notes/<...>/_attachments/`.
+- A social image, report, or export you hand the user → `Evidence/<scope>/<category>/`. Preserve the exact bytes you handed over, not drafts you never handed over.
+- Supporting output from a compiled note that was never handed over as a deliverable → `Notes/<...>/_attachments/`.
 - An official document received from a third party → `Evidence/<scope>/`. Third party, preserve as-received.
 - A Sources/Sessions transcript of a conversation → not a binary case; lives as markdown in `Sources/Sessions/` directly.
 
 **Why this matters:** mixing layers dilutes their epistemic discipline. Evidence
-holds exact proof-bearing or adopted-final bytes; Sources hold material reasoned
+holds exact proof-bearing or handed-over bytes; Sources hold material reasoned
 from. MIME never chooses between them. Keep the layers honest and the categories
 stay useful.
 
@@ -72,7 +72,7 @@ per-operation rules:
 | `Knowledge Base/Sources/**` | add | Append-only; never edit existing files. `_attachments/` subfolders may hold binary originals (append-only). |
 | `Knowledge Base/Notes/**` | note, replace | Follow the live engagement policy, operation envelope, and standing authority. `_attachments/` subfolders may hold binary outputs (append-only). |
 | `Knowledge Base/Entities/**` | link, replace | Follow the live engagement policy, operation envelope, and standing authority. |
-| `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and adopted-final artifacts; never edit existing files; no frontmatter required on binaries |
+| `Knowledge Base/Evidence/**` | preserve | Append-only proof-bearing and handed-over artifacts; never edit existing files; no frontmatter required on binaries |
 | `Knowledge Base/index.md` | any write | Catalog of what exists; auto-updated as part of every governed write |
 | `Knowledge Base/log.md` | any write | Chronological activity log; appended (never edited) on every governed write |
 | `Knowledge Base/<subfolder>/index.md` | any write | Catalog only; no orientation prose (orientation lives in `_Schema/references/`) |

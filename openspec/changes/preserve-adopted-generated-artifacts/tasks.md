@@ -20,7 +20,8 @@ Retirement scope (2026-10-11): Retirement supersedes Hosted v5 packaging and gat
 - [x] 3.1 Add scaffold, bootstrap, workflow, prominence, and documentation guidance for draft silence, explicit adoption, semantic destination, exact-byte receipts, and separate delivery.
 - [x] 3.2 Add real existing-collection Records integration tests for receipt-gated delivery links, reported versus verified remote identity, and no implicit collection creation.
 - [x] 3.3 Add capability-sensitive no-handle behavior that reports unavailable or non-committing handoff without false save language.
-- [x] 3.4 Add delegation-envelope and carrier tests proving selection/approval is an adoption fact, not write confirmation: Source/Evidence adoption and delivery Records obey `proactive_capture`, explicit save remains requested action, and missing-collection proposals/changes stay structural and confirmed.
+- [x] 3.4 Add delegation-envelope and carrier tests proving a hand-over is an adoption fact, not write confirmation: Source/Evidence adoption and delivery Records obey `proactive_capture`, explicit save remains requested action, and missing-collection proposals/changes stay structural and confirmed.
+- [x] 3.5 Make hand-over the adoption trigger: keep every generated file the agent hands the user, not only one the user selects, and not files written in the user's own workspace (activation capture policy, tool field descriptions, skill guidance, spec); store identical bytes once and a revision under the next free name.
 
 ## 4. Current client acceptance
 

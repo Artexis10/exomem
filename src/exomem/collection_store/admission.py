@@ -1189,6 +1189,11 @@ def _takeover_facts(session, runtime, token, raw, marker, fence):
 
 def _settle(session, runtime, token, facts, staged, action, reason, check, *, unchanged=None):
     """Under the boundary: revalidate cheaply what the decision read, then apply it."""
+    if action == "adopt":
+        from ..vault_store import availability
+
+        # The replica is a copy without pages, so adopting it over a store-mode store would drop them.
+        availability.refuse_page_loss(session.root, "adopting the vault replica as the live store")
     manager = session.manager
     state_migration._require_collection_store_recovery(session, token)
     # An adoption replaces the live store with the staged replica, which staging migrated.

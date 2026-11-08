@@ -59,8 +59,11 @@ It prompts for your vault, **scans it and shows what's already there** —
 existing notes are never touched; exomem writes only under `Knowledge Base/` —
 then initializes the KB, picks lean vs hybrid, runs `doctor`, registers the
 server with Claude Code (or prints the `.mcp.json` snippet if the `claude` CLI
-isn't on PATH), installs the skill, and offers the optional hooks. Re-running
-is safe: completed steps report `[skipped]`.
+isn't on PATH), installs the skill, and offers the optional hooks. Last, it
+shows Exomem's learning instruction and asks before it adds that text to your
+Claude Code `CLAUDE.md` and Codex `AGENTS.md`. The text asks the agent to recall
+Exomem before a task and save what it learns. Re-running is safe: completed
+steps report `[skipped]`.
 
 Setup prefers one already-running authenticated service when `--mcp-url` or
 `EXOMEM_BASE_URL` is configured, including cwd `.env`; Claude Code and Codex
@@ -70,6 +73,9 @@ confirm replacement or pass `--replace-client-registration`.
 
 Non-interactive (scripts/CI):
 `uv run python -m exomem setup --yes --vault "/path/to/vault" --lean`
+
+`--yes` edits no instruction file. Add `--learning-instruction` to place the
+learning instruction too.
 
 ## Not CLI-comfortable? Ask an assistant to drive
 
@@ -120,15 +126,15 @@ These aliases are thin routes over product commands: `ask` -> `search_memory`,
 leaves remain underneath for governance and validation, but new users do not need
 to learn them first.
 
-Generated drafts are ephemeral. When you select, approve, send, or publish one
-offered output, a balanced or maximal assistant may use `proactive_capture` to
-preserve that selected handle's exact bytes; unselected siblings remain
-unwritten. The assistant chooses Source or Evidence by the artifact's role,
-never its MIME type. If the client has no usable handle, it reports a
-non-committing upload handoff instead of claiming the artifact was saved.
-Delivery is recorded only after an Evidence adoption receipt and only through
-an existing compatible Records collection; a reported remote reference is not
-proof of remote byte equality.
+Handing you a generated file is what makes an assistant keep it. A balanced or
+maximal assistant uses `proactive_capture` to preserve the exact bytes of every
+generated file it hands you, as it hands it over. Drafts it never hands over
+stay unwritten, and so do files it edits in your own workspace or repository. The assistant chooses Source or Evidence by the
+artifact's role, never its MIME type. If the client has no usable handle, it
+reports a non-committing upload handoff instead of claiming the artifact was
+saved. Delivery is recorded only after an Evidence adoption receipt and only
+through an existing compatible Records collection; a reported remote reference
+is not proof of remote byte equality.
 
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
@@ -560,6 +566,9 @@ to unwire the config but leave the yadm-synced hook tree in place, `--client
 codex` (or `--client all`) to pick the client, and `--json` for the machine
 report. Restart the client afterwards; it keeps running the hooks it already
 loaded. Existing checkpoint state is inert and may be deleted separately.
+Uninstall also removes the learning instruction that setup placed between its
+markers in that client's `CLAUDE.md` or `AGENTS.md`, and leaves the rest of the
+file alone.
 
 **If your dotfiles are yadm-managed, the deployed file is not the file that
 matters.** Where `settings.json` is produced from alternates

@@ -54,6 +54,39 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **WHEN** a relevant comparison method is stored outside the current subject's anchor neighborhood
 - **THEN** method discovery can supply it with applicability evidence and its source reference
 
+#### Scenario: Different wording still finds the stored page
+
+- **WHEN** an unrestricted caller's turn paraphrases or misspells a stored page and shares no material term with it
+- **THEN** discovery ranks admitted pages by the dense reading of the resident recall matrix as well as by keyword, and supplies the page
+- **AND** a page enters through the dense reading only when one of its chunks clears the corpus-relative chance band over the admitted rows, so an unrelated turn gains no dense candidate
+- **AND** the dense reading never loads a model or a matrix on the request; while a service cannot run it (warming, or a matrix evicted after an idle gap, whose background reload the request starts), the keyword result stands and task context reports `partial`
+
+#### Scenario: A late deadline keeps what was found
+
+- **WHEN** the request budget runs out after some discovery lanes ran
+- **THEN** each later lane checks the budget before it starts and is skipped with a `budget` missing reason, the costliest lane last
+- **AND** task context returns the candidates already found with state `partial`, not an empty result
+
+#### Scenario: A candidate lists what it links to
+
+- **WHEN** an unrestricted caller's task discovery finds a page that authors typed relations and plain links to other pages
+- **THEN** the candidate lists up to five of its outbound links, each with the relation, the target's canonical ref and the target's title, and no body
+- **AND** links with a typed relation, as the relation registry's declared family marks it, come before plain links, and the graph owner's order stands within each group
+- **AND** a candidate with more links than it lists carries the count of those it omits, and a link to a page the caller may not see is never listed
+- **AND** no linked page becomes a candidate by that link, so the agent decides which link to follow
+- **AND** a page the turn slice already carries returns as a candidate only to list its links, when at least one fits
+
+#### Scenario: Links cost the allowance last
+
+- **WHEN** the packet allowance cannot hold every listed link
+- **THEN** every lead and method that fits without links is served, and links fill only the room that remains, in lead order
+- **AND** the candidate counts the links it could not list
+
+#### Scenario: An unavailable graph keeps the leads
+
+- **WHEN** the graph cannot answer, or the request budget cannot afford the link read
+- **THEN** the candidates stay and carry no links, and task context reports `partial` with a `lane_failed` or `budget` missing reason
+
 #### Scenario: A large structured collection is relevant
 - **WHEN** a collection description identifies a source of exact facts
 - **THEN** activation supplies its bounded query route without indexing or enumerating all collection rows
@@ -78,7 +111,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 #### Scenario: Restricted routes report their limits
 
 - **WHEN** a restricted caller activates task context
-- **THEN** task graph expansion reports an omitted lane until origin-unit release can precede its caps
+- **THEN** task links report an omitted lane until origin-unit release can precede the graph caps
 - **AND** collection claims routing requires existing FULL metadata admission, while independent released text remains eligible
 
 #### Scenario: Released-corpus discovery is off by default

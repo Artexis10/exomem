@@ -13,11 +13,14 @@ arm:
 - ``PP``: the primary Exomem arm. Exactly ``P``, and the task prompt also carries CL-Bench's
   per-task memory sentence pointed at Exomem: the sentence ``E`` gets, in the place ``F`` has its own.
 - ``P``: Exomem as its users get it. The shipped Claude plugin (skills and hooks) at its default
-  prominence, the documented balanced custom-instruction block, the Skill tool and the full Exomem
-  tool surface over a fresh disposable vault. The task prompt carries no memory instruction. It
-  measures the product gap that a capture change must close, and only describes. The workspace
-  resets per question, so Exomem is the only thing that persists. Each turn records the characters
-  the hooks injected.
+  prominence, the documented balanced custom-instruction block, the learning instruction that
+  ``exomem setup`` places in the user's ``CLAUDE.md``, the Skill tool and the full Exomem tool
+  surface over a fresh disposable vault. The harness reads project settings only, so the learning
+  instruction is laid in the workspace ``CLAUDE.md``, which Claude Code delivers through the same
+  channel as the user-level file. The task prompt carries no memory instruction. It measures the
+  product gap that a capture change must close, and only describes. The workspace resets per
+  question, so Exomem is the only thing that persists. Each turn records the characters the hooks
+  injected.
 - ``E``: ablation. Exomem over MCP alone on a fresh disposable vault, with our memory
   instruction in the task prompt. The workspace resets per question.
 - ``EH``: diagnostic. ``E`` plus the shipped plugin at its default activation; each turn
@@ -32,6 +35,7 @@ model run (R0), through ``run_cell``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -52,6 +56,8 @@ from epistemic.journeys.f27_replay import (
     refuse_unsafe_out_dir,
 )
 
+from exomem.client_config import place_learning_instruction
+from exomem.prominence import LEARNING_INSTRUCTION
 from membench.utility.switch_eval.session import hook_push, rejected_limit
 
 from .. import record
@@ -430,6 +436,15 @@ class ClaudeActor:
         self.mcp_config.write_text(json.dumps({"mcpServers": servers}, indent=2))
         self.block = arm_dir / "custom-instructions.txt"
         self.block_record = lay_instruction_block(self.block) if spec.shipped else None
+        # The learning instruction `exomem setup` places: laid by `_reset_work` with setup's own writer.
+        self.learning_record = (
+            {
+                "sha256": hashlib.sha256(LEARNING_INSTRUCTION.encode()).hexdigest(),
+                "laid": "workspace CLAUDE.md",
+            }
+            if spec.shipped
+            else None
+        )
         # Path-scoped: an unscoped Glob or Grep allow would let one arm read another arm's memory.
         allowed = ["Read(./**)", "Write(./**)", "Edit(./**)"]
         if spec.plugin:
@@ -463,11 +478,16 @@ class ClaudeActor:
         return {**self.env, **hook_env(self.arm_dir, f"q{index:03d}")}
 
     def _reset_work(self) -> None:
-        """An empty workspace; the folder arm's memory folder starts empty."""
+        """An empty workspace; the folder arm's memory folder starts empty.
+
+        A shipped arm's workspace holds the learning instruction as setup writes it.
+        """
         shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True)
         if self.spec.persists == "folder":
             (self.work / "memory").mkdir()
+        if self.spec.shipped:
+            place_learning_instruction(self.work / "CLAUDE.md", LEARNING_INSTRUCTION)
 
     def argv(self) -> list[str]:
         argv = build_turn_argv(
@@ -706,6 +726,7 @@ def run_cell(cell: CellSpec) -> Path:
                 if actor.spec.plugin
                 else None,
                 "instruction_block": actor.block_record,
+                "learning_instruction": actor.learning_record,
             }
         (arm_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 

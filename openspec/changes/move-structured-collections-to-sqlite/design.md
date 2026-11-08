@@ -23,7 +23,7 @@ PR #1457 measured a guarded append round trip of 12.2 s at N=1000, O(N). PR #145
 
 The owner's decisions for this change:
 
-- Knowledge (Notes, Entities, Sources, Evidence, Episodes) stays Markdown.
+- Knowledge (Notes, Entities, Sources, Evidence, Episodes) stays Markdown in file mode. A vault in store mode (`make-vault-store-canonical`) keeps its pages in the collection store.
 - Records and Planning, with their audit logs, move to SQLite as the single source of truth.
 - The concepts and data model stay; only the storage engine changes.
 - Markdown views are projections with governed edit-back (option 2).
@@ -72,7 +72,7 @@ The live store is one SQLite file per vault: `collections.sqlite` under the vaul
 - migration moves it and never drops it;
 - backups and portability include it.
 
-The vault carries a **replica**: `Knowledge Base/_Collections/collections.sqlite`. It is a single-file (`journal_mode=DELETE`) consistent snapshot, published by the backup API to a target-adjacent staging file, checked with `PRAGMA quick_check`, and atomically renamed into place.
+The vault carries a **replica**: `Knowledge Base/_Collections/collections.sqlite`. It is a single-file (`journal_mode=DELETE`) consistent copy of the collection tables, filled inside one read transaction into a target-adjacent staging database, checked with `PRAGMA quick_check`, and atomically renamed into place. It holds no page, lexical, graph or store-mode row. Backup and portability keep the backup API's whole-file copy.
 - **When it is published:** after committed transactions, coalesced to at most one publish per 60 s under steady writes (A9). The snapshot copy runs outside the vault write boundary, so writes proceed during it; two brief boundary steps (record the intent, then verify and swap) delay a write that arrives during one, in proportion to the replica's size. Publication is check-then-swap against the last replica this instance published (A4). It is always flushed synchronously on quiesce, writer-lease release, shutdown, upgrade handoff and portability export.
 - **What it carries:** in `store_meta`, the `store_id`, the publishing `instance_id` and its lineage, a store-wide `commit_seq` and chained `store_head_hash` (A3, A4), and the lease epoch. Explicit restore binds the snapshot to trusted enrollment and the current fence; the mode marker is a compatibility hint (A5).
 - **How it is used:** it is what restic, vault copies and multi-host replicas carry. It is never opened for writing in place.
@@ -84,7 +84,7 @@ Single source of truth is preserved because exactly one live store accepts write
 - A new holder facing a head recorded by another instance adopts the replica only once the replica reaches that head. Until then it refuses collection writes with the retryable `COLLECTION_STORE_SYNC_PENDING`.
 - A single-host store, where no foreign head was ever recorded, never waits.
 - `exomem collections adopt-local` continues deliberately from local state, recording the fork point.
-- Any foreign replica or view stamp is `COLLECTION_STORE_DIVERGED` immediately. Collection writes refuse, and knowledge writes and all reads continue.
+- Any foreign replica or view stamp is `COLLECTION_STORE_DIVERGED` immediately. Collection writes refuse, and all reads continue. Knowledge writes continue in file mode; in store mode they refuse with the same code.
 - The crash recovery point is the replica publish interval. Stranded transactions stay in the crashed host's store and are reconciled into held corrections (§15 item 5).
 
 *Alternative rejected:* the live store inside the vault. The ratified `machine-local-state-placement` requirement exists because sync agents hash, hold and replace database files, and a WAL database copied mid-checkpoint is corrupt. Ruled (R1): the live store under the per-vault state root, plus the integrity-checked single-file replica at `Knowledge Base/_Collections/collections.sqlite`.
@@ -1177,7 +1177,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 **3. Backup and restore (restic, vault copy).** #1457 is right that a live WAL database copied mid-write can be torn, and that a database in the state root is not captured by copying the vault. The answer is §1 plus §11:
 - The live store stays out of the vault.
-- A single-file, `integrity_check`ed replica is published into the vault. It is made with the backup API into a staging file and renamed atomically. `VACUUM INTO` is an equivalent primitive and would be acceptable.
+- A single-file, `integrity_check`ed replica is published into the vault. It is a staging database filled with the collection tables inside one read transaction, then renamed atomically. Backup and portability use the backup API's whole-file copy instead.
 - The replica is published after commits (coalesced) and synchronously on quiesce, lease release, shutdown, handoff and export. A restic snapshot or a folder copy of the vault is therefore a complete, consistent backup.
 - **A vault copy is not a read-only mirror.** Starting a service on the copy adopts the replica as its live store (same `store_id`, §1 takeover rule), and it is writable from then on.
 - **Restore** is: restore the vault, start the service, adopt the replica, re-render views into staging, and compare. A difference becomes a held correction, never an overwrite (§11).
@@ -1187,7 +1187,7 @@ Schema and rows therefore change together, atomically, under one audit chain. Th
 
 **5. Sync tools and two machines writing.** This is the one place the store design is genuinely weaker than files. Today two machines writing different items merge through ordinary file sync, and a same-file conflict becomes a sync conflict copy.
 - **With the multi-host writer lease** (the supported multi-writer setup), only the lease holder writes the store. Edits made on another machine are view edits. They reach the writer's vault through sync and go through edit-back there, so no store merge is ever needed (§1, §6). Sync conflict copies of views are held `VIEW_CONFLICT_COPY`.
-- **Without the lease**, two services each writing their own live store on one synced vault diverge. That includes a Windows and a WSL service on one vault, which have different state roots and locks. Instance identity, replica check-then-swap and stamps (§16 A4) detect it immediately. Collection writes then fail closed with `COLLECTION_STORE_DIVERGED`, while reads and knowledge writes continue.
+- **Without the lease**, two services each writing their own live store on one synced vault diverge. That includes a Windows and a WSL service on one vault, which have different state roots and locks. Instance identity, replica check-then-swap and stamps (§16 A4) detect it immediately. Collection writes then fail closed with `COLLECTION_STORE_DIVERGED`, while reads continue and, in file mode, knowledge writes continue. In store mode knowledge writes refuse with the same code.
 - **Nothing is lost.** An operator command, `maintain_memory(mode="collections-store-reconcile", dry_run=...)`, takes the divergent store's transactions after the fork point. It turns every changed item into a held view correction on the surviving store, carrying that store's values and diagnostics, and records the reconciliation as one content-free transaction. A human then resolves each one, as with a sync conflict copy today.
 - Running two writers without the lease becomes explicitly unsupported for collection writes. `describe` and the doctor probe say so. Knowledge Markdown is unaffected.
 
@@ -1329,7 +1329,7 @@ Warm checkout validates the held token through the existing coordinator status a
   - the store published that head under its stored epoch, with no pending publication, create intent, divergence or foreign adoption record;
   - the vault replica holds exactly the bytes the store last published.
   The replica hash runs before the mutation boundary. Under the boundary, settlement compares the publication records and the replica's file signature, change time included, again; any difference, or a record it cannot read, takes the full publication path. Custody, the import-original backfill, the token check under the report lock and the head report still run. The stored epoch is a grant that every later token exceeds, so another host adopts the replica as before. This keeps the routine idle-release cycle from holding the boundary for a whole-replica copy.
-- **Bounded.** The refusal is re-checked on every replica change (the `_Collections/` watch, A4) and every 10 s. After 15 minutes it also raises attention with the same remedy. Reads and knowledge writes are never blocked.
+- **Bounded.** The refusal is re-checked on every replica change (the `_Collections/` watch, A4) and every 10 s. After 15 minutes it also raises attention with the same remedy. Reads, and in file mode knowledge writes, are never blocked.
 
 **Explicit adopt-local.** `exomem collections adopt-local --why "…"` (also `maintain_memory(mode="collections-store-adopt-local")`) is owner-only and preview-first. It continues from the local store deliberately:
 - it records a fork point, meaning the foreign head it is not waiting for, in `store_meta.forks`;
@@ -1349,7 +1349,7 @@ Earlier, divergence was not always detected. The state directory is keyed on the
 - **Each name change is durable before the next.** After the capture rename, the install rename and the workspace removal, the publisher flushes the directories that changed before it changes another name or promotes the head. Otherwise a crash could keep the later unlink of the displaced replica and lose the rename that installed its successor. A held filesystem whose rename and directory unlink already flush the parents they change declares it (`HeldFilesystem.name_changes_flush_parents`), and the publisher does not repeat that flush. The POSIX implementation declares it; the Windows one flushes explicitly.
 - **Dark publisher integration seam.** Until the single mode/adoption/fence adapter is implemented, internal publish/recover calls require an explicit trusted authority callback with no permissive default, plus intrinsic vault/store binding, exclusive thread ownership (A3), open-handle and current lease checks. The caller retains the vault mutation boundary throughout the operation and supplies exclusive private workspace custody. For a synced deployment the future adapter must verify incoming and outgoing subtree exclusion for every sync client touching the vault; a random name, permissions, a reserved descriptor or the writer lease alone does not prove it. Isolated local callers establish custody through their own disposable directories. Missing custody prevents successful replica publication, not unrelated reads or knowledge writes; the deployment owner pays that bounded failure cost. No human attestation flag or new policy evaluator is added. This foundation has no public or service caller and does not establish marker, takeover or S1 acceptance.
 - **Foreign preservation follows the durable fence.** Record divergence before moving the unexpected replica to its owned no-clobber `.foreign-*` location. This filesystem-only preservation retains all mode, identity, exclusive thread ownership (A3), open-handle and live-lease checks; it never permits a business transaction through the divergence fence. If cancellation, authority loss or sharing prevents the move, keep the bytes in place and report preservation pending. Publication does not resume, and owner reconciliation must retain that input before replacing it.
-- **Watching `_Collections/`.** The directory is watched, and polled by the A1 reconcile. Any foreign replica, or any view stamp from a foreign instance, sets `COLLECTION_STORE_DIVERGED` immediately: collection writes refuse, and reads and knowledge writes continue. Reconciliation is the §15 item 5 command.
+- **Watching `_Collections/`.** The directory is watched, and polled by the A1 reconcile. Any foreign replica, or any view stamp from a foreign instance, sets `COLLECTION_STORE_DIVERGED` immediately: collection writes refuse, and reads continue, as do knowledge writes in file mode. In store mode knowledge writes refuse with the same code. Reconciliation is the §15 item 5 command.
 - **Moved vaults.** Opening the same store from a new resolved path (same `store_id` in the mode marker, A5; no local store at the new key) is an adoption, and gets a new lineage entry. It is not a fork.
 
 #### A5. Canonical ownership and fenced compatibility hints

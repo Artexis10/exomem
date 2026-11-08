@@ -6,10 +6,12 @@ vault migrates (OpenSpec ``move-structured-collections-to-sqlite``, design
 
 Contract held here, not in the writers:
 
-- every table is ``STRICT``;
+- every table this module creates is ``STRICT``. The lexical catalogue and graph tables that store
+  mode copies into this file (OpenSpec ``make-vault-store-canonical``) come from their own
+  modules' DDL, are not ``STRICT`` and are never created here;
 - ``txns``, ``audit_effects``, ``item_versions``, ``item_sources``,
-  ``collection_manifests``, ``collection_type_versions`` and
-  ``version_identity`` are append-only: conflicting ``BEFORE INSERT``,
+  ``collection_manifests``, ``collection_type_versions``,
+  ``version_identity`` and ``store_audit`` (schema 15) are append-only: conflicting ``BEFORE INSERT``,
   ``BEFORE UPDATE`` and ``BEFORE DELETE`` triggers abort the statement;
 - ``version_identity`` is the version spine (schema 5): every JSON or typed
   item version has exactly one identity, and ``item_sources`` references it.
@@ -45,7 +47,9 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
+#: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
+VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
 #: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
 #: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.
@@ -78,6 +82,19 @@ META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"
 
+#: The store-mode tables (schema 15). They hold pages, projection state and the audit trail of a vault
+#: whose pages the store owns; in file mode they stay empty.
+VAULT_STORE_TABLES = (
+    "store_mode",
+    "store_mode_objects",
+    "store_pages",
+    "store_binaries",
+    "store_manifest",
+    "store_projection_queue",
+    "store_held",
+    "store_audit",
+)
+
 TABLES = (
     "store_meta",
     "collection_types",
@@ -103,6 +120,7 @@ TABLES = (
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
+    *VAULT_STORE_TABLES,
 )
 _V1_APPEND_ONLY_TABLES = (
     "txns",
@@ -112,7 +130,8 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_manifests",
     "collection_type_versions",
 )
-APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats")
+APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats",
+                      "store_audit")
 
 _TABLES_V1 = (
     """
@@ -302,6 +321,7 @@ _CONFLICT_KEYS = {
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
     "version_identity": (("row_id", "row_version"),),
+    "store_audit": (("seq",),),
     "import_members": (("collection_id", "seq"),),
     "typed_field_epochs": (("collection_id", "generation", "field_ordinal"),),
     "typed_value_formats": (("collection_id", "generation", "field_ordinal", "format_id"),
@@ -943,6 +963,85 @@ _TRIGGERS_V14 = (
 )
 
 
+def _migrate_to_15(conn: sqlite3.Connection) -> None:
+    """Add the store-mode tables: pages, binaries, the projection manifest and queue, held corrections, audit.
+
+    Every vault gets them empty. Store mode is a per-vault state (``vault_store.mode``): the vault state
+    manifest records ``vault-store-v1`` and ``store_mode.mode`` says ``store``. ``store_mode.revision`` is the
+    store revision that page writes advance, so that a page write never advances ``txns.commit_seq`` and the
+    collection replica never republishes for it. ``store_mode_objects`` names each lexical or graph object the
+    migration copied in, so a rollback drops exactly those. ``store_audit`` is kept by a rollback, which
+    exports it first.
+    """
+    # The mode column is a closed set that this schema fixes: a vault is in file mode or in store mode.
+    conn.execute("""CREATE TABLE store_mode(
+      id INTEGER PRIMARY KEY CHECK(id = 1),
+      mode TEXT NOT NULL CHECK(mode IN ('file', 'store')),
+      revision INTEGER NOT NULL,
+      changed_at TEXT NOT NULL,
+      release TEXT NOT NULL
+    ) STRICT""")
+    conn.execute("""CREATE TABLE store_mode_objects(
+      name TEXT PRIMARY KEY,
+      type TEXT NOT NULL
+    ) STRICT""")
+    conn.execute("""CREATE TABLE store_pages(
+      path TEXT PRIMARY KEY,
+      body BLOB NOT NULL,
+      sha256 TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      frontmatter_json TEXT,
+      revision INTEGER NOT NULL
+    ) STRICT""")
+    conn.execute("""CREATE TABLE store_binaries(
+      path TEXT PRIMARY KEY,
+      sha256 TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      revision INTEGER NOT NULL
+    ) STRICT""")
+    conn.execute("""CREATE TABLE store_manifest(
+      path TEXT PRIMARY KEY,
+      sha256 TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      mtime_ns INTEGER NOT NULL,
+      revision INTEGER NOT NULL
+    ) STRICT""")
+    # The operation column is a closed set that this schema fixes: the projector writes or deletes a file.
+    conn.execute("""CREATE TABLE store_projection_queue(
+      path TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('write', 'delete')),
+      queued_at TEXT NOT NULL
+    ) STRICT""")
+    conn.execute("CREATE INDEX store_projection_queue_by_age ON store_projection_queue(queued_at)")
+    # The kind column is a closed set that this schema fixes: an outside edit or an outside delete is held.
+    conn.execute("""CREATE TABLE store_held(
+      path TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK(kind IN ('edit', 'delete')),
+      base_revision INTEGER,
+      store_revision INTEGER,
+      sha256 TEXT,
+      body BLOB,
+      detected_at TEXT NOT NULL
+    ) STRICT""")
+    # The operation column is a closed set that this schema fixes: each way the store's contents change.
+    conn.execute("""CREATE TABLE store_audit(
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      revision INTEGER NOT NULL,
+      path TEXT,
+      operation TEXT NOT NULL CHECK(operation IN ('migrate', 'write', 'delete', 'move', 'import', 'rollback')),
+      origin TEXT NOT NULL,
+      sha256 TEXT,
+      reason TEXT,
+      at TEXT NOT NULL
+    ) STRICT""")
+    for statement in _TRIGGERS_V15:
+        conn.execute(statement)
+
+
+_TRIGGERS_V15 = _append_only_triggers("store_audit")
+
+
 _MIGRATION_PATH = Path(__file__).with_name("migrations")
 # Alembic's context/op proxies are process-global, so environment lifetimes cannot overlap.
 _ALEMBIC_ENVIRONMENT_LOCK = threading.Lock()
@@ -1023,6 +1122,21 @@ def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> i
     return version
 
 
+def divergence_reason(conn: sqlite3.Connection) -> str | None:
+    """Why the store fences business writes as diverged, or None when it records no divergence.
+
+    Either record fences them: the replica divergence marker, whose JSON carries a ``reason``, or a view
+    that carries another store instance's stamp. Every reader of the fence asks here, so none restates the keys.
+    """
+    found = dict(conn.execute(
+        "SELECT key, value FROM store_meta WHERE key IN (?, ?)", (META_REPLICA_DIVERGENCE, META_VIEW_DIVERGED)))
+    if META_REPLICA_DIVERGENCE in found:
+        return json.loads(found[META_REPLICA_DIVERGENCE])["reason"]
+    if found.get(META_VIEW_DIVERGED) == "1":
+        return "a view carries another store instance's stamp"
+    return None
+
+
 def ensure_schema(conn: Connection) -> int:
     """Apply packaged revisions in one writer-owned immediate transaction."""
     # Store libraries load with the first store, not with every CLI import.
@@ -1052,7 +1166,8 @@ def ensure_schema(conn: Connection) -> int:
             encoding_triggers = _TRIGGERS_V11 if target >= 11 else _TRIGGERS_V5 if target >= 5 else ()
             for statement in (*_TRIGGERS_V1, *encoding_triggers,
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
-                              *(_TRIGGERS_V14 if target >= 14 else ())):
+                              *(_TRIGGERS_V14 if target >= 14 else ()),
+                              *(_TRIGGERS_V15 if target >= 15 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

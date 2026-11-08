@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from .. import held_fs, record_formats, records, state_migration, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
+from ..vault_store import availability
 from . import (
     admission,
     authority,
@@ -660,6 +661,8 @@ def _retire_marker(session, token, intent):
 
 def _tombstone_store(session, at):
     """Fold the live store into one file and rename it, with any derived rows beside it, as the final step."""
+    # The export steps refuse at their own boundary; this one holds for any caller, because a store-mode store holds the pages.
+    availability.refuse_page_loss(session.root, "retiring the live collection store")
     path = session.path
     if path.exists():
         try:
@@ -802,6 +805,8 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     admission._bind_fence_client(session, fence_client)
     deferred = []
     with manager.consistency_guard(root, operation="collection_store_export"):
+        # Under the mutation boundary, which excludes a concurrent store-mode activation, and before this export takes the lease.
+        availability.refuse_page_loss(root, "exporting the collections to files")
         intent, begun = _local_intent(root), None
         if intent is None:
             if ownership.current(root).marker is None:
@@ -976,6 +981,7 @@ def retire_local(session, manager, fence_client) -> dict:
     admission._ProducerSession.bind(session, manager)
     admission._bind_fence_client(session, fence_client)
     with manager.consistency_guard(root, operation="collection_store_export_retire_local"):
+        availability.refuse_page_loss(root, "retiring the local collection store")
         if authority.read_marker(root) is not None:
             raise CollectionStoreError(takeover.SYNC_PENDING, "this vault still routes collections to its store; "
                                        "wait until the exported vault reaches this host")

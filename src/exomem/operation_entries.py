@@ -606,7 +606,7 @@ _REMAINING = {
     )),
     "read_media": ("media", (
         _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec"), ("path",)),
-        _row("image", "read_media", ("path", "paths", "max_side")),
+        _row("image", "read_media", ("path", "paths", "max_side", "region")),
     )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),

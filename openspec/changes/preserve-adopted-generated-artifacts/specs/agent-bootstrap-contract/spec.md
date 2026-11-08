@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Bootstrap teaches generated artifact adoption
-Balanced and maximal bootstrap profiles SHALL teach that generated drafts remain ephemeral, only an explicitly selected or approved offered artifact becomes eligible for exact-byte preservation, semantic Source-or-Evidence choice precedes transport, and success requires a committed local receipt. They SHALL distinguish adoption eligibility from write confirmation and route agent-initiated adoption and delivery through the current `proactive_capture` disposition. They SHALL teach that delivery is a separate observed Record and remote byte equality cannot be inferred. A filtered surface without direct handles SHALL expose an honest unavailable or handoff state and MUST NOT advertise a nonexistent callable route. Off and light profiles SHALL retain their existing explicit-request-only semantics.
+Balanced and maximal bootstrap profiles SHALL teach that the agent keeps the exact bytes of every generated file it hands the user, at hand-over, and that drafts it never hands over stay ephemeral. They SHALL teach that semantic Source-or-Evidence choice precedes transport and that success requires a committed local receipt. They SHALL run the hand-over rule under the current `proactive_capture` disposition, so a hand-over is a trigger and not a standing write permission, and route agent-initiated delivery through the same disposition. They SHALL teach that delivery is a separate observed Record and remote byte equality cannot be inferred. A filtered surface without direct handles SHALL expose an honest unavailable or handoff state and MUST NOT advertise a nonexistent callable route. Off and light profiles SHALL retain their existing explicit-request-only semantics. The scope boundary (files the agent writes or edits in the user's own workspace or repository are not covered) SHALL live in the skill's engagement reference; the compact bootstrap need not carry it.
 
 #### Scenario: Direct-capable bootstrap names exact receipt boundary
 - **WHEN** bootstrap is rendered for a profile exporting direct client-file preservation
-- **THEN** it teaches selection, exact-byte commit, draft silence, and receipt-gated success
+- **THEN** it teaches hand-over adoption, exact-byte commit, draft silence, and receipt-gated success
 
 #### Scenario: Filtered bootstrap is capability-honest
 - **WHEN** bootstrap is rendered for a profile without direct file handles

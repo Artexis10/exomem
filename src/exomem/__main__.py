@@ -3426,9 +3426,10 @@ def _install_hook_main(argv: list[str]) -> int:
         "--uninstall",
         action="store_true",
         help=(
-            "Remove the entries and scripts this installed, and nothing else; "
-            "also edits any yadm alternate sources, which is what makes the "
-            "removal survive the next alternate selection."
+            "Remove the entries and scripts this installed, and the learning "
+            "instruction `exomem setup` placed in the client's CLAUDE.md or "
+            "AGENTS.md, and nothing else; also edits any yadm alternate sources, "
+            "which is what makes the removal survive the next alternate selection."
         ),
     )
     parser.add_argument(

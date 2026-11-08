@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    deferred_index,
     dreamer,
     dreamer_families,
     dreamer_policy,
@@ -397,6 +398,30 @@ def test_a_busy_vault_in_quiet_mode_still_gets_a_tick_once_the_bound_passes(
     dreamer._loop_once(vault, clock)
     assert dreamer.status()["ticks"] == 1
     assert recorder.pages, "the tick processed pages although the vault is busy"
+
+
+def test_a_slow_deferred_queue_delays_upkeep_without_starving_it(
+    tmp_path: Path, monkeypatch, recorder
+) -> None:
+    """A full-upsert queue that drains a dozen rows per pass can outlast days.
+    The worker reads that real queue and holds a tick for it only until the bound."""
+    monkeypatch.setenv("EXOMEM_DREAMER", "on")
+    monkeypatch.setattr(foreground_activity, "idle_seconds", lambda _vault: 3600.0)  # idle an hour
+    vault = _vault(tmp_path, 2)
+    assert deferred_index.add_full(vault, ["Knowledge Base/Notes/Insights/page-00.md"]) == 1
+    skew = [0.0]
+    clock = dreamer.Clock(monotonic=lambda: time.monotonic() + skew[0])
+
+    dreamer._loop_once(vault, clock)  # the worker first sees the vault: settling, not a tick
+    skew[0] = dreamer_policy.MAX_DEFER_SECONDS + 1.0
+    dreamer._loop_once(vault, clock)
+    assert dreamer.status()["ticks"] == 1, "the queue held upkeep past the bound"
+    assert recorder.pages
+
+    skew[0] += 1.0  # the vault is settled and a tick just completed: the queue now holds
+    dreamer._loop_once(vault, clock)
+    held = dreamer.status()
+    assert (held["ticks"], held["waiting_reason"]) == (1, "index_backlog")
 
 
 def test_the_bound_counts_from_the_last_completed_tick(

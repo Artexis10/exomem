@@ -49,10 +49,14 @@ COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
 _COLLECTION_STORE_COMPATIBILITY_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
 #: A store holding a sqlite collection records this: a release without it would render item views again.
 COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
+#: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
+#: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
+VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
     "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID,
 })
 
 
@@ -240,13 +244,30 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
     return tuple(str(entry) for entry in descriptors)
 
 
+def vault_store_recorded(vault_root: Path) -> bool:
+    """Whether the published state manifest records ``vault-store-v1``.
+
+    An absent manifest answers False. A manifest that cannot be read, is not valid JSON or belongs to
+    another vault raises ``StateMigrationManifestError``: it never reads as "not recorded", because the
+    caller decides whether this vault's pages live in the store.
+    """
+
+    manifest = _load_manifest(state_paths.vault_state_dir(vault_root), vault_root=vault_root)
+    # `_load_manifest` has validated that `descriptors` is a list of strings.
+    return manifest is not None and VAULT_STORE_COMPATIBILITY_ID in manifest["descriptors"]
+
+
 def supported_state_compatibility_ids() -> tuple[str, ...]:
-    """Optional state formats this runtime can use, not merely parse."""
+    """Optional state formats this runtime can use, not merely parse.
+
+    ``vault-store-v1`` is listed in every build, released or not, so a build that keeps the capability
+    off can still open a vault in store mode and roll it back.
+    """
 
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
         CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-        *store_schema.compatibility_ids(),
+        VAULT_STORE_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -372,6 +393,23 @@ def record_collection_store_schema(
                      drop=frozenset(store_schema.compatibility_ids()) - wanted)
 
 
+def record_vault_store_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool], active: bool,
+) -> None:
+    """Record (``active``) or drop the requirement that this vault's pages live in the store.
+
+    Activation records the id before its store commit and rollback drops it after its own commit,
+    so a crash between the two leaves file mode and both commands rerun cleanly: the id alone
+    never makes a vault store-mode (``vault_store.mode``). An earlier release reads the id as
+    unknown and refuses the vault. The caller proves its authority as for
+    ``record_collection_store_compatibility``.
+    """
+
+    ids = frozenset({VAULT_STORE_COMPATIBILITY_ID})
+    _record_optional(vault_root, authority_check, add=ids if active else frozenset(),
+                     drop=frozenset() if active else ids)
+
+
 def _record_optional(vault_root: Path, authority_check: Callable[[], bool], *,
                      add: frozenset[str], drop: frozenset[str] = frozenset()) -> None:
     if not (add or drop):
@@ -402,7 +440,8 @@ def retire_collection_store_compatibility(
     and owns the store custody and export intent; this seam removes only the store's IDs.
     """
 
-    owned = _store_owned_ids()
+    # A reverse export of collections never retires the pages' requirement: only a store-mode rollback does.
+    owned = _store_owned_ids() - {VAULT_STORE_COMPATIBILITY_ID}
     with _collection_store_manifest(vault_root, authority_check, "retirement") as (state_dir, manifest):
         if owned & set(manifest["descriptors"]):
             manifest["descriptors"] = sorted(set(manifest["descriptors"]) - owned)
@@ -410,9 +449,9 @@ def retire_collection_store_compatibility(
 
 
 def _store_owned_ids() -> frozenset[str]:
-    """Every ID that a store-routed vault may record: the store's own and its schema's."""
+    """Every ID that a store-routed vault may record: the store's own, its schema's and the pages'."""
 
-    return (_COLLECTION_STORE_COMPATIBILITY_IDS | {COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID}
+    return (_COLLECTION_STORE_COMPATIBILITY_IDS | {COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID, VAULT_STORE_COMPATIBILITY_ID}
             | frozenset(store_schema.compatibility_ids()))
 
 

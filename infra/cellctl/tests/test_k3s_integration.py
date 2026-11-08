@@ -2341,6 +2341,7 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
         "--set", "mediaEdge.enabled=true",
         "--set-string", f"mediaEdge.endpoint={endpoint}",
         "--set-string", "mediaEdge.bucket=media-bucket",
+        "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
         "--set-json", f'mediaEdge.cellIds=["{labelled_id}"]',
         "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
     ))

@@ -58,7 +58,10 @@ def empty(state: str = "empty", *, reset: bool = False) -> dict[str, Any]:
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
     if method:
         return f"Method: {item.get('attribution', '')}. Read the source for applicability and exclusions."
-    return f"{item.get('title', '')}: {item.get('reason', '')}"
+    line = f"{item.get('title', '')}: {item.get('reason', '')}"
+    # The listed links are served beside the lead, so the allowance charges them with it.
+    links = [f"{link['relation']} {link['title']} {link['target_ref']}" for link in item.get("links") or ()]
+    return f"{line} Links: {'; '.join(links)}" if links else line
 
 
 def packet_chars(block: Mapping[str, Any]) -> int:
@@ -363,17 +366,46 @@ def compile_context(
             candidates, block["interpretation"] = context_fit.interpret(
                 root, caller=caller, candidates=candidates, turn=turn, conversation=conversation, sources=sources,
             )
+        linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
+            # Links spend only what every lead and method leaves, so a link never displaces one.
+            links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
             if item["ref"] not in covered and item["source_ref"] not in covered:
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
                     block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                else:
+                    linked.append((item, links, False))
+            elif links:
+                # The turn slice carries no links, so a named lead returns here only to list them.
+                linked.append((item, links, True))
             for method in methods_by_source.get(item["source_ref"], ()):
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
+                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+        for item, links, named in linked:
+            if named:
+                block["candidates"].append(item)
+                if packet_chars(block) > allowance:
+                    block["candidates"].pop()
+                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    continue
+            item["links"] = []
+            for link in links:
+                item["links"].append(link)
+                if packet_chars(block) > allowance:
+                    item["links"].pop()
+                    break
+            if len(links) > len(item["links"]):
+                item["links_omitted"] = item.get("links_omitted", 0) + len(links) - len(item["links"])
+            if not item["links"]:
+                del item["links"]
+                if named:
+                    # A named lead without one listed link would only repeat the turn slice's route.
+                    block["candidates"].remove(item)
                     block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")

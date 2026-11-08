@@ -428,11 +428,10 @@ class CollectionStoreRuntime:
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
         token = self.manager._fencing_token
         if token is not None and self.reporting_ready(token):
-            divergence, view = self._meta(schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)
-            if divergence is not None or view is not None:
-                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True,
-                        "reason": json.loads(divergence)["reason"] if divergence is not None
-                        else "a view carries another store instance's stamp"}
+            with connection.store_reader(self.path, self.reader_pool()) as reader:
+                reason = schema.divergence_reason(reader)
+            if reason is not None:
+                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True, "reason": reason}
             return {"status": "admitted"}
         return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
 
@@ -1573,8 +1572,14 @@ class StoreServer:
             return
         self._stack, self.session, self.runtime = stack, session, self.manager._collection_store
 
-    def _serve(self, request):
+    def unserved(self):
+        """The refusal for a request that arrives while this vault's store is not open."""
         from ..cli_ops import OpError
+
+        code, message = self.refusal
+        return OpError(code, message, "Retry once the service serves the collection store.")
+
+    def _serve(self, request):
         from ..governance import policy
         from . import ownership
         from .preview import preview_store
@@ -1614,8 +1619,7 @@ class StoreServer:
 
         try:
             if self.runtime is None:
-                code, message = self.refusal
-                raise OpError(code, message, "Retry once the service serves the collection store.")
+                raise self.unserved()
             request.result = request.context.run(bound)
         except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
             if isinstance(error, connection.CollectionStoreError) and error.code == "COLLECTION_STORE_BUSY":

@@ -10,8 +10,8 @@ The design must work for any generated file type, retain Source-versus-Evidence 
 
 **Goals:**
 
-- Preserve exactly one explicitly adopted offered artifact and prove its byte identity.
-- Keep unselected, rejected, revised-away, and abandoned drafts out of canonical storage.
+- Preserve the exact bytes of every generated file the agent hands the user and prove their byte identity.
+- Keep drafts the agent never hands over (rejected, revised-away, and abandoned) out of canonical storage.
 - Make adoption durable and idempotent across retries and later sessions.
 - Record external delivery separately and avoid unproven remote-byte claims.
 - Extend the existing byte-preservation leaf rather than create a parallel blob path.
@@ -19,7 +19,8 @@ The design must work for any generated file type, retain Source-versus-Evidence 
 
 **Non-Goals:**
 
-- Automatically preserving every generated result or guessing finality from filename, MIME type, quality, or generation completion.
+- Preserving generated results the agent never hands to the user, or guessing a hand-over from filename, MIME type, quality, or generation completion.
+- Preserving files the agent writes or edits in the user's own workspace or repository, which already persist there.
 - Reconstructing binaries from descriptions, OCR, base64 emitted through a model, or re-encoding.
 - Claiming an upload, publication, send, or remote byte identity before evidence proves it.
 - Backfilling historical Evidence with manufactured adoption or delivery state.
@@ -29,7 +30,7 @@ The design must work for any generated file type, retain Source-versus-Evidence 
 
 ### D1. Adoption and delivery are two ordered facts
 
-The lifecycle is `drafts -> explicit adoption -> exact-byte receipt -> optional observed delivery Record`. Selection or approval identifies the offered artifact. A later report that a uniquely identified offered artifact was sent or published can request the same sequence, but the agent must commit the local bytes first and must not turn the external report into a preservation receipt.
+The lifecycle is `drafts -> hand-over -> exact-byte receipt -> optional observed delivery Record`. Handing a generated file to the user is the adoption trigger, and the handle the agent hands over identifies the file. A later report that a uniquely identified offered artifact was sent or published can request the same sequence, but the agent must commit the local bytes first and must not turn the external report into a preservation receipt.
 
 Alternative considered: treat sent or published as equivalent to saved. Rejected because it cannot prove local custody or remote byte identity.
 
@@ -37,7 +38,7 @@ Alternative considered: treat sent or published as equivalent to saved. Rejected
 
 The envelope carries a durable scoped adoption key, an explicit trigger, and one `selected_file_id` that must match exactly one supplied handle. It is accepted by `capture_source` for the Source lane and `preserve_artifacts` for the Evidence lane. When present, only that handle is staged for canonical commit; siblings receive no canonical write. Ordinary calls without the envelope keep their current semantics.
 
-The trigger vocabulary records an explicit user-visible fact, not a semantic classifier result. Validation occurs before canonical publication, while staging and hashing remain outside the mutation guard.
+The trigger is a free-form label that names what prompted adoption, such as `handed_over`; no code branches on it. Validation occurs before canonical publication, while staging and hashing remain outside the mutation guard.
 
 ### D3. Each lane's canonical companion owns the portable adoption receipt
 
@@ -63,17 +64,17 @@ The single v5 owner preserves v4's command membership and order unless an actual
 
 ### D8. Adoption eligibility and write authority are separate
 
-Selection, approval, send, or publication establishes that one offered artifact became durable work; it is not, by itself, an explicit command to write Exomem. Agent-initiated Source/Evidence adoption and a later compatible delivery Record are `proactive_capture` and obey its off/advisory/silent disposition. An explicit request to save or preserve remains an ordinary user-requested action. Proposing a missing collection is `structural_suggestions`; creating or changing a collection/schema is separate confirmed `restructure_execution`. No trigger creates standing delegation.
+Handing a generated file to the user, or a definite report that an offered artifact was sent or published, establishes that the file became durable work; it is not, by itself, an explicit command to write Exomem. Agent-initiated Source/Evidence adoption and a later compatible delivery Record are `proactive_capture` and obey its off/advisory/silent disposition. An explicit request to save or preserve remains an ordinary user-requested action. Proposing a missing collection is `structural_suggestions`; creating or changing a collection/schema is separate confirmed `restructure_execution`. No trigger creates standing delegation.
 
 ## Risks / Trade-offs
 
-- [A guessed trigger preserves drafts] -> Require an explicit offered-file identifier and publish draft/no-selection mutants.
+- [A guessed hand-over preserves drafts] -> Require an explicit handle for the file handed over and publish draft/no-hand-over mutants.
 - [Wrong sibling lands] -> Bind receipt identity to selected file id and staged digest; test sibling absence.
 - [Durable replay cannot inspect expired bytes] -> Fail `ADOPTION_REPLAY_UNVERIFIABLE` after the request window; never accept identifier equality as byte proof.
 - [Companion reconciliation drops adoption fields] -> Make the adoption block part of the governed companion vocabulary and test every renderer/reconciler.
 - [Delivery wording overclaims] -> Gate Records on a committed local receipt and represent remote byte verification explicitly.
 - [Hosted package history drifts] -> Candidate-own v5 skills and hash-check v1-v4 source and generated artifacts.
-- [Selection is mistaken for write consent] -> Keep adoption eligibility separate from the `proactive_capture` disposition and test off/advisory/silent behavior.
+- [A hand-over is mistaken for write consent] -> Keep adoption eligibility separate from the `proactive_capture` disposition and test off/advisory/silent behavior.
 
 ## Migration Plan
 

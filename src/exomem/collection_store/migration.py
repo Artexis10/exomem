@@ -273,6 +273,9 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
     rows, pending, store_ids = preflight.candidates(root, ownership_proof=ownership_proof)
     if not pending:
         return preflight.report(rows, store_ids), None
+    from ..vault_store import availability
+
+    availability.refuse_page_loss(root, "migrating this vault's pending collections")
     directory = (state_paths.ensure_vault_state_dir(root) / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
                  if donor is None else donor)
     # A stopped attempt may leave unknown bytes; a new private leaf preserves them without blocking a retry.
