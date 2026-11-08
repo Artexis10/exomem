@@ -1,0 +1,276 @@
+"""The Cloud export in three steps: pause, pack and upload (add-cloud-media-store D8, 2026-11-08).
+
+Each case runs the real portability writer and verifier and the real age decryption. The workflow case
+also runs the real media edge over HTTP and the presigned parts over TLS.
+"""
+from __future__ import annotations
+
+import contextlib
+import errno
+import hashlib
+import json
+import os
+import shutil
+import threading
+import uuid
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from exomem import cloud_export, cloud_export_steps, media_store, originals, vault_portability
+from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
+from exomem.kbdir import kb_dirname
+from exomem.trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
+from tests.test_cloud_export import CELL, storage  # noqa: F401
+from tests.test_media_collection import Cell, cell  # noqa: F401
+from tests.test_media_store import _offload, _stored, selected_store  # noqa: F401
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the cell export Job runs only on Linux cells")
+
+PLENTY = 1024**3
+
+
+def _owner():
+    return request_scope(RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="cloud-export",
+                                          issuer_family=f"cloud-cell:{CELL}"))
+
+
+def _evicted(vault: Path, category: str, size: int) -> tuple[Path, originals.StoredObject, bytes]:
+    path = _stored(vault, category, size)
+    data = path.read_bytes()
+    reference = originals.original_state(vault, path).reference
+    assert media_store.evict(vault, path)
+    return path, reference, data
+
+
+def _trash_companion(vault: Path, path: Path) -> Path:
+    """Move an evicted original's companion into a Trash bundle, as a folder deletion leaves it: no payload beside it."""
+    bundle = vault / kb_dirname() / TRASH_SUBPATH / "2026-11-08" / "bundle"
+    bundle.mkdir(parents=True)
+    originals.sidecar_path(path).rename(bundle / originals.sidecar_path(path).name)
+    (bundle.parent / ("bundle" + METADATA_SUFFIX)).write_text(
+        json.dumps({"original_path": path.parent.relative_to(vault).as_posix()}))
+    return bundle / path.name
+
+
+def _phase(log: Path, *args: str) -> dict:
+    status = cloud_export.main([*args, "--termination-log", str(log)])
+    report = json.loads(log.read_text(encoding="ascii"))
+    assert status == (1 if "error" in report else 0)
+    return report
+
+
+def test_an_export_carries_every_member_and_each_evicted_original_byte_identical(
+        cell: Cell, storage: dict, tmp_path: Path, tmp_path_factory, monkeypatch):  # noqa: F811
+    """Defect: the archive omits an evicted original, live or in Trash, drops an unreadable companion without
+    saying so, or carries what the runtime wrote after the pause."""
+    vault = cell.vault
+    cached = cell.original("cached.txt", b"cached bytes")
+    _offload(vault, cached)
+    evicted = cell.original("evicted.txt", b"evicted bytes")
+    _offload(vault, evicted)
+    assert media_store.evict(vault, evicted)
+    discarded = cell.original("discarded.txt", b"discarded bytes")
+    _offload(vault, discarded)
+    assert media_store.evict(vault, discarded)
+    trashed = _trash_companion(vault, discarded)
+    pending = cell.original("pending.txt", b"pending bytes")
+    damaged = cell.original("damaged.txt", b"bytes beside a damaged companion")
+    companion = originals.sidecar_path(damaged)
+    companion.write_text(companion.read_text().replace("evidence_file:", "evidence_file: [", 1))
+    note = vault / kb_dirname() / "Notes" / "Before the pause.md"
+    note.write_text("written before the pause")
+
+    staging = tmp_path_factory.mktemp("staging")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+    monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
+    monkeypatch.setattr(cloud_export_steps, "SPOOL_POLL_SECONDS", 0.01)
+    common = ["--export-id", str(uuid.uuid4()), "--max-bytes", str(PLENTY), "--vault", str(vault),
+              "--staging", str(staging)]
+    paused = _phase(tmp_path / "pause.json", "--phase", "pause", "--media-mode", "served", *common)
+    assert "error" not in paused, paused
+    assert (paused["evicted"], paused["evicted_bytes"], paused["unreadable_companions"]) == (2, 28, 1), paused
+
+    # The hold ends with the pause: the runtime serves, and what it writes now is not the export's.
+    note.write_text("written while the pack runs")
+    cached.unlink()
+    shutil.rmtree(vault / kb_dirname() / TRASH_SUBPATH)
+
+    urls = [f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber={number}" for number in range(1, 201)]
+    packed: dict = {}
+    pack = threading.Thread(target=lambda: packed.update(_phase(
+        tmp_path / "pack.json", "--phase", "pack", "--part-bytes", str(64 * 1024), "--max-parts", "200", *common)))
+    pack.start()
+    uploaded = _phase(tmp_path / "upload.json", "--phase", "upload", *common,
+                      *(argument for url in urls for argument in ("--part-url", url)))
+    pack.join()
+    assert "error" not in packed and "error" not in uploaded, (packed, uploaded)
+    assert (packed["evicted"], packed["unreadable_companions"]) == (2, 1)
+
+    parts = [storage["parts"][f"/cells/{CELL}/exports/archive.zip?partNumber={number}"]
+             for number in range(1, uploaded["parts"] + 1)]
+    assert uploaded["parts"] > 2 and len(storage["parts"]) == uploaded["parts"]
+    assert uploaded["etag_digest"] == cloud_export.etag_digest(
+        ['"' + hashlib.md5(part).hexdigest() + '"' for part in parts])  # noqa: S324 - S3's part ETag
+    archive = tmp_path / "archive.zip"
+    archive.write_bytes(b"".join(parts))
+    verified = vault_portability.verify_export_archive(archive, expected_cell_id=CELL)
+    assert (verified.archive_sha256, verified.archive_size) == (uploaded["sha256"], uploaded["bytes"])
+    with zipfile.ZipFile(archive) as opened:
+        files = {record["path"]: record for record in
+                 json.loads(opened.read(vault_portability.MANIFEST_NAME))["files"]}
+        expected = {evicted: b"evicted bytes", trashed: b"discarded bytes", cached: b"cached bytes",
+                    pending: b"pending bytes", damaged: b"bytes beside a damaged companion",
+                    note: b"written before the pause"}
+        for path, data in expected.items():
+            relative = path.relative_to(vault).as_posix()
+            assert opened.read(relative) == data, relative
+            assert files[relative]["sha256"] == hashlib.sha256(data).hexdigest()
+        assert opened.read(companion.relative_to(vault).as_posix()) == companion.read_bytes()
+    plan = json.loads((staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).read_text())
+    assert sorted(entry["path"] for entry in plan["evicted"]) == sorted(
+        path.relative_to(vault).as_posix() for path in (evicted, trashed))
+    reports = json.dumps([paused, packed, uploaded])
+    assert str(vault) not in reports and str(staging) not in reports and storage["base"] not in reports
+    assert not list((staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME).glob("part-*"))
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "absent", "staged"])
+def test_a_member_that_the_pack_cannot_reproduce_fails_the_export(vault: Path, selected_store, tmp_path_factory,  # noqa: F811
+                                                                  damage):
+    """Defect: a corrupt or missing stored version, or a staged copy cut short, is archived as an absence or as
+    other bytes, or a missing version waits out every retry first."""
+    _path, reference, _data = _evicted(vault, "evicted", 300)
+    staging = tmp_path_factory.mktemp("staging")
+    export_id = str(uuid.uuid4())
+    with _owner():
+        cloud_export_steps.pause(vault, staging, export_id=export_id, cell_id=CELL, media_mode="served",
+                                 max_bytes=PLENTY)
+        stored = Path(str(selected_store[0]["root"])) / reference.object / reference.version
+        stored.chmod(0o600)
+        if damage == "corrupt":
+            stored.write_bytes(bytes(byte ^ 1 for byte in stored.read_bytes()))
+        elif damage == "absent":
+            stored.unlink()
+        else:
+            # A node that crashed before the pause's sync can leave a staged copy without its tail.
+            plan = json.loads((staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).read_text())
+            path, size, _classification = next(member for member in plan["members"] if member[1])
+            os.truncate(staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.MEMBERS_NAME / path, size - 1)
+        waits: list[float] = []
+        with pytest.raises((media_store.MediaStoreError, vault_portability.PortabilityError)) as failed:
+            cloud_export_steps.pack(vault, staging, export_id=export_id, cell_id=CELL, part_bytes=64 * 1024**2,
+                                    max_parts=10, max_bytes=PLENTY, sleep=waits.append)
+    assert failed.value.code == {"corrupt": "MEDIA_ORIGINAL_UNVERIFIED", "absent": "STORED_MEMBER_ABSENT",
+                                 "staged": "STAGED_MEMBER_CHANGED"}[damage]
+    assert waits == []
+    spool = staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME
+    assert not (spool / cloud_export_steps.END_NAME).exists()
+    with pytest.raises(cloud_export.ExportRefused, match="^EXPORT_FAILED$"):
+        cloud_export_steps.upload(staging, ["https://storage.invalid/part-1"], sleep=pytest.fail)
+
+
+def test_a_read_that_drops_mid_object_is_read_again_from_its_start(vault: Path, selected_store,  # noqa: F811
+                                                                   tmp_path_factory, monkeypatch):
+    """Defect: a media edge that restarts during the pack fails the export, or leaves a member with a doubled prefix."""
+    path, reference, data = _evicted(vault, "evicted", 300_000)
+    staging = tmp_path_factory.mktemp("staging")
+    export_id = str(uuid.uuid4())
+    opened = media_store.FilesystemStore.open
+    drops = [200_000]
+
+    class Dropping:
+        def __init__(self, stream):
+            self.stream, self.left = stream, drops.pop()
+
+        def read(self, size=-1):
+            if self.left <= 0:
+                raise ConnectionResetError(errno.ECONNRESET, "the edge restarted")
+            block = self.stream.read(min(size, self.left) if size >= 0 else self.left)
+            self.left -= len(block)
+            return block
+
+    def dropping_open(store, name, version):
+        context = opened(store, name, version)
+        stream = context.__enter__()
+        try:
+            yield Dropping(stream) if drops else stream
+        finally:
+            context.__exit__(None, None, None)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", contextlib.contextmanager(dropping_open))
+    with _owner():
+        cloud_export_steps.pause(vault, staging, export_id=export_id, cell_id=CELL, media_mode="served",
+                                 max_bytes=PLENTY)
+        waits: list[float] = []
+        end = cloud_export_steps.pack(vault, staging, export_id=export_id, cell_id=CELL, part_bytes=64 * 1024**2,
+                                      max_parts=10, max_bytes=PLENTY, sleep=waits.append)
+    assert waits == [cloud_export_steps.FETCH_RETRY_SECONDS[0]] and end["parts"] == 1
+    archive = staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME / "part-00001"
+    with zipfile.ZipFile(archive) as written:
+        assert written.read(path.relative_to(vault).as_posix()) == data
+    assert reference.ciphertext_size > 200_000
+
+
+@pytest.mark.parametrize("binding", ["retained", "unbound"])
+def test_a_pause_that_cannot_reach_an_evicted_original_refuses_the_export(
+        vault: Path, selected_store, tmp_path_factory, monkeypatch, binding):  # noqa: F811
+    """Defect: a cell without an edge, or whose store binding is not mounted, exports its evicted originals as absences."""
+    _evicted(vault, "evicted", 300)
+    if binding == "unbound":
+        monkeypatch.delenv(originals.CONFIG_ENV)
+    staging = tmp_path_factory.mktemp("staging")
+    with _owner(), pytest.raises((cloud_export.ExportRefused, vault_portability.PortabilityError)) as refused:
+        cloud_export_steps.pause(vault, staging, export_id=str(uuid.uuid4()), cell_id=CELL,
+                                 media_mode="retained" if binding == "retained" else "served", max_bytes=PLENTY)
+    assert refused.value.code == {"retained": "EXPORT_MEDIA_UNREACHABLE", "unbound": "MEDIA_STORE_UNBOUND"}[binding]
+    assert not (staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).exists()
+
+
+def test_a_plan_above_the_export_bound_refuses_as_too_large(vault: Path, tmp_path_factory):
+    """Defect: an export above the parts that cellctl can sign runs its pack for hours, then fails as a fault."""
+    staging = tmp_path_factory.mktemp("staging")
+    with _owner(), pytest.raises(cloud_export.ExportRefused, match="^EXPORT_TOO_LARGE$"):
+        cloud_export_steps.pause(vault, staging, export_id=str(uuid.uuid4()), cell_id=CELL, media_mode=None,
+                                 max_bytes=1000)
+    assert not (staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).exists()
+
+
+def test_the_pause_copies_between_two_volumes(vault: Path, tmp_path_factory, monkeypatch):
+    """Defect: Linux refuses copy_file_range between the cell volume and its staging claim, and every pause fails."""
+    def refused(*_args):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "copy_file_range", refused, raising=False)
+    staging = tmp_path_factory.mktemp("staging")
+    with _owner():
+        result = cloud_export_steps.pause(vault, staging, export_id=str(uuid.uuid4()), cell_id=CELL, media_mode=None,
+                                          max_bytes=PLENTY)
+        members = list(vault_portability.iter_archive_members(vault))
+    assert result.members == len(members) > 0
+    for member in members:
+        staged = staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.MEMBERS_NAME / member.path
+        assert staged.read_bytes() == member.source_path.read_bytes(), member.path
+
+
+def test_the_spool_never_holds_more_than_two_parts(tmp_path: Path):
+    """Defect: a pack that outruns its upload fills the staging claim, which has room for two parts beside the members."""
+    spool = tmp_path / "spool"
+    sent: list[bytes] = []
+
+    def upload_oldest(_seconds: float) -> None:
+        waiting = sorted(path for path in spool.iterdir() if path.name.startswith("part-"))
+        assert len(waiting) <= cloud_export_steps.SPOOL_PARTS
+        sent.append(waiting[0].read_bytes())
+        waiting[0].unlink()
+
+    sink = cloud_export_steps.SpoolSink(spool, 1000, 50, sleep=upload_oldest)
+    data = os.urandom(10_500)
+    for offset in range(0, len(data), 700):
+        sink.write(data[offset:offset + 700])
+    end = sink.finish()
+    sent += [path.read_bytes() for path in sorted(spool.glob("part-*"))]
+    assert b"".join(sent) == data
+    assert end == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "parts": 11}

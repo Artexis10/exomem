@@ -1236,6 +1236,29 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
     return ObjectHead(size, plaintext.hexdigest())
 
 
+def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) -> ObjectHead:
+    """Decrypt one stored version into `sink` and return the plaintext's head; the export pack's read (D8).
+
+    The pack reads a staging copy, not the live vault, so this takes no pin, reservation or ledger row. A
+    transport failure raises `MEDIA_STORE_UNAVAILABLE`, after `sink` may have received a verified prefix.
+    """
+    return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
+
+
+def evicted_members(vault: Path, binding: originals.StoreBinding,
+                    unreadable: Callable[[str, Exception], None]) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
+    """Each original whose companion references the store and whose bytes are not on the volume, Trash included.
+
+    Yields the path that the archive gives it: a live original's bound path, or a Trash payload's path
+    beside its companion. `unreadable` hears of each companion that cannot be read, and the walk goes on.
+    """
+    for companion, binary, reference in media_allowance.bound_references(vault, binding, unreadable=unreadable):
+        # A Trash companion sits beside its payload, not at the path that it binds.
+        path = companion.removesuffix(".md") if trash_metadata.is_trash_path(companion) else binary.path
+        if not _on_volume(vault, path):
+            yield path, binary, reference
+
+
 def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
     # Only backend operations are transport failures; local staging writes keep their own errors.
     with _transport("read"), backend.open(reference.object, reference.version) as stream:

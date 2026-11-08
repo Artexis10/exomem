@@ -32,6 +32,8 @@ EXPORT_TOO_LARGE = "EXPORT_TOO_LARGE"
 EXPORT_UPLOAD_FAILED = "EXPORT_UPLOAD_FAILED"
 SOURCE_CHANGED_DURING_EXPORT = "SOURCE_CHANGED_DURING_EXPORT"
 EXPORT_CASE_COLLISION = "CASE_COLLISION"
+# An evicted original that the cell cannot fetch, because no media edge serves its store.
+EXPORT_MEDIA_UNREACHABLE = "EXPORT_MEDIA_UNREACHABLE"
 # A part PUT is idempotent, so a transient failure is retried this often.
 UPLOAD_ATTEMPTS = 3
 # A socket idle this long fails the part; a 64 MiB part has minutes on a slow link.
@@ -166,7 +168,8 @@ def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_
         with fs.open(url, "rb", size=archive_bytes, block_size=1024 * 1024,
                      cache_type="blockcache", cache_options={"maxblocks": 2}) as stream:
             verified = vault_portability.verify_export_stream(stream, archive_bytes, expected_cell_id=cell_id,
-                expected_vault_id=cell_id, limits=vault_portability.PortabilityLimits(max_total_bytes=max_bytes))
+                expected_vault_id=cell_id, limits=vault_portability.PortabilityLimits(
+                    max_total_bytes=max_bytes, max_file_bytes=max_bytes))
         if verified.archive_sha256 != archive_sha256:
             raise ExportRefused(EXPORT_FAILED)
         return {"bytes": verified.archive_size, "sha256": verified.archive_sha256, "verified": True}
@@ -211,6 +214,11 @@ def _failure_diagnostic(error: Exception) -> dict:
         detail["code"] = error.code
         if error.limit is not None:
             detail["limit"] = error.limit
+    from .media_store import MediaStoreError
+
+    if isinstance(error, MediaStoreError):
+        # The media store's fixed codes tell an unverified object from an outage; the message may name one.
+        detail["code"] = error.code
     cause = error
     if not isinstance(error, OSError):
         # A refusal raised from or while handling an OSError keeps that error's class and number,
@@ -239,8 +247,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     parser.add_argument("--staging", type=Path, default=Path("/data/scratch/export"))
     parser.add_argument("--termination-log", type=Path, default=Path("/dev/termination-log"))
+    # The three-step export of D8 (2026-11-08). Without a phase the Job streams the archive in one step.
+    parser.add_argument("--phase", choices=("pause", "pack", "upload"))
+    parser.add_argument("--media-mode", choices=("served", "retained"))
+    parser.add_argument("--max-parts", type=int)
     args = parser.parse_args(argv)
     cloud_containment.log_to_stderr()
+    if args.phase is not None:
+        return _run_phase(args)
     usage: dict[str, int] = {}
     try:
         # Measured first, so a failure report still carries the volume's use. A
@@ -273,5 +287,47 @@ def main(argv: list[str] | None = None) -> int:
         result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
     except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
         result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
+    args.termination_log.write_text(json.dumps(result), encoding="ascii")
+    return 1 if "error" in result else 0
+
+
+def _run_phase(args: argparse.Namespace) -> int:
+    """Run one step of the three-step export and write its content-free report."""
+    from . import cloud_export_steps as steps
+
+    usage: dict[str, int] = {}
+    try:
+        cell_id = os.environ["EXOMEM_CLOUD_CELL_ID"]
+        if str(uuid.UUID(args.export_id)) != args.export_id or args.max_bytes <= 0:
+            raise ExportRefused(EXPORT_FAILED)
+        # The pause measures the cell volume, the pack and the upload their staging claim.
+        usage = filesystem_use(args.vault.parent if args.phase == steps.PAUSE else args.staging)
+        principal = RequestPrincipal(audience_id=OWNER_AUDIENCE, surface="cloud-export",
+                                     issuer_family=f"cloud-cell:{cell_id}")
+        if args.phase == steps.PAUSE:
+            _check_cell(args.vault.parent, cell_id)
+            with request_scope(principal):
+                result = steps.pause(args.vault, args.staging, export_id=args.export_id, cell_id=cell_id,
+                                     media_mode=args.media_mode, max_bytes=args.max_bytes).report()
+        elif args.phase == steps.PACK:
+            if args.part_bytes <= 0 or not args.max_parts or args.max_parts <= 0:
+                raise ExportRefused(EXPORT_FAILED)
+            with request_scope(principal):
+                result = steps.pack(args.vault, args.staging, export_id=args.export_id, cell_id=cell_id,
+                                    part_bytes=args.part_bytes, max_parts=args.max_parts, max_bytes=args.max_bytes)
+        else:
+            # A plain-HTTP part URL would carry the owner's plaintext archive unencrypted.
+            if not args.part_urls or not all(url.startswith("https://") for url in args.part_urls):
+                raise ExportRefused(EXPORT_FAILED)
+            _authorize(args, cell_id, args.part_urls)
+            result = steps.upload(args.staging, args.part_urls)
+        result = {**result, **usage}
+    except ExportRefused as error:
+        result = {"error": error.code, "diagnostic": _failure_diagnostic(error), **usage}
+    except vault_portability.PortabilityError as error:
+        result = {"error": _portability_code(error), "diagnostic": _failure_diagnostic(error), **usage}
+    except Exception as error:  # noqa: BLE001 -- only code identifiers leave the Job
+        result = {"error": EXPORT_FAILED, "diagnostic": _failure_diagnostic(error), **usage}
+    result["phase"] = args.phase
     args.termination_log.write_text(json.dumps(result), encoding="ascii")
     return 1 if "error" in result else 0

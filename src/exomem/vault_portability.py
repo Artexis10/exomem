@@ -17,7 +17,7 @@ import struct
 import tempfile
 import unicodedata
 import zipfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -371,8 +371,11 @@ class PortabilityLimits:
     """Resource bounds enforced before and while reading an archive."""
 
     max_files: int = 100_000
-    max_total_bytes: int = 10 * 1024 * 1024 * 1024
-    max_file_bytes: int = 2 * 1024 * 1024 * 1024
+    # The largest archive that a Cloud export can upload: 1000 parts of at most 1 GiB (cellctl's part
+    # plan). The verifier and the restore must accept every archive that the export produces, and an
+    # evicted recording above 2 GiB is one member of it.
+    max_total_bytes: int = 1000 * 1024 * 1024 * 1024
+    max_file_bytes: int = 1000 * 1024 * 1024 * 1024
     max_manifest_bytes: int = 16 * 1024 * 1024
     max_path_bytes: int = 4096
     max_compression_ratio: int = 1_000
@@ -442,7 +445,10 @@ class _SourceSnapshot:
     size: int
     sha256: str
     classification: str
-    source_signature: tuple[int, int, int, int, int, int]
+    source_signature: tuple[int, int, int, int, int, int] | None
+    # A member whose bytes are not on this filesystem: it writes them into the archive entry and
+    # returns their size and SHA-256, which must equal the planned ones.
+    write: Callable[[BinaryIO], tuple[int, str]] | None = None
 
 
 def _fail(code: str, reason: str, *, limit: str | None = None) -> None:
@@ -638,9 +644,29 @@ def _digest_regular_source(
     return size, digest.hexdigest(), signature
 
 
-def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_SourceSnapshot]:
-    snapshots: list[_SourceSnapshot] = []
-    total_bytes = 0
+@dataclass(frozen=True, slots=True)
+class ArchiveMember:
+    """A present file that the archive carries, found before any of its bytes is read."""
+
+    path: str
+    source_path: Path
+    classification: str
+
+
+def _reject_unsafe_entry(source: Path, message: str) -> None:
+    source_stat = _safe_lstat(source)
+    if stat.S_ISLNK(source_stat.st_mode):
+        _fail("UNSAFE_SYMLINK", "vault exports never follow symbolic links")
+    if not stat.S_ISREG(source_stat.st_mode):
+        _fail("UNSAFE_SOURCE_ENTRY", message)
+
+
+def iter_archive_members(vault_root: Path) -> Iterator[ArchiveMember]:
+    """Every file that the classification puts in the archive, in walk order, unread.
+
+    The vault walk and the external state walk are the archive's one membership rule; the
+    export, the Cloud export's pause and its pack all take their members from here.
+    """
     try:
         root_stat = vault_root.lstat()
     except OSError:
@@ -672,42 +698,9 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
             classification = classify_artifact(normalized)
             if classification.artifact_class is ArtifactClass.DISPOSABLE_RUNTIME:
                 # Still reject links and unsupported entries in excluded locations.
-                source_stat = _safe_lstat(source)
-                if stat.S_ISLNK(source_stat.st_mode):
-                    _fail("UNSAFE_SYMLINK", "vault exports never follow symbolic links")
-                if not stat.S_ISREG(source_stat.st_mode):
-                    _fail("UNSAFE_SOURCE_ENTRY", "vault exports accept regular files only")
+                _reject_unsafe_entry(source, "vault exports accept regular files only")
                 continue
-            size, digest, source_signature = _digest_regular_source(source)
-            if size > limits.max_file_bytes:
-                _fail(
-                    "RESOURCE_LIMIT_EXCEEDED",
-                    "a source file exceeds the export limit",
-                    limit="max_file_bytes",
-                )
-            snapshots.append(
-                _SourceSnapshot(
-                    path=normalized,
-                    source_path=source,
-                    size=size,
-                    sha256=digest,
-                    classification=classification.artifact_class.value,
-                    source_signature=source_signature,
-                )
-            )
-            total_bytes += size
-            if len(snapshots) > limits.max_files:
-                _fail(
-                    "RESOURCE_LIMIT_EXCEEDED",
-                    "the vault exceeds the export file limit",
-                    limit="max_files",
-                )
-            if total_bytes > limits.max_total_bytes:
-                _fail(
-                    "RESOURCE_LIMIT_EXCEEDED",
-                    "the vault exceeds the export byte limit",
-                    limit="max_total_bytes",
-                )
+            yield ArchiveMember(normalized, source, classification.artifact_class.value)
 
     # Two portable-derived families now live outside the vault.  Preserve
     # their established logical archive names so old/new archives share one
@@ -746,51 +739,59 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
                     ):
                         _fail("UNSAFE_SOURCE_ENTRY", "external state entry is unsafe")
                     continue
-                size, digest, source_signature = _digest_regular_source(source)
-                if size > limits.max_file_bytes:
-                    _fail(
-                        "RESOURCE_LIMIT_EXCEEDED",
-                        "a source file exceeds the export limit",
-                        limit="max_file_bytes",
-                    )
-                snapshots.append(
-                    _SourceSnapshot(
-                        path=logical,
-                        source_path=source,
-                        size=size,
-                        sha256=digest,
-                        classification=classification.artifact_class.value,
-                        source_signature=source_signature,
-                    )
-                )
-                total_bytes += size
-                if len(snapshots) > limits.max_files:
-                    _fail(
-                        "RESOURCE_LIMIT_EXCEEDED",
-                        "the vault exceeds the export file limit",
-                        limit="max_files",
-                    )
-                if total_bytes > limits.max_total_bytes:
-                    _fail(
-                        "RESOURCE_LIMIT_EXCEEDED",
-                        "the vault exceeds the export byte limit",
-                        limit="max_total_bytes",
-                    )
-    snapshots.sort(key=lambda snapshot: snapshot.path)
+                yield ArchiveMember(logical, source, classification.artifact_class.value)
+
+
+def check_member_limits(count: int, size: int, total_bytes: int, limits: PortabilityLimits) -> None:
+    """Refuse a member above the per-file limit, or a running count or total above the archive's."""
+    if size > limits.max_file_bytes:
+        _fail("RESOURCE_LIMIT_EXCEEDED", "a source file exceeds the export limit", limit="max_file_bytes")
+    if count > limits.max_files:
+        _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export file limit", limit="max_files")
+    if total_bytes > limits.max_total_bytes:
+        _fail("RESOURCE_LIMIT_EXCEEDED", "the vault exceeds the export byte limit", limit="max_total_bytes")
+
+
+def check_path_collisions(paths: Iterable[str]) -> None:
+    """Refuse archive paths, or their directories, that collide on a case-insensitive filesystem."""
     folded: set[str] = set()
     directory_spellings: dict[str, str] = {}
-    for snapshot in snapshots:
-        collision_key = vault_name_key(snapshot.path)
+    for path in paths:
+        collision_key = vault_name_key(path)
         if collision_key in folded:
             _fail("CASE_COLLISION", "vault paths collide on a case-insensitive filesystem")
         folded.add(collision_key)
-        parts = PurePosixPath(snapshot.path).parts
+        parts = PurePosixPath(path).parts
         for index in range(1, len(parts)):
             spelling = "/".join(parts[:index])
             directory_key = vault_name_key(spelling)
             prior = directory_spellings.setdefault(directory_key, spelling)
             if prior != spelling:
                 _fail("CASE_COLLISION", "vault directories collide by case")
+
+
+def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_SourceSnapshot]:
+    snapshots: list[_SourceSnapshot] = []
+    total_bytes = 0
+    for member in iter_archive_members(vault_root):
+        # Checked on the listed size before any byte is read, so an oversized member costs no hash.
+        listed = _safe_lstat(member.source_path).st_size
+        check_member_limits(len(snapshots) + 1, listed, total_bytes + listed, limits)
+        size, digest, source_signature = _digest_regular_source(member.source_path)
+        total_bytes += size
+        check_member_limits(len(snapshots) + 1, size, total_bytes, limits)
+        snapshots.append(
+            _SourceSnapshot(
+                path=member.path,
+                source_path=member.source_path,
+                size=size,
+                sha256=digest,
+                classification=member.classification,
+                source_signature=source_signature,
+            )
+        )
+    snapshots.sort(key=lambda snapshot: snapshot.path)
+    check_path_collisions(snapshot.path for snapshot in snapshots)
     return snapshots
 
 
@@ -848,6 +849,14 @@ def _write_export_archive(
     ) as archive:
         archive.writestr(_zip_info(MANIFEST_NAME), _canonical_json(manifest))
         for snapshot in snapshots:
+            if snapshot.write is not None:
+                info = _zip_info(snapshot.path)
+                info.file_size = snapshot.size
+                with archive.open(info, "w", force_zip64=snapshot.size >= 2 * 1024 * 1024 * 1024) as output:
+                    written = snapshot.write(output)
+                if written != (snapshot.size, snapshot.sha256):
+                    _fail("STORED_MEMBER_UNVERIFIED", "a stored member differs from its planned size or digest")
+                continue
             descriptor, opened_signature = _open_regular_source(
                 snapshot.source_path,
                 expected_signature=snapshot.source_signature,
@@ -998,6 +1007,20 @@ def export_quiesced_vault(
     )
 
 
+def prepare_quiesced_export(vault_root: Path) -> dict | None:
+    """The live checks of a whole-vault stream before any member is read; returns the armed requirement.
+
+    The Cloud export's pause runs these on the live vault, because its pack reads only staged copies.
+    """
+    if not connector_boundary.unrestricted(vault_root, effective_principal()):
+        _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
+    _flush_collection_replica(vault_root)
+    armed_requirement = connector_boundary.read_requirement(vault_root)
+    if connector_boundary.snapshot(vault_root) is not None:
+        state_migration.require_vault_state_ready(vault_root)
+    return armed_requirement
+
+
 def stream_quiesced_vault(
     vault_root: Path, sink: BinaryIO, *, context: PortabilityContext,
     limits: PortabilityLimits | None = None,
@@ -1008,15 +1031,10 @@ def stream_quiesced_vault(
     effective_limits = limits or PortabilityLimits()
     _validate_limits(effective_limits)
     source_root = Path(vault_root).absolute()
-    if not connector_boundary.unrestricted(source_root, effective_principal()):
-        _fail("EXPORT_UNAVAILABLE", "whole-vault export is unavailable")
-    _flush_collection_replica(source_root)
+    armed_requirement = prepare_quiesced_export(source_root)
     from .media_store import local_originals
 
     with local_originals(source_root, (kb_dirname(),)):
-        armed_requirement = connector_boundary.read_requirement(source_root)
-        if connector_boundary.snapshot(source_root) is not None:
-            state_migration.require_vault_state_ready(source_root)
         snapshots = _enumerate_source(source_root, effective_limits)
         manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
         _write_export_archive(sink, snapshots, manifest)
@@ -1025,6 +1043,62 @@ def stream_quiesced_vault(
                 (item.path, item.size, item.sha256) for item in repeated]:
             _fail("SOURCE_CHANGED_DURING_EXPORT", "vault contents changed during export")
         return manifest
+
+
+@dataclass(frozen=True, slots=True)
+class StagedMember:
+    """A member that the Cloud export's pause copied into staging, with the size that it planned."""
+
+    path: str
+    staged_path: Path
+    size: int
+    classification: str
+
+
+@dataclass(frozen=True, slots=True)
+class StoredMember:
+    """A member that the archive receives from elsewhere, with the size and digest that it must have."""
+
+    path: str
+    size: int
+    sha256: str
+    write: Callable[[BinaryIO], tuple[int, str]]
+
+
+def stream_planned_archive(
+    sink: BinaryIO, staged: Iterable[StagedMember], stored: Iterable[StoredMember], *,
+    context: PortabilityContext, armed_requirement: dict | None, limits: PortabilityLimits | None = None,
+) -> dict[str, Any]:
+    """Write the canonical ZIP from a plan: staged copies hashed here, stored members written by their writers.
+
+    The plan replaces the live walk, so this reads no vault and no state root. A staged copy whose size
+    differs from the plan fails; so does a stored member whose written bytes differ from its digest.
+    """
+    _validate_context(context, allowed_states={"quiesced"})
+    effective_limits = limits or PortabilityLimits()
+    _validate_limits(effective_limits)
+    snapshots: list[_SourceSnapshot] = []
+    total_bytes = 0
+    for member in staged:
+        size, digest, signature = _digest_regular_source(member.staged_path)
+        if size != member.size:
+            _fail("STAGED_MEMBER_CHANGED", "a staged member differs from the planned size")
+        total_bytes += size
+        check_member_limits(len(snapshots) + 1, size, total_bytes, effective_limits)
+        snapshots.append(_SourceSnapshot(member.path, member.staged_path, size, digest, member.classification,
+                                         signature))
+    for member in stored:
+        if not _SHA256_RE.fullmatch(member.sha256):
+            _fail("STORED_MEMBER_UNVERIFIED", "a stored member has no valid digest")
+        total_bytes += member.size
+        check_member_limits(len(snapshots) + 1, member.size, total_bytes, effective_limits)
+        snapshots.append(_SourceSnapshot(_normalized_relative_path(member.path), Path(), member.size, member.sha256,
+                                         classify_artifact(member.path).artifact_class.value, None, member.write))
+    snapshots.sort(key=lambda snapshot: snapshot.path)
+    check_path_collisions(snapshot.path for snapshot in snapshots)
+    manifest = _build_manifest(snapshots, context, __version__, armed_requirement)
+    _write_export_archive(sink, snapshots, manifest)
+    return manifest
 
 
 def _json_no_duplicates(raw: bytes) -> Any:
