@@ -291,6 +291,25 @@ def test_a_retained_snapshot_without_a_complete_manifest_stops_every_hide(cell: 
     assert stopped == 1
 
 
+def test_a_name_that_the_edge_holds_busy_is_skipped_and_the_pass_goes_on(cell: Cell, monkeypatch):
+    """A pass that stopped at one busy name would, hold after hold, never reach the names after it in name order."""
+    paths = [cell.original(f"{name}.txt", name.encode() * 8) for name in ("first", "second")]
+    references = sorted((_offload(cell.vault, path) for path in paths), key=lambda reference: reference.object)
+    for path in paths:
+        cell.discard(path)
+    post = httpx.post
+
+    def edge(url: str, **kwargs):
+        if references[0].object in url:  # the edge's serial-write hold on this name
+            return httpx.Response(409, request=httpx.Request("POST", url))
+        return post(url, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", edge)
+    cell.hold()
+    assert cell.hides() == 1
+    assert [cell.head(reference).condemned for reference in references] == [False, True]
+
+
 def test_the_bucket_rule_deletes_only_hidden_or_superseded_versions():
     """The collection cases trust this rule: deleting a current version would make them fail for the wrong
     reason, and deleting nothing would make them pass for none."""

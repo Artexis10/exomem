@@ -74,8 +74,12 @@ def retained(manifest_path: str) -> dict[str, Manifest | None]:
     return manifests
 
 
-def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) -> Callable[[str], bool]:
-    """A condemn call through the media edge. True when the edge hid the name."""
+def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) -> Callable[[str], bool | None]:
+    """A condemn call through the media edge. True when the edge hid the name, None when it refused this name alone.
+
+    An outage or a refused credential stops the pass: every later name would get the same answer. A name that the
+    edge holds busy or does not find leaves the rest of the pass going, and the next hold tries it again.
+    """
     try:
         credential = credential_file.read_text(encoding="ascii").strip()
     except (OSError, UnicodeError) as error:
@@ -90,6 +94,9 @@ def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) ->
                                   headers={"authorization": f"Bearer {credential}"})
         except httpx.HTTPError as error:
             raise CollectStopped(f"the media edge condemn failed: {type(error).__name__}") from error
+        # HTTP's own statuses: 404 and 409 answer for one name, any other one for the edge as a whole.
+        if response.status_code in (404, 409):
+            return None
         if response.status_code != 200:
             raise CollectStopped(f"the media edge answered {response.status_code}")
         try:
@@ -103,12 +110,14 @@ def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) ->
     return condemn
 
 
-def collect(newest: str, manifests: Mapping[str, Manifest | None], condemn: Callable[[str], bool]) -> tuple[int, int]:
-    """Condemn every candidate, in name order. Returns (hidden now, candidates)."""
+def collect(newest: str, manifests: Mapping[str, Manifest | None],
+            condemn: Callable[[str], bool | None]) -> tuple[int, int, int]:
+    """Condemn every candidate, in name order. Returns (hidden now, candidates, names the edge refused alone)."""
     chosen = candidates(newest, manifests)
     if chosen is None:
         raise CollectStopped("a retained snapshot has no complete manifest, so nothing is condemned")
-    return sum(condemn(name) for name in sorted(chosen)), len(chosen)
+    answers = [condemn(name) for name in sorted(chosen)]
+    return answers.count(True), len(chosen), answers.count(None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,10 +131,10 @@ def main(argv: list[str] | None = None) -> int:
             raise CollectStopped("the media edge or the collector credential is not configured")
         condemn = edge_condemner(url, Path(credential))
         manifests = retained(args.manifest_path)
-        hidden, total = collect(args.snapshot, manifests, condemn)
+        hidden, total, skipped = collect(args.snapshot, manifests, condemn)
     except CollectStopped as stopped:
         print(f"media collection stopped: {stopped}", file=sys.stderr)
         return 1
-    print(f"media collection: {hidden} hidden of {total} candidates across {len(manifests)} retained snapshots",
-          file=sys.stderr)
+    print(f"media collection: {hidden} hidden of {total} candidates across {len(manifests)} retained snapshots, "
+          f"{skipped} refused by the edge for this hold", file=sys.stderr)
     return 0
