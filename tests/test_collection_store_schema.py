@@ -74,6 +74,7 @@ APPEND_ONLY = (
     "collection_manifests",
     "collection_type_versions",
     "import_members",
+    "store_audit",
 )
 
 
@@ -214,6 +215,12 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
             " importer_version, zone_rules) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (COLLECTION_ID, 1, 1, "0" * 32, 0, H, H, H, 1, 0, H, 1, "0.0.0", None),
         )
+        if schema.schema_version(conn) >= 15:  # an older store has no store audit
+            conn.execute(
+                "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
+                " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, '2026-11-08T00:00:00Z')",
+                (H,),
+            )
     return {"row_id": row_id}
 
 
@@ -259,31 +266,6 @@ def test_append_only_tables_abort_update_and_delete(
         tx.execute(f"DELETE FROM {table}")  # noqa: S608
 
     assert conn.execute(f"SELECT * FROM {table}").fetchall() == before  # noqa: S608
-
-
-def test_store_audit_rows_cannot_be_changed_deleted_or_replaced(store: connection.WriterConnection) -> None:
-    """Defect: a rollback, a repair or a stray writer rewrites the audit trail that store mode exports and keeps."""
-    with store.transaction() as tx:
-        tx.execute(
-            "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at)"
-            " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, 'first', '2026-11-08T00:00:00Z')",
-            (H,),
-        )
-    conn = store.connection
-    before = conn.execute("SELECT * FROM store_audit").fetchall()
-    assert len(before) == 1
-
-    statements = (
-        "UPDATE store_audit SET reason = 'rewritten'",
-        "DELETE FROM store_audit",
-        "INSERT OR REPLACE INTO store_audit(seq, revision, operation, origin, at)"
-        " VALUES (1, 2, 'delete', 'agent', '2026-11-08T00:00:01Z')",
-    )
-    for statement in statements:
-        with pytest.raises(sqlite3.IntegrityError, match="append-only"), store.transaction() as tx:
-            tx.execute(statement)
-
-    assert conn.execute("SELECT * FROM store_audit").fetchall() == before
 
 
 def test_item_rows_are_never_deleted(store: connection.WriterConnection) -> None:

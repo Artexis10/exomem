@@ -71,6 +71,38 @@ def test_a_dot_named_component_below_the_knowledge_base_makes_the_path_not_owned
     assert classify(rel) is Ownership.NONE
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        f"{KB}/Notes/idea.sync-conflict-20260101-120000-ABCDEFG.md",
+        f"{KB}/Evidence/scan.sync-conflict-20260101-120000-ABCDEFG.pdf",
+    ],
+)
+def test_a_syncthing_conflict_copy_is_not_owned(rel):
+    """Defect: the store keeps a transient conflict copy as a page or a binary that search never shows.
+
+    The Markdown shape is the one the Knowledge Base walk skips; the PDF shape shows that the name decides.
+    """
+    assert classify(rel) is Ownership.NONE
+
+
+@pytest.mark.parametrize(
+    ("rel", "owner"),
+    [
+        (f"{KB}/_trash/gone.md", Ownership.PAGE),
+        (f"{KB}/_archive/old.md", Ownership.PAGE),
+        (f"{KB}/_Adoption/run.md", Ownership.PAGE),
+        (f"{KB}/_attachments/photo.png", Ownership.BINARY),
+    ],
+)
+def test_content_that_search_hides_is_still_owned(rel, owner):
+    """Defect: the store copies the corpus walk's exclusions, so trashed and archived bytes never enter it.
+
+    Its projection would then treat those files on disk as outside edits or delete them.
+    """
+    assert classify(rel) is owner
+
+
 @pytest.mark.parametrize("rel", [f"{KB}/Records/Work/_collection.md", f"{KB}/Planning/Goals/view.md"])
 def test_a_records_or_planning_view_belongs_to_the_collection_store(rel):
     """Defect: both stores claim a collection view, so one overwrites the other's projection."""
@@ -118,12 +150,13 @@ def test_the_walk_yields_exactly_the_files_that_the_rule_owns(tmp_path):
     """Defect: migration and the sweep disagree about which files exist, so a file looks created or deleted.
 
     The tree holds the shapes that disagreed in the spike: a dot-directory in the Knowledge Base, files at
-    the vault root, the collection replica, a Records view, an Evidence PDF and the schema overlay.
+    the vault root, the collection replica, a Records view, an Evidence PDF, the schema overlay and a conflict copy.
     """
     _write(tmp_path, "README.md")
     _write(tmp_path, "Daily/outside.md")
     _write(tmp_path, f"{KB}/index.md", b"# index\n")
     _write(tmp_path, f"{KB}/Notes/idea.md", b"# idea\n")
+    _write(tmp_path, f"{KB}/Notes/idea.sync-conflict-20260101-120000-ABCDEFG.md")
     _write(tmp_path, f"{KB}/Notes/.trash/gone.md")
     _write(tmp_path, f"{KB}/.obsidian/workspace.json")
     _write(tmp_path, f"{KB}/Evidence/scan.pdf", b"%PDF-1.7 body")
@@ -146,6 +179,32 @@ def test_the_walk_yields_exactly_the_files_that_the_rule_owns(tmp_path):
     assert all(classify(entry.rel) is entry.ownership for entry in owned)
     assert {entry.rel: entry.stat.st_size for entry in owned}[f"{KB}/Evidence/scan.pdf"] == len(b"%PDF-1.7 body")
     assert skipped == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a POSIX mode removes read access")
+def test_a_folder_that_another_owner_holds_is_not_entered_so_its_unreadable_part_is_not_reported(tmp_path):
+    """Defect: the walk reports an unreadable folder in Records or governance, which blocks a migration for files it never owns.
+
+    The unreadable folder in Notes is the control: the walk reports it, so the test fails if the folders are unreadable no longer.
+    """
+    locked = [
+        _write(tmp_path, f"{KB}/Notes/locked/a.md").parent,
+        _write(tmp_path, f"{KB}/Records/Work/locked/a.md").parent,
+        _write(tmp_path, f"{KB}/_governance/locked/a.md").parent,
+    ]
+    try:
+        for folder in locked:
+            folder.chmod(0o000)
+        if os.access(locked[0], os.R_OK):
+            pytest.skip("this user reads a folder of mode 000")
+
+        owned, skipped = _walk(tmp_path)
+    finally:
+        for folder in locked:
+            folder.chmod(0o700)
+
+    assert owned == []
+    assert skipped == [Skipped(f"{KB}/Notes/locked", SkipReason.UNREADABLE)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
