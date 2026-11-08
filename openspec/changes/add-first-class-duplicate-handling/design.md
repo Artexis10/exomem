@@ -112,7 +112,7 @@ A recap revision that changes the Decided lines clears the head's `ingested_into
 
 ### D14. A recap fold pins every referenced revision over the whole vault
 
-Proposal computes the pinned set from `sources:` citations, `ingested_into` back-references and links of every live page outside the episode, regardless of what the caller can see. It refuses to run without whole-namespace content authority. Why: a caller that sees fewer pages could retire a revision that a hidden page cites. In the measured vault this keeps 36 revisions as files and moves about 4,254 to history. Pinned revisions stay as files with their mark, so every one of the 44 citations resolves to the text it cited, before, during and after a fold.
+Proposal computes the pinned set from `sources:` citations, `ingested_into` back-references and links of every live page outside the episode, whatever its lifecycle class and regardless of what the caller can see. It refuses to run without whole-namespace content authority. Why: a caller that sees fewer pages could retire a revision that a hidden page cites. In the measured vault this keeps 36 revisions as files and moves about 4,254 to history. Pinned revisions stay as files with their mark, so every one of the 44 citations resolves to the text it cited, before, during and after a fold.
 
 A history entry holds the exact stored bytes of a revision, not a derived form. Why: the entry is the only copy once the file moves to the trash, and byte equality is the check that lets the move happen.
 

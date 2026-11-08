@@ -30,7 +30,6 @@ from . import (
     episode_memory,
     find_corpus,
     fold_leaf,
-    lifecycle_statuses,
     memory_refs,
     recap_folder,
     source_capture,
@@ -195,14 +194,16 @@ def _listing_pages(vault_root: Path, path: str) -> list[str]:
     )
 
 
-def _referencing_pages(
+def _live_references(
     vault_root: Path, revisions: Sequence[_Held], own: frozenset[str]
 ) -> dict[str, str]:
-    """Each revision path that a page outside `own` names, mapped to the first such page.
+    """Each revision path that a live page outside `own` references, mapped to the first such page.
 
-    Three evidences, all read over the whole vault with no caller filter: a wikilink (which is
-    how a `sources:` citation is written), a memory reference, and the `ingested_into`
-    back-reference the revision itself carries.
+    Any live page pins, whatever its lifecycle class: a superseded or retired page still cites
+    the text it cited, and the plan promises every citation keeps resolving. Three evidences, all
+    read over the whole vault with no caller filter: a wikilink (which is how a `sources:`
+    citation is written), a memory reference, and the `ingested_into` back-reference the
+    revision itself carries.
     """
     named: dict[str, str] = {}
     paths = [path for path, _fields in revisions]
@@ -235,25 +236,6 @@ def _referencing_pages(
             if located is not None and located not in own and (vault_root / located).is_file():
                 named.setdefault(path, located)
     return named
-
-
-def _live_references(
-    vault_root: Path, revisions: Sequence[_Held], own: frozenset[str]
-) -> dict[str, str]:
-    """The revisions that a live page outside the episode references, by path."""
-    basis = lifecycle_statuses.Basis(vault_root)
-    pinned: dict[str, str] = {}
-    for path, referrer in _referencing_pages(vault_root, revisions, own).items():
-        try:
-            fields = vault.parse_frontmatter((vault_root / referrer).read_text(encoding="utf-8"))[0]
-        except (OSError, UnicodeDecodeError, ValueError):
-            # A page that cannot be read cannot be shown retired, so its reference still pins.
-            pinned[path] = referrer
-            continue
-        classification = basis.classify(fields.get("status"), path=referrer, frontmatter=fields)
-        if classification.lifecycle_class is None or not classification.historical:
-            pinned[path] = referrer
-    return pinned
 
 
 def _episode(vault_root: Path, args: Mapping[str, Any]) -> tuple[str, str, list[episode_memory._Revision]]:  # noqa: SLF001

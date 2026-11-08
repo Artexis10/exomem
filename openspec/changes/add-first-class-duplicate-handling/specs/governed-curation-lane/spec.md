@@ -145,7 +145,7 @@ Apply SHALL commit one content-free witness that binds the exact before and afte
 
 A `fold-recap-revisions` step SHALL have a closed argument schema of the episode's head page and its `expected_hash`, and the ordered list of that episode's superseded revision files, each with `path` and `expected_hash`. Proposal SHALL refuse a list that holds any file outside one episode and one audience group, any page that is not a superseded recap revision, or a head that is not the episode's single live page.
 
-Proposal SHALL compute the pinned revisions: those that any live page outside the episode's own pages references, by `sources:` citation, `ingested_into` back-reference or link. It SHALL compute them over the whole vault, regardless of what the caller can see, and SHALL refuse to run without the same whole-namespace content authority that source-identity lookup requires. It SHALL seal the pinned revisions as kept and SHALL refuse a plan that retires one.
+Proposal SHALL compute the pinned revisions: those that any live page outside the episode's own pages references, by `sources:` citation, `ingested_into` back-reference or link, whatever its lifecycle class: a superseded or retired page still cites the text it cited. It SHALL compute them over the whole vault, regardless of what the caller can see, and SHALL refuse to run without the same whole-namespace content authority that source-identity lookup requires. It SHALL seal the pinned revisions as kept and SHALL refuse a plan that retires one.
 
 Apply SHALL, for the episode:
 

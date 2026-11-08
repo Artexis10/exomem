@@ -998,6 +998,28 @@ def test_fold_pins_a_revision_that_only_a_page_withheld_from_another_audience_ci
     assert (vault / pages[0]).is_file() and not (vault / pages[1]).exists()
 
 
+def test_fold_keeps_a_revision_that_only_a_superseded_page_cites(vault: Path, earlier_episode) -> None:  # noqa: ANN001
+    """Any live page pins, whatever its lifecycle class: a superseded page still cites the text it cited."""
+    from exomem import lifecycle_statuses
+    from exomem import vault as vault_module
+
+    pages = earlier_episode(3)
+    note = _seed_note(vault, "curation-fold-superseded", sources=[pages[0].removesuffix(".md")])
+    lines = (vault / note).read_text(encoding="utf-8").splitlines(keepends=True)
+    kept_lines = [line for line in lines if not line.startswith("status:")]
+    (vault / note).write_text("".join([kept_lines[0], "status: superseded\n", *kept_lines[1:]]), encoding="utf-8")
+    fields = vault_module.parse_frontmatter((vault / note).read_text(encoding="utf-8"))[0]
+    assert lifecycle_statuses.Basis(vault).classify(fields.get("status"), path=note, frontmatter=fields).historical
+    proposed = _propose(vault, _fold_step(pages, vault))
+
+    result = _apply(vault, proposed)
+
+    assert result["phase"] == "completed"
+    assert result["step"]["leaf_result"]["kept"] == [pages[0]]
+    assert result["step"]["leaf_result"]["moved"] == [pages[1]]
+    assert (vault / pages[0]).is_file() and not (vault / pages[1]).exists()
+
+
 def test_fold_refuses_a_revision_that_a_page_cited_after_the_proposal(vault: Path, earlier_episode) -> None:
     """A link added between proposal and apply pins the revision: nothing is written or moved."""
     from exomem import curation

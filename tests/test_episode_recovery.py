@@ -867,6 +867,35 @@ def test_an_older_input_revision_is_recovered_from_its_history_entry(vault: Path
         assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
 
 
+def test_a_folded_recap_revisions_input_is_recovered_from_the_head_history(vault: Path, earlier_episode) -> None:
+    """A fold trashes the superseded recap files, yet a ledger reference to each one still
+    recovers its exact bytes from the head's history, and says unavailable once no entry holds them."""
+    from test_curation_execution import _apply, _fold_step, _propose
+
+    from exomem import compiled_history
+    from exomem import episode_model as model
+
+    key = "ep-" + "b2" * 16
+    pages = earlier_episode(3, key=key)
+    owner = _owner_store(vault)
+    identity = model.episode_id(key)
+    bodies = [commands.op_get(vault, path=path)["body"] for path in pages]
+
+    result = _apply(vault, _propose(vault, _fold_step(pages, vault)))
+
+    assert result["phase"] == "completed"
+    assert not any((vault / path).exists() for path in pages[:-1])
+    first = owner.recover_input(identity, input_revision=1)
+    assert first["status"] == "available" and first["body"] == bodies[0]
+    assert owner.recover_input(identity, input_revision=2)["body"] == bodies[1]
+    assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+    for entry in (vault / compiled_history.history_root()).rglob("*.json"):
+        entry.unlink()
+    assert owner.recover_input(identity, input_revision=1)["status"] == "unavailable"
+    assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+
 @pytest.mark.usefixtures("earlier_layout")
 def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
     """A withheld successor cannot hide the retired recap, exact span or single origin."""

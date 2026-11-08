@@ -205,9 +205,14 @@ class EpisodeInputOwner:
             return False
 
     def _earlier_revision(
-        self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], scheme: str | None
+        self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], scheme: str | None,
+        *, canonical: str | None = None,
     ) -> GetResult | None:
-        """The recap page as an earlier revision left it, if its history entry still proves those bytes."""
+        """The recap page as an earlier revision left it, if its history entry still proves those bytes.
+
+        `canonical` names the page the evidence was bound to. It is the resolved page unless the
+        evidence names a revision file that a fold moved into this page's history.
+        """
         # origin_bindings imports this module, and compiled_history imports it.
         from . import compiled_history
 
@@ -221,23 +226,61 @@ class EpisodeInputOwner:
             except (OSError, ValueError):
                 return None
             for entry in kept["revisions"]:
-                if entry["operation"] != compiled_history.EPISODE_OPERATION:
+                if entry["operation"] not in (compiled_history.EPISODE_OPERATION, compiled_history.FOLD_OPERATION):
                     continue
                 prior = entry["prior"]["source"]
-                earlier = replace(page, content=prior, content_hash=content_hash(prior))
-                try:
-                    digest = self._page_evidence(earlier, resolved.canonical, scheme)["digest"]
-                except model.EpisodeError:
-                    continue
-                parsed = find_corpus.parse_page(
-                    self.vault_root / page.path, page.mtime, self.vault_root,
-                    content=prior.encode("utf-8"),
-                )
-                if digest == evidence.get("digest") and parsed is not None:
-                    return replace(earlier, frontmatter=parsed.frontmatter, body=parsed.body)
+                texts = [prior]
+                if entry["operation"] == compiled_history.FOLD_OPERATION:
+                    # The earlier layout marked a file retired after the input was bound to it, so the
+                    # digest may name the file as first written. Only that digest proves which one this was.
+                    marked = find_corpus.parse_page(
+                        self.vault_root / page.path, page.mtime, self.vault_root, content=prior.encode("utf-8")
+                    )
+                    original = episode_capture.pre_retirement_content(prior)
+                    if (
+                        marked is not None
+                        and original is not None
+                        and episode_capture.is_retired_revision(entry["path"], marked.frontmatter, audience=self._owner())
+                    ):
+                        texts.append(original)
+                for text in texts:
+                    earlier = replace(page, content=text, content_hash=content_hash(text))
+                    try:
+                        digest = self._page_evidence(earlier, canonical or resolved.canonical, scheme)["digest"]
+                    except model.EpisodeError:
+                        continue
+                    parsed = find_corpus.parse_page(
+                        self.vault_root / page.path, page.mtime, self.vault_root, content=text.encode("utf-8")
+                    )
+                    if digest == evidence.get("digest") and parsed is not None:
+                        return replace(earlier, frontmatter=parsed.frontmatter, body=parsed.body)
             if not kept["truncated"] or kept["continuation"] in (None, continuation):
                 return None
             continuation = kept["continuation"]
+
+    def _folded_revision(
+        self, revisions: list[dict[str, Any]], evidence: dict[str, Any], identity: str
+    ) -> tuple[retained_inputs.RetainedInput, GetResult] | None:
+        """The episode's head and the bytes of a recap revision file that a fold moved into its history.
+
+        The revision file is gone, so its reference no longer resolves. The head is the newest
+        recorded input that still resolves to a recap of this episode, and the evidence digest
+        (which binds the revision's reference and exact bytes) picks the history entry that holds it.
+        """
+        for later in reversed(revisions):
+            candidate = later["evidence"]
+            if candidate.get("reference") in (None, evidence["reference"]):
+                continue
+            try:
+                head = self._resolve_bound_reference(candidate, identity)
+            except model.EpisodeError:
+                continue
+            if head.unit is None and self._is_recap_of(head.page, identity):
+                earlier = self._earlier_revision(
+                    head, evidence, evidence.get("version_scheme"), canonical=evidence["reference"]
+                )
+                return None if earlier is None else (head, earlier)
+        return None
 
     def _resolve_bound_reference(
         self, evidence: dict[str, Any], identity: str
@@ -563,8 +606,12 @@ class EpisodeInputOwner:
                 try:
                     resolved = self._resolve_bound_reference(evidence, episode_id)
                 except model.EpisodeError:
-                    return {"status": "unavailable", "input_revision": revision["revision"]}
-                bound = self._bound_page(resolved, evidence, episode_id)
+                    folded = self._folded_revision(revisions, evidence, episode_id)
+                    if folded is None:
+                        return {"status": "unavailable", "input_revision": revision["revision"]}
+                    resolved, bound = folded
+                else:
+                    bound = self._bound_page(resolved, evidence, episode_id)
                 if bound is None:
                     return {"status": "stale", "input_revision": revision["revision"]}
                 field, value = (
