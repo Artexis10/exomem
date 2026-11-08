@@ -95,6 +95,7 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import (
+    COLLECTOR_AUDIENCE,
     ActiveSet,
     EdgeEvidence,
     MediaEdgeConfig,
@@ -1274,13 +1275,13 @@ def _media_revocation(
     cell the edge may admit: a turned-off store writes it, and the statement that retires a deleted cell's
     media bundle adds `revoke_requested_at` before the pass publishes a set without the cell
     (db.retire_content_keys). The wait ends when the edge is confirmed to serve the exact published set and
-    that set omits the cell; the record keeps what was observed."""
+    that set omits the cell's runtime and collector credentials; the record keeps what was observed."""
     if cluster_config.media_edge is None:
         return False, None
     record = _media_store_of(row)
     if not isinstance(record, dict) or not record or "revoked_generation" in record:
         return False, None
-    if (active is not None and row.cell_id not in active.cells
+    if (active is not None and row.cell_id not in active.cells and row.cell_id not in active.collectors
             and memory.media_edge_confirmed == (active.generation, active.sha256())):
         return False, {**record, "revoked_generation": active.generation, "set_sha256": active.sha256(),
                        "observed_at": now.isoformat()}
@@ -1294,12 +1295,27 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
     return active.cells.get(row.cell_id)
 
 
+def _media_collects(cluster_config: ClusterConfig, row: CellRow) -> bool:
+    """collect-released-media D3: every cell with a store collects while the edge is on, a retained one too,
+    so its backups keep condemning the names that it released. A deleted cell has no store, so it stops."""
+    return cluster_config.media_edge is not None and _media_mode(cluster_config, row) is not None
+
+
+def _media_collector_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
+    """The collector credential version the edge admits for this cell's backup Job; None when it collects nothing."""
+    if active is None or not _media_collects(cluster_config, row):
+        return None
+    return active.collectors.get(row.cell_id)
+
+
 def _publish_media_edge_set(
-    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory,
+    collectors: Mapping[str, int] | None = None,
 ) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is to
+    `cells` maps each served or draining cell to its credential epoch, and `collectors` each cell whose
+    backup Job collects (collect-released-media D3). Returns the set the edge is to
     load, or None when the cluster would not say, in which case no keyed cell renders this pass. An
     unchanged set writes nothing."""
     try:
@@ -1312,12 +1328,13 @@ def _publish_media_edge_set(
                 memory.media_edge_foreign = max(memory.media_edge_foreign, cluster.media_edge_evidence(edge.url).loaded)
             except Exception as error:  # noqa: BLE001 - the edge may be away; the settled check learns it later
                 logger.warning("cellctl could not seed the media edge generation: %s", _describe_error(error))
-        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign)
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign,
+                                  collectors=collectors)
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
-            logger.info("cellctl: media edge active set published at generation %d for %d cell(s)",
-                        planned.generation, len(planned.cells))
+            logger.info("cellctl: media edge active set published at generation %d for %d cell(s) and %d collector(s)",
+                        planned.generation, len(planned.cells), len(planned.collectors))
         return planned
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
@@ -1442,7 +1459,9 @@ async def reconcile_once(
         # D12: a draining cell keeps its entry although the edge no longer selects it.
         media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
-            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory)
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory, collectors={
+            row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
+            if _media_collects(cluster_config, row)})
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -2682,6 +2701,14 @@ async def _reconcile_row(
             }
         elif media_mode == MEDIA_RETAINED:
             media_fields = {"media_store_retained": True}
+        collector_version = _media_collector_version(cluster_config, media_active, row)
+        if collector_version is not None:
+            # collect-released-media D3: only the backup Job mounts it. The render digest leaves it out, since the
+            # runtime never reads it, and every hold applies the Secret before it runs its Job. Without a version
+            # the backup still runs and collects nothing.
+            media_fields["media_collector_url"] = edge.url
+            media_fields["media_collector_credential"] = sign_credential(
+                edge.signing_key, cell_id=row.cell_id, version=collector_version, audience=COLLECTOR_AUDIENCE)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,

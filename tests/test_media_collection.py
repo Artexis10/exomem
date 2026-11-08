@@ -7,12 +7,15 @@ live in a small stand-in for restic, behind the same two commands that the colle
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
@@ -43,6 +46,7 @@ from tests.test_media_store import _offload, selected_store  # noqa: F401
 from tests.test_upload_sessions import _listening
 
 MANIFEST_PATH = "/tmp/media-manifest.json"
+CELLCTL = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl"
 RESTIC = """#!{python}
 import json, os, sys
 from pathlib import Path
@@ -309,3 +313,43 @@ def test_the_bucket_rule_deletes_only_hidden_or_superseded_versions():
     assert sorted(fake.lifecycle_tick(1)) == sorted([versions["superseded"], versions["hidden"]])
     assert fake.lifecycle_tick(10 * fake.hiding_days) == []
     assert {versions["newest"], versions["current"]} <= set(fake.files)
+
+
+def _cellctl_constant(module: str, name: str) -> object:
+    # cellctl cannot import the cell and the cell cannot import cellctl, so this reads cellctl's constant from its source.
+    values = [node.value for node in ast.parse((CELLCTL / module).read_text(encoding="utf-8")).body
+              if isinstance(node, ast.Assign) and [t.id for t in node.targets if isinstance(t, ast.Name)] == [name]]
+    assert len(values) == 1
+    return ast.literal_eval(values[0])
+
+
+def test_cellctl_signs_and_places_the_collector_credential_where_the_cell_reads_it():
+    """A difference refuses every condemn or finds no credential, and only the Job's log would say so."""
+    assert _cellctl_constant("media_edge.py", "COLLECTOR_AUDIENCE") == COLLECTOR_AUDIENCE
+    assert _cellctl_constant("manifests.py", "MEDIA_COLLECTOR_CREDENTIAL_ENV") == media_collect.COLLECTOR_CREDENTIAL_FILE_ENV
+    assert _cellctl_constant("manifests.py", "MEDIA_EDGE_URL_ENV") == URL_ENV
+
+
+def test_the_backup_jobs_own_commands_reach_the_cells_manifest_and_collector(cell: Cell, tmp_path: Path):
+    """The Job runs both commands in shell that keeps the backup going whatever they do, so a command or a flag that
+    cellctl and the cell spell differently would leave every hold collecting nothing, without a word."""
+    loader = importlib.util.spec_from_file_location("cellctl_backup_source", CELLCTL / "backup_source.py")
+    job = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(job)
+    path = cell.original("recording.txt")
+    reference = _offload(cell.vault, path)
+    cell.discard(path)
+    tools, written = tmp_path / "image", tmp_path / "written-manifest.json"
+    tools.mkdir()
+    (tools / "exomem").write_text(f'#!/bin/sh\nexec "{sys.executable}" -m exomem "$@"\n', encoding="utf-8")
+    (tools / "exomem").chmod(0o755)
+    shell = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}
+
+    manifest = job.media_manifest_command().replace("/data/vault", str(cell.vault))
+    subprocess.run(["sh", "-c", manifest.replace(job.MEDIA_MANIFEST_PATH, str(written))], check=True, env=shell)
+    snapshot = cell.snapshot(written.read_bytes())
+    collect = f"{job.MEDIA_COLLECT_START} && {job.media_collect_command()}"
+    subprocess.run(["sh", "-c", collect], check=True, env={**shell, "SNAPSHOT_ID": snapshot})
+
+    assert job.MEDIA_MANIFEST_PATH == MANIFEST_PATH
+    assert cell.hides() == 1 and cell.head(reference).condemned

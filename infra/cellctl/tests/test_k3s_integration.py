@@ -2381,6 +2381,34 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
                       documents=[render_namespace(served[unlabelled_id]), edge_policy[unlabelled_id]], check=False)
     assert paired.returncode == 0, paired.stderr
 
+    # collect-released-media D3: a retained cell's namespace has no access label, and its backup Jobs still reach
+    # the edge port to condemn. Admission gives job-egress exactly that third rule and nothing wider.
+    retained = _spec(cell_id=_cell_id(), image=image, media_edge_url="", media_collector_url=endpoint,
+                     media_collector_credential="collector")
+    _apply_server_side(k3s.name, [render_namespace(retained)])
+    collecting = next(p for p in render_network_policies(retained) if p["metadata"]["name"] == "job-egress")
+    admitted = dry_run(collecting)
+    assert admitted.returncode == 0, admitted.stderr
+
+    def to_the_gateway(rule: dict) -> None:
+        rule["to"][0]["podSelector"]["matchLabels"] = {"app.kubernetes.io/name": "exomem-cloud-gateway"}
+
+    def on_another_port(rule: dict) -> None:
+        rule["ports"][0]["port"] = 8768
+
+    def to_anywhere(rule: dict) -> None:
+        rule["to"] = [{"ipBlock": {"cidr": "0.0.0.0/0"}}]
+
+    for widen in (to_the_gateway, on_another_port, to_anywhere):
+        forged = copy.deepcopy(collecting)
+        widen(forged["spec"]["egress"][2])
+        denied = dry_run(forged)
+        assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, (widen.__name__, denied.stderr)
+    fourth = copy.deepcopy(collecting)
+    fourth["spec"]["egress"].append(copy.deepcopy(fourth["spec"]["egress"][2]))
+    denied = dry_run(fourth)
+    assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, denied.stderr
+
 
 # === harden-exomem-cloud-operator-access: the edge, the Cloud issuer and cell
 # connect admission, on the same disposable K3s cluster. ===

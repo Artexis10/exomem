@@ -7,6 +7,11 @@ set until their record shows no evicted original, so an upgrade that turns the
 edge off reads the live set and refuses while it lists any cell. A set that
 exists but cannot be read refuses too: it proves nothing drained.
 
+collect-released-media D3: the set also lists the collectors, the cells whose
+backup Jobs condemn their released media through the edge, a retained cell
+included. With the edge off that collection would stop without a word, so the
+check refuses while any collector is listed, or while the list cannot be read.
+
 `lookup` returns nothing in `helm template`, in a client-side dry run and in
 `helm rollback`, so those three skip this check.
 */ -}}
@@ -17,6 +22,10 @@ exists but cannot be read refuses too: it proves nothing drained.
 {{- fail "mediaEdge.enabled=false: the media edge active set cannot be read, so no cell is known to have drained. Turn the edge on until cellctl publishes it again (runbook: Turn the edge off)" }}
 {{- else if $set.cells }}
 {{- fail (printf "mediaEdge.enabled=false: the media edge active set still lists %s. Take each cell off mediaEdge.cellIds with the edge on, and turn the edge off once the set lists no cell (runbook: Turn the edge off)" (keys $set.cells | sortAlpha | join ", ")) }}
+{{- else if and (hasKey $set "collectors") (not (kindIs "map" $set.collectors)) }}
+{{- fail "mediaEdge.enabled=false: the collectors of the media edge active set cannot be read, so no backup is known to have stopped collecting. Turn the edge on until cellctl publishes it again (runbook: Turn the edge off)" }}
+{{- else if $set.collectors }}
+{{- fail (printf "mediaEdge.enabled=false: the media edge active set still lists the collectors %s, whose backups condemn released media through the edge. Keep the edge on while any cell holds a media store (runbook: Turn the edge off)" (keys $set.collectors | sortAlpha | join ", ")) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -218,6 +227,17 @@ spec:
             matchExpressions:
               - key: exomem.io/cell-job
                 operator: DoesNotExist
+        # collect-released-media D3: the backup Job of every cell namespace. A retained cell's namespace has no
+        # access label, and its backups still condemn its released names. The edge admits a collector
+        # credential only for a cell that its active set lists, and only to condemn.
+        - namespaceSelector:
+            matchExpressions:
+              - key: exomem.io/cloud-cell
+                operator: Exists
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-cell
+              exomem.io/cell-job: backup
       ports:
         - protocol: TCP
           port: 8769

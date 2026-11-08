@@ -86,7 +86,7 @@ def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) ->
     def condemn(name: str) -> bool:
         try:
             # An in-cluster literal address needs neither proxy nor DNS configuration.
-            response = httpx.post(f"{url}{OBJECTS_PATH}{name}/{CONDEMN_ACTION}", timeout=timeout, trust_env=False,
+            response = httpx.post(f"{url.rstrip('/')}{OBJECTS_PATH}{name}/{CONDEMN_ACTION}", timeout=timeout, trust_env=False,
                                   headers={"authorization": f"Bearer {credential}"})
         except httpx.HTTPError as error:
             raise CollectStopped(f"the media edge condemn failed: {type(error).__name__}") from error

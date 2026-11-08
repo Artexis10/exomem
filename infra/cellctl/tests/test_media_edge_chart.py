@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 import yaml
 
-from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, render_cell_manifests
+from cellctl.manifests import (
+    MEDIA_EDGE_ACCESS_LABEL,
+    render_backup_job,
+    render_cell_manifests,
+    render_restore_job,
+)
 
 from .test_media_edge import _spec
 from .test_platform_chart_headers import (
@@ -130,7 +135,7 @@ def test_the_edge_render_holds_neither_the_media_keys_nor_the_signing_key() -> N
     assert any(v.get("secret", {}).get("secretName") == "exomem-media-edge-signing-key" for v in cellctl["volumes"])
 
 
-def test_the_edge_admits_cellctl_and_the_runtimes_cellctl_labels_and_reaches_public_443_and_dns() -> None:
+def test_the_edge_admits_cellctl_the_runtimes_cellctl_labels_and_backups_and_reaches_public_443_and_dns() -> None:
     documents = _helm_template(*EDGE)
     policy = _find(documents, "NetworkPolicy", "exomem-media-edge")["spec"]
     peers = _ingress_peers(documents)
@@ -141,6 +146,8 @@ def test_the_edge_admits_cellctl_and_the_runtimes_cellctl_labels_and_reaches_pub
                                "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
          "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell"},
                          "matchExpressions": [{"key": "exomem.io/cell-job", "operator": "DoesNotExist"}]}},
+        {"namespaceSelector": {"matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell-job": "backup"}}},
     ]
     assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8769}]
     assert [rule["to"][0].get("ipBlock", {}).get("cidr") for rule in policy["egress"]] == ["0.0.0.0/0", None]
@@ -176,6 +183,29 @@ def test_a_turned_off_canary_reaches_the_edge_while_its_namespace_is_labelled_an
     assert _edge_admits(documents, draining) is True
     assert _edge_admits(documents, retained) is False
     assert _edge_peer_guarded_by_the_label(expression)
+
+
+def test_the_edge_admits_a_retained_cells_backup_job_and_none_of_its_other_pods() -> None:
+    # collect-released-media D3: a retained store's backups keep condemning what the cell released, and only the
+    # backup Job holds the collector credential, so no other Job and no unlabelled runtime may reach the edge.
+    documents = _helm_template(*EDGE, "--set-json", "mediaEdge.cellIds=[]")
+    spec = _spec(media_edge_url="", media_edge_credential="", media_age_identity="", media_recipient="",
+                 media_name_key=b"", media_key_version=0, media_max_object_bytes=0, media_store_retained=True,
+                 media_collector_url="http://10.43.0.30:8769", media_collector_credential="collector",
+                 hold_kind="backup", hold_started_at="2026-01-01T00:00:00+00:00")
+    namespace = next(m for m in render_cell_manifests(spec) if m["kind"] == "Namespace")["metadata"]["labels"]
+    store = dict(bucket_name="b", endpoint="https://s3.example")
+    pods = {
+        "backup": render_backup_job(spec, **store)["spec"]["template"]["metadata"]["labels"],
+        "restore": render_restore_job(spec, **store, snapshot_id="c" * 64)["spec"]["template"]["metadata"]["labels"],
+        "runtime": next(m for m in render_cell_manifests(spec)
+                        if m["kind"] == "StatefulSet")["spec"]["template"]["metadata"]["labels"],
+    }
+
+    admitted = {name for name, pod in pods.items() if any(
+        _selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
+        for peer in _ingress_peers(documents) if "namespaceSelector" in peer)}
+    assert admitted == {"backup"}
 
 
 def test_the_fleet_switch_selects_every_cell_beside_the_canary_list_and_leaves_the_network_wall() -> None:
@@ -341,6 +371,20 @@ def test_turning_the_edge_off_is_refused_while_the_live_active_set_cannot_be_rea
 
     assert result.returncode != 0
     assert "cannot be read" in result.stderr
+
+
+@pytest.mark.parametrize(("collectors", "says"), [
+    pytest.param(f'{{"{CANARY}":8}}', CANARY, id="a retained cell still collects"),
+    pytest.param("[]", "cannot be read", id="the collectors cannot be read"),
+])
+def test_turning_the_edge_off_is_refused_while_the_live_active_set_lists_a_collector(
+    collectors: str, says: str, tmp_path: Path
+) -> None:
+    # collect-released-media D3: with the edge off a retained cell's backups would stop condemning without a word.
+    result = _upgrade_with_the_edge_off(f'{{"generation":9,"cells":{{}},"collectors":{collectors}}}', tmp_path)
+
+    assert result.returncode != 0
+    assert says in result.stderr
 
 
 @pytest.mark.parametrize(

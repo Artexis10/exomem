@@ -12,7 +12,8 @@ and runs the command against the real exomem package.
 
 The media census is the same kind of command: it names `exomem cell-media-census`
 in the cell image, which prints the record the cell wrote (tests/test_media_drain_record.py runs it,
-and checks that the cell's record parses here).
+and checks that the cell's record parses here). So are the media manifest and the collection of
+collect-released-media, which name `exomem cell-media-manifest` and `exomem cell-media-collect`.
 """
 
 import re
@@ -55,6 +56,32 @@ def media_census_command(captured_at: str) -> str:
         f" || census={shlex.quote(unknown)}; "
         "printf '\\n%s' \"$census\" >> /dev/termination-log || true; }"
     )
+
+
+# collect-released-media D5: each snapshot holds the media manifest at this path, outside the paths a restore writes.
+MEDIA_MANIFEST_PATH = "/tmp/media-manifest.json"
+# Unlike the census, the manifest walks every companion in the vault. One that does not finish in time is unknown,
+# so the collector condemns nothing while this snapshot is retained, and the backup goes on without it.
+MEDIA_MANIFEST_SECONDS = 180
+# The collector stops this long after the Job script started, well inside the backup's 900-second deadline, so a
+# collection never fails a backup. A pass cut short has condemned only names it would condemn anyway: the clock
+# decides when the pass stops, never which name it hides.
+MEDIA_COLLECT_BY_SECONDS = 720
+MEDIA_COLLECT_START = "{ COLLECT_START=$(date +%s) || true; }"
+
+
+def media_manifest_command() -> str:
+    """Write the media manifest of the backup's own source. Its failure leaves an unknown or empty manifest."""
+    return (f"{{ timeout {MEDIA_MANIFEST_SECONDS} exomem cell-media-manifest --vault /data/vault"
+            f" > {MEDIA_MANIFEST_PATH} || true; }}")
+
+
+def media_collect_command() -> str:
+    """Condemn the released names that no retained snapshot reaches. It reports to the Job's log alone, and its
+    failure, timeout or unknown answer leaves the backup successful. The subshell keeps even a shell error inside it."""
+    return (f"( left=$((COLLECT_START + {MEDIA_COLLECT_BY_SECONDS} - $(date +%s))); [ \"$left\" -gt 0 ] && "
+            f"exec timeout \"$left\" exomem cell-media-collect --snapshot \"$SNAPSHOT_ID\" "
+            f"--manifest-path {MEDIA_MANIFEST_PATH} ) || true")
 
 
 # The report line is a closed protocol format that the cell writes (media_drain_record.format_line) and the Job copies:
