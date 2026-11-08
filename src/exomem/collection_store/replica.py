@@ -919,7 +919,7 @@ class _Publisher:
             while force or head is None or head["commit_seq"] < requested["commit_seq"] or not self.carries_metadata():
                 pending = self.begin()
                 with ExitStack() as staging:
-                    artifact = staging.enter_context(snapshot.staged_snapshot(
+                    artifact = staging.enter_context(snapshot.staged_collection_snapshot(
                         self.root,
                         directory=self.root / self.workspace_relative,
                         deadline=self.deadline,
@@ -1159,7 +1159,7 @@ def publish_replica_concurrently(vault_root, *, step, deadline, cancelled=None, 
                 if isinstance(pending, PublicationResult):
                     return pending
             with ExitStack() as staging:
-                artifact = staging.enter_context(snapshot.staged_snapshot(
+                artifact = staging.enter_context(snapshot.staged_collection_snapshot(
                     root,
                     directory=replica_path(root).parent / pending["workspace_leaf"],
                     deadline=deadline,
