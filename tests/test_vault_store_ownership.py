@@ -148,6 +148,7 @@ def test_the_walk_yields_exactly_the_files_that_the_rule_owns(tmp_path):
     assert skipped == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
 def test_a_symlinked_page_is_left_out_and_reported(tmp_path):
     """Defect: migration stores a symlink's target under the link's path, so the projection later writes a copy.
 
@@ -183,6 +184,7 @@ def test_a_hard_linked_file_is_left_out_and_reported(tmp_path):
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO contract")
 def test_a_named_pipe_is_left_out_without_being_opened(tmp_path):
     """Defect: the walk opens a named pipe in the Knowledge Base, so a migration blocks forever on it."""
     (tmp_path / KB).mkdir()
