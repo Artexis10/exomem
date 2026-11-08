@@ -172,6 +172,37 @@ def test_a_member_that_the_pack_cannot_reproduce_fails_the_export(vault: Path, s
         cloud_export_steps.upload(staging, ["https://storage.invalid/part-1"], sleep=pytest.fail)
 
 
+@pytest.mark.parametrize("tamper", ["absolute", "link"])
+def test_a_planted_plan_never_puts_a_file_outside_staging_into_the_archive(vault: Path, tmp_path_factory, tamper):
+    """Defect: a pod that can write staging plants a plan member that names the pack's media key, by an absolute
+    path or through a link, and the pack archives the key for the upload to send."""
+    secret = b"stand-in for the media identity"
+    # The layout that Kubernetes gives a mounted Secret: the files in a dated directory behind a link.
+    keys = tmp_path_factory.mktemp("media")
+    (keys / "..2026_11_08").mkdir()
+    (keys / "..2026_11_08" / "age-identity").write_bytes(secret)
+    os.symlink("..2026_11_08", keys / "..data")
+    staging = tmp_path_factory.mktemp("staging")
+    export_dir = staging / cloud_export_steps.EXPORT_DIR
+    export_id = str(uuid.uuid4())
+    with _owner():
+        cloud_export_steps.pause(vault, staging, export_id=export_id, cell_id=CELL, media_mode=None,
+                                 max_bytes=PLENTY)
+        plan = json.loads((export_dir / cloud_export_steps.PLAN_NAME).read_text())
+        if tamper == "absolute":
+            plan["members"].append([str(keys / "..data" / "age-identity"), len(secret), "user_content"])
+        else:
+            os.symlink(keys / "..data", export_dir / cloud_export_steps.MEMBERS_NAME / "Loot")
+            plan["members"].append(["Loot/age-identity", len(secret), "user_content"])
+        (export_dir / cloud_export_steps.PLAN_NAME).write_text(json.dumps(plan))
+        with pytest.raises(vault_portability.PortabilityError) as failed:
+            cloud_export_steps.pack(vault, staging, export_id=export_id, cell_id=CELL, part_bytes=64 * 1024**2,
+                                    max_parts=10, max_bytes=PLENTY)
+    assert failed.value.code == "UNSAFE_STAGED_MEMBER"
+    parts = (export_dir / cloud_export_steps.SPOOL_NAME).glob("part-*")
+    assert not any(secret in part.read_bytes() for part in parts)
+
+
 def test_a_read_that_drops_mid_object_is_read_again_from_its_start(vault: Path, selected_store,  # noqa: F811
                                                                    tmp_path_factory, monkeypatch):
     """Defect: a media edge that restarts during the pack fails the export, or leaves a member with a doubled prefix."""

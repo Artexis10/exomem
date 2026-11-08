@@ -34,6 +34,7 @@ from .export_layout import (
     ARCHIVE_BOUND,
     PACK,
     PAUSE,
+    SPOOL_SUBPATH,
     UPLOAD,
     VERIFY,
     job_name,
@@ -1630,7 +1631,7 @@ def render_export_job(spec: CellManifestSpec, item, step: str, *, deadline_secon
       edge credential.
     - Neither has public egress: job-egress excludes both, so they reach only
       the in-cluster peers runtime-ingress gives every cell pod, the edge among them.
-    - The upload mounts only staging and no media key, and sends the parts.
+    - The upload mounts only the spool directory of staging and no media key, and sends the parts.
     - The verification sees only its signed object version, never a cell volume or a cell key Secret.
     """
     staging = staging_claim_name(item.export_id)
@@ -1712,6 +1713,9 @@ def render_export_job(spec: CellManifestSpec, item, step: str, *, deadline_secon
         container = pod["containers"][0]
         container["command"] = _cell_command(command)
         container["env"] = [*_init_env(spec), log_env, *_containment_env(spec)]
+        # Read-write, because the upload deletes each part that it sent.
+        container["volumeMounts"] = [{"name": "data", "mountPath": f"/data/{SPOOL_SUBPATH}", "subPath": SPOOL_SUBPATH}
+                                     if mount["name"] == "data" else mount for mount in container["volumeMounts"]]
         kind = JOB_KIND_EXPORT
     else:
         raise ValueError(f"unknown export step {step!r}")

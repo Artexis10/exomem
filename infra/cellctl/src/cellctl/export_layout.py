@@ -27,6 +27,10 @@ STAGING_MARGIN_PERCENT = 110
 STAGING_SPOOL_BYTES = 2 * MAX_PART_BYTES
 # ext4 keeps 5% of a new filesystem's blocks for root, so the Jobs can write to 95% of the claim.
 STAGING_USABLE_PERCENT = 95
+# The cell command's spool of archive parts on the staging claim: exomem's cloud_export_steps
+# EXPORT_DIR and SPOOL_NAME, which a root test keeps in step. The upload mounts only this
+# directory, so it cannot change the plan or the staged members that the pack reads with the media key.
+SPOOL_SUBPATH = ".cell-export/spool"
 
 
 def job_name(export_id: str, step: str) -> str:

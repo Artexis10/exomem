@@ -181,6 +181,8 @@ def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mod
     if planned_archive_bytes([(member.path, member.source_path.lstat().st_size) for member in listed] + stored) > max_bytes:
         raise ExportRefused(EXPORT_TOO_LARGE)
     export_dir.mkdir()
+    # The upload mounts only the spool, by its subPath, so the directory exists before the upload starts.
+    (export_dir / SPOOL_NAME).mkdir()
     members: list[list] = []
     member_bytes = 0
     for member in listed:
@@ -348,7 +350,8 @@ def pack(vault: Path, staging: Path, *, export_id: str, cell_id: str, part_bytes
         plan = json.loads((export_dir / PLAN_NAME).read_text(encoding="utf-8"))
         if plan.get("v") != PLAN_VERSION or plan.get("export_id") != export_id or plan.get("cell_id") != cell_id:
             raise ExportRefused(EXPORT_FAILED)
-        staged = [vault_portability.StagedMember(path, export_dir / MEMBERS_NAME / path, size, classification)
+        staged = [vault_portability.StagedMember(path, _staged_source(export_dir / MEMBERS_NAME, path), size,
+                                                 classification)
                   for path, size, classification in plan["members"]]
         stored = [vault_portability.StoredMember(entry["path"], entry["size"], entry["sha256"],
                                                  _stored_writer(vault, entry, sleep)) for entry in plan["evicted"]]
@@ -368,6 +371,20 @@ def pack(vault: Path, staging: Path, *, export_id: str, cell_id: str, part_bytes
         _write_json(spool / FAILED_NAME, {"error": code})
         raise
     return {"phase": PACK, **end, "evicted": len(stored), "unreadable_companions": plan["unreadable_companions"]}
+
+
+def _staged_source(members: Path, path: object) -> Path:
+    """The staged copy of one plan member, below the members directory with no symbolic link on the way.
+
+    The plan is data on a shared claim. A path that leaves the members directory, or passes a link, would
+    put any file that the pack can read, such as its media key, into the archive; it fails the pack.
+    """
+    if isinstance(path, str):
+        source = members / path
+        # realpath resolves every link, `.` and `..`, so only a plain relative path maps onto itself.
+        if os.path.realpath(source) == os.path.realpath(members) + os.sep + path:
+            return source
+    raise vault_portability.PortabilityError("UNSAFE_STAGED_MEMBER", "a planned member leaves staging or passes a link")
 
 
 def upload(staging: Path, part_urls: list[str], *, sleep: Callable[[float], None] = time.sleep) -> dict:
