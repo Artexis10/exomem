@@ -47,12 +47,15 @@ def _apply(vault: Path, proposed: dict[str, object], *, why: str = "Approved exa
     )
 
 
-def _seed_note(vault: Path, slug: str, sentence: str = "Keep old text.") -> str:
+def _seed_note(
+    vault: Path, slug: str, sentence: str = "Keep old text.", *, sources: list[str] | None = None
+) -> str:
     arguments = {
         "title": f"Curation {slug}",
         "slug": slug,
         "content": f"## Observations\n\n- [finding] {sentence} ^{slug}\n",
         "note_type": "insight",
+        **({"sources": sources} if sources else {}),
     }
     validation = commands.op_remember(vault, validate_only=True, **arguments)
     result = commands.op_remember(
@@ -87,6 +90,18 @@ def _seed_plain_file(vault: Path, slug: str, content: str) -> str:
         draft_token=validation["draft_token"],
     )
     return result["path"]
+
+
+def _fold_step(pages: list[str], vault: Path, *, step_id: str = "fold", keep: tuple[str, ...] = ()) -> dict[str, object]:
+    """A `fold-recap-revisions` step over every superseded page of `pages` (the last is the head)."""
+    def pinned(path: str) -> dict[str, str]:
+        return {"path": path, "expected_hash": content_hash((vault / path).read_text(encoding="utf-8"))}
+
+    return {
+        "step_id": step_id,
+        "kind": "fold-recap-revisions",
+        "args": {"head": pinned(pages[-1]), "revisions": [pinned(path) for path in pages[:-1] if path not in keep]},
+    }
 
 
 def _witness(vault: Path, proposed: dict[str, object], step_id: str) -> dict[str, object]:
@@ -790,3 +805,215 @@ def test_accept_relation_uses_the_real_review_queue_leaf_and_exact_postimage(
         {"path": acorn, "content_hash": content_hash(authored)}
     ]
     assert curation.status(vault, run_id=proposed["run_id"])["phase"] == "completed"
+
+
+def test_fold_moves_unreferenced_recap_revisions_and_keeps_the_cited_one(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """Five superseded revisions: one cited by a compiled page stays a file, four move, all stay readable."""
+    from exomem import curation, source_closure
+    from exomem import vault as vault_module
+
+    pages = earlier_episode(6)
+    head, cited = pages[-1], pages[2]
+    citing = _seed_note(vault, "curation-fold-cites", sources=[cited.removesuffix(".md")])
+    cited_bytes = (vault / cited).read_bytes()
+    before = {path: (vault / path).read_bytes() for path in pages}
+    citation = vault_module.parse_frontmatter((vault / citing).read_text(encoding="utf-8"))[0]["sources"]
+    resolver = vault_module.WikilinkResolver(vault)
+
+    def resolves() -> bool:
+        """The citation names the cited file and that file holds the bytes it cited."""
+        located = [source_closure.locate(vault, entry, resolver=resolver) for entry in citation]
+        return located == [cited] and (vault / cited).read_bytes() == cited_bytes
+
+    during: list[bool] = []
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: during.append(resolves()))
+    proposed = _propose(vault, _fold_step(pages, vault))
+    assert resolves()
+    result = _apply(vault, proposed)
+
+    assert result["phase"] == "completed"
+    assert resolves() and during and all(during)
+    assert (vault / head).read_bytes() == before[head]
+    moved = [path for path in pages[:-1] if path != cited]
+    assert len(moved) == 4 and not any((vault / path).exists() for path in moved)
+    history = commands.op_read_memory(vault, path=head, include_history=True)["revision_history"]
+    assert {item["path"]: item["prior"]["source"].encode() for item in history["revisions"]} == {
+        path: before[path] for path in pages[:-1]
+    }
+    assert {item["operation"] for item in history["revisions"]} == {"episode_fold"}
+    witness = json.dumps(_witness(vault, proposed, "fold"))
+    assert "Recap number" not in witness and "Step number" not in witness
+
+
+class _ProcessCut(BaseException):  # noqa: N818 - a process cut is not an error: nothing in the step may catch it
+    """A stop that no `except Exception` in the step can turn into a recorded failure."""
+
+
+def _sealed_fold(vault: Path, proposed: dict[str, object]) -> dict[str, object]:
+    """The manifest a fold step sealed at proposal: its entries and trash identities."""
+    from exomem import curation
+
+    return curation.CurationStore(vault).load_plan(proposed["run_id"])["binding_manifest"][0]["prepared"]
+
+
+def _trashed(vault: Path, manifest: dict[str, object]) -> dict[str, bytes]:
+    """Each revision path whose sealed trash identity holds bytes, with those bytes."""
+    return {
+        item["path"]: (vault / item["trash"]).read_bytes()
+        for item in manifest["revisions"]
+        if item["trash"] is not None and (vault / item["trash"]).exists()
+    }
+
+
+def test_fold_stops_before_moving_a_revision_whose_retained_copy_vanished(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """The entry is re-read immediately before each move, so a copy lost after the first move saves the rest."""
+    from exomem import curation
+
+    pages = earlier_episode(4)
+    before = {path: (vault / path).read_bytes() for path in pages}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    manifest = _sealed_fold(vault, proposed)
+    second = manifest["revisions"][1]
+    first_barrier = True
+
+    def lose_the_second_copy(name: str) -> None:
+        nonlocal first_barrier
+        if name == "fold-after-move" and first_barrier:
+            first_barrier = False
+            (vault / second["entry"]["path"]).unlink()
+
+    monkeypatch.setattr(curation, "_fault_barrier", lose_the_second_copy)
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert not first_barrier
+    assert _trashed(vault, manifest) == {pages[0]: before[pages[0]]}
+    assert not (vault / pages[0]).exists()
+    assert [(vault / path).read_bytes() for path in pages[1:]] == [before[path] for path in pages[1:]]
+
+
+@pytest.mark.parametrize("barrier", ["fold-after-entries", "fold-after-move"])
+def test_fold_cut_between_history_write_and_move_resumes_without_a_duplicate(
+    vault: Path, earlier_episode, monkeypatch, barrier: str  # noqa: ANN001
+) -> None:
+    """A cut after the entries (nothing moved) or after one move resumes to the same final state."""
+    from exomem import compiled_history, curation
+
+    pages = earlier_episode(4)
+    before = {path: (vault / path).read_bytes() for path in pages}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    manifest = _sealed_fold(vault, proposed)
+
+    def cut(name: str) -> None:
+        if name == barrier:
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        _apply(vault, proposed)
+    history = vault / compiled_history.history_root()
+    entries = {path: path.read_bytes() for path in history.rglob("*.json")}
+    assert len(entries) == 3
+    moved_by_the_cut = _trashed(vault, manifest)
+    assert len(moved_by_the_cut) == (1 if barrier == "fold-after-move" else 0)
+
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    resumed = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert resumed["phase"] == "completed"
+    assert {path: path.read_bytes() for path in history.rglob("*.json")} == entries
+    assert _trashed(vault, manifest) == {path: before[path] for path in pages[:-1]}
+    assert not any((vault / path).exists() for path in pages[:-1])
+    assert (vault / pages[-1]).read_bytes() == before[pages[-1]]
+
+
+def test_fold_blocks_when_a_revision_and_its_trash_identity_both_hold_bytes(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """Bytes in place and at the sealed identity name no single outcome, so resume blocks and moves nothing."""
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    before = {path: (vault / path).read_bytes() for path in pages}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    manifest = _sealed_fold(vault, proposed)
+
+    def cut(name: str) -> None:
+        if name == "fold-after-entries":
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        _apply(vault, proposed)
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    planted = vault / manifest["revisions"][0]["trash"]
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_bytes(before[pages[0]])
+
+    with pytest.raises(curation.CurationError, match="CURATION_OUTCOME_UNCERTAIN"):
+        curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert [(vault / path).read_bytes() for path in pages] == [before[path] for path in pages]
+    assert planted.read_bytes() == before[pages[0]]
+
+
+@pytest.mark.parametrize("kind", ["delete", "move"])
+def test_a_recap_revision_cannot_leave_through_plain_relocation(vault: Path, earlier_episode, kind: str) -> None:
+    """The fold's trash leaf is reachable only through the fold step: a plain `delete` or `move` of a Source stays refused."""
+    from exomem import curation
+
+    pages = earlier_episode(2)
+    args = (
+        {"path": pages[0], "confirm": True}
+        if kind == "delete"
+        else {"old_path": pages[0], "new_path": pages[0].replace(".md", "-moved.md")}
+    )
+
+    with pytest.raises(curation.CurationError, match="CURATION_TARGET_PROTECTED"):
+        _propose(vault, {"step_id": "plain", "kind": kind, "args": args})
+
+    assert (vault / pages[0]).is_file()
+
+
+def test_fold_pins_a_revision_that_only_a_page_withheld_from_another_audience_cites(
+    vault: Path, earlier_episode  # noqa: ANN001
+) -> None:
+    """The pinned set reads the whole vault: a rule that hides the citing page from a reader changes nothing."""
+    from test_episode_recovery import _write_source_rule
+
+    pages = earlier_episode(3)
+    _seed_note(vault, "curation-fold-withheld", sources=[pages[0].removesuffix(".md")])
+    _write_source_rule(vault, ceiling=0, paths="Notes/**")
+    proposed = _propose(vault, _fold_step(pages, vault))
+
+    result = _apply(vault, proposed)
+
+    assert result["phase"] == "completed"
+    assert result["step"]["leaf_result"]["kept"] == [pages[0]]
+    assert result["step"]["leaf_result"]["moved"] == [pages[1]]
+    assert (vault / pages[0]).is_file() and not (vault / pages[1]).exists()
+
+
+def test_fold_refuses_a_revision_that_a_page_cited_after_the_proposal(vault: Path, earlier_episode) -> None:
+    """A link added between proposal and apply pins the revision: nothing is written or moved."""
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    note = _seed_note(vault, "curation-fold-late-cite")
+    before = {path: (vault / path).read_bytes() for path in pages}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    commands.op_edit(
+        vault, path=note, why="Cite the earlier recap.", old_string="Keep old text.",
+        new_string=f"Keep old text, as [[{pages[0].removesuffix('.md')}]] recorded.",
+    )
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert [(vault / path).read_bytes() for path in pages] == [before[path] for path in pages]
+    history = commands.op_read_memory(vault, path=pages[-1], include_history=True)["revision_history"]
+    assert history["revisions"] == []

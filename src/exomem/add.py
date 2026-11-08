@@ -1503,6 +1503,48 @@ def _activity_summary(
     return f"{base} — {excerpt}{tags_part}"
 
 
+def revision_activity_writes(
+    vault_root: Path, *, path: str, title: str, source_type: str, now: dt.datetime
+) -> list[PlannedWrite]:
+    """The index and log writes that a revision of the Source at `path` makes.
+
+    They are the writes `add` makes for a new Source, so a revision shows up in
+    the recent-activity lists and the log as a new page did. A revision adds no
+    page, so the folder counts stay the ones on disk.
+    """
+    from .governance import connector_boundary
+
+    page = Path(path)
+    folder = page.parent.name
+    rel_no_ext = page.with_suffix("").as_posix()
+    update = indexes.compute_updates(
+        vault_root,
+        source_type=folder.lower(),
+        folder_title=folder,
+        folder_description=source_taxonomy.load_taxonomy(vault_root).category_description(folder),
+        rel_source_path=rel_no_ext,
+        date_iso=temporal.render_date(now),
+        stamp_iso=temporal.stamp(now),
+        activity_summary=_activity_summary(
+            rel_source_no_ext=rel_no_ext, title=title, source_type=source_type, tags=[]
+        ),
+        log_entry_body=_log_entry_body(
+            title=title, source_type=source_type, url=None, tags=[], why_captured=None
+        ),
+    )
+    kb = kb_root(vault_root)
+    effect_admitted = connector_boundary.effect_admission(vault_root)
+    return [
+        write
+        for write in (
+            PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
+            PlannedWrite(path=kb / "index.md", content=update.top_index_content),
+            PlannedWrite(path=kb / "log.md", content=update.log_content),
+        )
+        if effect_admitted(write.path)
+    ]
+
+
 def _log_entry_body(
     *,
     title: str,

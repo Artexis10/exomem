@@ -536,7 +536,7 @@ def test_governed_legacy_correction_uses_existing_edit_and_keeps_prior_account(
     assert list((tmp_path / "Knowledge Base/Notes").rglob("*.md")) == [tmp_path / UNTYPED_PAGE]
 
 
-@pytest.mark.parametrize("claim", ["parent", "directory", "path", "prior", "before_hash", "after_hash", "version", "filename", "create_only", "guard", "late_create_only", "late_guard"])
+@pytest.mark.parametrize("claim", ["parent", "directory", "path", "prior", "before_hash", "after_hash", "version", "filename", "create_only", "guard", "late_create_only", "late_guard", "episode_operation"])
 def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
     tmp_path: Path, owner, claim: str,
 ) -> None:
@@ -575,6 +575,8 @@ def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
         entry["after_hash"] = "b" * 64
     elif claim == "version":
         entry["version"] = 2
+    elif claim == "episode_operation":
+        entry["operation"] = compiled_history.EPISODE_OPERATION
     elif claim == "filename":
         target = target.with_name("20250101T000000000000Z-bbbbbbbb.json")
     forged = replace(

@@ -215,6 +215,8 @@ def test_work_item_uses_recorded_pages_exact_hashes_and_discloses_truncation(
     assert item["truncation"]["pages"] == [path]
     assert "Kieliriippumaton" in source
     assert set(item["step_schemas"]) == set(curation.STEP_KINDS)
+    assert "fold-recap-revisions" in item["step_schemas"]
+    assert "unfold-recap-revisions" not in item["step_schemas"]
     assert set(item["registry_ids"]) == {"entities", "relations", "schemas"}
 
 
@@ -411,3 +413,74 @@ def test_create_note_vocabulary_preparation_is_actionable_and_decision_bound(vau
     assert result["phase"] == "completed"
     path = result["step"]["path"]
     assert (vault / path).exists()
+
+
+def test_fold_proposal_refuses_a_head_that_is_not_the_single_live_page(vault, earlier_episode) -> None:  # noqa: ANN001
+    """Only the episode's live page can hold the history, so a superseded page is no head."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    step = _fold_step(pages[:-1], vault)  # the second page is the head, the first its only revision
+
+    with pytest.raises(curation.CurationError, match="single live page"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_a_page_of_another_episode(vault, earlier_episode) -> None:  # noqa: ANN001
+    """One step folds one episode: a revision of another episode, however superseded, is refused."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    other = earlier_episode(2, key="ep-" + "b2" * 16)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].append(_fold_step(other, vault)["args"]["revisions"][0])
+
+    with pytest.raises(curation.CurationError, match="not a superseded recap revision of this episode"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_revisions_listed_newest_first(vault, earlier_episode) -> None:  # noqa: ANN001
+    """The history is written oldest first, so the plan must name the revisions in that order."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(4)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].reverse()
+
+    with pytest.raises(curation.CurationError, match="oldest first"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_the_head_among_its_revisions(vault, earlier_episode) -> None:  # noqa: ANN001
+    """The live page is never a revision to retire, whatever its hash says."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(2)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].append(step["args"]["head"])
+
+    with pytest.raises(curation.CurationError, match="never the head"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_needs_the_whole_namespace_content_authority(vault, earlier_episode) -> None:  # noqa: ANN001
+    """A caller that cannot read the whole namespace cannot prove which revisions a hidden page cites."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    pages = earlier_episode(3)
+    step = _fold_step(pages, vault)
+
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        with pytest.raises(curation.CurationError, match="SOURCE_IDENTITY_FORBIDDEN"):
+            curation.propose(vault, _plan(step))

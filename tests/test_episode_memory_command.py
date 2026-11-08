@@ -375,6 +375,9 @@ def test_three_recaps_keep_one_page_and_two_history_entries(
         assert _frontmatter(page)["summary"] == summaries[2]
         assert "status" not in _frontmatter(page)
         assert len(_history_files(vault)) == 2
+        # Each recap reaches the log as a new page did before the page was revised in place.
+        log = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+        assert log.count(f"add | {path.removeprefix('Knowledge Base/').removesuffix('.md')}") == 3
         # Newest entry first: the second recap's page, then the first recap's.
         assert _prior_summaries(vault, path) == [f"summary: {summaries[1]}", f"summary: {summaries[0]}"]
 
@@ -453,7 +456,8 @@ def test_the_recorder_refuses_to_rewrite_any_source_but_its_own_episode_page(vau
             before = (vault / path).read_text(encoding="utf-8")
             with pytest.raises(EpisodeError, match="EPISODE_PAGE_NOT_REVISABLE"):
                 episode_memory.revise_page(
-                    vault, recap, path=path, expected_hash=vault_module.content_hash(before)
+                    vault, recap, path=path, expected_hash=vault_module.content_hash(before),
+                    when=dt.datetime.now().astimezone(),
                 )
             assert (vault / path).read_text(encoding="utf-8") == before
     assert _history_files(vault) == []

@@ -2,7 +2,11 @@
 
 The episode recorder keeps the same entries for the one page of a recap. A recap
 Source is the only Source whose text is revised, and only that recorder revises
-it (`plan_episode_entry`), so a revision never loses its previous text.
+it (`plan_episode_entry`), so a revision never loses its previous text. The recap
+fold (`episode_fold`) writes the same kind of entry, operation `episode_fold`, for a
+superseded revision file of an earlier layout that it then retires from the Sources
+tree. That entry is published alone (`plan_fold_entry`, `publish_fold_entry`), because
+the head page it belongs to does not change.
 
 One entry keeps one before image as read. History stays outside ordinary reads
 and indexing; this owner admits every retained image before serving its fields.
@@ -27,11 +31,13 @@ from . import (
     memory_refs,
     origin_bindings,
     provenance,
+    recap_folder,
     record_history,
     registry_history,
     retained_inputs,
     semantic_index,
     source_closure,
+    source_taxonomy,
     vault,
 )
 from .governance.principal import OWNER_AUDIENCE, effective_principal
@@ -40,6 +46,9 @@ from .kbdir import kb_dirname
 ENTRY_VERSION = 1
 #: The `operation` an episode revision's entry carries; the semantic writer names its own.
 EPISODE_OPERATION = "episode_revision"
+#: The `operation` of the entry that the recap fold writes for a revision it retires from the Sources tree.
+FOLD_OPERATION = "episode_fold"
+_DESCRIPTOR_ID = "compiled-history"  # The registry family of the history tree (`reserved_paths._REGISTRY`).
 
 
 def history_root() -> str:
@@ -84,6 +93,14 @@ def validate_new_entry(
             or entry["after_hash"] != vault.content_hash(after_source)
         ):
             raise ValueError("compiled history does not match its primary")
+        if entry["operation"] == EPISODE_OPERATION:
+            # `plan_entry` leaves every Source out; only a recap page of the episode folders keeps one.
+            fields = vault.parse_frontmatter(before_source, strict=True)[0]
+            if (
+                not recap_folder.under(recap_folder.recap_folders(root), primary_path)
+                or fields.get("source_type") != source_taxonomy.EPISODE_KIND
+            ):
+                raise ValueError("an episode revision keeps only a recap page")
     except (KeyError, TypeError, AttributeError, ValueError) as error:
         raise ValueError("VOCABULARY_AUXILIARY_CHANGED") from error
 
@@ -197,17 +214,117 @@ def plan_episode_entry(
     return _new_entry_write(root, root / history_dir(parent_ref) / name, entry)
 
 
+def plan_fold_entry(
+    root: Path, *, head_path: str, head_source: str, revision_path: str, revision_source: str,
+    at: dt.datetime, actor: dict[str, Any], exomem_version: str,
+) -> tuple[str, str]:
+    """The vault-relative path and exact text of the entry that keeps one folded recap revision.
+
+    The entry is a pure function of its inputs, so a fold that resumes plans the same
+    bytes and finds an entry it already wrote; the fold seals `actor` and `exomem_version`
+    at proposal, so an upgrade or another caller between proposal and apply cannot change them.
+    Its parent is the episode's head, which the fold leaves unchanged: `after_hash` is the
+    head's hash and `before_hash` the revision's.
+    """
+    parent_ref = memory_refs.ref_from_markdown(head_source) or context_refs.vault_ref(head_path)
+    transition_id = hashlib.sha256(
+        f"{revision_path}\n{vault.content_hash(revision_source)}".encode()
+    ).hexdigest()[:32]
+    entry = {
+        "version": ENTRY_VERSION,
+        "parent_ref": parent_ref,
+        "path": revision_path,
+        "at": at.isoformat().replace("+00:00", "Z"),
+        "operation": FOLD_OPERATION,
+        "transition_id": transition_id,
+        "before_hash": vault.content_hash(revision_source),
+        "after_hash": vault.content_hash(head_source),
+        "affected_units": [],
+        "reason": None,
+        "actor": actor,
+        "prior": {"source": revision_source},
+        "binding": provenance.parse_origin(revision_source, managed=True).payload,
+        "exomem_version": exomem_version,
+    }
+    name = registry_history.version_id(at, transition_id) + ".json"
+    return f"{history_dir(parent_ref)}/{name}", _entry_text(entry)
+
+
+def publish_fold_entry(root: Path, *, path: str, text: str) -> bool:
+    """Create one fold entry; False when the same bytes already stood there.
+
+    A fold has no changed primary page to seal an auxiliary write against, so the entry is
+    published through the history owner's own held write, under its own scope. The owner write
+    replaces, so this reads the leaf first and never publishes over bytes that differ from `text`.
+    """
+    from . import reserved_paths
+
+    directory, _, name = path.rpartition("/")
+    kept = registry_history.read_kept(root, directory, name)
+    if kept == text:
+        return False
+    if kept is not None:
+        raise ValueError("VOCABULARY_AUXILIARY_CHANGED: a history entry with other bytes stands there")
+    with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
+        reserved_paths._publish_owner_bytes(  # noqa: SLF001 - the owner seam every private store writes through
+            root, root / path, _DESCRIPTOR_ID, text.encode("utf-8")
+        )
+    return True
+
+
+def retire_fold_entry(root: Path, *, path: str, trash_path: str) -> None:
+    """Move one fold entry to its sealed trash identity; the undo of a fold is its only caller.
+
+    The caller has proved that the revision's own file is back in place, so the bytes that
+    the entry holds stay held. The owner seam has no rename, so the entry's exact bytes are
+    created at `trash_path` first, then the entry is removed: a stop between the two leaves
+    both, and a repeat finishes the removal. Other bytes at `trash_path` are never replaced.
+    """
+    from . import reserved_paths
+
+    text = read_entry(root, path=path)
+    if text is None:
+        raise ValueError("NOT_FOUND: the history entry to retire is missing or unreadable")
+    try:
+        trashed, _guard = vault.read_guarded_text(root, root / trash_path)
+    except FileNotFoundError:
+        reserved_paths.publish_generic_bytes(root, trash_path, text.encode("utf-8"), expected_identity=None)
+    else:
+        if trashed != text:
+            raise ValueError("VOCABULARY_AUXILIARY_CHANGED: other bytes stand at the trash identity")
+    with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
+        reserved_paths._remove_owner_file(root, root / path, _DESCRIPTOR_ID)  # noqa: SLF001 - the owner seam
+
+
+def read_entry(root: Path, *, path: str) -> str | None:
+    """The text of one entry as stored, or None when it is missing or unreadable."""
+    directory, _, name = path.rpartition("/")
+    return registry_history.read_kept(root, directory, name)
+
+
+def _entry_text(entry: dict) -> str:
+    return json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
 def _new_entry_write(root: Path, path: Path, entry: dict) -> vault.PlannedWrite:
     guard = vault.PathGuard.capture(root, path.relative_to(root).as_posix(), leaf_policy="absent")
-    return vault.PlannedWrite(
-        path,
-        json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
-        create_only=True,
-        guard=guard,
+    return vault.PlannedWrite(path, _entry_text(entry), create_only=True, guard=guard)
+
+
+def _folded_revision(root: Path, source: str, path: str, head_episode: Any) -> bool:
+    """Whether `source` is a recap revision of the head's episode, held in a recap folder."""
+    fields = vault.parse_frontmatter(source, strict=True)[0]
+    return (
+        isinstance(head_episode, str)
+        and fields.get("episode") == head_episode
+        and fields.get("source_type") == source_taxonomy.EPISODE_KIND
+        and recap_folder.under(recap_folder.recap_folders(root), path)
     )
 
 
-def _admitted_entry(root: Path, text: str | None, *, path: str, parent_ref: str) -> dict | None:
+def _admitted_entry(
+    root: Path, text: str | None, *, path: str, parent_ref: str, head_episode: Any = None
+) -> dict | None:
     try:
         entry = json.loads(text) if text is not None else None
         if (
@@ -229,10 +346,13 @@ def _admitted_entry(root: Path, text: str | None, *, path: str, parent_ref: str)
         source = entry["prior"]["source"]
         if not isinstance(source, str) or vault.content_hash(source) != entry["before_hash"]:
             return None
-        retained_ref = memory_refs.ref_from_markdown(source) or context_refs.vault_ref(
-            historical_path
-        )
-        if retained_ref != parent_ref:
+        if entry.get("operation") == FOLD_OPERATION:
+            # A folded revision keeps its own identity, so it binds to the head by episode, not by ref.
+            if not _folded_revision(root, source, historical_path, head_episode):
+                return None
+        elif (
+            memory_refs.ref_from_markdown(source) or context_refs.vault_ref(historical_path)
+        ) != parent_ref:
             return None
         # Current-page admission cannot authorize bytes removed from that page.
         registry_history._require_snapshot_admission(
@@ -308,6 +428,7 @@ def read(
             registry_history.read_kept(root, directory, name),
             path=canonical,
             parent_ref=parent_ref,
+            head_episode=current["frontmatter"].get("episode"),
         )
         if entry is None:
             continue

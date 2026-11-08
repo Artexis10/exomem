@@ -11,7 +11,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import curation, episode_capture, episode_materials, note_types, provenance, retained_inputs
+from . import (
+    curation,
+    episode_capture,
+    episode_materials,
+    find_corpus,
+    note_types,
+    provenance,
+    retained_inputs,
+)
 from . import episode_model as model
 from .collection_store.ownership import read_scope
 from .episode_store import EpisodeStore
@@ -150,6 +158,18 @@ class EpisodeInputOwner:
         self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], identity: str,
         *, whole_parent: bool = False,
     ) -> bool:
+        return self._bound_page(resolved, evidence, identity, whole_parent=whole_parent) is not None
+
+    def _bound_page(
+        self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], identity: str,
+        *, whole_parent: bool = False,
+    ) -> GetResult | None:
+        """The page as `evidence` bound it: the live page, or its earlier bytes, or None.
+
+        A recap that the recorder revised in place no longer holds an older
+        revision's bytes, so those come from the compiled-history entry that
+        kept them. An entry that is missing or unreadable proves nothing.
+        """
         unit_ref = None if whole_parent else resolved.unit_ref
         fingerprint = resolved.unit.fingerprint if unit_ref is not None and resolved.unit else None
         scheme = evidence.get("version_scheme")
@@ -158,18 +178,66 @@ class EpisodeInputOwner:
             unit_ref=unit_ref, unit_fingerprint=fingerprint,
         )
         if evidence.get("digest") == expected["digest"]:
-            return True
-        if not self._retired_recorder(resolved, identity):
+            return resolved.page
+        if self._retired_recorder(resolved, identity):
+            candidate = episode_capture.pre_retirement_content(resolved.page.content)
+            if candidate is None:
+                return None
+            expected = self._page_evidence(
+                replace(resolved.page, content=candidate, content_hash=content_hash(candidate)),
+                resolved.canonical, scheme, unit_ref=unit_ref, unit_fingerprint=fingerprint,
+            )
+            # A match proves the old material, not who wrote the retirement fields.
+            return resolved.page if evidence.get("digest") == expected["digest"] else None
+        if unit_ref is None and self._is_recap_of(resolved.page, identity):
+            return self._earlier_revision(resolved, evidence, scheme)
+        return None
+
+    @staticmethod
+    def _is_recap_of(page: GetResult, identity: str) -> bool:
+        try:
+            return (
+                str(page.frontmatter.get("type") or "").casefold() == "source"
+                and str(page.frontmatter.get("source_type") or "").casefold() == "episode"
+                and model.episode_id(page.frontmatter.get("episode")) == identity
+            )
+        except model.EpisodeError:
             return False
-        candidate = episode_capture.pre_retirement_content(resolved.page.content)
-        if candidate is None:
-            return False
-        expected = self._page_evidence(
-            replace(resolved.page, content=candidate, content_hash=content_hash(candidate)),
-            resolved.canonical, scheme, unit_ref=unit_ref, unit_fingerprint=fingerprint,
-        )
-        # A match proves the old material, not who wrote the retirement fields.
-        return evidence.get("digest") == expected["digest"]
+
+    def _earlier_revision(
+        self, resolved: retained_inputs.RetainedInput, evidence: dict[str, Any], scheme: str | None
+    ) -> GetResult | None:
+        """The recap page as an earlier revision left it, if its history entry still proves those bytes."""
+        # origin_bindings imports this module, and compiled_history imports it.
+        from . import compiled_history
+
+        page = resolved.page
+        continuation = None
+        while True:
+            try:
+                kept = compiled_history.read(
+                    self.vault_root, path=page.path, continuation=continuation
+                )
+            except (OSError, ValueError):
+                return None
+            for entry in kept["revisions"]:
+                if entry["operation"] != compiled_history.EPISODE_OPERATION:
+                    continue
+                prior = entry["prior"]["source"]
+                earlier = replace(page, content=prior, content_hash=content_hash(prior))
+                try:
+                    digest = self._page_evidence(earlier, resolved.canonical, scheme)["digest"]
+                except model.EpisodeError:
+                    continue
+                parsed = find_corpus.parse_page(
+                    self.vault_root / page.path, page.mtime, self.vault_root,
+                    content=prior.encode("utf-8"),
+                )
+                if digest == evidence.get("digest") and parsed is not None:
+                    return replace(earlier, frontmatter=parsed.frontmatter, body=parsed.body)
+            if not kept["truncated"] or kept["continuation"] in (None, continuation):
+                return None
+            continuation = kept["continuation"]
 
     def _resolve_bound_reference(
         self, evidence: dict[str, Any], identity: str
@@ -496,10 +564,11 @@ class EpisodeInputOwner:
                     resolved = self._resolve_bound_reference(evidence, episode_id)
                 except model.EpisodeError:
                     return {"status": "unavailable", "input_revision": revision["revision"]}
-                if not self._matches_bound_evidence(resolved, evidence, episode_id):
+                bound = self._bound_page(resolved, evidence, episode_id)
+                if bound is None:
                     return {"status": "stale", "input_revision": revision["revision"]}
                 field, value = (
-                    ("body", resolved.page.body) if resolved.unit is None
+                    ("body", bound.body) if resolved.unit is None
                     else ("text", resolved.unit.span.text)
                 )
                 if value is None or len(value.encode("utf-8")) > _MAX_RESPONSE_BYTES:

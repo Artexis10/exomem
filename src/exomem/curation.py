@@ -60,7 +60,21 @@ STEP_KINDS: Final[tuple[str, ...]] = (
     "move",
     "delete",
     "recover",
+    "fold-recap-revisions",
 )
+#: The recap fold (add-first-class-duplicate-handling A7): an episode's superseded recap revisions
+#: move into compiled history. It is public, and with its undo it is the only step that retires a
+#: Source: `move`, `delete` and `recover` keep refusing, because the fold trashes a file only after
+#: it re-reads identical bytes held elsewhere (`fold_leaf`), so it needs no relocation lineage.
+FOLD_RECAP_STEP_KIND: Final[str] = "fold-recap-revisions"
+#: The fold's inverse. It is internal: `STEP_KINDS` lacks it, and only a compensation plan that
+#: `propose_compensation` derives from a fold's sealed manifest may carry it.
+UNFOLD_RECAP_STEP_KIND: Final[str] = "unfold-recap-revisions"
+# nosemgrep: ep-word-set -- the two fold step kinds this module defines, a closed set.
+FOLD_STEP_KINDS: Final[frozenset[str]] = frozenset({FOLD_RECAP_STEP_KIND, UNFOLD_RECAP_STEP_KIND})
+#: The protected trees a fold may name: the Sources tree its revisions live in. The trash is named too.
+# nosemgrep: ep-word-set -- the protected-tree names `PROTECTED_TREES` fixes, a closed subset.
+_FOLD_TREES: Final[frozenset[str]] = frozenset({"sources"})
 #: The episode Records leaf (close-memory-loop 3.5). It is not a general
 #: curation kind: only a plan the episode `records` route seals may carry it
 #: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
@@ -266,7 +280,11 @@ _PRESERVE_EVIDENCE_FIELDS = frozenset({"original", "scope", "category", "filenam
 _ADD_PLAN_FIELDS = frozenset({"collection", "item", "plan_id", "expected_container_hash", "body", "why"})
 _UPDATE_PLAN_FIELDS = frozenset({"collection", "plan_id", "changes", "body", "expected_container_hash", "expected_item_version", "why"})
 _TRIAGE_PLAN_FIELDS = frozenset({"collection", "plan_id", "transition", "expected_container_hash", "expected_item_version", "why"})
+# nosemgrep: ep-word-set -- the fold step's argument names, fixed by its schema.
+_FOLD_RECAP_FIELDS = frozenset({"head", "revisions"})
 _ARG_FIELDS = {
+    FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
+    UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
     "capture-source": _CAPTURE_SOURCE_FIELDS,
     "preserve-evidence": _PRESERVE_EVIDENCE_FIELDS,
     "add-plan": _ADD_PLAN_FIELDS, "update-plan": _UPDATE_PLAN_FIELDS, "triage-plan": _TRIAGE_PLAN_FIELDS,
@@ -285,6 +303,8 @@ _ARG_FIELDS = {
     "update-record": _UPDATE_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
+    FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
+    UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
     "capture-source": frozenset({"original", "title", "source_type"}),
     "preserve-evidence": frozenset({"original", "scope", "category", "filename"}),
     "add-plan": frozenset({"collection", "item", "expected_container_hash", "why"}),
@@ -466,13 +486,14 @@ def _folded_segment(part: str) -> str:
 
 
 def normalize_target_path(
-    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, allow_fold: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
 ) -> str:
     """A confined governed path. `allow_records` is the Records leaf's alone:
     it admits the Records tree, spelled exactly as the Records layer is, and
     nothing else, so that leaf can neither leave the tree nor open it to any
     other kind. Every other kind compares folded segments, so a spelling the
-    filesystem folds onto a protected tree is that tree."""
+    filesystem folds onto a protected tree is that tree. `allow_fold` is the fold
+    steps' alone: it admits the Sources tree and the trash, and no other protected tree."""
     if _planning_identity is not None:
         from . import structured_collections
 
@@ -508,9 +529,11 @@ def normalize_target_path(
         if parts[0] != "Records" or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
         return raw
-    if first in PROTECTED_TREES or compact.startswith("workflow-contract/"):
+    if (first in PROTECTED_TREES and not (allow_fold and first in _FOLD_TREES)) or compact.startswith(
+        "workflow-contract/"
+    ):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
-    if first == "_trash" and not allow_trash:
+    if first == "_trash" and not (allow_trash or allow_fold):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} targets trash internals")
     return raw
 
@@ -524,7 +547,15 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     if missing:
         raise _error("INVALID_CURATION_PLAN", f"steps[{ordinal}].args misses {missing}")
 
-    if kind in PRESERVATION_STEP_KINDS:
+    if kind in FOLD_STEP_KINDS:
+        from . import episode_fold
+
+        args = (
+            episode_fold.validate_args(args, ordinal)
+            if kind == FOLD_RECAP_STEP_KIND
+            else episode_fold.validate_unfold_args(args, ordinal)
+        )
+    elif kind in PRESERVATION_STEP_KINDS:
         from . import provenance
 
         args["original"] = provenance._origin_payload(  # noqa: SLF001
@@ -779,7 +810,7 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str,
     the private leaves (the episode leaves and the promotion revert's
     `remove-relation`); only their sealers and sealed plans pass it."""
     kinds = (
-        (*STEP_KINDS, *_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND)
+        (*STEP_KINDS, *_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND, UNFOLD_RECAP_STEP_KIND)
         if allow_records
         else STEP_KINDS
     )
@@ -1784,6 +1815,17 @@ def _prepare_step(
             # its hash stands for the whole collection as reviewed.
             effect_before.append({"path": manifest_path, "content_hash": manifest_hash})
             effect_after = [{"path": path, "exists": True}]
+        elif kind in FOLD_STEP_KINDS:
+            from . import episode_fold
+
+            folded = (
+                episode_fold.prepare(vault_root, args)
+                if kind == FOLD_RECAP_STEP_KIND
+                else episode_fold.prepare_unfold(vault_root, args)
+            )
+            path, before_hash, after_hash = folded["path"], folded["before_hash"], folded["after_hash"]
+            prepared = folded["prepared"]
+            effect_before, effect_after = folded["effect_before"], folded["effect_after"]
         elif kind == "move":
             validation = move_module.move_file(vault_root, validate_only=True, **args)
             if not isinstance(validation, move_module.MoveFileValidation):
@@ -2207,6 +2249,12 @@ def _binding_blockers(
         if index in store_owned:
             # Its bound files are the store's generated views; the store blocker says why it cannot run.
             continue
+        if item.get("kind") in FOLD_STEP_KINDS:
+            from . import episode_fold
+
+            # A fold may stand half done, so its files are judged by live state, not by one hash each.
+            blockers.extend(episode_fold.binding_blockers(vault_root, item))
+            continue
         for expected_item in _binding_expectations(item):
             path = str(expected_item.get("path") or "")
             if expected_item.get("absent") is True:
@@ -2382,6 +2430,9 @@ def compensation_kind(kind: str) -> str:
         "move": "move",
         "delete": "recover",
         "recover": "delete",
+        FOLD_RECAP_STEP_KIND: UNFOLD_RECAP_STEP_KIND,
+        # An undone fold is folded again by a new reviewed plan, never by undoing the undo.
+        UNFOLD_RECAP_STEP_KIND: "unavailable",
         # Records history is corrected by a later Records transition, never
         # by removing the one that happened.
         RECORDS_STEP_KIND: "unavailable",
@@ -2456,6 +2507,8 @@ def _witness_basis(
         "move": "manage_memory_file:move",
         "delete": "manage_memory_file:delete",
         "recover": "manage_memory_file:recover",
+        FOLD_RECAP_STEP_KIND: "maintain_memory:fold-recap-revisions",
+        UNFOLD_RECAP_STEP_KIND: "maintain_memory:unfold-recap-revisions",
         RECORDS_STEP_KIND: "record_memory:append",
         "update-record": "record_memory:update",
         OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
@@ -2526,6 +2579,13 @@ def _finalize_witness_batch(
             raise _error("CURATION_BINDING_STALE", "native core changed after preparation")
         return curation_witness.render_with_after(content, binding["effect_after"])
     kind = str(step["kind"])
+    if kind in FOLD_STEP_KINDS:
+        # The fold's own files are moved by held writers, never by this batch: its witness is
+        # committed alone and last, once `pending.ready` says the whole effect stands.
+        pending = curation_witness.pending_for(vault_root)
+        if pending is None or not pending.ready:
+            return None
+        return curation_witness.render_with_after(content, binding["effect_after"])
     source = str(binding["path"])
     destination = str(binding.get("postcondition", {}).get("path") or source)
     prior_hash = binding.get("before_hash")
@@ -2660,6 +2720,7 @@ def _validate_witness(
                 item.get("path"),
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
+                allow_fold=kind in FOLD_STEP_KINDS,
                 allow_records=kind in RECORDS_STEP_KINDS,
                 _planning_tree=kind in PLANNING_STEP_KINDS,
                 _planning_identity=(binding["prepared"]["collection_id"], binding["prepared"]["item_key"]) if kind in PLANNING_STEP_KINDS and binding["prepared"].get("store") is not None else None,
@@ -3006,6 +3067,14 @@ def _dispatch_step(
     kind = str(step["kind"])
     args = json.loads(canonical_json(step["args"]))
     prepared = dict(binding.get("prepared") or {})
+    if kind in FOLD_STEP_KINDS:
+        from . import episode_fold
+
+        return (
+            episode_fold.fold(vault_root, binding)
+            if kind == FOLD_RECAP_STEP_KIND
+            else episode_fold.unfold(vault_root, binding)
+        )
     if kind in PRESERVATION_STEP_KINDS:
         return _preservation_call(vault_root, kind, args, prepared=prepared)
     if kind == "create-note":
@@ -5071,6 +5140,9 @@ def _compensation_args(
             "CURATION_COMPENSATION_UNAVAILABLE",
             "a removed edge is authored again as a new write, which is a new promotion",
         )
+    if kind == FOLD_RECAP_STEP_KIND:
+        # The undo is derived from the sealed manifest alone: every identity it needs was sealed.
+        return inverse, {"fold": binding["prepared"]}
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:
         path = str(effect.get("path") or binding["postcondition"]["path"])
@@ -5171,7 +5243,9 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "version": 1,
             "title": f"Compensation for {run_id}",
             "steps": steps,
-        }
+        },
+        # Only this derivation may carry the private inverse of a fold.
+        allow_records=True,
     )
     manifest = _prepare_manifest(root, plan["steps"])
     _require_plan_relocation_history(root, plan)

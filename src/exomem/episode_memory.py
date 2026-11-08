@@ -146,8 +146,16 @@ def _revisions(
     frontmatter matters: a group collision is ruled out by the `episode` field
     itself.
     """
-    folder = _folder(vault_root)
-    group = episode_capture.key_group(key, audience)
+    return group_pages(
+        vault_root, _folder(vault_root), key, episode_capture.key_group(key, audience),
+        diagnostics=diagnostics,
+    )
+
+
+def group_pages(
+    vault_root: Path, folder: Path, key: str, group: str, *, diagnostics: dict[str, int] | None = None
+) -> list[_Revision]:
+    """The recap pages of episode `key` and filename group `group` in `folder`, oldest first."""
     try:
         with os.scandir(folder) as entries:
             names = [entry.name for entry in entries if entry.is_file()]
@@ -247,13 +255,14 @@ def _revised_text(
 
 
 def revise_page(
-    vault_root: Path, recap: episode_capture.Recap, *, path: str, expected_hash: str
+    vault_root: Path, recap: episode_capture.Recap, *, path: str, expected_hash: str, when: dt.datetime
 ) -> None:
     """Rewrite the episode's recap page at `path` to `recap`, keeping its previous bytes in compiled history.
 
-    The page and its history entry commit in one atomic batch, so the page never
-    changes without its previous text retained, and a failed history write
-    leaves the page as it was. `expected_hash` is the page's content hash as the
+    The page, its history entry and the index and log lines that a new recap
+    page used to write commit in one atomic batch, so the page never changes
+    without its previous text retained, and a failed history write leaves the
+    page as it was. `expected_hash` is the page's content hash as the
     caller read it; a page another writer changed since fails the call.
 
     This is the one place a Source is rewritten. The target check is closed
@@ -286,10 +295,13 @@ def revise_page(
     manifest = vocabulary_auxiliaries.seal(
         root, primary=primary, derived=(("compiled-history", history),)
     )
+    activity = add_module.revision_activity_writes(
+        root, path=path, title=recap.subject, source_type=source_taxonomy.EPISODE_KIND, now=when
+    )
     intents: list[object] = []
     with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
         committed = batch_atomic_write(
-            [primary, history],
+            [primary, history, *activity],
             vault_root=root,
             post_commit_fanout=False,
             publication_intents_out=intents,
@@ -330,7 +342,7 @@ def _write(
             return _source(head.path, head.frontmatter), True, paths
         try:
             if head is not None:
-                revise_page(vault_root, recap, path=head.path, expected_hash=head.hash)
+                revise_page(vault_root, recap, path=head.path, expected_hash=head.hash, when=when)
                 source = {**_source(head.path, head.frontmatter), "title": recap.subject}
             else:
                 # Never before the newest file on disk, whatever the clock says.

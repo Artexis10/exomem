@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -1241,6 +1241,30 @@ def earlier_layout() -> Iterator[pytest.MonkeyPatch]:
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(episode_memory, "_write", write)
         yield patch
+
+
+@pytest.fixture
+def earlier_episode(vault: Path, source_schema, earlier_layout) -> Iterator[Callable[..., list[str]]]:
+    """Build an episode as earlier releases kept it, as the local owner for the whole test.
+
+    The factory returns the episode's Sources pages oldest first: one page per recap
+    revision, only the last live. That is the shape a fold exists for, because the
+    shipped recorder keeps a single page per episode.
+    """
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    def build(revisions: int, key: str = "ep-" + "a1" * 16) -> list[str]:
+        return [
+            commands.op_episode_memory(
+                vault, source_schema, action="record", episode=key, subject="Fold fixture",
+                summary=f"Recap number {number}", worked_on=[f"Step number {number}"],
+            )["source"]["path"]
+            for number in range(1, revisions + 1)
+        ]
+
+    with request_scope(owner_principal()):
+        yield build
 
 
 class ScopeWalkSentinel:
