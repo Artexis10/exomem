@@ -21,8 +21,9 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, call_spans, privacy_log, reserved_paths
+from . import access, call_spans, privacy_log, procedure_approval, reserved_paths
 from . import find as find_module
+from .governance import principal, raw_protection
 from .kbdir import kb_prefix
 from .vault import (
     VaultPathError,
@@ -309,3 +310,27 @@ def get_page(
         content_hash=content_hash(content),
         mtime=prepared.mtime,
     )
+
+
+def approval_fields(vault_root: Path, result: GetResult, *, ref: str, full_release: bool) -> dict:
+    """The approval verdict of the page just read, for this caller, as result fields.
+
+    `approval` is the one verdict of `procedure_approval`. The owner's read also carries `diagnostics` with
+    the findings of the ref's ledger; any other caller receives none. A page whose approval cannot be checked
+    reads `unapproved`: approval only ever adds an endorsement, and the page content stays readable.
+    `ref` is the reference index's ref for this path, which the index gives only to the single valid owner of
+    an id. So the page is its own holder, and the verdict needs no second index.
+    """
+    try:
+        outcome = procedure_approval.served_verdict(
+            vault_root, result.path, procedure_approval.ledger(vault_root, ref),
+            owner=raw_protection.is_owner(principal.effective_principal()), full_release=full_release,
+            read=lambda: result.content.encode("utf-8"), holders=lambda: (result.path,),
+        )
+    except Exception:  # noqa: BLE001 - an unchecked approval reads unapproved and never blocks the read
+        log.warning("approval verdict unavailable for %s", result.path, exc_info=True)
+        return {"approval": procedure_approval.UNAPPROVED}
+    fields: dict = {"approval": outcome.value}
+    if outcome.findings:
+        fields["diagnostics"] = {"approval_findings": [finding.row() for finding in outcome.findings]}
+    return fields

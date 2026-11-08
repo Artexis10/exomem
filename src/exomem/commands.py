@@ -4619,7 +4619,13 @@ def op_get(
                 return current
         except source_corrections.SourceCorrectionUnavailable:
             raise ValueError("NOT_FOUND: memory identifier is unavailable") from None
-    return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
+    out = _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
+    if "ref" in out and not frontmatter_only:
+        out.update(get_page_module.approval_fields(
+            vault_root, result, ref=out["ref"],
+            full_release=out.get("release_level", egress_module.LEVEL_FULL) == egress_module.LEVEL_FULL,
+        ))
+    return out
 
 
 def op_edit(
@@ -8058,6 +8064,7 @@ def op_read_memory(
 
     Missing/stale units report status; never substituted.
     Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
+    Procedures: approval is approved, stale (owner) or unapproved; only approved is endorsed.
 
     Args:
         path: Vault-relative path or KB shorthand.

@@ -24,12 +24,12 @@
 
 ## 3. S3 Serving
 
-- [ ] 3.1 In `src/exomem/context_task.py`, add `approval` to the method item and the approved line, charge the line to the shared budget, and compare the verdict in revalidation.
-- [ ] 3.2 In `src/exomem/working_set_runtime.py`, carry `approval` in `method_versions`. Read an entry without the field as `unapproved`.
-- [ ] 3.3 In `src/exomem/get_page.py`, report the verdict in the `read_memory` result.
-- [ ] 3.4 Render the approved line in the retrieve hook. Regenerate the plugin hook copies and the Cloud hook bundle.
-- [ ] 3.5 Regenerate the tool schemas, the tool-surface contract, the ChatGPT pending digest and `docs/capabilities.md`. Raise the schema budget by the measured bytes.
-- [ ] 3.6 Test the serving paths:
+- [x] 3.1 In `src/exomem/context_task.py`, add `approval` to the method item and the approved line, charge the line to the shared budget, and compare the verdict in revalidation.
+- [x] 3.2 In `src/exomem/working_set_runtime.py`, carry `approval` in `method_versions`. Read an entry without the field as `unapproved`.
+- [x] 3.3 In `src/exomem/get_page.py`, report the verdict in the `read_memory` result.
+- [x] 3.4 Render the approved line in the retrieve hook. Regenerate the plugin hook copies and the Cloud hook bundle.
+- [x] 3.5 Regenerate the tool schemas, the tool-surface contract, the ChatGPT pending digest and `docs/capabilities.md`. Raise the schema budget by the measured bytes.
+- [x] 3.6 Test the serving paths:
   - a revoke with unchanged bytes resets held methods;
   - a direct file edit makes the approval stale;
   - a restricted reader sees two states, and a reader below FULL release sees `unapproved`;
