@@ -203,7 +203,7 @@ def stored_artifact_suffix(suffix: str) -> str:
     return ".md.txt" if suffix.lower() == ".md" else suffix
 
 
-def _artifact_pair(
+def artifact_pair(
     folder: Path, stem: str, suffix: str, *, vault_root: Path, protected: bool = False
 ) -> tuple[Path, Path]:
     """A free artifact and its canonical companion under `folder`.
@@ -612,7 +612,7 @@ def add(
         artifact_path: Path | None = None
         source_path = unique_path(folder_path, stem, vault_root=vault_root)
     else:
-        artifact_path, source_path = _artifact_pair(
+        artifact_path, source_path = artifact_pair(
             folder_path, stem, artifact_suffix, vault_root=vault_root, protected=raw_protection
         )
 

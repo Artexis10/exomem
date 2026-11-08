@@ -14,14 +14,15 @@ out of the way.
 | `balanced` | on topic match | durable conclusions | quiet; mentions the KB only on a hit |
 | `maximal` | before every substantive turn | every stepping stone | says what it recalled and saved |
 
-For generated artifacts, balanced and maximal apply a bounded adoption rule:
-a generated draft stays ephemeral, while a user-selected, approved, sent, or
-published output is eligible for `proactive_capture`. Preserve only that
-handle's exact bytes, choose Source or Evidence by semantic role rather than
-MIME, and leave all siblings unwritten. Selection is not write consent. Without
-a usable handle, return a non-committing handoff status instead of claiming a
-save. Delivery is later and receipt-gated through an existing compatible
-Records collection; reported remote identity never proves remote byte equality.
+For generated files, balanced and maximal apply a bounded adoption rule:
+handing a file to the user is the trigger. The agent keeps the exact bytes of
+every generated file it hands over, at hand-over, under `proactive_capture`, and
+chooses Source or Evidence by semantic role rather than MIME. Drafts it never
+hands over stay unwritten, and so do files it writes in your own workspace or
+repository. Without a usable handle, it returns a non-committing handoff status
+instead of claiming a save. Delivery is later and receipt-gated through an
+existing compatible Records collection; reported remote identity never proves
+remote byte equality.
 Off and light remain explicit-request-only.
 
 ## Change the level through your agent

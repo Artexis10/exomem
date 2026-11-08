@@ -529,7 +529,12 @@ _OptionalArtifactAdoption = Annotated[
                     "additionalProperties": False,
                     "required": ["key", "trigger", "selected_file_id"],
                     "properties": {
-                        "key": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "key": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "description": "One per hand-over: file name plus version.",
+                        },
                         "trigger": {"type": "string", "minLength": 1, "maxLength": 64},
                         "selected_file_id": {
                             "type": "string",
