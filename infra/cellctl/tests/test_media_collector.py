@@ -197,6 +197,19 @@ def test_a_failed_manifest_or_collection_leaves_the_backup_successful(tmp_path, 
     assert observed.backup_job_media_collection == MediaCollection("stopped", "no-result", None, None, None)
 
 
+def test_a_collection_line_that_does_not_parse_is_logged_as_a_warning(tmp_path, caplog) -> None:
+    """A cell image that writes the result in another format would otherwise drop the collection without a trace, and
+    the operator would read every later hold as one that ran no collection."""
+    with caplog.at_level(logging.WARNING, logger="cellctl"):
+        observed, _data = _run_backup_job(tmp_path, _exomem(tmp_path, manifest="echo manifest",
+                                                            collect="echo 'done: hid two names'"),
+                                          retention=PRUNING, **COLLECTING)
+
+    assert observed.backup_job_media_collection is None
+    assert "media collection line that does not parse" in caplog.text
+    assert "hid two names" not in caplog.text
+
+
 async def test_the_collectors_result_reaches_cellctls_log_when_the_hold_ends(cell_db, caplog) -> None:
     """The Job's pod, and the collector's own log with it, is gone minutes after the hold. Without this line a stopped
     or unknown collection would leave no trace that the operator can read."""

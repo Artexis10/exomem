@@ -1331,7 +1331,13 @@ def _media_census(message: str | None) -> MediaCensus | None:
 def _media_collection(message: str | None) -> MediaCollection | None:
     """The collection a backup Job reported, or None when it ran none or reported a line that cellctl cannot read."""
 
-    parsed = parse_media_collection(_report_line(message, 2))
+    line = _report_line(message, 2)
+    parsed = parse_media_collection(line)
+    if parsed is None and line:
+        # A cell image that writes another format would otherwise leave no trace that a collection ran. The line is
+        # not logged: only its parsed shape is known to carry no name.
+        logger.warning("cellctl: a backup Job reported a media collection line that does not parse (%d characters)",
+                       len(line))
     return None if parsed is None else MediaCollection(*parsed)
 
 
