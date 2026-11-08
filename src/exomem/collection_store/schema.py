@@ -1050,7 +1050,8 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
     ``store_pages_meta`` lets a metadata read (path, revision, hash, size, mtime, frontmatter) skip
     the page body, and ``store_audit_by_path`` lets an audit read by path skip the whole trail.
     The projection queue gains the ``move`` operation, which names the file's old path in
-    ``from_path``, so a rename is one intent. Every vault keeps its rows.
+    ``from_path``, so a rename is one intent, and the audit trail gains the same column for a move's
+    new-path row. Every vault keeps its rows.
     """
     conn.execute("ALTER TABLE store_pages ADD COLUMN mtime_ns INTEGER NOT NULL DEFAULT 0")
     conn.execute(
@@ -1062,6 +1063,9 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
         "store_pages(path, revision, sha256, size, mtime_ns, frontmatter_json)"
     )
     conn.execute("CREATE INDEX store_audit_by_path ON store_audit(path, revision)")
+    # A move's row at its new path names the old path; every other row leaves it NULL. The append-only
+    # triggers belong to the table, so they survive the added column.
+    conn.execute("ALTER TABLE store_audit ADD COLUMN from_path TEXT")
     # SQLite cannot widen a CHECK in place, so the queue is rebuilt and its rows carried over.
     conn.execute("ALTER TABLE store_projection_queue RENAME TO store_projection_queue_v15")
     conn.execute("DROP INDEX store_projection_queue_by_age")

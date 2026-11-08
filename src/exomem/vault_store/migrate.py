@@ -33,7 +33,7 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from . import availability, mode, ownership, verify
-from .write import frontmatter_json
+from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
@@ -488,8 +488,8 @@ def _install_rows(
     )
     conn.execute(
         "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
-        "VALUES (?, NULL, 'migrate', 'store-mode migrate', NULL, ?, ?)",
-        (revision, why, now),
+        "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
+        (revision, Origin.MIGRATION.value, why, now),
     )
 
 

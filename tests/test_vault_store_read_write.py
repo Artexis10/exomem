@@ -18,9 +18,16 @@ from contextlib import closing
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, DIAGRAM, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import (  # noqa: F401
+    ALPHA,
+    BETA,
+    DIAGRAM,
+    migrate_apply,
+    rollback_apply,
+    vault,
+)
 
-from exomem import reserved_paths
+from exomem import reserved_paths, state_migration
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
@@ -167,6 +174,35 @@ def test_a_projection_that_lags_the_store_is_not_what_the_byte_readers_return(st
     assert reserved_paths.read_generic_bytes(stored, ALPHA).data == EDITED
 
 
+def test_the_text_reader_bounds_a_stored_page_by_its_stored_size_not_its_files(stored, writer):
+    """A text reader that takes its limit from the file: a stored page that grew refuses as over its
+    limit, and a page that the projector has not written yet reads as missing."""
+    grown = EDITED * 50
+    assert len(grown) > (stored / ALPHA).stat().st_size
+    write.commit(writer, put(ALPHA, grown))
+    write.commit(writer, put(NEW, EDITED))
+    assert not (stored / NEW).exists()
+    assert vault_module.read_guarded_text(stored, stored / ALPHA)[0] == grown.decode()
+    assert vault_module.read_guarded_text(stored, stored / NEW)[0] == EDITED.decode()
+
+
+def test_a_dotdot_or_symlink_spelling_of_a_page_reads_the_stored_page_and_one_leading_out_reads_the_file(
+    stored, writer, tmp_path
+):
+    """A reader that judges containment by the spelling: a path that reaches a page through `..` or
+    a link reads the stale file in store mode, and one that leads out of the vault is taken for a page."""
+    write.commit(writer, put(ALPHA, EDITED))
+    notes = stored / "Knowledge Base/Notes"
+    (notes / "Link.md").symlink_to("Alpha.md")
+    outside = tmp_path / "Outside.md"
+    outside.write_bytes(b"not a page of the vault\n")
+    (notes / "Out.md").symlink_to(outside)
+    read_bytes = vault_module.read_bytes_without_pinning
+    assert read_bytes(notes / ".." / "Notes" / "Alpha.md", stored) == EDITED
+    assert read_bytes(notes / "Link.md", stored) == EDITED
+    assert read_bytes(notes / "Out.md", stored) == outside.read_bytes()
+
+
 def test_a_page_the_store_deleted_reads_as_missing_though_its_file_is_still_on_disk(stored, writer):
     """A reader that brings a deleted page back from the file that the projector has not removed."""
     write.commit(
@@ -181,6 +217,8 @@ def test_a_page_the_store_deleted_reads_as_missing_though_its_file_is_still_on_d
         reserved_paths.read_generic_bytes(stored, BETA)
     with pytest.raises(FileNotFoundError):
         vault_module.read_bytes_without_pinning(stored / BETA, stored)
+    with pytest.raises(FileNotFoundError):
+        vault_module.read_guarded_text(stored, stored / BETA)
 
 
 def test_a_store_guard_refuses_after_a_store_commit_and_ignores_a_change_to_the_projection(
@@ -298,8 +336,10 @@ def test_a_moved_page_gives_each_side_an_audit_row_and_one_move_intent(stored, w
         stored, "SELECT path, body FROM store_pages WHERE path IN (?, ?)", BETA, MOVED
     ) == [(MOVED, body)]
     assert queue(stored) == [(MOVED, "move", BETA)]
-    audited = rows(stored, "SELECT path FROM store_audit WHERE operation = 'move' ORDER BY seq")
-    assert [path for (path,) in audited] == [BETA, MOVED]
+    audited = rows(
+        stored, "SELECT path, from_path FROM store_audit WHERE operation = 'move' ORDER BY seq"
+    )
+    assert audited == [(BETA, None), (MOVED, BETA)]
 
 
 def test_a_later_change_to_a_moved_page_leaves_its_old_file_to_be_deleted(stored, writer):
@@ -314,6 +354,89 @@ def test_a_new_page_at_a_moved_pages_old_path_is_never_renamed_away(stored, writ
     write.commit(writer, move(BETA, MOVED))
     write.commit(writer, put(BETA, EDITED))
     assert queue(stored) == [(BETA, "write", None), (MOVED, "write", None)]
+
+
+def manifest(root):
+    return rows(root, "SELECT path, sha256, revision FROM store_manifest ORDER BY path")
+
+
+def adopt(root, writer, rel, body):
+    """Commit a page whose file already holds ``body``, as the importer adopts a person's edit."""
+    (root / rel).write_bytes(body)
+    mtime = (root / rel).stat().st_mtime_ns
+    return write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR, "adopted", puts=(write.PagePut(rel, body, mtime),)
+        ),
+    )
+
+
+def move_on_disk(src, dst):
+    return write.StoreChange(
+        write.Origin.GOVERNED, "tidy", moves=(write.PageMove(src, dst, on_disk=True),)
+    )
+
+
+def test_a_binary_recorded_again_after_its_delete_is_not_unlinked_by_the_queued_removal(
+    stored, writer
+):
+    """A queue that keeps the removal of a binary that the store records again, so the projector
+    unlinks a file that exists."""
+    sha, size = rows(stored, "SELECT sha256, size FROM store_binaries WHERE path = ?", DIAGRAM)[0]
+    removal = write.StoreChange(
+        write.Origin.GOVERNED, "test", binary_deletes=(write.BinaryDelete(DIAGRAM),)
+    )
+    write.commit(writer, removal)
+    assert queue(stored) == [(DIAGRAM, "delete", None)]
+    again = write.StoreChange(
+        write.Origin.GOVERNED, "test", binaries=(write.BinaryRecord(DIAGRAM, sha, size),)
+    )
+    write.commit(writer, again)
+    assert queue(stored) == []
+
+
+def test_an_on_disk_move_of_a_page_whose_latest_bytes_are_not_projected_is_refused(stored, writer):
+    """A move that carries the manifest row of old bytes onto a page that holds newer ones: the page
+    then reads as projected, and an outside edit that expects a projected page overwrites bytes that
+    the file never received."""
+    write.commit(writer, put(ALPHA, EDITED))
+    before = manifest(stored)
+    (stored / ALPHA).rename(stored / MOVED)
+    with pytest.raises(write.StoreConflict) as refused:
+        write.commit(writer, move_on_disk(ALPHA, MOVED))
+    assert refused.value.path == ALPHA
+    assert queue(stored) == [(ALPHA, "write", None)]
+    assert manifest(stored) == before
+
+
+def test_an_on_disk_move_onto_a_path_with_a_queued_delete_cancels_that_delete(stored, writer):
+    """A queue that keeps the delete of a path that the move just filled, so the projector unlinks
+    the moved file."""
+    write.commit(writer, put(MOVED, EDITED))
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(MOVED),)),
+    )
+    assert queue(stored) == [(MOVED, "delete", None)]
+    (stored / BETA).rename(stored / MOVED)
+    write.commit(writer, move_on_disk(BETA, MOVED))
+    assert queue(stored) == []
+    expect = {MOVED: write.Expect(projected=True)}
+    write.commit(writer, put(MOVED, EDITED, expect=expect))
+
+
+def test_an_on_disk_move_onto_a_path_that_the_manifest_records_is_a_conflict(stored, writer):
+    """A commit that fails with a database integrity error, which no caller handles, in place of
+    the conflict that tells it to adopt the file."""
+    adopt(stored, writer, MOVED, EDITED)
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(MOVED),)),
+    )
+    with pytest.raises(write.StoreConflict) as refused:
+        write.commit(writer, move_on_disk(BETA, MOVED))
+    assert refused.value.path == MOVED
 
 
 def test_a_put_of_bytes_already_on_disk_records_the_manifest_and_queues_nothing(stored, writer):
@@ -341,6 +464,22 @@ def test_a_path_the_store_does_not_own_is_refused_before_anything_is_written(sto
     """A commit that stores a file of another owner, or a binary as a page."""
     revision = read.current_revision(stored)
     for rel in ("Archive/Outside.md", DIAGRAM):
+        with pytest.raises(OpError, match=write.NOT_OWNED):
+            write.commit(writer, put(rel, b"x"))
+    assert read.current_revision(stored) == revision
+
+
+def test_a_path_that_spells_a_parent_a_backslash_or_an_empty_folder_is_refused_before_a_write(
+    stored, writer
+):
+    """A commit that stores a page under a spelling that no reader can ask for, or that names
+    another page: the page then exists twice, under two keys."""
+    revision = read.current_revision(stored)
+    for rel in (
+        "Knowledge Base/Notes/../Notes/Alpha.md",
+        "Knowledge Base\\Notes\\Gamma.md",
+        "Knowledge Base/Notes//Gamma.md",
+    ):
         with pytest.raises(OpError, match=write.NOT_OWNED):
             write.commit(writer, put(rel, b"x"))
     assert read.current_revision(stored) == revision
@@ -397,3 +536,30 @@ def test_a_kill_inside_a_commit_leaves_the_pages_audit_intents_and_revision_all_
     assert [rows(stored, sql) for sql in tables] == before
     with closing(sqlite3.connect(connection.store_path(stored))) as database:
         assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_a_reader_does_not_parse_the_state_manifest_again_while_it_is_unchanged(vault, monkeypatch):  # noqa: F811
+    """A reader that parses the manifest on every page read: a file-mode vault then pays for the
+    parse on each read, which is several times the cost of the read."""
+    assert read.serves(vault, ALPHA) is False
+    parsed = []
+    real = state_migration._read_manifest_bytes
+
+    def counting(path):
+        parsed.append(path)
+        return real(path)
+
+    monkeypatch.setattr(state_migration, "_read_manifest_bytes", counting)
+    for _ in range(20):
+        assert read.serves(vault, ALPHA) is False
+    assert parsed == []
+
+
+def test_a_reader_follows_the_manifest_through_an_activation_and_a_rollback(vault, tmp_path):  # noqa: F811
+    """A reader that keeps its answer past a change of the manifest: it serves the lagging file
+    after an activation, or the store after a rollback."""
+    assert read.serves(vault, ALPHA) is False
+    assert migrate_apply(vault) == 0
+    assert read.serves(vault, ALPHA) is True
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    assert read.serves(vault, ALPHA) is False

@@ -20,6 +20,7 @@ from .. import epistemic_graph, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
 from . import migrate, mode, projection
+from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
 _KEPT_TABLES = ("store_mode", "store_audit")  # nosemgrep: ep-word-set -- Table names that schema 15 fixes.
@@ -305,8 +306,8 @@ def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     tx.execute(
         "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
-        "VALUES (?, NULL, 'rollback', 'store-mode rollback', NULL, ?, ?)",
-        (revision, why, now),
+        "VALUES (?, NULL, 'rollback', ?, NULL, ?, ?)",
+        (revision, Origin.ROLLBACK.value, why, now),
     )
     tx.execute(
         "UPDATE store_mode SET mode = ?, revision = ?, changed_at = ? WHERE id = 1",

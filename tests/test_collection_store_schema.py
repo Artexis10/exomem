@@ -569,6 +569,9 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
                 conn.execute(
                     "INSERT INTO store_projection_queue(path, revision, operation, queued_at)"
                     " VALUES (?, 1, 'write', 't1')", (pages[0][0],))
+                conn.execute(
+                    "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
+                    " VALUES (1, ?, 'write', 'agent', ?, 't1')", (pages[0][0], H))
 
     with connection.open_writer(path, lease_check=_allow) as writer:
         conn = writer.connection
@@ -585,6 +588,10 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
         assert conn.execute("SELECT path, mtime_ns, body FROM store_pages ORDER BY path").fetchall() == [
             (pages[0][0], pages[0][1], b"body"), (pages[1][0], pages[1][1], b"body"),
             ("Knowledge Base/Notes/c.md", 0, b"\x00")]
+        # The audit trail keeps its row, gains the move column, and stays append-only.
+        assert conn.execute("SELECT path, from_path FROM store_audit").fetchall() == [(pages[0][0], None)]
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"), writer.transaction() as tx:
+            tx.execute("UPDATE store_audit SET from_path = 'x'")
         indexes = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('store_pages_meta', 'store_audit_by_path')")}
         assert indexes == {"store_pages_meta", "store_audit_by_path"}

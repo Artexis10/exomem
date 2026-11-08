@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import ownership
+from . import mode, ownership
 from .read import NOT_ACTIVE
 
 if TYPE_CHECKING:
@@ -196,7 +196,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     _require_owned(change)
     with writer.handle.transaction() as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
-        if row is None or row[0] != "store":
+        if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
         _check(tx, change.expect)
@@ -231,6 +231,10 @@ def _require_owned(change: StoreChange) -> None:
     )
     for rels, kind in ((pages, ownership.Ownership.PAGE), (binaries, ownership.Ownership.BINARY)):
         for rel in rels:
+            try:
+                vault._safe_guard_target(rel)  # the rule that every guarded vault read applies
+            except vault.PathGuardError as error:
+                raise OpError(NOT_OWNED, f"{rel!r} is not a safe vault-relative path") from error
             if ownership.classify(rel) is not kind:
                 raise OpError(NOT_OWNED, f"the store holds no {kind.value} at {rel}")
 
@@ -264,15 +268,19 @@ def _check(tx: Connection, expect: Mapping[str, Expect]) -> None:
             raise StoreConflict(rel, f"its revision is {have[0]}, not {want.revision}")
         if want.sha256 is not None and have[1] != want.sha256:
             raise StoreConflict(rel, "its bytes are not the expected bytes")
-        if want.projected and not _projected(tx, rel, have[0]):
+        if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
 
 
-def _projected(tx: Connection, rel: str, revision: int) -> bool:
-    manifest = tx.execute("SELECT revision FROM store_manifest WHERE path = ?", (rel,)).fetchone()
+def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
+    """Whether the file on disk is the stored page: the manifest names the page's revision and bytes,
+    and no projection is queued and no outside change is held for the path."""
+    manifest = tx.execute(
+        "SELECT revision, sha256 FROM store_manifest WHERE path = ?", (rel,)
+    ).fetchone()
     queued = tx.execute("SELECT 1 FROM store_projection_queue WHERE path = ?", (rel,)).fetchone()
     held = tx.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
-    return manifest is not None and manifest[0] == revision and queued is None and held is None
+    return manifest == (revision, sha256) and queued is None and held is None
 
 
 class _Trail:
@@ -290,13 +298,14 @@ class _Trail:
         self.deleted: list[str] = []
 
     def record(
-        self, rel: str, operation: str, sha256: str | None, reason: str | None = None
+        self, rel: str, operation: str, sha256: str | None, from_path: str | None = None
     ) -> None:
         self._tx.execute(
-            "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (self._revision, rel, operation, self._origin.value, sha256,
-             reason or self._reason, self._now),
+            "INSERT INTO store_audit("
+            "revision, path, operation, origin, sha256, reason, at, from_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._revision, rel, operation, self._origin.value, sha256, self._reason, self._now,
+             from_path),
         )
 
     def wrote(self, rel: str, sha256: str, *, queue: bool = True) -> None:
@@ -312,9 +321,10 @@ class _Trail:
             self.intents[rel] = ("delete", None)
 
     def moved(self, move: PageMove, sha256: str) -> None:
-        # The audit has no column for a move's side, so each row's reason names the other path.
-        self.record(move.src, "move", sha256, f"{self._reason}; moved to {move.dst}")
-        self.record(move.dst, "move", sha256, f"{self._reason}; moved from {move.src}")
+        # Each side has its own row, so a read of either path's trail meets the move; the new path's
+        # row names the old path.
+        self.record(move.src, "move", sha256)
+        self.record(move.dst, "move", sha256, from_path=move.src)
         self.deleted.append(move.src)
         self.written.append(move.dst)
         if not move.on_disk:
@@ -341,9 +351,13 @@ def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> Non
             "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
             (put.rel, digest, len(put.body), mtime_ns, revision),
         )
-        # The file already is the page, so a queued projection of an older state has nothing to do.
-        tx.execute("DELETE FROM store_projection_queue WHERE path = ?", (put.rel,))
+        _clear_queued(tx, put.rel)
     audit.wrote(put.rel, digest, queue=not on_disk)
+
+
+def _clear_queued(tx: Connection, *paths: str) -> None:
+    """Drop the projection intents queued for ``paths``: their files already match the store."""
+    tx.executemany("DELETE FROM store_projection_queue WHERE path = ?", [(path,) for path in paths])
 
 
 def _delete_page(tx: Connection, rel: str, audit: _Trail) -> None:
@@ -356,27 +370,35 @@ def _delete_page(tx: Connection, rel: str, audit: _Trail) -> None:
 
 def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> None:
     page = tx.execute(
-        "SELECT body, sha256, size, frontmatter_json, mtime_ns FROM store_pages WHERE path = ?",
+        "SELECT body, sha256, size, frontmatter_json, mtime_ns, revision FROM store_pages "
+        "WHERE path = ?",
         (move.src,),
     ).fetchone()
     if page is None:
         raise StoreConflict(move.src, "the store holds no page to move")
     if _stored(tx, move.dst) is not None:
         raise StoreConflict(move.dst, "the store already holds it")
+    *content, stored_revision = page
+    if move.on_disk:
+        # The file kept its bytes and mtime through the rename, so it must have been the stored page.
+        if not _projected(tx, move.src, stored_revision, page[1]):
+            raise StoreConflict(move.src, "its file on disk is not the stored page")
+        if tx.execute("SELECT 1 FROM store_manifest WHERE path = ?", (move.dst,)).fetchone():
+            raise StoreConflict(move.dst, "the manifest already records a file there")
     tx.execute("DELETE FROM store_pages WHERE path = ?", (move.src,))
     tx.execute(
         "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, mtime_ns, revision) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (move.dst, *page, revision),
+        (move.dst, *content, revision),
     )
     if move.on_disk:
-        # The file kept its bytes and mtime through the rename, so the manifest row follows it.
-        moved = tx.execute(
+        tx.execute(
             "UPDATE store_manifest SET path = ?, revision = ? WHERE path = ?",
             (move.dst, revision, move.src),
         )
-        if moved.rowcount != 1:
-            raise StoreConflict(move.src, "the manifest records no projected file to move")
+        # Nothing is left to project at either path; a queued intent at the destination named a file
+        # that this rename replaced.
+        _clear_queued(tx, move.src, move.dst)
     audit.moved(move, page[1])
 
 
@@ -387,6 +409,8 @@ def _record_binary(tx: Connection, record: BinaryRecord, revision: int, audit: _
         "revision = excluded.revision",
         (record.rel, record.sha256, record.size, revision),
     )
+    # The file is durable already, so a queued removal of an earlier record of it must not run.
+    _clear_queued(tx, record.rel)
     audit.wrote(record.rel, record.sha256, queue=False)
 
 

@@ -3580,11 +3580,7 @@ def read_bytes_without_pinning(path: Path, vault_root: Path | None = None) -> by
     if vault_root is not None:
         from .vault_store import read
 
-        try:
-            rel = path.relative_to(vault_root).as_posix()
-        except ValueError:
-            rel = None  # A path outside the vault is no page of its store.
-        page = None if rel is None else read.owned_page(vault_root, rel)
+        page = read.owned_page_at(vault_root, path)
         if page is not None:
             return page.body
     return read_disk_bytes_without_pinning(path)
@@ -4546,8 +4542,13 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
                 "PATH_GUARD_INVALID", "guarded read target is outside the vault"
             ) from error
     absolute = root / relative
+    from .vault_store import read
+
+    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
+    # A page that the store lacks raises FileNotFoundError, as the missing file does.
+    stored = read.owned_meta(root, relative.as_posix())
     try:
-        limit = absolute.lstat().st_size
+        limit = absolute.lstat().st_size if stored is None else stored.size
     except FileNotFoundError:
         raise
     except OSError as error:

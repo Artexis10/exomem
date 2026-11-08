@@ -155,7 +155,13 @@ class StoreSnapshot:
 
 
 def _walk_member(rel: str) -> bool:
-    """Whether ``vault.walk_vault_md`` would reach this stored page."""
+    """Whether ``vault.walk_vault_md`` would reach this stored page, judged by path alone.
+
+    The walk's own entry rule (``vault._walk_vault_md_entry``) also lstat's the file for a symlink,
+    a hard link and a regular file, and a stored page may have no file yet, so it cannot judge a
+    page. That is the gap: this keeps the rule's path tests (the reserved registry, the excluded
+    scan folders, the Markdown suffix), and ``ownership.classify`` already keeps out a conflict copy.
+    """
     # A file extension is a closed set that the format fixes; it names the format, not the meaning.
     return (
         rel.lower().endswith(".md")
@@ -192,14 +198,21 @@ def current_revision(vault_root: Path) -> int:
         return view.revision
 
 
+def _as_path(value: Path | str) -> Path:
+    """``Path(value)`` without copying a path that already is one: a file-mode read pays this per call."""
+    return value if isinstance(value, Path) else Path(value)
+
+
 def serves(vault_root: Path, rel: str) -> bool:
     """Whether the store, not the disk, answers for ``rel``: store mode is on and it owns the page.
 
     The one place that decides it; each byte chokepoint asks here. The path rule is pure and runs
-    first, so a path that the store never owns costs no read of the mode records.
+    first, so a path that the store never owns costs no read of the mode records. The mode answer
+    is the reader's: it holds until the manifest changes.
     """
-    page_path = ownership.classify(rel) is ownership.Ownership.PAGE
-    return page_path and mode.store_mode_active(vault_root)
+    return (
+        ownership.classify(rel) is ownership.Ownership.PAGE and mode.store_mode_for_reads(vault_root)
+    )
 
 
 def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
@@ -208,7 +221,7 @@ def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
     A path that the store serves but holds no page for raises ``FileNotFoundError``, as a missing
     file does.
     """
-    root = Path(vault_root)
+    root = _as_path(vault_root)
     if not serves(root, rel):
         return None
     with snapshot(root) as view:
@@ -218,7 +231,45 @@ def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
     return page
 
 
+def owned_meta(vault_root: Path, rel: str) -> PageMeta | None:
+    """``owned_page`` without the body: the stored page's size, hash and revision, else None."""
+    root = _as_path(vault_root)
+    if not serves(root, rel):
+        return None
+    with snapshot(root) as view:
+        meta = view.page_meta(rel)
+    if meta is None:
+        raise FileNotFoundError(rel)
+    return meta
+
+
 def owned_bytes(vault_root: Path, rel: str) -> bytes | None:
     """``owned_page``'s bytes: the stored page when the store serves ``rel``, else None."""
     page = owned_page(vault_root, rel)
     return None if page is None else page.body
+
+
+def owned_page_at(vault_root: Path, path: Path) -> StoredPage | None:
+    """``owned_page`` for the file at ``path``, which a caller names by its location, not its vault path.
+
+    A path that does not lie below the root is no page of it, and that lexical test runs first and
+    costs no read of the mode records. In store mode only, resolved paths decide what the file is: a
+    symlink or a ``..`` spelling that leads into the vault names the page it reaches, and one that
+    leads out names none. A file-mode read never pays that resolution.
+    """
+    root = _as_path(vault_root)
+    try:
+        rel = vault.relative_posix(path, root)  # a string slice for a path built under the root
+    except ValueError:
+        # A spelling of the vault that is not lexically below this root is a gap: it reads the disk.
+        return None
+    # A ``..`` can lead from a folder that is no page's into one that is, so it is not judged lexically.
+    if ".." not in rel.split("/") and ownership.classify(rel) is not ownership.Ownership.PAGE:
+        return None
+    if not mode.store_mode_for_reads(root):
+        return None
+    try:
+        resolved = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    return owned_page(root, resolved)
