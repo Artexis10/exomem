@@ -353,7 +353,8 @@ def test_cellctl_signs_and_places_the_collector_credential_where_the_cell_reads_
 def test_the_backup_jobs_own_commands_reach_the_cells_manifest_and_collector(cell: Cell, tmp_path: Path):
     """The Job runs both commands in shell that keeps the backup going whatever they do, so a command or a flag that
     cellctl and the cell spell differently would leave every hold collecting nothing, without a word. So would a
-    census that writes anywhere on the clone: the Job mounts the vault and the state root read-only."""
+    census that writes anywhere on the clone: the Job mounts the vault and the state root read-only. A result line
+    that cellctl reads differently would leave every hold's outcome out of cellctl's log."""
     loader = importlib.util.spec_from_file_location("cellctl_backup_source", CELLCTL / "backup_source.py")
     job = importlib.util.module_from_spec(loader)
     loader.loader.exec_module(job)
@@ -372,8 +373,10 @@ def test_the_backup_jobs_own_commands_reach_the_cells_manifest_and_collector(cel
     subprocess.run([*read_only, "sh", "-c", manifest.replace(job.MEDIA_MANIFEST_PATH, str(written))],
                    check=True, env=shell)
     snapshot = cell.snapshot(written.read_bytes())
-    collect = f"{job.MEDIA_COLLECT_START} && {job.media_collect_command()}"
+    report = tmp_path / "termination-log"
+    collect = f"{job.MEDIA_COLLECT_START} && {job.media_collect_command()}".replace("/dev/termination-log", str(report))
     subprocess.run(["sh", "-c", collect], check=True, env={**shell, "SNAPSHOT_ID": snapshot})
 
     assert job.MEDIA_MANIFEST_PATH == MANIFEST_PATH
     assert cell.hides() == 1 and cell.head(reference).condemned
+    assert job.parse_media_collection(report.read_text(encoding="utf-8").removeprefix("\n")) == ("complete", "-", 1, 1, 0)

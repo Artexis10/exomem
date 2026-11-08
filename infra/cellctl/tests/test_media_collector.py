@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import logging
+from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import jwt
 import pytest
 
-from cellctl import backup_source, manifests, media_edge
+from cellctl import backup_source, db, manifests, media_edge
 from cellctl.manifests import MEDIA_COLLECTOR_CREDENTIAL_KEY, MEDIA_CREDENTIAL_KEY, namespace_name
+from cellctl.state import MediaCollection
 
 from .test_local_storage import SNAPSHOT_ID, _run_backup_job
 from .test_media_edge import CANARY, NOW, NOW_MS, URL, _delete, _fleet, _report, _spec, _turn_off
+from .test_reconcile import FakeClusterGateway, _observed_from_applied, _pass, _seed_cell
 
 RUNTIME_KEYS = {MEDIA_CREDENTIAL_KEY, manifests.MEDIA_IDENTITY_KEY, manifests.MEDIA_NAME_KEY_KEY}
 SECRET = "cell-credentials"
@@ -158,3 +162,34 @@ def test_a_failed_manifest_or_collection_leaves_the_backup_successful(tmp_path, 
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert calls[-1].startswith("exomem cell-media-collect")
     assert time.monotonic() - started < 30
+    # A collector that wrote no result still leaves a line, with every count unknown.
+    assert observed.backup_job_media_collection == MediaCollection("stopped", "no-result", None, None, None)
+
+
+async def test_the_collectors_result_reaches_cellctls_log_when_the_hold_ends(cell_db, caplog) -> None:
+    """The Job's pod, and the collector's own log with it, is gone minutes after the hold. Without this line a stopped
+    or unknown collection would leave no trace that the operator can read."""
+    cell_id = "aaaaaaaaaaaaaaaa"
+    await _seed_cell(cell_db, cell_id, "tenant-a")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    cluster = FakeClusterGateway()
+    window = datetime(2026, 1, 1, 2, tzinfo=UTC)
+    try:
+        for _ in range(3):
+            await _pass(connection, cluster, window - timedelta(hours=3))
+            cluster.observations[cell_id] = _observed_from_applied(cluster, cell_id)
+        await _pass(connection, cluster, window)
+        cluster.observations[cell_id] = _observed_from_applied(
+            cluster, cell_id, pod_exists=False, pod_uses_volume=False, pod_ready=False,
+            backup_job_succeeded=True, backup_job_snapshot_id=SNAPSHOT_ID,
+            backup_job_media_collection=MediaCollection("stopped", "edge-outage", 2, 5, None),
+        )
+
+        with caplog.at_level(logging.INFO, logger="cellctl"):
+            await _pass(connection, cluster, window + timedelta(minutes=1))
+
+        assert (await db.select_all_rows(connection))[0].last_backup_snapshot == SNAPSHOT_ID
+        assert (f"cell {cell_id}'s media collection stopped (edge-outage): 2 name(s) hidden of 5 candidate(s), "
+                "an unknown number of refused by the edge") in caplog.text
+    finally:
+        await connection.close()

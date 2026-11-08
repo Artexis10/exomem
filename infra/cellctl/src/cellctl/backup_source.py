@@ -76,12 +76,18 @@ def media_manifest_command() -> str:
             f" > {MEDIA_MANIFEST_PATH} || true; }}")
 
 
+# The line the Job reports when the collector printed none: it was killed, or the deadline passed before it started.
+MEDIA_COLLECTION_NO_RESULT = "stopped no-result ? ? ?"
+
+
 def media_collect_command() -> str:
-    """Condemn the released names that no retained snapshot reaches. It reports to the Job's log alone, and its
-    failure, timeout or unknown answer leaves the backup successful. The subshell keeps even a shell error inside it."""
-    return (f"( left=$((COLLECT_START + {MEDIA_COLLECT_BY_SECONDS} - $(date +%s))); [ \"$left\" -gt 0 ] && "
-            f"exec timeout \"$left\" exomem cell-media-collect --snapshot \"$SNAPSHOT_ID\" "
-            f"--manifest-path {MEDIA_MANIFEST_PATH} ) || true")
+    """Condemn the released names that no retained snapshot reaches, and append the collector's result line to the
+    termination message, the third line after the census. Its failure, timeout or unknown answer leaves the backup
+    successful. The command substitution keeps even a shell error inside it."""
+    return (f"{{ collected=$( left=$((COLLECT_START + {MEDIA_COLLECT_BY_SECONDS} - $(date +%s))); "
+            f"[ \"$left\" -gt 0 ] && exec timeout \"$left\" exomem cell-media-collect --snapshot \"$SNAPSHOT_ID\" "
+            f"--manifest-path {MEDIA_MANIFEST_PATH} ); "
+            f"printf '\\n%s' \"${{collected:-{MEDIA_COLLECTION_NO_RESULT}}}\" >> /dev/termination-log; }} || true")
 
 
 # The report line is a closed protocol format that the cell writes (media_drain_record.format_line) and the Job copies:
@@ -89,6 +95,27 @@ def media_collect_command() -> str:
 # known and one unknown is no census, since a known 0 beside it would read as drained.
 _MEDIA_CENSUS = re.compile(
     rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")
+
+
+# The collector's result line, a closed protocol format that the cell writes (media_collect.Result.line):
+# "<outcome> <reason> <hidden> <candidates> <skipped>", "?" for a count that the collector does not know. The outcomes
+# are the protocol's own; the reason is read by its shape alone, lowercase words, so that no name or path reaches
+# cellctl's log.
+MEDIA_COLLECTION_COMPLETE = "complete"
+_MEDIA_COLLECTION = re.compile(
+    rf"(?P<outcome>{MEDIA_COLLECTION_COMPLETE}|stopped|unknown-manifest) (?P<reason>-|[a-z]{{1,16}}(?:-[a-z]{{1,16}}){{0,3}})"
+    r" (?P<hidden>[0-9]{1,19}|\?) (?P<candidates>[0-9]{1,19}|\?) (?P<skipped>[0-9]{1,19}|\?)")
+
+
+def parse_media_collection(line: str) -> tuple[str, str, int | None, int | None, int | None] | None:
+    """The collection a result line reports as (outcome, reason, hidden, candidates, skipped), None for an unknown
+    count; None when the line is unreadable."""
+    match = _MEDIA_COLLECTION.fullmatch(line)
+    if match is None:
+        return None
+    hidden, candidates, skipped = (None if match[key] == "?" else int(match[key])
+                                   for key in ("hidden", "candidates", "skipped"))
+    return match["outcome"], match["reason"], hidden, candidates, skipped
 
 
 def parse_media_census(line: str) -> tuple[int | None, int | None, datetime] | None:

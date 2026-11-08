@@ -24,6 +24,7 @@ import asyncpg
 from kubernetes.client.rest import ApiException
 
 from . import alerts, cell_readiness, db
+from .backup_source import MEDIA_COLLECTION_COMPLETE
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -2567,6 +2568,14 @@ async def _reconcile_row(
     if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
         # D5: the failed Job's own code, value-free; the Job goes a pass later.
         logger.warning("cellctl: cell %s's backup failed: %s", row.cell_id, observation.backup_job_failure_code)
+    collection = observation.backup_job_media_collection
+    if collection is not None and "last_backup_at" in decision.row_updates:
+        # collect-released-media D5: the pass that ends the hold reads the Job last, before its pod's TTL deletes it.
+        counts = ["an unknown number of" if count is None else count
+                  for count in (collection.hidden, collection.candidates, collection.skipped)]
+        logger.log(logging.INFO if collection.outcome == MEDIA_COLLECTION_COMPLETE else logging.WARNING,
+                   "cellctl: cell %s's media collection %s (%s): %s name(s) hidden of %s candidate(s), %s refused by "
+                   "the edge", row.cell_id, collection.outcome, collection.reason, *counts)
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
     # crash between the two leaves the rollout paused and no other cell can
