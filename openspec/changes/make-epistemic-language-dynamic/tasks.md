@@ -1,7 +1,7 @@
 ## 1. Specification
 
 - [ ] 1.1 Write the proposal, the design and the deltas. Validate strictly with the CI-pinned OpenSpec.
-- [ ] 1.2 Record the owner's choice for degree of belief. Then add the MODIFIED deltas for the bootstrap commitments and the verdict remediation text.
+- [x] 1.2 Record the owner's choice for degree of belief (levels plus sourced numbers, 2026-11-08). Then add the MODIFIED deltas for the bootstrap commitments and the verdict remediation text.
 - [ ] 1.3 Agree the split with the neighbours: `relates_to` retyping, the single-store edge table, the sensed epistemic model and approved procedures.
 
 ## 2. Behaviours and dimensions

@@ -59,16 +59,16 @@ Verdicts carry behaviours:
 
 A refuted claim still keeps active standing, as the commitments require. `undercuts` lowers trust when a reader weighs it. It does not hide the claim.
 
-### Degree of belief, sourced (pending the owner's confirmation)
+### Degree of belief, sourced
 
-The recommended shape:
+The owner chose this shape on 2026-11-08:
 
 - Belief levels are registry words that any claim may carry: speculative, plausible, likely and near-certain by default.
 - A numeric probability is governed unit metadata (`belief: 0.7`). It is valid only beside a `holder` (whose belief) and a `basis` (the evidence or the method).
 - Predictions with a probability and a `check_by` can be scored for calibration when their verdict arrives.
 - The commitment "a judgment MUST NOT be recorded as a number" becomes "a judgment MUST NOT be recorded as a number without a holder and a basis".
 
-The alternatives were levels only, which keeps the old rule but gives up calibration, and free numbers on any claim, which is the most exposed to unsupported precision. The owner chooses.
+The rejected alternatives were levels only, which keeps the old rule but gives up calibration, and free numbers on any claim, which is the most exposed to unsupported precision.
 
 ### Mood, holder, order, definitions, quantities, procedures
 
