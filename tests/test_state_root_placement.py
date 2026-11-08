@@ -167,6 +167,7 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "collection-replica",
     "consolidation-tree",
     "governance-tree",
+    "procedure-approvals",
     "source-corrections",
 }
 
@@ -175,15 +176,18 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
 _SOURCE_DESCRIBED_EXTERNAL_CANONICAL_FAMILIES = {
     "collection-archive",
     "collection-store",
+    "procedure-approval-key",
 }
 
 
 def _external_canonical_constructor_map():
+    from exomem import procedure_approval
     from exomem.collection_store import connection, conversion
 
     return {
         "collection-archive": (lambda vault: conversion.archive_folder(vault, "c" * 32, 1),),
         "collection-store": (connection.store_path,),
+        "procedure-approval-key": (procedure_approval.key_path,),
     }
 
 

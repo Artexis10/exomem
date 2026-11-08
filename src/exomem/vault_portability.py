@@ -262,6 +262,12 @@ _CLASSIFICATION_RULES = (
         lambda path, _parts: reserved_paths.classify_logical(path).descriptor_id == "source-corrections",
     ),
     _ClassificationRule(
+        "canonical-procedure-approvals",
+        ArtifactClass.CANONICAL,
+        "Approval entries are the owner's audit record; they take effect again on a host that holds the owner's key.",
+        lambda path, _parts: reserved_paths.classify_logical(path).descriptor_id == "procedure-approvals",
+    ),
+    _ClassificationRule(
         "registered-internal-state",
         ArtifactClass.DISPOSABLE_RUNTIME,
         "The security registry owns this path; portability cannot redefine it as content.",

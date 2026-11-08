@@ -126,6 +126,10 @@ def _raw_zip(
          + "/shared-predecessor", "disposable-runtime"),
         ("Knowledge Base/_Collections/unknown.json", "disposable-runtime"),
         ("Knowledge Base/collections.sqlite", "disposable-runtime"),
+        (
+            "Knowledge Base/_Approvals/6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b/" + "a" * 32,
+            "canonical",
+        ),
         ("Knowledge Base/.review-state.json", "portable-derived"),
         (
             "Knowledge Base/.graph-commit-receipts/0123456789abcdef01234567.json",
