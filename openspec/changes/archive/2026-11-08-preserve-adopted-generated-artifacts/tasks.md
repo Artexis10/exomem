@@ -38,4 +38,4 @@ Hosted candidate tasks 4.1–4.3 and 4.5 are superseded, not current release obl
 
 ## 6. OpenSpec closure
 
-- [ ] 6.1 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.
+- [x] 6.1 After surviving client acceptance and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive. Evidence: archived third of the four with `openspec archive`, with strict validation before and after.
