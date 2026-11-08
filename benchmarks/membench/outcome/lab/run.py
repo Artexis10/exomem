@@ -10,7 +10,8 @@ use besides the converted documents:
   would need, without seeing the task. A fresh task session then writes the deliverable. Both
   sessions get the shipped Claude plugin (skills and hooks), the documented balanced
   custom-instruction block, the Skill tool, the full Exomem tool surface and the file tools.
-  The task prompt is the plain task and says nothing of memory.
+  The task prompt is the plain task and says nothing of memory. It does not lay the learning
+  instruction that setup offers, so it predates that setup step.
 - ``W``: ablation. Exomem over MCP alone: the compile session gets the full Exomem tools, and
   the task session gets Exomem's read tools and a sentence that its memory holds notes from
   this matter. No plugin, no instruction block, no Skill tool.

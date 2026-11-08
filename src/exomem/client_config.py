@@ -273,10 +273,6 @@ LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setu
 LEARNING_END = "<!-- END exomem learning instruction -->"
 
 
-def claude_home() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
-
-
 def instruction_file(client: str, home: Path) -> Path:
     """The user-level instruction file a client reads from its config home.
 

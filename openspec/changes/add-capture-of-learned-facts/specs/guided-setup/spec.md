@@ -24,4 +24,4 @@
 
 #### Scenario: Uninstall removes only the marked span
 - **WHEN** the user removes Exomem's client integration
-- **THEN** the marked span is gone and the rest of the file is unchanged
+- **THEN** the marked span is gone and every other line of the file is unchanged

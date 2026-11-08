@@ -579,6 +579,7 @@ def _report_file_outcome(name: str, outcome: dict, *, path: Path, print_fn, repo
 
 def _offer_learning_instruction(
     *,
+    vault_root: Path,
     targets: list[tuple[str, str, Path]],
     choice: bool | None,
     yes: bool,
@@ -597,7 +598,10 @@ def _offer_learning_instruction(
         for name, _client, _path in targets:
             report(name, "[skipped: --no-learning-instruction]")
         return
-    level = prominence.resolve_context(prominence.CODING_CONTEXT)["level"]
+    # Read the level inside the vault's scope, so a level the user saved through
+    # the agent (for example coding: off) counts, not only the machine setting.
+    with prominence.request_scope(vault_root):
+        level = prominence.resolve_context(prominence.CODING_CONTEXT)["level"]
     if not any(rule["proactive_permitted"] for rule in prominence.capture_gate(level).values()):
         for name, _client, _path in targets:
             report(name, f"[skipped: prominence is {level}, which saves only when asked]")
@@ -1047,7 +1051,7 @@ def run_setup(
 
     # 9. learning instruction — the user's own request to recall and save, placed in
     # the instruction file each detected client reads. Never served by Exomem itself.
-    claude_root = home if home is not None else client_config.claude_home()
+    claude_root = home if home is not None else install_module.client_home("claude")
     targets: list[tuple[str, str, Path]] = []
     if which_fn("claude") or claude_root.is_dir():
         targets.append(
@@ -1063,6 +1067,7 @@ def run_setup(
     else:
         report("learning-codex", "[skipped: Codex not detected on this machine]")
     _offer_learning_instruction(
+        vault_root=vault_path,
         targets=targets,
         choice=learning_instruction,
         yes=yes,

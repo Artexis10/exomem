@@ -17,6 +17,6 @@ So the missing piece is a short learning instruction in the user's voice, placed
 
 - **Users:** a new setup step changes a file the user owns. The step asks first, shows the text, and is reversible. Users who already keep their own instructions can decline it.
 - **Agents:** sessions recall and save more. That adds tool calls per task and exposes the write refusals that the write-path work already tracks.
-- **Benchmarks:** the f35 deciding run waits for this change (amendment sequence 10). P then measures the shipped product with the instruction, and PP stays the told reference.
+- **Benchmarks:** the f35 deciding run waits for this change (amendment sequence 10). P then measures the shipped product with the instruction. PP is P plus the benchmark's own memory sentence, so it now carries the instruction too, and a PP run after this change is not pooled with an earlier one.
 - **Unverified:** the hosted-client effect. No harness drives ChatGPT or claude.ai, so the paste-in route ships on the evidence that hosted custom instructions use the same user-side channel.
 - No vault data, registry or tool-surface change.
