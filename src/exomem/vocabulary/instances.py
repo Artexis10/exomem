@@ -95,10 +95,12 @@ class DefinitionsSelection:
             binding = spec.binding_revision
         return PageDefinitions(scope or PUBLIC_INSTANCE, binding, snapshots, path, frontmatter)
 
-    def dependency(self) -> tuple:
+    def dependency(self, *, public_only: bool = False) -> tuple:
         """Everything `page_definitions` reads for these subjects, except the page itself.
 
         A cache of interpreted pages may reuse a page only while this stays equal.
+        `public_only` leaves out every private instance's entries, so that what a
+        cache shares across callers is keyed by the public instance alone.
         """
         from ..governance import policy
 
@@ -106,7 +108,7 @@ class DefinitionsSelection:
             document = configuration(self._root)
         except AssignmentRequired:
             document = None
-        scopes = (None,) if document is None else (None, *sorted(document["private"]))
+        scopes = (None,) if document is None or public_only else (None, *sorted(document["private"]))
         # Page membership selects the instance only in a bound vault.
         entries: list[object] = [None if document is None else policy.load(self._root).fingerprint]
         for subject in self._subjects:

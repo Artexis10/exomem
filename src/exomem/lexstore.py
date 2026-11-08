@@ -827,7 +827,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: `pages.structure_json` their summary; readers interpret both per operation.
 #: 14: `pages.ranking_json` holds ranking and link inputs from the page snapshot.
 #: 15: parent structure includes separately versioned prose-carrier positions.
-SCHEMA_VERSION = 15
+#: 16: `unit_revisions` names each parent's unit rows and summary by a revision
+#: that every write to them changes, so ranking statistics re-read only parents
+#: that moved.
+SCHEMA_VERSION = 16
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1394,31 +1397,44 @@ class _SelectedUnits:
                 if unit is not None and unit.unit_ref is not None:
                     yield row, unit
 
-    def corpus(
-        self, column: str, parents: set[str], representatives: dict[int, str],
-        occurrences: dict[str, list[tuple[int, str, str]]],
-    ) -> dict[str, list[str]]:
-        """Stemmed tokens of every referable unit of `parents`, keyed by public ref.
+    def contributions(
+        self, column: str, parents: Sequence[str],
+    ) -> tuple[dict[str, tuple[_UnitContribution, ...]], set[str]]:
+        """Each of `parents`' referable units, as ranking statistics count it, by parent, and the parents read.
 
-        Ranking statistics come from this selected corpus, so a candidate no
+        A unit holds its stemmed tokens and its public ref; a candidate no
         interpretation emits, or an overlapping occurrence, never weighs in.
+        A parent's units come in rowid order, which fixes which occurrence of a
+        shared ref stands for it. A parent with no unit has no entry. The set
+        names every parent that had a stored row and so was interpreted, even
+        when its interpretation emitted no unit.
         """
+        if not parents:
+            return {}, set()
         rows = self.conn.execute(
             "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed, u.rowid FROM semantic_units u "
             "JOIN unit_fts ON unit_fts.rowid = u.rowid "
-            f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+            f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?)) "
+            "ORDER BY u.parent_path, u.rowid",
             (json.dumps(sorted(parents), ensure_ascii=False),),
         )
-        corpus: dict[str, list[str]] = {}
-        for row, unit in self.served(rows):
-            ref = str(unit.unit_ref)
-            if ref not in corpus:
-                corpus[ref] = str(row[2]).split()
-                representatives[int(row[3])] = ref
-            # Retain identities without text; ambiguous hit precedence still
-            # belongs to the original candidate SQL traversal.
-            occurrences.setdefault(ref, []).append((int(row[3]), str(row[1]), str(row[0])))
-        return corpus
+        interpreted: set[str] = set()
+
+        def counted() -> Iterator[tuple]:
+            for row in rows:
+                if row[1] not in interpreted:
+                    interpreted.add(row[1])
+                    call_spans.measure(call_spans.UNIT_PARENTS_INTERPRETED)
+                yield row
+
+        grouped: dict[str, list[_UnitContribution]] = {}
+        for row, unit in self.served(counted()):
+            grouped.setdefault(str(row[1]), []).append(_UnitContribution(
+                int(row[3]), str(row[0]), str(unit.unit_ref),
+                # Interned: the units of a base share each distinct token.
+                tuple(map(sys.intern, str(row[2]).split())),
+            ))
+        return {path: tuple(units) for path, units in grouped.items()}, interpreted
 
 
 @dataclass(frozen=True, slots=True)
@@ -3152,6 +3168,47 @@ class _AdmittedBase:
 
     pages: Mapping[str, _PageTerms]
     frequency: Mapping[str, int]
+
+
+#: Bytes that one scope's unit base may keep, by the estimate below: a unit costs about 370 bytes (its tuples,
+#: rowid and two ids; measured at 505 for a unit of 12 tokens) and 8 for each token it holds, as the tokens
+#: are interned. 64 MiB holds about 130,000 units of 12 tokens, twice a live vault's 62,000 units. A corpus
+#: past it keeps no base, and its next build interprets every parent.
+_UNIT_BASE_BYTES_MAX = 64 << 20
+_UNIT_BYTES = 370
+_TOKEN_BYTES = 8
+
+
+class _UnitContribution(NamedTuple):
+    """One referable unit's share of a unit corpus."""
+
+    rowid: int
+    #: The stored occurrence's key within its parent, which a reader's interpretation maps to a unit.
+    key: str
+    #: The unit's public ref in the interpretation that emitted it.
+    ref: str
+    tokens: tuple[str, ...]
+
+
+class _ParentUnits(NamedTuple):
+    """One parent's units as one revision of the parent held them."""
+
+    revision: str
+    units: tuple[_UnitContribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _UnitBase:
+    """The parents an admitted unit corpus was built from, so the next build interprets only those that moved.
+
+    `key` names the catalogue and the public instance's definitions, the only inputs of a parent's units beyond
+    its revision. A parent enters `parents` only when its page selects the public instance: an owner-only
+    instance's interpretation is the owner's, so every request interprets such a parent again and never keeps it.
+    A parent with no stored unit row enters as an empty entry, which holds no interpretation.
+    """
+
+    key: tuple
+    parents: Mapping[str, _ParentUnits]
 
 
 def _text_digest(text: str) -> bytes:
@@ -4924,6 +4981,9 @@ class LexicalStore:
         # scope -> the pages the latest admitted corpus of that scope was built from;
         # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
         self._admitted_bases: dict[str, _AdmittedBase] = {}
+        # scope -> the public-instance parents the latest admitted unit corpus of that scope was built
+        # from; see `_UnitBase`. Guarded by `_term_frequency_cache_lock`.
+        self._unit_bases: dict[str, _UnitBase] = {}
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
         # recall rows, and the lock a miss holds while one request fills it.
         # See `_admitted_recall_rows`.
@@ -5945,6 +6005,42 @@ class LexicalStore:
             " UNIQUE(parent_path, unit_ref))"
         )
         self._create_frequency_revision_triggers(conn, "semantic_units")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS unit_revisions("
+            " parent_path TEXT PRIMARY KEY, revision TEXT NOT NULL)"
+        )
+        self._create_unit_revision_triggers(
+            conn, "semantic_units", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
+            lambda row: f"{row}.parent_path",
+        )
+        # A summary written beside its page row changes how the parent's units read, so it counts as a unit write.
+        self._create_unit_revision_triggers(
+            conn, "pages",
+            (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
+            lambda row: f"{row}.path",
+        )
+
+    def _create_unit_revision_triggers(
+        self, conn: sqlite3.Connection, table: str, events: tuple[tuple[str, str], ...],
+        parent: Callable[[str], str],
+    ) -> None:
+        """Give a parent a fresh revision whenever a write changes what its units rank as.
+
+        `events` pairs each trigger event with the changed row it reads, and `parent`
+        names the parent path of that row in SQL (NULL when the row has none).
+        A reader keeps a parent's interpreted units while its revision is the
+        one it kept them under. The revision is random, so a catalogue replaced
+        beside the live one never repeats one. A unit row never changes parent:
+        the writers delete a parent's rows and insert them again.
+        """
+        for event, row in events:
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS unit_revision_{table}_{event.split()[0]} "
+                f"AFTER {event} ON {table} BEGIN "
+                "INSERT OR REPLACE INTO unit_revisions(parent_path, revision) "
+                f"SELECT path, hex(randomblob(16)) FROM (SELECT {parent(row)} AS path) "
+                "WHERE path IS NOT NULL; END"
+            )
 
     def _create_frequency_revision_triggers(
         self, conn: sqlite3.Connection, table: str
@@ -6007,7 +6103,7 @@ class LexicalStore:
         """Drop the disposable normal + FTS tables (never `meta`), so a legacy
         shape can be replaced by the current one without a new-column index or
         INSERT ever running against the old table."""
-        for table in ("semantic_units", "pages", "fts", "tri", "unit_fts"):
+        for table in ("semantic_units", "pages", "unit_revisions", "fts", "tri", "unit_fts"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> bool:
@@ -6056,6 +6152,13 @@ class LexicalStore:
                 f"USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
             self._create_frequency_revision_triggers(conn, "unit_fts_content")
+            # The shadow row's id is the unit's rowid, whose parent the `semantic_units` row names. FTS5
+            # writes an update as a delete and an insert; the UPDATE trigger, like the frequency one above,
+            # covers a direct write to the shadow row.
+            self._create_unit_revision_triggers(
+                conn, "unit_fts_content", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
+                lambda row: f"(SELECT parent_path FROM semantic_units WHERE rowid = {row}.id)",
+            )
         except sqlite3.Error as e:
             log.debug(
                 "lexical FTS/trigram virtual tables unavailable (%s); "
@@ -6529,6 +6632,8 @@ class LexicalStore:
                 conn.execute("DELETE FROM fts")
                 conn.execute("DELETE FROM tri")
                 conn.execute("DELETE FROM unit_fts")
+            # The deletes above left a revision for every parent they removed; the inserts below give each page its own.
+            conn.execute("DELETE FROM unit_revisions")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
             self._stamp_whole_build(conn)
@@ -10258,32 +10363,118 @@ class LexicalStore:
     def _admitted_unit_statistics(
         self, conn: sqlite3.Connection, scope: str, parents: set[str], view: _SelectedUnits,
     ) -> _AdmittedStatisticsEntry:
-        """Selected-unit figures and first-occurrence row identities for this snapshot."""
+        """Selected-unit figures and first-occurrence row identities for this snapshot.
+
+        Reused for the same snapshot, or whenever every admitted parent's revision and the
+        interpretation's inputs are unchanged. Otherwise a parent is interpreted again only
+        if it moved or the public-instance base lacks it, and every parent's units are then
+        merged in `(parent path, rowid)` order, which gives the figures of a build from nothing.
+        """
         from . import bm25 as bm25_module
+        from .vocabulary.registry import PUBLIC_INSTANCE
 
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
             "\0".join(sorted(admitted)).encode("utf-8", "surrogatepass"), digest_size=16,
         ).hexdigest()
+        generation = self._snapshot_generation(conn)
+        dependency = view.interpretations.dependency()
         # This technical tag separates unit statistics from page statistics.
-        key = ("semantic-units", scope, *self._snapshot_generation(conn), digest,
-               view.interpretations.dependency())
+        key = ("semantic-units", scope, *generation, digest, dependency)
         with self._term_frequency_cache_lock:
             cached = self._admitted_statistics.get(key)
         if cached is not None:
             return cached
-        representatives: dict[int, str] = {}
-        occurrences: dict[str, list[tuple[int, str, str]]] = {}
-        corpus = view.corpus(
-            "in_vault" if scope == "vault" else "in_kb", admitted, representatives, occurrences,
-        )
-        view.require_complete()
-        call_spans.measure(call_spans.STATS_REBUILT)
-        entry = _AdmittedStatisticsEntry(
-            b"", bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
-            MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
-        )
+        # A parent with no row here has no unit row either: every write that gives it one gives it a revision.
+        revisions = dict(sorted(conn.execute(
+            "SELECT parent_path, revision FROM unit_revisions "
+            "WHERE parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(admitted), ensure_ascii=False),),
+        )))
+        identity = dict(generation[1:]).get("catalog_identity")
+        fingerprint = hashlib.sha256(repr(identity).encode())
+        for path, revision in revisions.items():
+            encoded = path.encode("utf-8", "surrogatepass")
+            # Length framing keeps field and row boundaries unambiguous; a revision has a fixed size.
+            fingerprint.update(len(encoded).to_bytes(8, "big"))
+            fingerprint.update(encoded)
+            fingerprint.update(revision.encode())
+        current_fingerprint = fingerprint.digest()
+
+        def same_inputs(retained_key: tuple, entry: _AdmittedStatisticsEntry) -> bool:
+            return (
+                retained_key[0] == "semantic-units" and retained_key[1] == scope
+                and retained_key[-2:] == (digest, dependency) and entry.fingerprint == current_fingerprint
+            )
+
         with self._term_frequency_cache_lock:
+            retained = next((
+                entry for retained_key, entry in self._admitted_statistics.items()
+                if same_inputs(retained_key, entry)
+            ), None)
+        if retained is not None:
+            entry = retained
+        else:
+            call_spans.measure(call_spans.STATS_REBUILT)
+            base_key = (identity, view.interpretations.public_dependency())
+            with self._term_frequency_cache_lock:
+                base = self._unit_bases.get(scope)
+            held = base.parents if base is not None and base.key == base_key else {}
+            fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
+                path for path, revision in revisions.items()
+                if (kept := held.get(path)) is None or kept.revision != revision
+            ])
+            view.require_complete()
+            corpus: dict[str, tuple[str, ...]] = {}
+            representatives: dict[int, str] = {}
+            occurrences: dict[str, list[tuple[int, str, str]]] = {}
+            kept_parents: dict[str, _ParentUnits] = {}
+            kept_bytes = 0
+            for path, revision in revisions.items():
+                parent = held.get(path)
+                if parent is None or parent.revision != revision:
+                    units = fresh.get(path, ())
+                    # A parent of an owner-only instance is interpreted by its caller alone, on every request,
+                    # even when its interpretation emitted no unit: another caller may be refused that instance.
+                    # Only a parent with no stored row holds no interpretation at all.
+                    parent = (
+                        _ParentUnits(revision, units)
+                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
+                    )
+                else:
+                    units = parent.units
+                for unit in units:
+                    if unit.ref not in corpus:
+                        corpus[unit.ref] = unit.tokens
+                        representatives[unit.rowid] = unit.ref
+                    # Retain identities without text; ambiguous hit precedence still
+                    # belongs to the original candidate SQL traversal.
+                    occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+                    if parent is not None:
+                        kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
+                if parent is not None:
+                    kept_parents[path] = parent
+            # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
+            # parents this build did not read. Each is used again only at its own revision; a deleted or
+            # renamed page's entry stays until the byte bound drops the base.
+            for path, parent in held.items():
+                if path not in revisions:
+                    kept_parents[path] = parent
+                    kept_bytes += sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in parent.units)
+            entry = _AdmittedStatisticsEntry(
+                current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
+                MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
+            )
+            with self._term_frequency_cache_lock:
+                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
+                    self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
+                else:
+                    self._unit_bases.pop(scope, None)
+        with self._term_frequency_cache_lock:
+            # Equivalent snapshot aliases must not evict another admitted corpus.
+            for retained_key, other in tuple(self._admitted_statistics.items()):
+                if same_inputs(retained_key, other):
+                    del self._admitted_statistics[retained_key]
             if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
                 self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
             self._admitted_statistics[key] = entry
