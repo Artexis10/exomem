@@ -520,18 +520,20 @@ def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> N
     ))
     assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
     assert discovery["needs"] == "scope"
-    assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
+    # The samples start in the first wave; the instrument check gates the aggregate instead.
+    assert sampler["needs"] == "scope"
     assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
     assert "!cancelled()" in aggregate["if"]
-    assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
+    assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.scope.outputs.recall_shards) }}"
     assert sampler["strategy"]["fail-fast"] is False
-    source = discovery["steps"][-1]["run"]
-    assert 'git rev-parse --verify "refs/tags/$tag^{commit}"' in source
+    # One base release for every sample, read once in the first job.
+    source = next(step for step in jobs["scope"]["steps"] if step.get("id") == "recall-series")["run"]
+    assert 'gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha' in source
     assert "benchmarks/recall-latency/profile.json" in source
     sample = next(step for step in sampler["steps"] if "--paired --series" in step.get("run", ""))
     assert '--base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"' in sample["run"]
     assert '--shard "$SHARD" --shards "$SHARDS"' in sample["run"]
-    assert sample["env"]["BASE_COMMIT"] == "${{ needs.recall-latency-series.outputs.base_commit }}"
+    assert sample["env"]["BASE_COMMIT"] == "${{ needs.scope.outputs.recall_base_commit }}"
     assert sample["timeout-minutes"] < sampler["timeout-minutes"]
     assert sampler["steps"][-1]["with"]["name"].endswith("${{ github.run_id }}-${{ github.run_attempt }}")
     download = next(step for step in aggregate["steps"] if "download-artifact" in step.get("uses", ""))
@@ -650,7 +652,9 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     assert _triggers(workflow)["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     jobs = workflow["jobs"]
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
-    assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
+    assert next(step for step in jobs["scope"]["steps"] if step.get("id") == "scope")["run"] == (
+        "python3 scripts/release_evidence.py scope"
+    )
     for name in FULL_CI_JOBS:
         assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
         assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]

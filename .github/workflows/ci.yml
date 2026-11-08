@@ -39,6 +39,11 @@ jobs:
       release: ${{ steps.scope.outputs.release }}
       docs_only: ${{ steps.docs-scope.outputs.docs_only }}
       pytest_args: ${{ steps.docs-scope.outputs.pytest_args }}
+      recall_series: ${{ steps.recall-series.outputs.series }}
+      recall_shards: ${{ steps.recall-series.outputs.shards }}
+      recall_shard_count: ${{ steps.recall-series.outputs.shard_count }}
+      recall_base_tag: ${{ steps.recall-series.outputs.base_tag }}
+      recall_base_commit: ${{ steps.recall-series.outputs.base_commit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +54,22 @@ jobs:
         run: python3 scripts/ci_change_scope.py "unmarked test cases and empty core/harness shard jobs"
       - id: scope
         run: python3 scripts/release_evidence.py scope
+      - name: Read the recall latency series and base release once for every sample
+        id: recall-series
+        if: ${{ steps.scope.outputs.full == 'true' }}
+        # Read here, in the first job, so the sample jobs start in the first wave. The case
+        # file defines the series; the paired matrix keeps no second list. One base release
+        # for every sample, so a release published mid-run cannot split the evidence.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+          echo "base_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "base_commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "series=$(jq -c '[.[].series] | unique' benchmarks/recall-latency/cases.json)" >> "$GITHUB_OUTPUT"
+          echo "shard_count=$(jq -r .paired_shards benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
+          echo "shards=$(jq -c '.paired_shards as $n | [range(1; $n + 1)]' benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
 
   timing-tests:
     needs: scope
@@ -714,12 +735,6 @@ jobs:
     if: ${{ needs.scope.outputs.full == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    outputs:
-      series: ${{ steps.series.outputs.series }}
-      shards: ${{ steps.series.outputs.shards }}
-      shard_count: ${{ steps.series.outputs.shard_count }}
-      base_tag: ${{ steps.series.outputs.base_tag }}
-      base_commit: ${{ steps.series.outputs.base_commit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -728,29 +743,18 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Verify the latency instrument once before fan-out
+      - name: Verify the latency instrument once
+        # Runs beside the samples rather than before them, so the samples start in the first
+        # wave; a broken instrument fails this job, and the aggregate gives no verdict without it.
         env:
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
         run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py -q
-      - name: Read the series from the reference case file
-        id: series
-        # The case file defines the series; the paired matrix keeps no second list.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(gh release view --json tagName --jq .tagName)
-          commit=$(git rev-parse --verify "refs/tags/$tag^{commit}")
-          echo "base_tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "base_commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "series=$(jq -c '[.[].series] | unique' benchmarks/recall-latency/cases.json)" >> "$GITHUB_OUTPUT"
-          echo "shard_count=$(jq -r .paired_shards benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
-          echo "shards=$(jq -c '.paired_shards as $n | [range(1; $n + 1)]' benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
 
   recall-latency-paired:
     name: recall latency samples (${{ matrix.series }}, shard ${{ matrix.shard }})
     if: ${{ needs.scope.outputs.full == 'true' }}
-    needs: [scope, recall-latency-series]
+    needs: scope
     # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
     runs-on: ubuntu-24.04
     # Keep the established budget while measuring the new case-shard timings.
@@ -758,8 +762,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        series: ${{ fromJSON(needs.recall-latency-series.outputs.series) }}
-        shard: ${{ fromJSON(needs.recall-latency-series.outputs.shards) }}
+        series: ${{ fromJSON(needs.scope.outputs.recall_series) }}
+        shard: ${{ fromJSON(needs.scope.outputs.recall_shards) }}
     steps:
       - name: Record paired workload start
         run: date +%s > "$RUNNER_TEMP/recall-latency-job-start"
@@ -788,9 +792,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SERIES: ${{ matrix.series }}
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ needs.recall-latency-series.outputs.shard_count }}
-          BASE_TAG: ${{ needs.recall-latency-series.outputs.base_tag }}
-          BASE_COMMIT: ${{ needs.recall-latency-series.outputs.base_commit }}
+          SHARDS: ${{ needs.scope.outputs.recall_shard_count }}
+          BASE_TAG: ${{ needs.scope.outputs.recall_base_tag }}
+          BASE_COMMIT: ${{ needs.scope.outputs.recall_base_commit }}
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
         run: >-
@@ -822,7 +826,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        series: ${{ fromJSON(needs.recall-latency-series.outputs.series) }}
+        series: ${{ fromJSON(needs.scope.outputs.recall_series) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -841,8 +845,8 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           SERIES: ${{ matrix.series }}
-          BASE_TAG: ${{ needs.recall-latency-series.outputs.base_tag }}
-          BASE_COMMIT: ${{ needs.recall-latency-series.outputs.base_commit }}
+          BASE_TAG: ${{ needs.scope.outputs.recall_base_tag }}
+          BASE_COMMIT: ${{ needs.scope.outputs.recall_base_commit }}
           PRODUCER_OUTCOME: ${{ needs.recall-latency-paired.result }}
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
