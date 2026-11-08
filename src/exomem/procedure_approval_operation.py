@@ -70,6 +70,12 @@ def check_arguments(action: str, ref: str | None, expected_version: str | None) 
             "approve needs expected_version.",
             "Read the page with read_memory and pass its content_hash as expected_version.",
         )
+    if expected_version is not None and not procedure_approval.is_version(expected_version):
+        raise _invalid(
+            "expected_version is not a page content_hash, which is 64 lowercase hex characters.",
+            "Read the page with read_memory and pass its content_hash as expected_version, "
+            "or omit expected_version on a revoke.",
+        )
     return canonical
 
 

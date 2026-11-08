@@ -320,6 +320,14 @@ def _ensure_key(vault_root: Path) -> bytes:
 # --- entry format ----------------------------------------------------------------------
 
 
+def is_version(value: object) -> bool:
+    """Whether `value` has the shape of a page version: a SHA-256 digest in lowercase hex.
+
+    An entry whose version lacks this shape is unreadable, so a writer checks it before it appends.
+    """
+    return isinstance(value, str) and _DIGEST_SHAPE.fullmatch(value) is not None
+
+
 def _canonical(fields: Mapping[str, object]) -> bytes:
     return json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
         "ascii"
@@ -366,7 +374,7 @@ def _parse_entry(data: bytes) -> tuple[Entry, dict[str, object], str] | None:
         identifier is None
         or memory_refs.memory_ref(identifier) != text["ref"]
         or not _ENTRY_ID_SHAPE.fullmatch(text["entry_id"])
-        or not _DIGEST_SHAPE.fullmatch(text["version"])
+        or not is_version(text["version"])
         or not _DIGEST_SHAPE.fullmatch(mac)
         or text["action"] not in ACTIONS
         or _parse_timestamp(text["recorded_at"]) is None

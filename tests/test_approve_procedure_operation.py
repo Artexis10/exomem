@@ -220,6 +220,31 @@ def test_a_stale_version_is_refused_and_names_the_fix(vault, mcp) -> None:
     assert not ref_directory(vault).exists()
 
 
+def test_an_approve_with_a_malformed_version_names_the_shape_and_not_a_page_change(vault, mcp) -> None:
+    rel = write_page(vault, "release-steps")
+
+    refused = approve(mcp, REF, facts_of(vault, rel).version.upper())
+
+    assert refused["error"]["code"] == "APPROVE_PROCEDURE_INVALID"
+    assert "64 lowercase hex characters" in refused["error"]["message"]
+    assert "pass its content_hash as expected_version" in refused["error"]["remediation"]
+    assert not ref_directory(vault).exists()
+
+
+def test_a_revoke_of_a_deleted_page_with_a_malformed_version_writes_nothing(vault, mcp) -> None:
+    """No page is left to compare against, so only the shape check keeps an unreadable entry out of the ledger."""
+    rel = write_page(vault, "release-steps")
+    approve(mcp, REF, facts_of(vault, rel).version)
+    delete_file(vault, path=rel, confirm=True)
+    before = entry_names(vault)
+
+    refused = call(mcp, "approve_procedure", {"kind": "revoke", "ref": REF, "expected_version": "an old version"})
+
+    assert refused["error"]["code"] == "APPROVE_PROCEDURE_INVALID"
+    assert "64 lowercase hex characters" in refused["error"]["message"]
+    assert entry_names(vault) == before
+
+
 def test_a_page_that_repeats_its_id_is_refused_with_the_fix_for_that_condition(vault, mcp) -> None:
     first = write_page(vault, "first-copy")
     write_page(vault, "second-copy")
