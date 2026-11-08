@@ -41,7 +41,7 @@ PAIRS = {
     ),
     "lab": ("WP-S", "W-S", "WP-W"),
     "planted": ("E-P",),
-    "epistemic": ("P-F", "P-N", "E-P"),
+    "epistemic": ("P-F", "P-N", "P-E"),
 }
 SPLITS = ("dev", "heldout", "panel")
 #: CL-Bench's decision schedule: upstream's default schedule at seed 42. Development rounds and the
@@ -412,6 +412,7 @@ def epistemic_report(run_dir: Path, stored: dict, spec, wanted, arms, jobs: int)
     if spec is None:
         raise refuse("epistemic needs a judge: add --judge claude or --judge codex")
     projects = cases.load_split(RUN_ROOT, stored["split"])
+    cases.require_unchanged_since_run(projects, stored.get("case_check", {}))
     judge_run = run_dir / f"judge-{spec.backend}"
     judge.items(run_dir, projects, judge_run, arms)
     judge.judge(judge_run, spec, REJUDGE_FRACTION, jobs)

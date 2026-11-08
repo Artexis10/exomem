@@ -2,7 +2,7 @@
 
 A probe's score for an arm is the mean of the judge's ``correct`` over the project's counted windows
 (0, 0.5 or 1; see ``layout.counted_windows``). The windows of one project are not independent units.
-A pair (P-F, P-N, E-P) is the difference of those scores over change probes, with a 95% percentile
+A pair (P-F, P-N, P-E) is the difference of those scores over change probes, with a 95% percentile
 bootstrap over probes that resamples inside each project. A decision reads a held-out run only: two
 valid windows per project, at least ``MIN_WINDOW_GAP_HOURS`` apart. Every other figure describes.
 Unknown, partial and failed values stay visible as such, never 0.
@@ -36,9 +36,13 @@ MEMORY_NEEDED_FLOOR = 0.80
 PAIR_ROLES = {
     "P-F": "read by the decision: beats folder, no worse than folder",
     "P-N": "read by the decision: helps",
-    "E-P": "description only: what the plugin, skills and instruction add",
+    "P-E": "description only: what the plugin, skills and instruction add",
 }
-NO_CROSS_CHECK = "none ran: no probe declares a structured answer field"
+NO_CROSS_CHECK = "none ran: the harness has no parser cross-check of the judge"
+#: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
+#: A closed set of the harness's own literals, not a reading of what an answer means; it counts how often the
+#: answer text names a store, which can show the blind judge the arm.
+STORE_NAMES = ("memory/", "exomem")
 
 Unit = tuple[str, str]  # (project, probe id)
 
@@ -90,19 +94,32 @@ def arm_means(scores: dict, meta: dict, arm: str, pick) -> dict:
 
 
 def incomplete_reasons(
-    failed: list[str], again: dict, *, heldout: bool, counted: dict, expected: list[str]
+    failed: list[str], again: dict, *, heldout: bool, states: list[dict], expected: list[str]
 ) -> list[str]:
-    """Why no figure can be final yet. Empty when the run is complete."""
+    """Why no figure can be final yet. Empty when the run is complete.
+
+    A held-out project needs two valid windows, at most one replay and at least
+    ``MIN_WINDOW_GAP_HOURS`` between its two counted windows. A report that only describes a held-out
+    run would still be stamped as decision evidence by the gate, so a short gap is incomplete too.
+    """
     why = [f"the judgement of {item} failed" for item in failed]
     if again["rate"] is None:
         why.append("judge agreement unknown: no item was judged twice")
     elif again["rate"] < AGREEMENT_FLOOR:
         why.append(f"judge agreement {again['rate']:.2f}")
     if heldout:
+        counted = layout.counted_windows(states)
         for project in expected:
             have = len(counted.get(project, []))
             if have < layout.WINDOWS_PER_PROJECT:
                 why.append(f"{project} has {have} valid window(s) of {layout.WINDOWS_PER_PROJECT}")
+        why += layout.window_problems(states)
+        why += [
+            f"{project}'s valid windows start {hours} hours apart, under {layout.MIN_WINDOW_GAP_HOURS}: "
+            "only a new run fixes the gap"
+            for project, hours in layout.window_gaps(counted).items()
+            if hours < layout.MIN_WINDOW_GAP_HOURS
+        ]
     return why
 
 
@@ -118,22 +135,11 @@ def decide(
     why: list[str], *, heldout: bool, counted: dict, rows: dict[str, dict]
 ) -> tuple[dict, dict]:
     """``(decision, hours apart per project)``. Incomplete beats description; a dev run only describes."""
-    gaps = {
-        project: round(layout.hours_apart(*windows), 2)
-        for project, windows in counted.items()
-        if len(windows) == layout.WINDOWS_PER_PROJECT
-    }
+    gaps = layout.window_gaps(counted)
     if why:
         return {"status": "incomplete", "why": why}, gaps
     if not heldout:
         return {"status": "description only", "why": ["a dev run decides nothing"]}, gaps
-    close = [
-        f"{project}'s windows start {hours} hours apart, under {layout.MIN_WINDOW_GAP_HOURS}"
-        for project, hours in gaps.items()
-        if hours < layout.MIN_WINDOW_GAP_HOURS
-    ]
-    if close:
-        return {"status": "description only", "why": close}, gaps
     return {
         "status": "complete",
         "beats_folder": rule(rows.get("P-F"), "lower bound of P-F above 0", 0.0),
@@ -162,21 +168,40 @@ def behaviour_rates(outcomes: list[dict], meta: dict, arms: list[str]) -> dict:
 
 
 def harm(outcomes: list[dict]) -> dict:
-    """Probe-windows that N answers correctly and P does not, out of those that N answers correctly."""
+    """Probe-windows that N answers correctly and P does not, out of those that N answers correctly and P answered.
+
+    A probe-window where P has no verdict is unknown, not a loss: it leaves the denominator and is counted apart.
+    """
     verdicts = {
         (o["arm"], o["project"], o["probe_id"], o["window"]): o["verdict"]["correct"]
         for o in outcomes
         if o["verdict"] is not None
     }
     solved = sorted(k[1:] for k, ok in verdicts.items() if k[0] == "N" and ok)
-    harmed = [k for k in solved if verdicts.get(("P", *k)) is False]
+    known = [k for k in solved if ("P", *k) in verdicts]
+    harmed = [k for k in known if verdicts[("P", *k)] is False]
     return {
-        "scope": "probe-windows, change and stable probes",
+        "scope": "probe-windows, change and stable probes, where N is correct and P has a verdict",
         "harmed": len(harmed),
-        "solved_by_n": len(solved),
-        "rate": round(len(harmed) / len(solved), 4) if solved else None,
+        "solved_by_n": len(known),
+        "dropped_p_unknown": len(solved) - len(known),
+        "rate": round(len(harmed) / len(known), 4) if known else None,
         "probes": [f"{p}:{probe} window {w}" for p, probe, w in harmed],
     }
+
+
+def store_mentions(outcomes: list[dict], arms: list[str]) -> dict:
+    """Per arm, the answers that name a memory store (``STORE_NAMES``) out of the answers the judge read."""
+    rows = {}
+    for arm in arms:
+        texts = [o["answer"] for o in outcomes if o["arm"] == arm and o["state"] == "answered"]
+        naming = sum(any(name in text.casefold() for name in STORE_NAMES) for text in texts)
+        rows[arm] = {
+            "answers": len(texts),
+            "naming_a_store": naming,
+            "share": round(naming / len(texts), 4) if texts else None,
+        }
+    return rows
 
 
 def window_scores(outcomes: list[dict], counted: dict, meta: dict, arms: list[str]) -> dict:
@@ -317,9 +342,7 @@ def build(
     }
     scores = score_tables(outcomes, arms)
     rows = {f"{a}-{b}": pair_row(a, b, scores, meta) for a, b in pairs}
-    why = incomplete_reasons(
-        failed, again, heldout=heldout, counted=counted, expected=list(projects)
-    )
+    why = incomplete_reasons(failed, again, heldout=heldout, states=states, expected=list(projects))
     decision, gaps = decide(why, heldout=heldout, counted=counted, rows=rows)
     play = [o for o in outcomes if o["arm"] != HISTORY_ARM]
     stable_pairs = [(a, b) for a, b in pairs if a in arms and b in arms]
@@ -358,6 +381,11 @@ def build(
             }
             for arm in arms
         },
+        "skipped_answers": [
+            {k: o[k] for k in ("project", "window", "arm", "probe_id", "reason")}
+            for o in outcomes
+            if o["state"] == "probe_dropped"
+        ],
         "windows": {
             "counted": {
                 p: [{"window": w["window"], "started_at": w["started_at"]} for w in ws]
@@ -390,6 +418,10 @@ def build(
             },
             "behaviours": behaviour_rates(play, meta, arms),
             "harm": harm(play) if {"N", "P"} <= set(arms) else None,
+            "answers_naming_a_store": {
+                "scope": f"share of the answers the judge read that contain any of {list(STORE_NAMES)}, case-folded",
+                "arms": store_mentions(play, arms),
+            },
             "window_scores": window_scores(play, counted, meta, arms),
             "usage_scope": "every call of the ended projects and the solvable gate; parked unfinished attempts are not counted",
         },
@@ -436,6 +468,10 @@ def summary_lines(report: dict) -> list[str]:
     for unfinished in report["windows"]["unfinished"]:
         lines.append(
             f"unfinished window {unfinished['window']} of {unfinished['project']}: run the command again"
+        )
+    for skipped in report["skipped_answers"]:
+        lines.append(
+            f"skipped {skipped['arm']} answer to {skipped['probe_id']} of {skipped['project']}: {skipped['reason']}"
         )
     for name, gate in report.get("dev_gates", {}).items():
         if "status" in gate:

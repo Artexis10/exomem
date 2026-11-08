@@ -21,6 +21,7 @@ import pytest
 from epistemic.journeys.f27_replay import AgentEnvelope
 from membench.outcome import command
 from membench.outcome.epistemic import cases, layout, report
+from membench.outcome.epistemic import judge as epistemic_judge
 from membench.outcome.epistemic import run as epistemic_run
 from membench.outcome.faults import RETRIES
 from membench.outcome.stats import paired_interval, stratified_bootstrap_ci
@@ -401,10 +402,10 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
     assert built["status"] == "complete"
     assert built["windows"]["unfinished"] == [] and built["windows"]["invalid"] == []
     # Change probes p-first and p-second: P knows both, F lost the second, N and E know neither.
-    pf, pn, ep = (built["pairs"][k] for k in ("P-F", "P-N", "E-P"))
+    pf, pn, pe = (built["pairs"][k] for k in ("P-F", "P-N", "P-E"))
     assert (pf["mean_difference"], pf["ci95"]) == (0.5, [0.0, 1.0])
     assert (pn["mean_difference"], pn["ci95"]) == (1.0, [1.0, 1.0])
-    assert ep["mean_difference"] == -1.0
+    assert pe["mean_difference"] == 1.0, "P minus E reads positive when the plugin adds knowledge"
     assert built["decision"]["status"] == "description only", "a dev run decides nothing"
     stable = built["description"]["stable_probes"]
     assert (stable["P"]["mean_score"], stable["F"]["mean_score"], stable["N"]["mean_score"]) == (
@@ -413,7 +414,7 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
         0.0,
     )
     assert built["description"]["harm"]["harmed"] == 0
-    assert built["parser_cross_check"].startswith("none ran")
+    assert built["parser_cross_check"].startswith("none ran: the harness has no parser cross-check")
     # N with the whole history solves every probe, and N without it solves none.
     gates = built["dev_gates"]
     assert (gates["solvable"]["rate"], gates["solvable"]["meets"]) == (1.0, True)
@@ -433,6 +434,21 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
     for text in prompts:
         for leak in (str(played.root), "window-", "unblinding", "history"):
             assert leak not in text, f"a judge input contains {leak!r}"
+
+
+def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
+    tmp_path,
+):
+    """The gate played the probe; a repaired case file no longer holds it, and the report must not crash."""
+    run_dir = tmp_path / "run"
+    gone = run_dir / "window-1" / "history" / "proj-a" / "p-gone"
+    gone.mkdir(parents=True)
+    (gone / "probe.json").write_text(json.dumps({"probe_id": "p-gone"}))
+
+    entries = epistemic_judge.collect(run_dir, {"proj-a": (invented_project(), {})}, ["N"])
+
+    assert [(e["probe_id"], e["state"]) for e in entries] == [("p-gone", "probe_dropped")]
+    assert "no longer holds this probe" in entries[0]["reason"]
 
 
 # --------------------------------------------------------------------------
@@ -469,6 +485,23 @@ def test_a_harness_fault_that_survives_its_retries_invalidates_the_window_for_ev
     play("r2", arms=["N", "F"], window=2, project="proj-a")
     counted = layout.counted_windows(layout.project_states(run_dir))
     assert [w["window"] for w in counted["proj-a"]] == [2]
+
+
+def test_an_actor_protects_the_paths_that_start_after_it_and_its_own_answer_records(scratch):
+    """The protected list is read per call: a project that starts beside a running one must not be readable."""
+    arm = scratch.root / "runs" / "r1" / "window-1" / "proj-a" / "N"
+    arm.mkdir(parents=True)
+    envelope = AgentEnvelope(executable=Path("claude"), version="0.0-test")
+    actor = epistemic_run.EpistemicActor(
+        epistemic_run.ARMS["N"], arm, "m", "high", root=scratch.root, envelope=envelope
+    )
+    (scratch.root / "runs" / "r1" / "window-1" / "proj-b").mkdir()
+
+    protected = actor.protected()
+
+    assert scratch.root / "runs" / "r1" / "window-1" / "proj-b" in protected
+    assert arm / "sessions" in protected and arm / "probes" in protected
+    assert arm / "work" not in protected
 
 
 # --------------------------------------------------------------------------
@@ -530,6 +563,35 @@ def test_a_probe_whose_answer_is_not_one_value_loads_with_a_null_value():
     assert checked == 4, (
         "the null value is skipped; its accepted phrasing, its trap and the other probes' values are checked"
     )
+
+
+def test_a_key_with_an_unknown_behaviour_or_a_non_string_accept_item_refuses_with_a_named_problem():
+    """A misspelt behaviour would never be rated, and a number in `accept` would crash the leak check."""
+    project = invented_project()
+    project["probes"][0]["key"]["behaviours"] = ["uses_current", "remembers_fondly"]
+    project["probes"][1]["key"]["accept"] = ["beta", 7]
+    project["probes"][2]["key"]["trap"] = 5
+
+    problems = cases.structure_problems(project)
+
+    assert any("p-early: key.behaviours names ['remembers_fondly']" in p for p in problems)
+    assert "probe p-first: every key.accept item must be a string" in problems
+    assert "probe p-second: key.trap must be a string or null" in problems
+
+    listing_trusts_stale = invented_project()["probes"][1]
+    listing_trusts_stale["key"]["behaviours"] = ["trusts_stale"]
+    assert epistemic_judge.behaviours_asked(listing_trusts_stale) == ("trusts_stale",), (
+        "a change probe asks trusts_stale once even when its key lists it"
+    )
+
+
+def test_a_report_refuses_a_case_file_that_changed_since_the_run_played_it(scratch):
+    """SPLIT.json can be repaired after a run; the report must still read the file the run played."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    stored = {"split": "dev", "case_check": {"proj-a": {"sha256": "0" * 64}}}
+
+    with pytest.raises(SystemExit, match="proj-a changed since this run played it"):
+        command.epistemic_report(scratch.root / "runs" / "r1", stored, object(), [], ["N"], 1)
 
 
 def test_a_held_out_epistemic_run_refuses_while_f38_is_not_registered(scratch):
@@ -607,38 +669,113 @@ def test_a_probe_scores_the_mean_of_its_windows_and_an_unjudged_window_is_unknow
     assert row["ci95"] == [0.25, 0.5]
 
 
-def test_the_decision_waits_for_two_valid_windows_a_trusted_judge_and_six_hours():
-    """A decision is read only from a complete held-out run; anything less describes, and says why."""
-    first = {"window": 1, "started_at": "2026-11-08T08:00:00+00:00"}
-    later = {"window": 2, "started_at": "2026-11-08T15:00:00+00:00"}
-    soon = {"window": 2, "started_at": "2026-11-08T11:00:00+00:00"}
+def test_harm_leaves_probe_windows_where_p_has_no_verdict_out_of_its_denominator():
+    """N solves four probe-windows. P fails one, solves one, and has no verdict on two: they are unknown, not harm."""
+    outcomes = [outcome("N", "a", f"a{i}", 1, True) for i in range(1, 5)] + [
+        outcome("P", "a", "a1", 1, True),
+        outcome("P", "a", "a2", 1, False),
+        outcome("P", "a", "a3", 1, None),
+    ]
+
+    row = report.harm(outcomes)
+
+    assert (row["harmed"], row["solved_by_n"], row["dropped_p_unknown"]) == (1, 2, 2)
+    assert row["rate"] == 0.5 and row["probes"] == ["a:a2 window 1"]
+
+
+def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():
+    """The blind judge reads the answer text, so an answer that says 'saved to memory/' can show it the arm."""
+    answered = {"state": "answered", "verdict": {"correct": True}}
+    outcomes = [
+        {**answered, "arm": "F", "answer": "I saved it to memory/ first."},
+        {**answered, "arm": "F", "answer": "It is beta."},
+        {**answered, "arm": "P", "answer": "Recorded in Exomem: beta."},
+        {**answered, "arm": "P", "answer": "Beta, as the earlier note says."},
+        {"state": "unanswered", "verdict": None, "arm": "P", "answer": None},
+    ]
+
+    rows = report.store_mentions(outcomes, ["F", "P", "N"])
+
+    assert rows["F"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
+    assert rows["P"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
+    assert rows["N"] == {"answers": 0, "naming_a_store": 0, "share": None}, "no answer is not 0"
+
+
+def window_state(project, window, hour, status="complete"):
+    """The ``state.json`` of one project window that started ``hour`` hours after a fixed morning."""
+    return {
+        "project": project,
+        "window": window,
+        "status": status,
+        "started_at": f"2026-11-08T{hour:02d}:00:00+00:00",
+    }
+
+
+def read_decision(states, *, expected=("proj-a", "proj-b"), again=None, failed=(), heldout=True):
     lows = {
         "P-F": {"ci95": [0.1, 0.4], "verdict": "better"},
         "P-N": {"ci95": [0.2, 0.5], "verdict": "better"},
     }
-    agreed = {"rate": 0.95}
+    why = report.incomplete_reasons(
+        list(failed),
+        again or {"rate": 0.95},
+        heldout=heldout,
+        states=states,
+        expected=list(expected),
+    )
+    return report.decide(why, heldout=heldout, counted=layout.counted_windows(states), rows=lows)[0]
 
-    def read(counted, again=agreed, failed=(), heldout=True):
-        why = report.incomplete_reasons(
-            list(failed), again, heldout=heldout, counted=counted, expected=["proj-a", "proj-b"]
-        )
-        return report.decide(why, heldout=heldout, counted=counted, rows=lows)[0]
 
-    both = {"proj-a": [first, later], "proj-b": [first, later]}
-    decided = read(both)
+def test_the_decision_waits_for_two_valid_windows_a_trusted_judge_and_six_hours():
+    """A decision is read only from a complete held-out run; anything less describes, and says why."""
+    both = [window_state(p, w, hour) for p in ("proj-a", "proj-b") for w, hour in ((1, 8), (2, 15))]
+    decided = read_decision(both)
     assert decided["status"] == "complete"
     assert [decided[k]["result"] for k in ("beats_folder", "helps", "no_worse_than_folder")] == [
         True
     ] * 3
 
-    one_window = read({"proj-a": [first, later], "proj-b": [first]})
+    one_window = read_decision(both[:3])
     assert (
         one_window["status"] == "incomplete" and "proj-b has 1 valid window" in one_window["why"][0]
     )
 
-    unsure = read(both, again={"rate": 0.85})
+    unsure = read_decision(both, again={"rate": 0.85})
     assert unsure["status"] == "incomplete" and "judge agreement 0.85" in unsure["why"]
+    assert read_decision(both, heldout=False)["status"] == "description only"
 
-    close = read({"proj-a": [first, soon], "proj-b": [first, soon]})
-    assert close["status"] == "description only" and "3.0 hours apart" in close["why"][0]
-    assert read(both, heldout=False)["status"] == "description only"
+
+def test_valid_windows_under_six_hours_apart_leave_a_decision_incomplete_and_only_a_new_run_fixes_it():
+    """A gate stamps a report that reads 'description only' as decision evidence; an 'incomplete' one it does not."""
+    states = [
+        window_state(p, w, hour) for p in ("proj-a", "proj-b") for w, hour in ((1, 8), (2, 11))
+    ]
+    close = read_decision(states)
+
+    assert close["status"] == "incomplete"
+    assert "3.0 hours apart" in close["why"][0] and "only a new run" in close["why"][0]
+
+
+def test_a_project_replays_once_at_most_so_a_second_invalid_window_leaves_the_decision_incomplete():
+    """Windows 3 and 4 alone would pass as a clean pair of valid windows, hiding two harness failures."""
+
+    def project(*windows):
+        return [window_state("proj-a", w, hour, status) for w, hour, status in windows]
+
+    other = [window_state("proj-b", w, hour) for w, hour in ((1, 8), (2, 15))]
+    two_failures = project(
+        (1, 8, "invalid"), (2, 9, "invalid"), (3, 16, "complete"), (4, 24, "complete")
+    )
+    refused = read_decision(two_failures + other)
+    assert refused["status"] == "incomplete"
+    assert any("proj-a has 2 invalid windows" in why for why in refused["why"])
+
+    one_replay = project((1, 8, "invalid"), (2, 9, "complete"), (3, 16, "complete"))
+    assert read_decision(one_replay + other)["status"] == "complete"
+
+    four_windows = project(
+        (1, 8, "complete"), (2, 16, "complete"), (3, 24, "complete"), (4, 32, "complete")
+    )
+    too_many = read_decision(four_windows + other)
+    assert too_many["status"] == "incomplete"
+    assert any("proj-a has 4 windows" in why for why in too_many["why"])

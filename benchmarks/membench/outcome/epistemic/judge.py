@@ -4,8 +4,8 @@
 file. ``judge`` gives one fresh judge process per item: the probe task, the key (value, accepted
 phrasings, rubric and trap), the final answer and a diff of the files the call changed. The judge never
 sees the arm, the memory tool calls or another arm's answer, and decides ``correct`` itself, so a
-correct answer in other words scores as correct. No probe declares a structured answer field, so no
-parser cross-checks the judge. ``membench outcome report epistemic`` drives this module.
+correct answer in other words scores as correct. The harness has no parser cross-check of the judge.
+``membench outcome report epistemic`` drives this module.
 """
 
 from __future__ import annotations
@@ -16,20 +16,12 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import is_stable
+from .cases import BEHAVIOURS, is_stable
 
 SEED = 20261108
 JUDGE_TIMEOUT_SECONDS = 600
 #: The label of an answer given with the whole history in its prompt (the solvable gate).
 HISTORY_ARM = "N-history"
-BEHAVIOURS = (
-    "uses_current",
-    "flags_conflict",
-    "cites_source",
-    "keeps_attribution",
-    "abstains_when_unknown",
-    "trusts_stale",
-)
 ANSWERS = ("yes", "no", "n/a")
 
 VERDICT_SCHEMA = {
@@ -79,7 +71,7 @@ def shown_changes(changed: dict) -> str:
 
 def collect(run_dir: Path, projects: dict[str, tuple[dict, dict]], arms: list[str]) -> list[dict]:
     """One entry per probe answer that a report scores, whatever its state: ``answered``, ``unanswered``,
-    ``missing`` or ``harness_fault``. Only the windows that count are read: invalid windows score nothing."""
+    ``missing``, ``harness_fault`` or ``probe_dropped``. Only the windows that count are read: invalid windows score nothing."""
     entries = []
 
     def entry(window: int, name: str, arm: str, probe: dict, found: dict | None) -> dict:
@@ -115,10 +107,25 @@ def collect(run_dir: Path, projects: dict[str, tuple[dict, dict]], arms: list[st
                     found = json.loads(path.read_text()) if path.exists() else None
                     entries.append(entry(state["window"], name, arm, probe, found))
     for window, name, found in layout.history_records(run_dir):
-        if name in projects:
-            probe = next(
-                p for p in projects[name][0]["probes"] if p["probe_id"] == found["probe_id"]
+        if name not in projects:
+            continue
+        probe = next(
+            (p for p in projects[name][0]["probes"] if p["probe_id"] == found["probe_id"]), None
+        )
+        if probe is None:
+            # The case file dropped the probe after the solvable gate played it: nothing can grade that answer.
+            entries.append(
+                {
+                    "window": window,
+                    "project": name,
+                    "arm": HISTORY_ARM,
+                    "probe_id": found["probe_id"],
+                    "item": None,
+                    "state": "probe_dropped",
+                    "reason": "the case file no longer holds this probe, so its answer is not judged",
+                }
             )
+        else:
             entries.append(entry(window, name, HISTORY_ARM, probe, found))
     return entries
 
@@ -212,21 +219,29 @@ def sample_agreement(judge_run: Path, sample_run: Path) -> dict:
 def scored(judge_run: Path) -> tuple[list[dict], list[str], dict]:
     """``(outcomes, failed judgements, self-agreement)`` of a judged run.
 
-    An outcome is an unblinding entry with its ``verdict``. An unanswered probe scores
-    ``UNANSWERED_VERDICT``. A probe that is missing, a harness fault or whose judgement failed has
-    verdict None: it is unknown, never a loss.
+    An outcome is an unblinding entry with its ``verdict`` and, when answered, its ``answer`` text. An
+    unanswered probe scores ``UNANSWERED_VERDICT``. A probe that is missing, dropped, a harness fault
+    or whose judgement failed has verdict None: it is unknown, never a loss.
     """
     entries = json.loads((judge_run / "unblinding" / "items.json").read_text())
     judge_dir = judge_run / "judge"
     first = verdicts_of(judge_dir / "verdicts.jsonl")
+    answers = {
+        row["id"]: row["answer"]
+        for row in map(json.loads, (judge_dir / "items.jsonl").read_text().splitlines())
+    }
     outcomes = []
     for entry in entries:
         verdict = UNANSWERED_VERDICT if entry["state"] == "unanswered" else first.get(entry["item"])
-        outcomes.append({**entry, "verdict": verdict})
+        outcomes.append({**entry, "verdict": verdict, "answer": answers.get(entry["item"])})
     again = agreement(first, verdicts_of(judge_dir / "rejudge.jsonl"))
     return outcomes, failed_judgements(judge_dir), again
 
 
 def behaviours_asked(probe: dict) -> tuple[str, ...]:
     """The behaviours a probe's score reports: its key's own, and ``trusts_stale`` for every change probe."""
-    return tuple(probe["key"]["behaviours"]) + (() if is_stable(probe) else ("trusts_stale",))
+    return tuple(
+        dict.fromkeys(
+            [*probe["key"]["behaviours"], *(() if is_stable(probe) else ("trusts_stale",))]
+        )
+    )

@@ -89,20 +89,24 @@ paraphrases.
 The judge sees an opaque id, the probe task, the key, the answer and a diff of the files that the
 call changed. It does not see the arm or the memory tool calls. A seeded 20% of the items are
 judged twice. If the two judgements agree on `correct` in less than 90% of the items, the report
-reads `incomplete: judge agreement X`. No other judge breaks that tie. No parser cross-check ran:
-no probe declares a structured answer field, and the report says so.
+reads `incomplete: judge agreement X`. No other judge breaks that tie. The harness has no parser
+cross-check of the judge, and the report says so. Before it judges, the report refuses a case file
+whose digest differs from the digest that the run recorded.
 
 The score of a probe for an arm is the mean of `correct` over the project's counted windows. A
-project counts its first two valid windows. The pairs `P-F`, `P-N` and `E-P` use change probes
-only. Each reports the mean difference and a 95% percentile bootstrap interval over probes,
+project counts its first two valid windows. The pairs `P-F`, `P-N` and `P-E` use change probes
+only; `P-E` shows what the plugin, skills and instruction add to the MCP server alone. Each reports the mean difference and a 95% percentile bootstrap interval over probes,
 resampled inside each project (10,000 draws, the seed is in the report). A decision reads a
 held-out run only, and only when every project has two valid windows that start at least 6 hours
-apart. The decision then reads `beats folder` when the lower bound of `P-F` is above 0, `helps`
+apart. Each project has windows 1 and 2 and at most one replay: a project with more than one
+invalid window, or with more than three windows, makes the decision `incomplete`, and so does a
+gap under 6 hours. Only a new run fixes either. The decision otherwise reads `beats folder` when the lower bound of `P-F` is above 0, `helps`
 when the lower bound of `P-N` is above 0, and `no worse than folder` when the lower bound of `P-F`
-is above the not-worse bound. In any other case the report only describes, and `decision.why`
-says why. A project with fewer than two valid windows makes the decision `incomplete` and names
-the project. A dev run adds two gates: arm `N` with the whole history solves at least 90% of the
-probes, and arm `N` without it fails at least 80%. Each gate lists the probes that fail it.
+is above the not-worse bound. A dev run only describes, and `decision.why` says so. A project
+with fewer than two valid windows makes the decision `incomplete` and names the project. A dev run adds two gates: arm `N` with the whole history solves at least 90% of the
+probes, and arm `N` without it fails at least 80%. Each gate lists the probes that fail it. The
+description rows include the share of answers per arm that name a memory store (`memory/` or the
+product name), because the blind judge reads the answer text.
 
 A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
 can pass it.

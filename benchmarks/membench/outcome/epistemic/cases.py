@@ -20,6 +20,15 @@ CASES_DIR = ("cases", "epistemic")
 STABLE = "stable"
 #: A key string of this many characters or more is checked as a substring; a shorter one as a whole token.
 MIN_SUBSTRING_CHARS = 4
+#: The behaviours the judge rates yes, no or n/a. A key lists the ones its probe asks for; ``judge`` imports this tuple.
+BEHAVIOURS = (
+    "uses_current",
+    "flags_conflict",
+    "cites_source",
+    "keeps_attribution",
+    "abstains_when_unknown",
+    "trusts_stale",
+)
 #: Top-level workspace names the harness owns: a scripted file there would collide with an arm's memory or instruction.
 RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 
@@ -95,11 +104,27 @@ def structure_problems(project: dict) -> list[str]:
             problems.append(
                 f"probe {name}: key.accept, key.rubric and key.behaviours must be lists"
             )
+        else:
+            problems += key_problems(name, key)
         # A probe that is neither stable nor tied to a change would silently drop out of every statistic.
         if (p.get("change_id") is None) != (p.get("dimension") == STABLE):
             problems.append(
                 f"probe {name}: a stable probe has no change_id, and a change probe has one"
             )
+    return problems
+
+
+def key_problems(name: str, key: dict) -> list[str]:
+    """What is wrong inside the lists of a key whose shape is right: each problem names what to fix."""
+    problems = []
+    if not all(isinstance(text, str) for text in key["accept"]):
+        problems.append(f"probe {name}: every key.accept item must be a string")
+    if not isinstance(key.get("trap"), (str, type(None))):
+        problems.append(f"probe {name}: key.trap must be a string or null")
+    if unknown := [b for b in key["behaviours"] if b not in BEHAVIOURS]:
+        problems.append(
+            f"probe {name}: key.behaviours names {unknown}, which the judge does not rate; use {list(BEHAVIOURS)}"
+        )
     return problems
 
 
@@ -199,3 +224,21 @@ def load_split(root: Path, split: str, only: str | None = None) -> dict[str, tup
     if unlisted:
         raise refused(f"SPLIT.json has no case_sha256 for {', '.join(unlisted)}")
     return {name: load_project(root, name, index["case_sha256"][name]) for name in names}
+
+
+def require_unchanged_since_run(projects: dict[str, tuple[dict, dict]], recorded: dict) -> None:
+    """Refuse when a case file's digest differs from the one the run recorded when it played that project.
+
+    ``load_split`` checks each file against ``SPLIT.json``; a report must also read the file the run played.
+    A project the run did not record is not compared.
+    """
+    changed = [
+        name
+        for name, (_, check) in projects.items()
+        if name in recorded and recorded[name]["sha256"] != check["sha256"]
+    ]
+    if changed:
+        raise refused(
+            f"the case file of {', '.join(changed)} changed since this run played it; "
+            "judge it against the file it played, or start a new run"
+        )

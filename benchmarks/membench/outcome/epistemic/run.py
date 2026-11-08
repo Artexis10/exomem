@@ -59,8 +59,17 @@ MAIN_TIMEOUT_SECONDS = 1200.0
 PROBE_TIMEOUT_SECONDS = 600.0
 #: What the judge sees of the files a probe changed is cut here, and the record says so.
 MAX_DIFF_CHARS = 20_000
-#: The arm's own folders: they are laid by the harness or hold its memory, so they never count as the actor's work.
-PRIVATE_DIRS = ("vault", "exomem-state", "transcripts", "snapshot", "hook-home")
+#: The arm's own folders: they are laid by the harness or hold its memory and its records of earlier answers,
+#: so they never count as the actor's work and the actor may not read them.
+PRIVATE_DIRS = (
+    "vault",
+    "exomem-state",
+    "transcripts",
+    "snapshot",
+    "hook-home",
+    "sessions",
+    "probes",
+)
 
 #: F's instruction is the product's learning instruction with these explicit replacements (old, new).
 #: ``folder_instruction`` fails when one misses, so a change to the product text cannot drift unseen.
@@ -122,10 +131,10 @@ class EpistemicActor(ClaudeActor):
         model: str,
         effort: str,
         *,
-        outside: list[Path],
+        root: Path,
         envelope: AgentEnvelope | None = None,
     ) -> None:
-        self._outside = outside
+        self.root = root
         super().__init__(spec, arm_dir, model, effort, "", envelope=envelope)
         # No arm gets a per-task memory sentence: an arm's instruction sits in its workspace CLAUDE.md.
         self.memory_instruction = None
@@ -138,7 +147,8 @@ class EpistemicActor(ClaudeActor):
         self.calls = 0
 
     def protected(self) -> list[Path]:
-        return [*self._outside, *(self.arm_dir / name for name in PRIVATE_DIRS)]
+        """Read per call: a project, window or run that starts after this actor did sits under ``root`` too."""
+        return [*outside_paths(self.root, self.arm_dir), *(self.arm_dir / n for n in PRIVATE_DIRS)]
 
     def _reset_work(self) -> None:
         self.lay_workspace({})
@@ -401,7 +411,7 @@ def play_project(
             project_dir / arm,
             model,
             effort,
-            outside=outside_paths(root, project_dir / arm),
+            root=root,
             envelope=envelope,
         )
         for arm in arms
@@ -578,7 +588,7 @@ def play_history_probe(window: Window, name: str, project: dict, probe: dict, fo
         folder,
         window.model,
         window.effort,
-        outside=outside_paths(window.root, folder),
+        root=window.root,
         envelope=window.envelope,
     )
     call = play_call(
