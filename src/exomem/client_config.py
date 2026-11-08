@@ -374,10 +374,16 @@ def remove_learning_instruction(path: Path) -> dict:
         ValueError: the file is not UTF-8 or its markers are unmatched (nothing is written).
     """
     path = Path(path)
-    original = _read_user_text(path)
     absent = {"action": "absent", "path": str(path), "diff": "", "backup": None}
-    if original is None:
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError):
         return absent
+    # Placing refuses a file it cannot decode, so a file without either marker holds
+    # nothing of Exomem's: report it absent rather than fail an unrelated uninstall.
+    if LEARNING_BEGIN.encode() not in raw and LEARNING_END.encode() not in raw:
+        return absent
+    original = _read_user_text(path)
     lines = original.splitlines(keepends=True)
     bounds = _learning_span(lines, path)
     if bounds is None:
@@ -387,7 +393,8 @@ def remove_learning_instruction(path: Path) -> dict:
     if not after and before and not before[-1].strip():
         before = before[:-1]
     updated = "".join(before + after)
-    if not updated:
+    # Unlinking a symlink would leave the span in its target, so empty the target instead.
+    if not updated and not path.is_symlink():
         path.unlink()
         return {"action": "removed", "path": str(path), "diff": "", "backup": None}
     diff, backup = _write_user_file(path, original, updated)

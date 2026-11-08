@@ -617,7 +617,9 @@ def _offer_learning_instruction(
                 path, prominence.LEARNING_INSTRUCTION
             )
         except (OSError, ValueError) as exc:
-            report(name, f"[failed: {exc}]")
+            # Only an explicit --learning-instruction makes an unusable file a failure;
+            # an offered step the user never asked for is skipped with the reason.
+            report(name, f"[failed: {exc}]" if choice else f"[skipped: {exc}]")
             continue
         if change == "current":
             report(name, f"[skipped: already current in {path}]")
@@ -632,7 +634,7 @@ def _offer_learning_instruction(
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
             "  Setup keeps it between Exomem markers. Delete that block, or run "
-            "`exomem install-hook --uninstall`, to remove it."
+            "`exomem install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"
