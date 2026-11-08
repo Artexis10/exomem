@@ -421,6 +421,11 @@ def _count_files(folder: Path) -> int:
     return sum(len(files) for _dirpath, _dirs, files in os.walk(folder))
 
 
+def _hidden(name: str) -> bool:
+    """Whether a scan without include_hidden skips this file or folder name (see `walk_inventory`)."""
+    return name.startswith(".")
+
+
 def _order_key(row: dict) -> tuple[int, str]:
     """A file row's place in the scan: artifacts first, then text, then rows that never import; each by path.
 
@@ -495,7 +500,7 @@ def walk_inventory(
                 if dpath.is_symlink():
                     rows.append(_row(rel_dir, 0, 0.0, eligible=False, reason="NOT_REGULAR_FILE"))
                     continue
-                if not include_hidden and d.startswith("."):
+                if not include_hidden and _hidden(d):
                     try:
                         mtime = dpath.stat().st_mtime
                     except OSError:
@@ -513,7 +518,7 @@ def walk_inventory(
             for fn in filenames:
                 if fn == import_stage.SERIES_FILE and import_stage.is_series_file(_rel(root, Path(dirpath) / fn)):
                     continue  # the series file is never an item to file, nor a hidden file to report
-                if not include_hidden and fn.startswith("."):
+                if not include_hidden and _hidden(fn):
                     hidden_files += 1
                     continue
                 fpath = Path(dirpath) / fn
@@ -3597,6 +3602,8 @@ FILING_COUNTS = ("filed", "failed", "remaining", "pages_done")  # nosemgrep: ep-
 _WORKING, _STOPPED, _DONE = FILING_STATES
 # The driver's own steps that publish: a reconciling call runs only the apply that its identity stored.
 _APPLY_STEPS = ("apply", "retry")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `apply`.
+# The driver's own steps that open a page: the first page of a scan, a later page, or a new scan of a finished one.
+_SCAN_STEPS = ("start", "rescan")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `start`.
 # What a done `file` reply carries from the last `finish` reply, which reports on that page alone.
 _PAGE_REPORT = ("coverage", "first_question", "route", "indexing")  # nosemgrep: ep-word-set -- `finish`'s closed reply fields.
 
@@ -3631,7 +3638,8 @@ def _resumed_page(store: AdoptionRunStore, runs: Iterable[dict]) -> dict | None:
     """The page that a call with only the path carries on, or None when no run has scanned the folder.
 
     It is the newest of `runs` that has a step left, else the newest of them, followed to the newest page of its
-    scan. So a retried first call never makes a second run, and a finished import answers `done` again.
+    scan. So a retried first call never makes a second run, and a finished import carries on from its last page,
+    which answers `done` unless staged files came after its scan (see `_filing_step`).
     """
     runs = tuple(runs)
     if not runs:
@@ -3645,8 +3653,9 @@ def filing_done(root: Path, path: str, runs: Iterable[dict]) -> bool:
 
     `runs` are the runs of the folder's stage, as `AdoptionRunStore.runs_by_stage` groups them.
     """
-    page = _resumed_page(AdoptionRunStore(root), (run for run in runs if run.get("source_root") == path))
-    return page is not None and _next_filing_step(page) == "done"
+    store = AdoptionRunStore(root)
+    page = _resumed_page(store, (run for run in runs if run.get("source_root") == path))
+    return page is not None and _filing_step(root, store, page) == "done"
 
 
 def _filing_page(root: Path, store: AdoptionRunStore, path: str, collection: str | None, continuation: str | None) -> dict | None:
@@ -3681,7 +3690,7 @@ def _filing_page(root: Path, store: AdoptionRunStore, path: str, collection: str
     page = _resumed_page(store, store.runs_at(source_root))
     if page is not None and _other_collection(page, collection):
         raise AdoptionRunError(
-            "INVALID_CONTINUATION",
+            "IMPORT_REQUEST_INVALID",
             f"{source_root!r} is imported as collection {page['collection']['label']!r}; "
             "pass that collection, or no collection, to carry on with it",
         )
@@ -3701,13 +3710,20 @@ def _retry_owed(run: dict) -> bool:
 def _next_filing_step(run: dict) -> str:
     """The step that moves this page on, from its saved phase alone; `done` ends the import.
 
-    A page with failed files retries them once (`retry`). Then a page with a filed file finishes. A page whose every
-    file failed is closed (`close`): `finish` refuses it, and a later page cannot plan while it stays open.
+    A page that an `apply` limited to some files (`only_paths`) left with planned files that have no outcome applies
+    them first. A page with failed files retries them once (`retry`). Then a page with a filed file finishes. A page
+    whose every file failed is closed (`close`): `finish` refuses it, and a later page cannot plan while it stays open.
     """
     phase = run["phase"]
     if phase == "selecting":
         return "plan" if run.get("plan_draft") or (run.get("selection") or {}).get("paths") else "select"
     if phase in _APPLY_PHASES:
+        return "apply"
+    outcomes = run.get("outcomes") or {}
+    # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
+    if phase in (*_FINISH_PHASES, "failed") and any(
+        item["original_path"] not in outcomes for item in (run.get("plan") or {}).get("items") or ()
+    ):
         return "apply"
     # nosemgrep: ep-word-membership -- This module's run phases are a closed protocol.
     if phase in (*_FINISH_PHASES, "failed") and _retry_owed(run):
@@ -3717,6 +3733,37 @@ def _next_filing_step(run: dict) -> str:
     if phase == "failed":
         return "close"
     return "start" if _open_cursor(run, "after") else "done"
+
+
+def _unscanned(root: Path, store: AdoptionRunStore, page: dict) -> int:
+    """How many staged files under the page's folder no page of its scan classifies: the residual's `outside_run`.
+
+    Such a file came after the scan, such as one that a rerun of a local import copied, or one put in the stage by
+    hand. The classification is the residual's own (`adoption_consume.stage_reasons` over the pages of the scan), so
+    a `done` reply's residual reads the same pages. A hidden file does not count: a scan skips it by design, so a new
+    scan would not classify it either.
+    """
+    parts = PurePosixPath(page["source_root"]).parts
+    if len(parts) < 2 or parts[0] != IMPORT_STAGE_DIR:
+        return 0
+    inner = parts[2:]  # the folder that the scan covered inside the stage, when it did not cover the whole stage
+    files = [
+        (path, size) for path, size in import_stage.staged_files(root, parts[1])
+        if PurePosixPath(path).parts[:len(inner)] == inner
+        and not any(_hidden(name) for name in PurePosixPath(path).parts[len(inner):])
+    ]
+    pages = (page, *_earlier_pages(store, page))
+    reasons = adoption_consume.stage_reasons(parts[1], files, pages, _APPLIED_STATUSES)
+    return sum(1 for _path, _size, reason in reasons if reason == adoption_consume.OUTSIDE_RUN)
+
+
+def _filing_step(root: Path, store: AdoptionRunStore, run: dict) -> str:
+    """The step that moves the import on: the page's own step, or `rescan` when its scan is done and missed staged files.
+
+    `done` ends the import only when no staged file came after the scan; else a new scan of the folder files them.
+    """
+    step = _next_filing_step(run)
+    return "rescan" if step == "done" and _unscanned(root, store, run) else step
 
 
 def _held_apply(store: AdoptionRunStore, run: dict, identity_digest: str) -> tuple[str, dict] | None:
@@ -3744,6 +3791,13 @@ def _file_step(
             )
         else:
             opened = start(root, after=f"{run['run_id']}:{_open_cursor(run, 'after')}", today=today)
+        return store.load(opened["run_id"])
+    if step == "rescan":
+        # The new scan keeps the label of the finished one, so a file that the finished scan filed is not filed twice.
+        opened = start(
+            root, path=run["source_root"], collection=run["collection"]["label"],
+            max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
+        )
         return store.load(opened["run_id"])
     run_id = run["run_id"]
     if step == "select":
@@ -3814,10 +3868,10 @@ def file(
             )
             return _filing_reply(root, store, _chain_end(store, store.load(page_id)))
         while True:
-            step = "start" if run is None else _next_filing_step(run)
+            step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":
                 break
-            if steps and (step == "start" or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)):
+            if steps and (step in _SCAN_STEPS or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)):
                 break
             if step in _APPLY_STEPS and reconciling:
                 # Only the identity's own held apply may run under reconciliation; this attempt published nothing.
@@ -3842,9 +3896,9 @@ def file(
     return _filing_reply(root, store, run)
 
 
-def _filing_state(run: dict) -> tuple[str, dict | None]:
-    """`done`, `stopped` for space with why, or `working`, from the newest page alone."""
-    if _next_filing_step(run) == "done":
+def _filing_state(root: Path, store: AdoptionRunStore, run: dict) -> tuple[str, dict | None]:
+    """`done`, `stopped` for space with why, or `working`, from the newest page and its stage."""
+    if _filing_step(root, store, run) == "done":
         return _DONE, None
     stop = run.get("apply_stop")
     if stop:
@@ -3862,7 +3916,9 @@ def _page_remaining(run: dict) -> int:
     if run["phase"] in _FINISHED_PHASES:
         return 0
     if run.get("plan"):
-        return _progress(run)["remaining"]
+        # Every planned file without an outcome, also one outside the last `apply`'s `only_paths`: the next step applies it.
+        outcomes = run.get("outcomes") or {}
+        return sum(_is_open(outcomes, item["original_path"]) for item in run["plan"]["items"])
     selected = (run.get("selection") or {}).get("paths")
     return len(selected) if selected else sum(1 for row in run.get("inventory") or [] if row.get("eligible"))
 
@@ -3898,7 +3954,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     residual and, under `last_finished_page`, what the last `finish` reported about its own page alone.
     """
     run = store.load(run["run_id"])
-    filing, derived = _filing_state(run)
+    filing, derived = _filing_state(root, store, run)
     if stop is not None:
         filing, derived = _STOPPED, stop
     pages = (run, *_earlier_pages(store, run))
@@ -3906,6 +3962,8 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     filed = sum(1 for outcome in outcomes if outcome.get("status") in _APPLIED_STATUSES)
     failed = sum(1 for outcome in outcomes if outcome.get("status") == "failed")
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
+    if _next_filing_step(run) == "done":
+        remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
     pages_done = sum(1 for page in pages if page["phase"] in _FINISHED_PHASES)
     person: list[dict] = []
     if stop is None and filing == _STOPPED and run.get("apply_stop"):
@@ -3926,11 +3984,8 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         reply["stop"] = derived
     if filing == _DONE:
         finished = next((page for page in pages if page.get("finish")), None)
-        residual = (
-            run["finish"]["residual"] if run.get("finish")
-            # The last page finished nothing (it held no file to import, or every file failed), so the residual is read now.
-            else adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
-        )
+        # Read now from the stage, as `_unscanned` reads it, so a file put in the stage after the last `finish` is listed.
+        residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
         done: dict = {}
         if finished is not None:
             finish = _presented_finish(finished)

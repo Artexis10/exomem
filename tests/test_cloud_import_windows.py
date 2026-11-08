@@ -1485,6 +1485,21 @@ def test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_
     assert result["filing"]["windows_waiting"] == 1 and "Keep the source folder" in rig.said()
 
 
+def test_a_file_call_that_fails_on_the_way_stops_that_window_and_the_upload_still_ends(rig):
+    """Catches a dropped connection on one `file` call that ends the whole upload command, not that window's filing."""
+    rig.files(a01__bin=800)
+
+    async def connection_drops(path, *, collection=None, continuation=None):
+        raise httpx2.ConnectError("connection reset by peer")
+
+    rig.cell.file = connection_drops
+
+    result = rig.run(file=True)
+
+    assert "Filing window 1 stopped (NETWORK_ERROR)" in rig.said()
+    assert result["filing"]["windows_waiting"] == 1 and "Keep the source folder" in rig.said()
+
+
 def test_a_window_that_stops_for_space_is_filed_again_from_its_continuation_on_the_next_poll(rig):
     """Catches a stopped window that the CLI forgets, or one that it restarts from the beginning."""
     nine(rig)

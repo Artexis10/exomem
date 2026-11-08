@@ -59,7 +59,8 @@ WORKING, STOPPED, DONE = adoption_run.FILING_STATES
 # The CLI's own state for a `file` call that the cell refused with an error; no `file` reply has it.
 CALL_ERROR = "error"
 # The cell reconciles a `file` call whose outcome it could not report only under the same call, so the CLI repeats that
-# call: once after an unknown outcome, and after a wait while the acknowledgement is pending.
+# call: once after an unknown outcome, and after a wait while the acknowledgement is pending. The codes are the writer
+# lease's own; `cli_ops` names them only as keys of its private remediation table, so there is no name to import.
 _REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"})  # nosemgrep: ep-word-set -- the cell's closed outcome codes.
 _REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
 # The code with which a cell refuses an action that it does not know.
@@ -137,16 +138,15 @@ class McpCell(Cell):
 
         A schema that cannot be read, or that lists no kinds, proves nothing, so the caller keeps the error as a stop.
         """
-        try:
-            tools = await self._client.list_tools()
-        except Exception:  # noqa: BLE001 -- a listing that fails says nothing about the action
-            return False
         kinds: set[str] = set()
-        for tool in tools:
-            operation = ((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}
-            for variant in (operation.get("oneOf") or operation.get("anyOf") or ()) if tool.name == "import_memory" else ():
-                kind = ((variant if isinstance(variant, dict) else {}).get("properties") or {}).get("kind") or {}
-                kinds.update([kind["const"]] if "const" in kind else kind.get("enum") or ())
+        try:
+            for tool in await self._client.list_tools():
+                operation = ((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}
+                for variant in (operation.get("oneOf") or operation.get("anyOf") or ()) if tool.name == "import_memory" else ():
+                    kind = ((variant if isinstance(variant, dict) else {}).get("properties") or {}).get("kind") or {}
+                    kinds.update([kind["const"]] if "const" in kind else kind.get("enum") or ())
+        except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the action
+            return False
         return bool(kinds) and "file" not in kinds
 
 
@@ -494,7 +494,14 @@ class _Run:
         path, continuation = f"{import_stage.STAGE_DIR}/{import_id}", self.unfiled[import_id]
 
         async def call() -> FilingReply:
-            return FilingReply.of(await self.cell.file(path, collection=self.collection, continuation=continuation))
+            try:
+                reply = await self.cell.file(path, collection=self.collection, continuation=continuation)
+            except FilingUnavailable:
+                raise
+            except Exception as error:  # noqa: BLE001 -- a call that fails on the way stops this window only; it keeps its place
+                return FilingReply.refused(_coded(_Where(WINDOWS, import_id), error).code,
+                                           "the file call failed before the cell's answer arrived")
+            return FilingReply.of(reply)
 
         reply = await call()
         if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:
@@ -534,7 +541,8 @@ class _Run:
                     self.progress.say(self.refusal)
                     return moved
                 if reply.state == CALL_ERROR:
-                    # No step ran, so the window keeps its continuation for the next pass, or for a rerun after this one ends.
+                    # The cell refused the call, or the call failed on the way: the window keeps its continuation for the
+                    # next pass, or for a rerun after this one ends.
                     self._say_stop(import_id, reply)
                     break
                 previous = self.marks.get(import_id)

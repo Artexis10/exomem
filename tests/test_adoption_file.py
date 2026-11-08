@@ -13,7 +13,14 @@ import pytest
 from fastmcp import Client
 from test_adoption_paging import PDF, _stage
 
-from exomem import adoption_run, client_artifacts, command_surface, server, writer_lease
+from exomem import (
+    adoption_run,
+    client_artifacts,
+    command_surface,
+    local_import,
+    server,
+    writer_lease,
+)
 
 TODAY = dt.date(2026, 10, 27)
 FILES = 5
@@ -288,6 +295,81 @@ def test_a_call_with_only_the_path_after_done_answers_done_again_and_starts_no_r
     assert again["progress"] == done["progress"] and _runs(vault) == runs
 
 
+def test_a_file_that_a_rerun_of_a_local_import_copies_after_done_is_filed_by_the_next_call(vault, tmp_path, monkeypatch):
+    """Catches a finished import that answers `done` from its old scan, so the file that a rerun copied is never filed."""
+    monkeypatch.setattr(local_import, "user_state_dir", lambda name: str(tmp_path / "user-state"))
+    folder = tmp_path / "elsewhere" / "Field Notes"
+    folder.mkdir(parents=True)
+    (folder / "a.txt").write_text("The first field note.\n", encoding="utf-8")
+    (folder / "z.txt").write_text("The last field note.\n", encoding="utf-8")
+    publish = local_import.held_fs.publish_bytes
+
+    def disk_refuses_the_last_file(fs, directory, leaf, *arguments, **options):
+        if leaf == "z.txt":
+            return local_import.held_fs.HeldResult(error=local_import.held_fs.HeldFsError("IO_REFUSED", "disk is full"))
+        return publish(fs, directory, leaf, *arguments, **options)
+
+    monkeypatch.setattr(local_import.held_fs, "publish_bytes", disk_refuses_the_last_file)
+    first = local_import.stage(folder, vault)
+    assert first["code"] == "COPY_INCOMPLETE"
+    before = _sources(vault)
+    assert _file_to_the_end(vault, first["start_path"])["progress"]["filed"] == 1
+    monkeypatch.setattr(local_import.held_fs, "publish_bytes", publish)
+    assert local_import.stage(folder, vault)["ok"]
+
+    again = _file_to_the_end(vault, first["start_path"])
+
+    assert again["filing"] == "done"
+    added = [path.read_text(encoding="utf-8") for path in _sources(vault) if path not in before]
+    assert len(added) == 2 and sum("The last field note." in text for text in added) == 1
+
+
+def test_a_file_put_in_the_stage_after_done_is_filed_by_the_next_call(vault, monkeypatch):
+    """Catches a finished import whose stored residual and `done` hide a file put in the stage after its last finish."""
+    monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
+    staged = _staged(vault)
+    (vault / staged / "doc9.bin").write_bytes(b"x" * (len(PDF) + 50))  # stays staged, so the stage folder stays
+    _file_to_the_end(vault, staged)
+    before = _sources(vault)
+    (vault / staged / "late.pdf").write_bytes(PDF + b"late")
+
+    again = _file_to_the_end(vault, staged)
+
+    assert again["filing"] == "done" and len(_sources(vault)) - len(before) == 1
+    assert "outside_run" not in again["filed"]["residual"]["by_reason"]
+
+
+def test_a_hidden_file_put_in_the_stage_after_done_starts_no_scan_and_the_done_reply_lists_it(vault, monkeypatch):
+    """Catches a hidden file that makes every later call scan the stage again, or a done reply that leaves it out."""
+    monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(PDF) + 5))
+    staged = _staged(vault)
+    (vault / staged / "doc9.bin").write_bytes(b"x" * (len(PDF) + 50))  # stays staged, so the stage folder stays
+    _file_to_the_end(vault, staged)
+    runs = _runs(vault)
+    (vault / staged / ".folder-settings").write_bytes(b"view options")
+
+    again = adoption_run.file(vault, path=staged, today=TODAY)
+
+    assert again["filing"] == "done" and _runs(vault) == runs
+    assert again["filed"]["residual"]["by_reason"]["outside_run"]["files"] == 1
+
+
+def test_a_page_that_an_apply_of_some_files_left_gets_every_planned_file_filed(vault):
+    """Catches a page whose `apply` with only_paths left planned files without an outcome, which `file` then finished."""
+    staged = _staged(vault, PAGE)
+    run_id = adoption_run.start(vault, path=staged, today=TODAY)["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=[staged])
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    first = planned["plan"]["items"][0]["original_path"]
+    adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], only_paths=[first], today=TODAY)
+    before = _sources(vault)
+
+    reply = _file_to_the_end(vault, staged)
+
+    assert reply["filing"] == "done" and reply["progress"]["filed"] == PAGE
+    assert len(_sources(vault)) - len(before) == PAGE - 1
+
+
 def test_a_call_with_only_the_path_that_names_another_collection_is_refused_with_the_imports_own(vault):
     """Catches a second collection name that the import drops without a word, so the person files under the wrong label."""
     staged = _staged(vault)
@@ -297,7 +379,7 @@ def test_a_call_with_only_the_path_that_names_another_collection_is_refused_with
     with pytest.raises(adoption_run.AdoptionRunError) as refused:
         adoption_run.file(vault, path=staged, collection="Reading List", today=TODAY)
 
-    assert refused.value.code == "INVALID_CONTINUATION" and "'Field Notes'" in refused.value.reason
+    assert refused.value.code == "IMPORT_REQUEST_INVALID" and "'Field Notes'" in refused.value.reason
     assert adoption_run.file(vault, path=staged, collection="Field Notes", today=TODAY)["run_id"] == first["run_id"]
 
 
