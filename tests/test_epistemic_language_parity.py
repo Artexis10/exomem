@@ -1731,35 +1731,17 @@ def test_an_episode_correction_does_not_pin_the_target_of_a_grandfathered_extens
     assert _pins_its_target(tmp_path / "vault", "x.leans_on") is False  # FLIPS 9
 
 
-def test_a_possessive_turn_carries_only_claims_that_name_the_subject_by_about_entity(
-    vault: Path,
-) -> None:
-    """Working-set admission reads the subject relation of each claim.
+def _carried_gauges(vault: Path, gauges: tuple[tuple[str, str], ...]) -> set[str]:
+    """The gauges of the claims that a possessive turn about the sled carries from `CARRY_PAGE`.
 
-    A turn that asks about "Cargo Sled's quillon vantry constraint" admits a
-    claim of an unrelated research note only when the claim says `about_entity`
-    on the sled. Four claims differ only in the relation word; the page names
-    no sled, so the relation alone decides.
-
-    FLIPS 7: the `x.concerns` extension and its alias `concerns` do not admit
-    today, because admission matches the key `about_entity`. After intended
-    change 7 both admit, and the unregistered word still does not.
+    Each claim says `word: [[sled]]` and names its gauge in its text, so the relation word
+    alone decides whether the page's claim is admitted.
     """
-    _seed_structure(vault)
-    _seed_planning(vault)
-    _seed_carry_pages(vault)
-    _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
-    gauges = (
-        ("core", "about_entity", "blue"),
-        ("extension", "x.concerns", "amber"),
-        ("alias", "concerns", "green"),
-        ("unregistered", "x.unknown", "red"),
-    )
     claims = "".join(
-        f"## Claim\n- category: constraint\n- id: {name}\n"
+        f"## Claim\n- category: constraint\n- id: {gauge}\n"
         f"- relations: {word}: [[{SLED_ANCHOR}]]\n\n"
         f"The quillon vantry constraint uses the {gauge} gauge.\n\n"
-        for name, word, gauge in gauges
+        for word, gauge in gauges
     )
     _write(
         vault,
@@ -1776,12 +1758,38 @@ def test_a_possessive_turn_carries_only_claims_that_name_the_subject_by_about_en
         )
     finally:
         request_budget.reset_current(token)
-
-    carried = {
+    return {
         gauge
         for unit in packet["units"]
         if unit["provenance"]["path"] == CARRY_PAGE
-        for _name, _word, gauge in gauges
+        for _word, gauge in gauges
         if f"{gauge} gauge" in unit["text"]
     }
-    assert carried == {"blue"}  # CORE for blue; FLIPS 7 adds amber and green
+
+
+def test_a_possessive_turn_carries_the_claims_that_name_the_subject_through_a_registered_relation(
+    vault: Path,
+) -> None:
+    """Working-set admission reads the subject relation of each claim.
+
+    A turn that asks about "Cargo Sled's quillon vantry constraint" admits a claim of an
+    unrelated research note only when the claim names the sled through a relation that
+    names its subject. The page names no sled, so the relation alone decides. The packet
+    lists two units of one page, so the claims run in two rounds.
+
+    FLIPS 7: the `x.concerns` extension and its alias `concerns` did not admit, because
+    admission matched the key `about_entity`. Both admit now, and the unregistered word
+    still does not.
+    """
+    _seed_structure(vault)
+    _seed_planning(vault)
+    _seed_carry_pages(vault)
+    _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+
+    core = _carried_gauges(vault, (("about_entity", "blue"), ("x.unknown", "red")))
+    named = _carried_gauges(
+        vault, (("x.concerns", "amber"), ("concerns", "green"), ("x.unknown", "red"))
+    )
+
+    assert core == {"blue"}  # CORE
+    assert named == {"amber", "green"}  # FLIPS 7

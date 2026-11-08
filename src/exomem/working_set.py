@@ -3743,7 +3743,7 @@ def _carry_admission(
     A rich unit proves subject-associated context, never ownership of every
     sentence. Uncovered prose has no such association and cannot be a bypass.
     """
-    from . import find, semantic_language_registry, vault
+    from . import find, relation_registry, semantic_language_registry, vault
 
     scopes = working_set_resolve.possessive_scopes(analysis)
     if not scopes:
@@ -3772,6 +3772,7 @@ def _carry_admission(
         ) if len(matches) == 1 else frozenset()
     restricted = {}
     registries = {}
+    relation_registries = {}
     language = semantic_language_registry.load_registry(vault_root)
     for path, page in pages.items():
         if page is None:
@@ -3794,6 +3795,8 @@ def _carry_admission(
         restricted[path] = tuple(local)
         registries[path] = semantic_language_registry.for_attached_projects(
             language, tuple(find._all_projects(page.frontmatter)))
+        relation_registries[path] = relation_registry.load_for_page(
+            vault_root, path, page.frontmatter)
 
     def admit(path, hit):
         if path not in restricted:
@@ -3804,9 +3807,11 @@ def _carry_admission(
             return False
         # Subject relations must identify the canonical page. A short alias
         # alone cannot prove identity, even when the turn used a unique name.
+        names_subject = relation_registries[path]
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
-            for relation in hit.relations if relation.get("kind") == "about_entity"}
+            for relation in hit.relations
+            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False

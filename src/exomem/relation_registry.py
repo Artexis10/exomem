@@ -255,6 +255,10 @@ class RelationRegistry:
         parent = self.core.get(definition.parent or "")
         return parent.behaviours if parent is not None else frozenset()
 
+    def behaviours_of_label(self, label: str) -> frozenset[str]:
+        """`behaviours_of` for a relation as an author wrote it: a key, an alias or an extension."""
+        return self.behaviours_of(self.resolve(label).canonical or "")
+
     def keys_with(self, behaviour: str) -> frozenset[str]:
         """Every core key and every extension, whatever its status, that has `behaviour`.
 
