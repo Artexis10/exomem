@@ -141,10 +141,10 @@ Expected result: after the next backup of each media cell, cellctl logs `holds <
 
 ## Turn on collection
 
-Collection needs a release that carries `collect-released-media`, and the bucket's lifecycle rule with a
-grace period. Each backup that prunes then hides the names that its cell released and that no retained
-backup reaches. The rule deletes each hidden or superseded version when the grace period ends. No rule
-hides a version by age.
+Collection needs a release that carries `collect-released-media`, the bucket's lifecycle rule with a grace
+period, and the cell on `mediaEdge.collectCells`. Each backup that prunes then hides the names that its cell
+released and that no retained backup reaches. The rule deletes each hidden or superseded version when the
+grace period ends. No rule hides a version by age.
 
 Before you start:
 
@@ -155,48 +155,68 @@ Before you start:
 - Agree the pinned-set change with the owner of `contain-cloud-controller-compromise`. That change owns
   the watcher's pinned set.
 
-1. Deploy the cell image, the edge, cellctl and the chart as one release, with the command in step 2 of "Undo".
-   The manifest, the collector credential and the condemn operation depend on each other.
-2. Check that the canary holds the collector credential:
-   `kubectl -n exo-cell-<canary> get secret cell-credentials -o jsonpath='{.data.media-edge-collector-credential}'`
-   Expect output.
-3. Read the active set as in step 2 of "Turn the edge off". Expect the canary under `"collectors"`.
-4. After the canary's next backup that prunes, read its backup Job log:
-   `kubectl -n exo-cell-<canary> logs -l exomem.io/cell-job=backup --tail=-1 | grep "media collection"`
-   Expect `media collection: <n> hidden of <m> candidates`. A line `media collection stopped:` gives the reason.
-5. Read the canary's last meter line:
+1. Keep `mediaEdge.collectCells` empty. Deploy the edge, cellctl and the chart with the command in step 2 of "Undo".
+2. Wait for the edge to roll out: `kubectl -n exomem-cloud rollout status deployment/exomem-media-edge`
+   Expect `successfully rolled out`.
+3. After step 2, roll the new cell image out through cellctl. A new cell treats a HEAD answer without a
+   version status as an outage, so the edge must serve the new image first.
+4. Read the canary's last meter line:
    `kubectl -n exomem-cloud logs deployment/cellctl | grep "cell <canary> holds" | tail -n 1`
    Expect `0 name(s) with more than one upload version`.
-6. If the count is above 0 or unknown, stop and do not apply the rule. See the gate note below.
-7. Set the durability variable `cloud_media_condemned_days` to the grace period, with the root's other private values.
-8. Plan the durability root: `infra/scripts/plan.sh durability <plan>`
+5. If the count is above 0 or unknown, stop and do not apply the rule. See the gate note below.
+6. Set the durability variable `cloud_media_condemned_days` to the grace period, with the root's other private values.
+7. Plan the durability root: `infra/scripts/plan.sh durability <plan>`
    Expect two changes: the media bucket's rule gains `days_from_hiding_to_deleting`, and one new key,
    `key_watcher_media_list`. A plan without the variable fails and names it.
-9. With the operator's approval, apply that plan: `infra/scripts/apply_saved_plan.sh durability <plan>`
-10. Store the watcher's media key ID:
-    `terraform -chdir=infra/terraform/durability output -raw key_watcher_media_list_application_key_id | gh secret set B2_WATCHER_MEDIA_KEY_ID --env key-watcher`
-11. Store the watcher's media key:
+8. With the operator's approval, apply that plan: `infra/scripts/apply_saved_plan.sh durability <plan>`
+9. Store the watcher's media key ID:
+   `terraform -chdir=infra/terraform/durability output -raw key_watcher_media_list_application_key_id | gh secret set B2_WATCHER_MEDIA_KEY_ID --env key-watcher`
+10. Store the watcher's media key:
     `terraform -chdir=infra/terraform/durability output -raw key_watcher_media_list_application_key | gh secret set B2_WATCHER_MEDIA_KEY --env key-watcher`
-12. Pin the new key and the media watch, as "Pin the media watch" in `cloud-key-custody.md` says.
-13. Export the operator key for the media bucket, as in step 1 of "Media bucket of a deleted cell" in `cloud-key-custody.md`.
-14. Read that key's capabilities:
+11. Pin the new key and the media watch, as "Pin the media watch" in `cloud-key-custody.md` says.
+12. Export the operator key for the media bucket, as in step 1 of "Media bucket of a deleted cell" in `cloud-key-custody.md`.
+13. Read that key's capabilities:
     `curl -fsS -u "$CELL_CLEANUP_B2_KEY_ID:$CELL_CLEANUP_B2_APPLICATION_KEY" https://api.backblazeb2.com/b2api/v4/b2_authorize_account | jq -c '.apiInfo.storageApi.allowed | {capabilities, buckets: [.buckets[]?.id]}'`
     Expect `deleteFiles` in `capabilities` and the media bucket's ID in `buckets`. A rescue needs both.
+14. Add the canary to `mediaEdge.collectCells` in the private values file. Deploy the chart as in step 1.
+15. Check that the canary holds the collector credential:
+    `kubectl -n exo-cell-<canary> get secret cell-credentials -o jsonpath='{.data.media-edge-collector-credential}'`
+    Expect output.
+16. Read the active set as in step 2 of "Turn the edge off". Expect the canary under `"collectors"`.
+17. After the canary's next backup that prunes, read the collection result in cellctl's log:
+    `kubectl -n exomem-cloud logs deployment/cellctl | grep "cell <canary>'s media collection" | tail -n 1`
+    Expect `media collection complete (-): <n> name(s) hidden of <m> candidate(s), 0 refused by the edge`.
 
-Expected result: the watcher's run shows `<n> media hides in the window` and no `MEDIA_` token, and the
-canary's backups keep logging `media collection:`.
+Expected result: the watcher's run shows `<n> media hides in the window` and no `MEDIA_` token, and
+cellctl logs `media collection complete` for the canary after each backup that prunes.
+
+The backup Job's pod is gone before you can read its log, so the Job reports its result to cellctl, which
+logs it when the backup ends. The result carries counts and a reason, never a name. "Refused by the edge"
+counts the names that the edge refused one at a time; the pass went on past each of them. Another outcome
+names its reason in parentheses:
+
+| Result | Meaning |
+|---|---|
+| `unknown-manifest (-)` | A retained backup has no complete manifest, so the Job hid nothing. Collection starts once the backups from before the release are pruned. |
+| `stopped (edge-outage)` | The edge did not answer, or answered with a server error. The next backup tries again. |
+| `stopped (edge-refused)` | The edge refused the collector credential. Repeat steps 15 and 16. |
+| `stopped (edge-answer)` | The edge answered in a way the Job does not know. Check the edge's image as in step 2 of "Triage a burst of hides". |
+| `stopped (restic)` | restic could not list the retained backups. |
+| `stopped (credential)` or `stopped (unconfigured)` | The Job could not read its collector credential, or has none. Repeat steps 15 and 16. |
+| `stopped (deadline)` | The Job's time ran out during the pass. The next backup goes on from the names that are still visible. |
+| `stopped (fault)` or `stopped (no-result)` | The pass failed or printed no result. Read the next backup's Job log while its pod exists. |
 
 Gate note: a name with two upload versions loses the older one when the rule applies. If the canary's
 reference names the older version, its original would be lost. This release has no tool that maps a stored
 name to its original. The cell offloads an original again under a new name when its version is not current:
 at its next eviction pass if it holds the bytes, and after a read that hydrates them if it does not. Ask the
-canary's owner to open the evicted originals, then repeat step 5 after the next backup.
+canary's owner to open the evicted originals, then repeat step 4 after the next backup.
 
-The rule counts each hide from the time it was made. Apply it less than one grace period after step 1, so
-that no hide made before the rule existed is past its grace when the rule applies.
+No cell collects before step 14, so no hide exists before the rule applies.
 
 The undo is the grace period: rescue a version, as "Rescue a hidden version" says, before it ends.
-Removing the canary's collector entry stops all collection for the canary.
+To stop collection for a cell, take it off `mediaEdge.collectCells` and deploy the chart. Its collector entry
+and its credential go, and its backups hide nothing more.
 
 ## Triage a burst of hides
 
@@ -305,12 +325,13 @@ counts its evicted originals.
     `kubectl get namespace exo-cell-<cell> -o jsonpath='{.metadata.labels.exomem\.io/media-edge-access}'`
     Expect no output.
 11. Check that the ConfigMap no longer lists the cell under `"cells"` and that `/v1/generation`
-    reports the new number and the digest of the published set. The cell stays under `"collectors"`.
+    reports the new number and the digest of the published set. A cell on `mediaEdge.collectCells`
+    stays under `"collectors"`.
 
 Expected result: the cell serves its local files and keeps its store identity alone, so
-it reads no original as deleted. Its runtime has no key, credential or edge access. Its
-backup Job keeps the collector credential and its egress to the edge, so its backups keep
-condemning the names that it releases.
+it reads no original as deleted. Its runtime has no key, credential or edge access. While
+the cell stays on `mediaEdge.collectCells`, its backup Job keeps the collector credential and
+its egress to the edge, so its backups keep condemning the names that it releases.
 
 cellctl keeps the cell's key bundle after an undo. A later return reuses the bundle and
 gets a new credential version, so a credential from before the undo stays revoked.
@@ -324,9 +345,9 @@ therefore reads ConfigMap `exomem-media-edge-active-set` and refuses while
 `active-set.json` lists any cell. Draining cells stay listed. The refusal names each
 cell, and the upgrade changes nothing.
 
-The check also refuses while the set lists any collector. A cell keeps its collector entry
-while it holds a store identity, a drained cell included, so its backups keep collecting. No
-step removes that entry before the cell is deleted. While any cell holds a store, keep the edge on.
+The check also refuses while the set lists any collector. A cell on `mediaEdge.collectCells`
+keeps its collector entry while it holds a store identity, a drained cell included, so its
+backups keep collecting. Empty that list before you turn the edge off.
 
 `helm template`, a client-side dry run and `helm rollback` cannot read the cluster, so
 they skip this check. Use `helm upgrade` or `helm upgrade --dry-run=server` to turn the
@@ -338,7 +359,9 @@ edge off.
    Expect `"cells":{}` and no `"collectors"`.
 3. If a cell is still listed, read its drain record as in step 7 of the undo. Wait for
    its next backup, then repeat step 2.
-4. Set `mediaEdge.enabled=false` and deploy the chart with the command in step 2 of the undo.
+4. If a collector is still listed, remove it from `mediaEdge.collectCells`. Deploy the chart
+   with the command in step 2 of the undo, then repeat step 2.
+5. Set `mediaEdge.enabled=false` and deploy the chart with the command in step 2 of the undo.
 
 Expected result: the upgrade succeeds, and no cell has `8769` in its egress. The state
 volume `exomem-media-edge-state` stays after `mediaEdge.enabled=false`. Delete it by hand
