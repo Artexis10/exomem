@@ -1,9 +1,11 @@
-"""Write MCP server registration into agent clients' own config files.
+"""Write Exomem's entries into agent clients' own files.
 
-The setup wizard has always shelled out to Claude's MCP registration CLI, but
-every other client only ever got a printed snippet for the user to paste. That is
-the difference between "installed" and "here are instructions", and it is why
-Codex users ended up with no working registration.
+Two entries live here: the MCP server registration, and the learning instruction
+in each client's user-level instruction file. The setup wizard has always shelled
+out to Claude's MCP registration CLI, but every other client only ever got a
+printed snippet for the user to paste. That is the difference between "installed"
+and "here are instructions", and it is why Codex users ended up with no working
+registration.
 
 These files belong to the user, so the rules here are deliberately conservative:
 merge rather than overwrite, back up before touching anything, show exactly what
@@ -240,6 +242,12 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"refusing to write invalid TOML to {path}: {e}") from e
 
+    diff, backup = _write_user_file(path, original, updated)
+    return {"action": action, "path": str(path), "diff": diff, "backup": backup}
+
+
+def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str | None]:
+    """Back up, diff and write one user-owned file. Returns (diff, backup path)."""
     diff = "".join(
         difflib.unified_diff(
             original.splitlines(keepends=True),
@@ -256,5 +264,131 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
         shutil.copy2(path, backup_path)
         backup = str(backup_path)
     path.write_text(updated, encoding="utf-8", newline="")
+    return diff, backup
 
+
+# The learning instruction sits between these two lines, so a re-run replaces only
+# that span and uninstall removes only it. They are protocol tokens Exomem owns.
+LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
+LEARNING_END = "<!-- END exomem learning instruction -->"
+
+
+def claude_home() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+
+
+def instruction_file(client: str, home: Path) -> Path:
+    """The user-level instruction file a client reads from its config home.
+
+    The names are each client's documented file, a closed set the clients fix.
+    """
+    return Path(home) / ("AGENTS.md" if client == "codex" else "CLAUDE.md")
+
+
+def _read_user_text(path: Path) -> str | None:
+    """The file's exact text, line endings included, or None when it is absent."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"cannot read {path} as UTF-8 text ({exc}); nothing was changed") from exc
+
+
+def _learning_span(lines: list[str], path: Path) -> tuple[int, int] | None:
+    """Line indexes of the BEGIN and END markers, or None when neither is present."""
+    begins = [i for i, line in enumerate(lines) if line.strip() == LEARNING_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.strip() == LEARNING_END]
+    if not begins and not ends:
+        return None
+    if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
+        return begins[0], ends[0]
+    # Guessing which marker is stray could delete the user's own lines, so refuse.
+    raise ValueError(
+        f"{path} does not hold exactly one Exomem learning-instruction span. "
+        f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line, "
+        "or delete every marker line, then run the command again."
+    )
+
+
+def _plan_learning_instruction(path: Path, text: str) -> tuple[str, str, str]:
+    """(action, original, updated) for placing ``text``; action is "current" when nothing changes.
+
+    A file without the span gets it appended after one blank line; a file with the
+    span gets only the span replaced. A CRLF file keeps CRLF.
+    """
+    existing = _read_user_text(path)
+    original = existing or ""
+    newline = "\r\n" if "\r\n" in original else "\n"
+    span = newline.join([LEARNING_BEGIN, text, LEARNING_END]) + newline
+    lines = original.splitlines(keepends=True)
+    bounds = _learning_span(lines, path)
+    if bounds is None:
+        if original:
+            body = original if original.endswith("\n") else original + newline
+            updated, action = body + newline + span, "added"
+        else:
+            updated, action = span, "created" if existing is None else "added"
+    else:
+        start, end = bounds
+        updated = "".join(lines[:start]) + span + "".join(lines[end + 1 :])
+        action = "updated"
+    return ("current" if updated == original else action), original, updated
+
+
+def learning_instruction_change(path: Path, text: str) -> str:
+    """What `place_learning_instruction` would do: "created", "added", "updated" or "current".
+
+    Writes nothing. Raises ValueError when the file is not UTF-8 or its markers are unmatched.
+    """
+    return _plan_learning_instruction(Path(path), text)[0]
+
+
+def place_learning_instruction(path: Path, text: str) -> dict:
+    """Put ``text`` between the learning markers in ``path``, changing nothing outside them.
+
+    Returns {"action": "created"|"added"|"updated"|"current", "path", "diff", "backup"};
+    "current" writes nothing.
+
+    Raises:
+        ValueError: the file is not UTF-8 or its markers are unmatched (nothing is written).
+    """
+    path = Path(path)
+    action, original, updated = _plan_learning_instruction(path, text)
+    if action == "current":
+        return {"action": action, "path": str(path), "diff": "", "backup": None}
+    diff, backup = _write_user_file(path, original, updated)
     return {"action": action, "path": str(path), "diff": diff, "backup": backup}
+
+
+def remove_learning_instruction(path: Path) -> dict:
+    """Remove the learning span from ``path`` and nothing else.
+
+    Also drops the one blank line `place_learning_instruction` put before a span at
+    the end of the file. A file left empty held only the span, so it is deleted.
+    Returns {"action": "removed"|"absent", "path", "diff", "backup"}.
+
+    Raises:
+        ValueError: the file is not UTF-8 or its markers are unmatched (nothing is written).
+    """
+    path = Path(path)
+    original = _read_user_text(path)
+    absent = {"action": "absent", "path": str(path), "diff": "", "backup": None}
+    if original is None:
+        return absent
+    lines = original.splitlines(keepends=True)
+    bounds = _learning_span(lines, path)
+    if bounds is None:
+        return absent
+    start, end = bounds
+    before, after = lines[:start], lines[end + 1 :]
+    if not after and before and not before[-1].strip():
+        before = before[:-1]
+    updated = "".join(before + after)
+    if not updated:
+        path.unlink()
+        return {"action": "removed", "path": str(path), "diff": "", "backup": None}
+    diff, backup = _write_user_file(path, original, updated)
+    return {"action": "removed", "path": str(path), "diff": diff, "backup": backup}

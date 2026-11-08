@@ -150,6 +150,21 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+#: The learning instruction: the user's own request to recall before a task and to
+#: save what the task establishes. Agents read the server's policy text as
+#: background; the same request changed what they did only when it arrived as the
+#: user's instruction. So it lives in the user's instruction file, never in a server,
+#: bootstrap or hook channel. `exomem setup` offers it for Claude Code and Codex
+#: (`client_config.place_learning_instruction`), the hosted-client guides show it as
+#: paste-in text, and `tests/test_prominence.py` fails when a guide's copy differs.
+LEARNING_INSTRUCTION = (
+    "Use Exomem as the memory for my work. Before you start a task, recall what Exomem "
+    "holds about the systems, projects or topics it touches. As you work, save each "
+    "reusable fact you establish (how something is structured, a pitfall, a method that "
+    "worked) as one concise observation, and update an existing note when one covers it, "
+    "so a later session does not have to find it again."
+)
+
 #: The activation carrier, at `balanced` and `maximal` only.
 #:
 #: Where the host exposes a prompt lifecycle, the retrieve hook injects the
