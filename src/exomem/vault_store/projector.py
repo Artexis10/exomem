@@ -7,10 +7,11 @@ projection manifest records it, so a kill at any point leaves an intent for the 
 
 The projector never overwrites a person's work. Before it replaces or removes a file it compares
 the file's hash with the manifest. A file that matches is Exomem's own projection. A file with the
-hash of bytes that the audit trail shows Exomem wrote after the manifest's revision is Exomem's own
-projection that a kill left unrecorded. Any other file is held in ``store_held`` and left alone, and
-so is a projected file that has gone missing. A held path stays unprojected until something
-resolves the hold. This module does not resolve holds.
+hash of bytes that the audit trail shows Exomem wrote for this path in its current life, which a
+kill left unrecorded, is Exomem's own projection too. Any other file is held in ``store_held`` and
+left alone, and so is a projected file that has gone missing, unless the audit trail shows that
+Exomem removed it. A held path stays unprojected until something resolves the hold. This module
+does not resolve holds.
 
 Every manifest, queue and hold write runs as store-thread work, one short transaction each, and
 the projector thread holds no mutation boundary while it waits for the store thread.
@@ -18,6 +19,7 @@ the projector thread holds no mutation boundary while it waits for the store thr
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import logging
 import os
@@ -33,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from .. import held_fs, vault
 from ..collection_store import preview, runtime
-from . import ownership, read, write
+from . import mode, ownership, read, write
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -44,6 +46,9 @@ POLL_SECONDS = 1.0
 #: Intents listed per query. A listing carries no bodies, so this bounds only the rows in memory.
 LISTING_PAGE = 128
 STOP_TIMEOUT_SECONDS = 15.0
+#: The most that a hold copies into the store. A held edit is one SQLite blob; a file above this
+#: stays on disk, untouched, and is held by its hash alone. The hash, not the size, says whose.
+HELD_BODY_LIMIT = 64 * 1024 * 1024
 
 #: Runs bookkeeping where the store's writer lives: ``run(work)`` calls ``work(writer)`` there.
 Runner = Callable[[Callable[["CollectionWriter"], None]], None]
@@ -87,6 +92,8 @@ class Intent:
     operation: str
     from_path: str | None
     queued_at: str
+    #: Why the projector could not finish this intent at its last attempt, or None.
+    deferred: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,10 +115,14 @@ class Facts:
     page: read.PageMeta | None
     manifest: Manifest | None
     held: bool
-    #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here after the
-    #: manifest's revision, which a kill may have put on disk before the manifest heard of them. For
-    #: a binary, whose file the store never writes, it is the last recorded hash alone.
+    #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here, which a kill
+    #: may have put on disk before the manifest heard of them: those after the manifest's revision,
+    #: or with no manifest, those of this path's current life. For a binary, whose file the store
+    #: never writes, it is the last recorded hash alone.
     audited: frozenset[str]
+    #: The audit trail shows Exomem removed this path after the manifest's revision, so a missing
+    #: file is the removal that a kill left unrecorded and not an outside delete.
+    removed: bool = False
 
     @property
     def own_hashes(self) -> frozenset[str]:
@@ -250,11 +261,9 @@ class Projector:
         """The next intents after ``after`` in queue order, without bodies or held paths."""
         with read.snapshot(self._root) as view:
             rows = view.connection.execute(
-                "SELECT path, revision, operation, from_path, queued_at "
-                "FROM store_projection_queue q "
-                "WHERE (queued_at, path) > (?, ?) AND NOT EXISTS ("
-                "SELECT 1 FROM store_held h WHERE h.path = q.path OR h.path = q.from_path) "
-                "ORDER BY queued_at, path LIMIT ?",
+                "SELECT path, revision, operation, from_path, queued_at, deferred "
+                "FROM store_projection_queue q WHERE (queued_at, path) > (?, ?) "
+                f"AND {mode.UNHELD_INTENT} ORDER BY queued_at, path LIMIT ?",
                 (*after, LISTING_PAGE),
             ).fetchall()
         return [Intent(*row) for row in rows]
@@ -263,7 +272,7 @@ class Projector:
         with read.snapshot(self._root) as view:
             database = view.connection
             queued = database.execute(
-                "SELECT path, revision, operation, from_path, queued_at "
+                "SELECT path, revision, operation, from_path, queued_at, deferred "
                 "FROM store_projection_queue WHERE path = ?",
                 (rel,),
             ).fetchone()
@@ -271,13 +280,15 @@ class Projector:
                 "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
             ).fetchone()
             held = database.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
+            manifest_revision = None if recorded is None else recorded[3]
             return Facts(
                 path=rel,
                 intent=None if queued is None else Intent(*queued),
                 page=view.page_meta(rel),
                 manifest=None if recorded is None else Manifest(*recorded),
                 held=held is not None,
-                audited=_audited(database, rel, None if recorded is None else recorded[3]),
+                audited=_audited(database, rel, manifest_revision),
+                removed=_removed_since(database, rel, manifest_revision),
             )
 
     def _stored_body(self, expected: read.PageMeta) -> bytes | None:
@@ -297,17 +308,37 @@ class Projector:
     # -- one intent -------------------------------------------------------------------------------
 
     def _project(self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport) -> None:
+        facts: Facts | None = None
         try:
             facts = self._facts(rel)
             if facts.intent is None or facts.held:
                 return  # a commit or a hold settled the path after the listing
             self._dispatch(filesystem, facts, report)
         except Deferred as refusal:
-            report.deferred[rel] = str(refusal)
+            self._defer(report, facts, rel, str(refusal))
         except held_fs.HeldFsError as refusal:
-            report.deferred[rel] = refusal.code
+            self._defer(report, facts, rel, refusal.code)
         except OSError as refusal:
-            report.deferred[rel] = f"{type(refusal).__name__}: the file system refused"
+            self._defer(
+                report, facts, rel, f"{type(refusal).__name__}: the file system refused"
+            )
+
+    def _defer(self, report: PassReport, facts: Facts | None, rel: str, reason: str) -> None:
+        """Leave the intent queued, and note why on its row for ``status``, once for each reason."""
+        report.deferred[rel] = reason
+        intent = None if facts is None else facts.intent
+        if intent is None or intent.deferred == reason:
+            return
+
+        def work(writer: CollectionWriter) -> None:
+            with writer.handle.transaction() as tx:
+                tx.execute(
+                    "UPDATE store_projection_queue SET deferred = ? "
+                    "WHERE path = ? AND revision = ?",
+                    (reason, intent.path, intent.revision),
+                )
+
+        self._run(work)
 
     def _dispatch(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
@@ -332,37 +363,49 @@ class Projector:
     def _project_write(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
     ) -> None:
-        intent, page, manifest = facts.intent, facts.page, facts.manifest
+        intent, page = facts.intent, facts.page
         assert intent is not None
         if page is None:
             raise Deferred("a write intent names a path with no stored page")
         disk = _observe(filesystem, intent.path)
-        if disk is None:
-            if manifest is not None:
-                # The file was projected, is gone, and Exomem did not remove it: an outside delete.
-                self._hold(
-                    report,
-                    intent.path,
-                    "delete",
-                    base_revision=manifest.revision,
-                    store_revision=page.revision,
-                    sha256=manifest.sha256,
-                    body=None,
-                )
-                return
-        elif disk.sha256 == page.sha256:
+        self._apply_write(filesystem, facts, disk, _judge_write(facts, disk), report)
+
+    def _apply_write(
+        self,
+        filesystem: held_fs.HeldFilesystem,
+        facts: Facts,
+        disk: OnDisk | None,
+        verdict: Judgement,
+        report: PassReport,
+    ) -> None:
+        page, manifest = facts.page, facts.manifest
+        assert page is not None
+        if verdict is Judgement.HOLD_DELETE:
+            assert manifest is not None
+            self._hold(
+                report,
+                facts.path,
+                "delete",
+                base_revision=manifest.revision,
+                store_revision=page.revision,
+                sha256=manifest.sha256,
+                body=None,
+            )
+        elif verdict is Judgement.HOLD_EDIT:
+            self._hold_edit(filesystem, report, facts, store_revision=page.revision)
+        elif verdict is Judgement.IN_PLACE:
+            assert disk is not None
+            # A retry after a refused flush finds the file in place; its name is made durable first.
+            _flush_folder(filesystem, _split(facts.path)[0])
             self._record_projected(page, disk.size, disk.mtime_ns)
             report.projected += 1
-            return
-        elif disk.sha256 not in facts.own_hashes:
-            self._hold_edit(filesystem, report, facts, store_revision=page.revision)
-            return
-        body = self._stored_body(page)
-        if body is None:
-            return  # a commit changed the page meanwhile, and its intent comes up on the next pass
-        installed = _publish(filesystem, intent.path, body, disk)
-        self._record_projected(page, installed.size, installed.mtime_ns)
-        report.projected += 1
+        else:
+            body = self._stored_body(page)
+            if body is None:
+                return  # a commit changed the page meanwhile; its intent comes up next pass
+            installed = _publish(filesystem, facts.path, body, disk)
+            self._record_projected(page, installed.size, installed.mtime_ns)
+            report.projected += 1
 
     def _project_delete(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
@@ -392,6 +435,8 @@ class Projector:
         when the file was held, and True otherwise, meaning that the removal is settled.
         """
         if disk is None:
+            # A retry after a refused flush finds the file gone; its removal is made durable first.
+            _flush_folder(filesystem, _split(facts.path)[0])
             return True
         if disk.sha256 in facts.own_hashes:
             _unlink(filesystem, facts.path, disk)
@@ -419,15 +464,21 @@ class Projector:
         if old.held:
             return
         old_disk = _observe(filesystem, old.path)
+        new_disk = _observe(filesystem, intent.path)
         if (
             old_disk is not None
             and old.manifest is not None
             and old.manifest.sha256 == page.sha256 == old_disk.sha256
-            and _observe(filesystem, intent.path) is None
+            and new_disk is None
         ):
             renamed = _rename(filesystem, old.path, intent.path, old_disk)
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
+            return
+        verdict = _judge_write(facts, new_disk)
+        if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
+            # A person's file at the new path is held before the old file goes: the old one stays.
+            self._apply_write(filesystem, facts, new_disk, verdict, report)
             return
         if not self._remove(filesystem, old, old_disk, report, store_revision=None):
             return
@@ -444,9 +495,12 @@ class Projector:
         *,
         store_revision: int | None,
     ) -> None:
-        """Keep a person's file and its bytes: it is neither the projection nor Exomem's own."""
+        """Keep a person's file and its bytes: it is neither the projection nor Exomem's own.
+
+        A file above ``HELD_BODY_LIMIT`` is held by its hash alone; its bytes stay in the file.
+        """
         kept = _observe(filesystem, facts.path, keep_body=True)
-        if kept is None or kept.body is None:
+        if kept is None:
             raise Deferred("the file vanished while it was being held")
         self._hold(
             report,
@@ -471,8 +525,7 @@ class Projector:
     ) -> None:
         # One row for each path: a second outside change replaces the bytes and keeps the first
         # detection time, so a person's repeated saves are one held item.
-        # The store's one timestamp format is the commit's, so held rows and queue rows read alike.
-        detected = write._timestamp()
+        detected = write.timestamp()
 
         def work(writer: CollectionWriter) -> None:
             with writer.handle.transaction() as tx:
@@ -597,36 +650,85 @@ class Projector:
         return removed
 
 
+class Judgement(enum.Enum):
+    """What a write intent does with the file at its path: the closed set it acts on."""
+
+    IN_PLACE = enum.auto()
+    PUBLISH = enum.auto()
+    HOLD_EDIT = enum.auto()
+    HOLD_DELETE = enum.auto()
+
+
+def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
+    """Whether the file at a path may be left, replaced or written, or is a person's, held."""
+    page, manifest = facts.page, facts.manifest
+    assert page is not None
+    if disk is None:
+        # A projected file that is gone is an outside delete, unless Exomem removed it and a kill
+        # came before the manifest heard of it.
+        if manifest is not None and not facts.removed:
+            return Judgement.HOLD_DELETE
+        return Judgement.PUBLISH
+    if disk.sha256 == page.sha256:
+        return Judgement.IN_PLACE
+    if disk.sha256 not in facts.own_hashes:
+        return Judgement.HOLD_EDIT
+    return Judgement.PUBLISH
+
+
 # -- store reads ----------------------------------------------------------------------------------
 
 
 def _audited(database: Connection, rel: str, manifest_revision: int | None) -> frozenset[str]:
-    """The hashes that ``Facts.audited`` names: rows after the manifest, or a binary's last row."""
-    if ownership.classify(rel) is ownership.Ownership.PAGE:
-        rows = database.execute(
-            "SELECT DISTINCT sha256 FROM store_audit "
-            "WHERE path = ? AND revision > ? AND sha256 IS NOT NULL",
-            (rel, manifest_revision or 0),
-        )
-    else:
+    """The hashes that ``Facts.audited`` names.
+
+    A page with a manifest row takes the rows after the manifest's revision. A page with none has no
+    file that the projector recorded, so only its latest life counts: the writes after the last
+    removal that came before the latest write. A removal after that write may still be queued, and
+    the file that it removes is this life's. The bytes of an earlier life never count, because a
+    person may have restored them. A binary takes its last row.
+    """
+    if ownership.classify(rel) is not ownership.Ownership.PAGE:
         rows = database.execute(
             "SELECT sha256 FROM store_audit WHERE path = ? AND sha256 IS NOT NULL "
             "ORDER BY seq DESC LIMIT 1",
             (rel,),
         )
+    elif manifest_revision is not None:
+        rows = database.execute(
+            "SELECT DISTINCT sha256 FROM store_audit "
+            "WHERE path = ? AND revision > ? AND sha256 IS NOT NULL",
+            (rel, manifest_revision),
+        )
+    else:
+        rows = database.execute(
+            "SELECT DISTINCT sha256 FROM store_audit "
+            f"WHERE path = ? AND sha256 IS NOT NULL AND {write.BEGINS_A_LIFE} AND seq > "
+            "COALESCE((SELECT MAX(seq) FROM store_audit "
+            f"WHERE path = ? AND {write.ENDS_A_LIFE} AND seq < "
+            f"(SELECT MAX(seq) FROM store_audit WHERE path = ? AND {write.BEGINS_A_LIFE})), 0)",
+            (rel, rel, rel),
+        )
     return frozenset(row[0] for row in rows)
+
+
+def _removed_since(database: Connection, rel: str, manifest_revision: int | None) -> bool:
+    """Whether Exomem removed or moved away ``rel`` after the manifest's revision."""
+    if manifest_revision is None:
+        return False
+    row = database.execute(
+        "SELECT 1 FROM store_audit WHERE path = ? AND revision > ? "
+        f"AND {write.ENDS_A_LIFE} LIMIT 1",
+        (rel, manifest_revision),
+    ).fetchone()
+    return row is not None
 
 
 def _record_file(
     tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
 ) -> None:
     """Record what the file at ``rel`` holds; the page's mtime then says what a stat does."""
-    tx.execute(
-        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, ?, ?, ?) "
-        "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
-        "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
-        (rel, sha256, size, mtime_ns, revision),
-    )
+    write.record_manifest(tx, rel, sha256, size, mtime_ns, revision)
     tx.execute(
         "UPDATE store_pages SET mtime_ns = ? WHERE path = ? AND revision = ? AND sha256 = ?",
         (mtime_ns, rel, revision, sha256),
@@ -636,7 +738,7 @@ def _record_file(
 def _turn_into_write(tx: Connection, intent: Intent) -> None:
     """A move whose bytes need a rewrite is a write of its new path, unless a commit changed it."""
     tx.execute(
-        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL "
+        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL, deferred = NULL "
         "WHERE path = ? AND revision = ? AND operation = 'move'",
         (intent.path, intent.revision),
     )
@@ -659,8 +761,10 @@ def _observe(
 ) -> OnDisk | None:
     """The file at ``rel`` with its hash, or None when no file is there.
 
-    A refusal other than absence raises ``HeldFsError``: a symlink, an unreadable folder or a name
-    that differs only by case is not something to judge, and the intent stays queued.
+    The hash is streamed, so a file of any size costs no memory. With ``keep_body`` the bytes come
+    too, unless the file is above ``HELD_BODY_LIMIT``. A refusal other than absence raises
+    ``HeldFsError``: a symlink, an unreadable folder or a name that differs only by case is not
+    something to judge, and the intent stays queued.
     """
     folder, leaf = _split(rel)
     opened = filesystem.parent(folder, access="mutate")
@@ -671,16 +775,28 @@ def _observe(
         if _missing(found):
             return None
         with found.require() as file:
-            data = filesystem.read(file).require()
             version = file.version()
+            body = None
+            if keep_body and version.size <= HELD_BODY_LIMIT:
+                body = filesystem.read(file, max_bytes=HELD_BODY_LIMIT).require()
+                digest = hashlib.sha256(body).hexdigest()
+            else:
+                digest = _stream_sha256(file)
             return OnDisk(
-                sha256=hashlib.sha256(data).hexdigest(),
+                sha256=digest,
                 size=version.size,
                 mtime_ns=version.mtime_ns,
                 identity=file.identity,
                 permissions=_permissions(file),
-                body=data if keep_body else None,
+                body=body,
             )
+
+
+def _stream_sha256(file: held_fs.HeldFile) -> str:
+    """The file's hash, read in chunks from a duplicate of the held descriptor."""
+    with os.fdopen(os.dup(file.descriptor), "rb") as stream:
+        stream.seek(0)
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def _permissions(file: held_fs.HeldFile) -> int | None:
@@ -729,10 +845,13 @@ def _publish(
     """Write ``body`` to a new file, or replace ``existing`` only while it is still that exact file.
 
     The held filesystem compares the file's identity and hash again just before the replacing
-    rename, and makes the temporary durable before it and the folder durable after (on POSIX).
+    rename and makes the temporary durable before it. A create-only install is a hard link, and a
+    new folder is a bare mkdir, and neither flushes a folder: so this flushes the file's folder
+    after the install, and the folder above each folder that it made, before it returns.
     """
     folder, leaf = _split(rel)
-    with filesystem.parent(folder, create=True, access="mutate").require() as parent:
+    opened, created = _open_creating(filesystem, folder)
+    with opened.require() as parent:
         published: list[held_fs.StableIdentity] = []
 
         def publish():
@@ -750,7 +869,55 @@ def _publish(
             return result
 
         _retrying(publish)
+        _flush(filesystem, parent)
+        _flush_above(filesystem, created)
         return _installed(filesystem, parent, leaf, published[-1], hashlib.sha256(body).hexdigest())
+
+
+def _open_creating(
+    filesystem: held_fs.HeldFilesystem, folder: str
+) -> tuple[held_fs.HeldResult[held_fs.HeldDirectory], list[str]]:
+    """Open ``folder`` for a change, making it if need be, with the folders that did not exist."""
+    opened = filesystem.parent(folder, access="mutate")
+    if not _missing(opened):
+        return opened, []
+    absent = [folder]
+    above = _split(folder)[0]
+    while above:
+        probe = filesystem.parent(above)
+        if probe.ok:
+            probe.require().close()
+            break
+        if not _missing(probe):
+            probe.require()
+        absent.append(above)
+        above = _split(above)[0]
+    return filesystem.parent(folder, create=True, access="mutate"), absent
+
+
+def _flush(filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory) -> None:
+    """Make the name changes in ``directory`` durable."""
+    # Windows cannot open a directory for a flush: a rename is durable once the file's flush
+    # returned.
+    if os.name != "nt":
+        filesystem.flush_directory(directory).require()
+
+
+def _flush_above(filesystem: held_fs.HeldFilesystem, created: list[str]) -> None:
+    """Make durable the entries that a ``create`` made: each new folder sits in a folder above."""
+    for folder in created:
+        _flush_folder(filesystem, _split(folder)[0])
+
+
+def _flush_folder(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
+    """Make the name changes in ``folder`` durable; a folder that does not exist has none."""
+    if os.name == "nt":
+        return
+    opened = filesystem.parent(folder, access="flush")
+    if _missing(opened):
+        return
+    with opened.require() as directory:
+        filesystem.flush_directory(directory).require()
 
 
 def _installed(
@@ -773,27 +940,28 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
     folder, leaf = _split(rel)
     with filesystem.parent(folder, access="mutate").require() as parent:
         with filesystem.file(parent, leaf, access="mutate").require() as file:
-            if (
-                file.identity != expected.identity
-                or hashlib.sha256(filesystem.read(file).require()).hexdigest() != expected.sha256
-            ):
+            if file.identity != expected.identity or _stream_sha256(file) != expected.sha256:
                 raise Deferred("the file changed before it was removed")
             _retrying(lambda: filesystem.unlink(file))
+        _flush(filesystem, parent)
 
 
 def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: OnDisk) -> OnDisk:
-    """Rename the old file to a free path, only while it is still the exact file that was judged."""
+    """Rename the old file to a free path, only while it is still the exact file that was judged.
+
+    The source is checked before the destination folder is made, so a refused rename leaves no new
+    folder. On POSIX the rename flushes both folders; this flushes the folders above any new one.
+    """
     old_folder, old_leaf = _split(old)
     new_folder, new_leaf = _split(new)
-    with (
-        filesystem.parent(old_folder, access="mutate").require() as old_parent,
-        filesystem.parent(new_folder, create=True, access="mutate").require() as new_parent,
-    ):
+    with filesystem.parent(old_folder, access="mutate").require() as old_parent:
         with filesystem.file(old_parent, old_leaf, access="mutate").require() as file:
-            if (
-                file.identity != expected.identity
-                or hashlib.sha256(filesystem.read(file).require()).hexdigest() != expected.sha256
-            ):
+            if file.identity != expected.identity or _stream_sha256(file) != expected.sha256:
                 raise Deferred("the file changed before it was renamed")
-            _retrying(lambda: filesystem.rename(file, new_parent, new_leaf, replace=False))
-        return _installed(filesystem, new_parent, new_leaf, expected.identity, expected.sha256)
+            opened, created = _open_creating(filesystem, new_folder)
+            with opened.require() as new_parent:
+                _retrying(lambda: filesystem.rename(file, new_parent, new_leaf, replace=False))
+                _flush_above(filesystem, created)
+                return _installed(
+                    filesystem, new_parent, new_leaf, expected.identity, expected.sha256
+                )

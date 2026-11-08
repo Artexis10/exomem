@@ -107,6 +107,11 @@ def _stored_mode(vault_root: Path) -> str | None:
     return None if row is None else row[0]
 
 
+#: The projector acts on a queued intent only while no hold sits on its path or on a move's old
+#: path. The projector's listing and the status age both read this rule, over the queue as ``q``.
+UNHELD_INTENT = (
+    "NOT EXISTS (SELECT 1 FROM store_held h WHERE h.path = q.path OR h.path = q.from_path)"
+)
 #: What ``status`` reports for a record it cannot read: never a zero, which would pass for empty.
 UNKNOWN = "unknown"
 #: The report's own field names for a store-mode vault: the figures that it adds to mode and gate.
@@ -117,6 +122,7 @@ STORE_FIGURES = (
     "pages",
     "binaries",
     "queued_projections",
+    "deferred_projections",
     "oldest_projection_age_seconds",
     "held",
     "held_by_kind",
@@ -129,7 +135,9 @@ def status(vault_root: Path) -> dict:
 
     A file-mode vault reports only the mode and the release gate. A crash window reports its own state. A
     store-mode vault adds the figures that an operator checks before a rollback: stored pages and binaries,
-    queued projections with the age in seconds of the oldest one (None when nothing is queued), and
+    queued projections, how many of those the projector left queued with a reason (a linked file, a
+    path that the store does not own), the age in seconds of the oldest projection that waits for
+    the projector (None when none waits, "unknown" when the clock says it is in the future), and
     held items in total and by kind. A store that cannot be read gives "unknown", for the mode or
     for each figure, with the error's name in ``unreadable``: an unreadable store never reports
     zeros. A damaged state manifest raises instead, so that the command refuses and names it.
@@ -169,9 +177,16 @@ def _store_figures(vault_root: Path) -> dict:
             for table in schema.VAULT_STORE_TABLES
         }
         # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
+        # The age counts only what waits for the projector: a held path or a deferred intent waits
+        # for a person.
         (age,) = reader.execute(
             "SELECT CAST(strftime('%s', 'now') AS INTEGER) "
-            "- CAST(strftime('%s', MIN(queued_at)) AS INTEGER) FROM store_projection_queue"
+            "- CAST(strftime('%s', MIN(queued_at)) AS INTEGER) "
+            f"FROM store_projection_queue q WHERE deferred IS NULL AND {UNHELD_INTENT}"
+        ).fetchone()
+        (deferred,) = reader.execute(
+            "SELECT COUNT(*) FROM store_projection_queue q "
+            f"WHERE deferred IS NOT NULL AND {UNHELD_INTENT}"
         ).fetchone()
         held_by_kind = dict(
             reader.execute("SELECT kind, COUNT(*) FROM store_held GROUP BY kind").fetchall()
@@ -183,7 +198,9 @@ def _store_figures(vault_root: Path) -> dict:
         "pages": counts["store_pages"],
         "binaries": counts["store_binaries"],
         "queued_projections": counts["store_projection_queue"],
-        "oldest_projection_age_seconds": None if age is None else max(age, 0),
+        "deferred_projections": deferred,
+        # A negative age is a clock that went backwards: it is not known, and it is never a zero.
+        "oldest_projection_age_seconds": UNKNOWN if age is not None and age < 0 else age,
         "held": counts["store_held"],
         "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],

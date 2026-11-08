@@ -577,7 +577,7 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
         conn = writer.connection
         assert schema.schema_version(conn) == 16
         assert conn.execute("SELECT * FROM store_projection_queue").fetchall() == [
-            (pages[0][0], 1, "write", None, "t1")]
+            (pages[0][0], 1, "write", None, "t1", None)]
         with writer.transaction() as tx:
             tx.execute("INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at)"
                        " VALUES ('Knowledge Base/Notes/d.md', 2, 'move', ?, 't2')", (pages[1][0],))

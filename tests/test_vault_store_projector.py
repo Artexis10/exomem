@@ -22,7 +22,7 @@ import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
 
-from exomem import held_fs, server_runtime
+from exomem import _held_fs_posix, held_fs, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
@@ -276,6 +276,10 @@ def test_the_status_reports_queue_age_and_held_kinds_and_unknown_for_an_unreadab
     waiting = mode.status(stored)
     assert waiting["queued_projections"] == 1
     assert 90 <= waiting["oldest_projection_age_seconds"] < 120
+    future = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE store_projection_queue SET queued_at = ?", (future,))
+    assert mode.status(stored)["oldest_projection_age_seconds"] == mode.UNKNOWN, "a clock skew"
 
     (stored / ALPHA).write_bytes(PERSON)
     (stored / BETA).unlink()
@@ -284,6 +288,8 @@ def test_the_status_reports_queue_age_and_held_kinds_and_unknown_for_an_unreadab
     projecting.run_pass()
     held = mode.status(stored)
     assert (held["held"], held["held_by_kind"]) == (2, {"edit": 1, "delete": 1})
+    # Two held paths are queued, and neither waits for the projector.
+    assert (held["queued_projections"], held["oldest_projection_age_seconds"]) == (2, None)
 
     def unreadable(_root):
         raise OSError("the store cannot be read")
@@ -327,6 +333,200 @@ def test_the_service_starts_the_projector_only_for_a_store_mode_vault(vault, mon
     finally:
         worker.stop()
     assert not worker._thread.is_alive()
+
+
+def test_the_status_counts_a_deferred_intent_apart_from_the_age_of_the_queue(
+    stored, writer, projecting
+):
+    """A status whose queue age is the age of an intent that only a person can unblock, or that
+    leaves a deferred intent uncounted, so that a stuck projection looks like a healthy queue."""
+    commit(writer, **put(NEW, b"# Gamma\n"))
+    projecting.run_pass()
+    os.link(stored / NEW, stored.parent / "another-name-for-gamma")
+    commit(writer, **put(NEW, b"# Gamma\n\nA second version.\n"))
+
+    report = projecting.run_pass()
+
+    assert report.deferred == {NEW: "IDENTITY_CHANGED"}, "a file with two names is never replaced"
+    status = mode.status(stored)
+    assert (status["queued_projections"], status["deferred_projections"]) == (1, 1)
+    assert status["oldest_projection_age_seconds"] is None
+    assert rows(stored, "SELECT deferred FROM store_projection_queue") == [("IDENTITY_CHANGED",)]
+    commit(writer, **put(NEW, b"# Gamma\n\nA third version.\n"))
+    assert rows(stored, "SELECT deferred FROM store_projection_queue") == [(None,)]
+
+
+@pytest.mark.parametrize("ending", ["delete", "move"])
+def test_a_put_never_replaces_an_earlier_version_that_a_person_restored(
+    stored, writer, projecting, ending
+):
+    """A projector that counts the audit rows of a path's earlier lives as Exomem's own, so that it
+    replaces a person's restored file with the store's newer bytes."""
+    first = b"# Gamma\n\nThe first life of this page.\n"
+    commit(writer, **put(NEW, first))
+    projecting.run_pass()
+    if ending == "delete":
+        commit(writer, deletes=(write.PageDelete(NEW),))
+    else:
+        commit(writer, moves=(write.PageMove(NEW, f"{NOTES}/Elsewhere/Gamma.md"),))
+    projecting.run_pass()
+    assert not (stored / NEW).exists()
+    (stored / NEW).write_bytes(first)
+    commit(writer, **put(NEW, b"# Gamma\n\nThe second life of this page.\n"))
+
+    report = projecting.run_pass()
+
+    assert (report.held, report.projected) == (1, 0)
+    assert (stored / NEW).read_bytes() == first
+    assert rows(stored, "SELECT kind, body FROM store_held") == [("edit", first)]
+
+
+def test_a_delete_never_removes_an_earlier_version_that_a_person_restored(
+    stored, writer, projecting
+):
+    """A projector that unlinks a file whose bytes match an earlier life of the path, which a
+    person restored, because it counts every audit row of the path as Exomem's own."""
+    first = b"# Gamma\n\nThe first life of this page.\n"
+    commit(writer, **put(NEW, first))
+    projecting.run_pass()
+    commit(writer, deletes=(write.PageDelete(NEW),))
+    projecting.run_pass()
+    (stored / NEW).write_bytes(first)
+    commit(writer, **put(NEW, b"# Gamma\n\nThe second life of this page.\n"))
+    commit(writer, deletes=(write.PageDelete(NEW),))
+
+    report = projecting.run_pass()
+
+    assert (report.removed, report.held) == (0, 0)
+    assert (stored / NEW).read_bytes() == first
+
+
+def test_a_delete_removes_a_file_that_a_kill_left_unrecorded(stored, writer, projecting):
+    """A projector that leaves the file of a deleted page on disk because its write was killed
+    before the manifest heard of it, so the deleted page stays in the vault."""
+    body = b"# Gamma\n\nPublished, and then the kill came.\n"
+    commit(writer, **put(NEW, body))
+    (stored / NEW).write_bytes(body)  # the file that the killed projection had installed
+    commit(writer, deletes=(write.PageDelete(NEW),))
+
+    report = projecting.run_pass()
+
+    assert (report.removed, report.held) == (1, 0)
+    assert not (stored / NEW).exists()
+
+
+def test_a_file_that_exomem_removed_before_a_kill_is_written_again_not_held(
+    stored, writer, projecting
+):
+    """A projector that holds a page whose file its own removal took away just before a kill, so
+    that a page deleted and put again never reaches the disk."""
+    commit(writer, **put(NEW, b"# Gamma\n\nThe first life of this page.\n"))
+    projecting.run_pass()
+    commit(writer, deletes=(write.PageDelete(NEW),))
+    (stored / NEW).unlink()  # the kill came after this unlink and before the manifest row went
+    second = b"# Gamma\n\nThe second life of this page.\n"
+    commit(writer, **put(NEW, second))
+
+    report = projecting.run_pass()
+
+    assert (report.held, report.projected) == (0, 1)
+    assert (stored / NEW).read_bytes() == second
+
+
+def test_a_file_above_the_hold_limit_is_held_by_its_hash_without_a_copy_of_its_bytes(
+    stored, writer, projecting, monkeypatch
+):
+    """A projector that reads an outside file whole into memory and into the store, or one that
+    replaces a file that is too large to keep."""
+    monkeypatch.setattr(projector, "HELD_BODY_LIMIT", len(PERSON) - 1)
+    (stored / ALPHA).write_bytes(PERSON)
+    commit(writer, **put(ALPHA, EDITED))
+
+    assert projecting.run_pass().held == 1
+
+    assert (stored / ALPHA).read_bytes() == PERSON
+    assert rows(stored, "SELECT kind, body, sha256 FROM store_held") == [
+        ("edit", None, hashlib.sha256(PERSON).hexdigest())
+    ]
+
+
+def test_a_move_over_a_persons_file_holds_the_new_path_and_keeps_the_old_file(
+    stored, writer, projecting
+):
+    """A projector that removes the old file of a move before it has judged the new path, which
+    leaves neither the page's old file nor the move's result."""
+    drifter = b"# Drifter\n\nA page that moves.\n"
+    commit(writer, **put(MOVE_FROM, drifter))
+    projecting.run_pass()
+    (stored / MOVE_TO).parent.mkdir(parents=True, exist_ok=True)
+    (stored / MOVE_TO).write_bytes(PERSON)
+    commit(writer, moves=(write.PageMove(MOVE_FROM, MOVE_TO),))
+
+    report = projecting.run_pass()
+
+    assert (report.held, report.removed) == (1, 0)
+    assert (stored / MOVE_TO).read_bytes() == PERSON
+    assert (stored / MOVE_FROM).read_bytes() == drifter
+    assert rows(stored, "SELECT path, kind FROM store_held") == [(MOVE_TO, "edit")]
+    assert len(rows(stored, "SELECT path FROM store_manifest WHERE path = ?", MOVE_FROM)) == 1
+
+
+def test_a_refused_rename_leaves_no_new_folder_behind(stored, writer, projecting, monkeypatch):
+    """A projector that makes the new folder of a move before it has checked the old file, so that
+    a refused rename leaves an empty folder in a person's vault."""
+    commit(writer, **put(MOVE_FROM, b"# Drifter\n"))
+    projecting.run_pass()
+    moved_to = f"{NOTES}/Fresh/Drifter.md"
+    commit(writer, moves=(write.PageMove(MOVE_FROM, moved_to),))
+    observe = projector._observe
+
+    def a_person_replaces_the_file_after_it_was_judged(filesystem, rel, **options):
+        seen = observe(filesystem, rel, **options)
+        if rel == MOVE_FROM and seen is not None:
+            (stored / MOVE_FROM).unlink()
+            (stored / MOVE_FROM).write_bytes(PERSON)
+        return seen
+
+    monkeypatch.setattr(projector, "_observe", a_person_replaces_the_file_after_it_was_judged)
+
+    report = projecting.run_pass()
+
+    assert report.deferred == {moved_to: "the file changed before it was renamed"}
+    assert not (stored / NOTES / "Fresh").exists()
+
+
+def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_records_it(
+    stored, writer, projecting, monkeypatch
+):
+    """A projector that records a file in the manifest while the folder entry of the file, of an
+    unlink, or of a folder that the projection made is still only in the page cache."""
+    deep = f"{NOTES}/Fresh/Deeper/Page.md"
+    flushed = []
+    flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
+
+    def spy(self, directory):
+        folder = os.readlink(f"/proc/self/fd/{directory.descriptor}")
+        recorded = rows(stored, "SELECT 1 FROM store_manifest WHERE path = ?", deep)
+        flushed.append((folder, bool(recorded)))
+        return flush_directory(self, directory)
+
+    monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "flush_directory", spy)
+    commit(writer, **put(deep, b"# Page\n"))
+
+    projecting.run_pass()
+
+    root = stored.resolve()
+    assert {folder for folder, _ in flushed} >= {
+        str(root / NOTES / "Fresh" / "Deeper"),
+        str(root / NOTES / "Fresh"),
+        str(root / NOTES),
+    }
+    assert not any(recorded for _, recorded in flushed), "the manifest came before a flush"
+
+    flushed.clear()
+    commit(writer, deletes=(write.PageDelete(deep),))
+    projecting.run_pass()
+    assert [folder for folder, _ in flushed] == [str(root / NOTES / "Fresh" / "Deeper")]
 
 
 # -- the kill trial -------------------------------------------------------------------------------
