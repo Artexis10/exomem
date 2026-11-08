@@ -1184,7 +1184,7 @@ def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated
 # written-to catalogue nothing a previous turn computed may be reused. The
 # carry is not flat like the compiler's seed-capped stages: its windows grow
 # with the rarity cap, 0.5% of the knowledge base by design
-# (`working_set.carry_fetch_size`: 11 rows at 2k notes, 41 at 8k), it admits
+# (`working_set.carry_fetch_size`: 11 rows at 2k notes, 38 at 8k), it admits
 # every page on each request, and its catalogue ranking reads the pages that
 # hold the turn's words, which here are words every generated note holds. The
 # bound admits that growth and refuses work that grows with the whole corpus.
@@ -1194,8 +1194,17 @@ def test_restricted_view_reads_under_a_withholding_policy_are_reported_not_gated
 # and 607ms @ 8k (5.2x). It rebuilt ranking statistics from every page,
 # scanned every page holding each turn word, and tested corroboration on
 # every matched row. With the carry bounded, 40ms and 93ms (2.4x).
-CEIL_CARRY_RATIO = 3.0
-CARRY_RATIO_SLACK_MS = 50.0
+#
+# The work itself is the gate: the carry's own counts refuse each of those
+# three regressions at both sizes, and no runner's speed moves them. Time is a
+# fixed backstop at 8k only. A ratio to the 2k sample failed on shared runners
+# with nothing regressed (121.1ms against a 119.4ms bound; 2k medians 40-59ms
+# make the ratio sit near 3), and a faster 2k arm tightened it. Counts measured
+# 2026-11-08 on main: stem rows 84 @ 2k and 192 @ 8k, ranked candidates 11 and
+# 38, nothing rebuilt or tokenized; without the scan's early stop, 6,860 stem
+# rows @ 2k. Full-run 8k medians reach 134ms, so the ceiling keeps 3x over
+# that and stays under the 607ms the regression took on a faster machine.
+CEIL_CARRY_MS = 400.0
 CARRY_SAMPLES = 5
 #: Resolves no anchor and names no page, so both carry rungs run and the turn
 #: abstains. Its everyday words occur on every generated note; its three
@@ -1204,9 +1213,9 @@ CARRY_SAMPLES = 5
 CARRY_TURN = "how is the prose paragraph about the quillon vantry ceiling realistically ranked"
 
 
-def _measure_unresolved_carry(vault: Path) -> list[float]:
+def _measure_unresolved_carry(vault: Path) -> list[tuple[float, dict[str, dict[str, int]]]]:
     """The `working_set.carry` stage of an abstaining activation, each sample
-    taken right after a catalogue write.
+    taken right after a catalogue write: its time and its two rungs' counts.
 
     A write gives the catalogue a new revision, which is what retires any
     statistics a previous turn cached. It is published outside the timed call,
@@ -1214,19 +1223,34 @@ def _measure_unresolved_carry(vault: Path) -> list[float]:
     belong to the index refresh, not to the carry, so this gate times the
     carry's own stage.
     """
-    from exomem import commands, working_set_runtime
+    from exomem import call_spans, commands, working_set_runtime
 
     _prepare_working_set_vault(vault)
     notes = sorted((vault / "Knowledge Base").rglob("note-0000*.md"))
 
-    def call() -> dict:
+    def call() -> tuple[dict, dict[str, dict[str, int]]]:
         working_set_runtime.reset_caches_for_tests(packets_only=True)
         gc.collect()
-        return commands.op_activate_context(vault, turn=CARRY_TURN, include_timings=True)
+        rungs: dict[str, dict[str, int]] = {}
 
-    first = call()
+        def record(name: str, elapsed_ms: float, fields=None) -> None:
+            if name.startswith("recall.working_set.carry.") and fields:
+                rung = rungs.setdefault(name.rsplit(".", 1)[1], {})
+                for key, value in fields.items():
+                    rung[key] = rung.get(key, 0) + int(value)
+
+        # The rungs always measure; the sink drops spans outside an MCP call.
+        # Capturing at the sink keeps this an ordinary off-path activation.
+        # Runs that opened a call token instead left graph stores in the real
+        # user state root after the test ended.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(call_spans, "record_span", record)
+            result = commands.op_activate_context(vault, turn=CARRY_TURN, include_timings=True)
+        return result, rungs
+
+    first, _ = call()
     assert first["abstained"] is True and first["abstention"]["reason"] == "unresolved", first
-    samples: list[float] = []
+    samples: list[tuple[float, dict[str, dict[str, int]]]] = []
     for index in range(CARRY_SAMPLES):
         note = notes[index % len(notes)]
         note.write_text(
@@ -1234,10 +1258,12 @@ def _measure_unresolved_carry(vault: Path) -> list[float]:
         )
         freshness.on_files_changed(vault, changed=[note])
         lexstore.ensure_fresh(vault)
-        stages = call()["timings"]["stages"]
+        result, rungs = call()
+        stages = result["timings"]["stages"]
         # Both rungs ran: a carry the catalogue refused would time nothing.
         assert stages["working_set.carry"].get("calls") == 2, stages.get("working_set.carry")
-        samples.append(float(stages["working_set.carry"]["ms"]))
+        assert set(rungs) == {"phrase", "title"}, rungs
+        samples.append((float(stages["working_set.carry"]["ms"]), rungs))
     return samples
 
 
@@ -1246,26 +1272,45 @@ def _measure_unresolved_carry(vault: Path) -> list[float]:
 def test_unresolved_carry_does_not_scale_with_the_corpus(tmp_path: Path, model_free) -> None:
     from synth_vault import gen_entity_overlay
 
-    from exomem import working_set, working_set_runtime
+    from exomem import call_spans, working_set, working_set_runtime
 
-    medians: dict[int, float] = {}
+    stems = working_set_runtime.pairable_stems(CARRY_TURN)
+    large_ms = 0.0
     for notes, overlay in ((N_NOTES, 125), (N_NOTES_LARGE, 500)):
         vault = _build_dense_vault(tmp_path, notes)
         gen_entity_overlay(vault, overlay, seed=23)
         _seed_freshness_live(vault)
         lexstore.ensure_fresh(vault)
-        rare, pages, state = working_set_runtime.rare_turn_terms(
-            vault, working_set_runtime.pairable_stems(CARRY_TURN)
-        )
+        rare, pages, state = working_set_runtime.rare_turn_terms(vault, stems)
         assert state == "available" and len(rare) >= 2, (state, rare)
         assert pages >= working_set.RETRIEVAL_CARRY_MIN_PAGES, pages
-        medians[notes] = statistics.median(_measure_unresolved_carry(vault))
+        samples = _measure_unresolved_carry(vault)
+        for _ms, rungs in samples:
+            admitted = rungs["phrase"][call_spans.ADMITTED_PAGES]
+            # Each word's rarity count stops one row past its window.
+            window = working_set.rare_document_cap(admitted) + working_set.RETRIEVAL_CARRY_FETCH
+            # The title rung tests corroboration in batches that double from the
+            # fetch window, so two batches read three windows; testing every
+            # matched row reads the corpus.
+            ranked = 3 * working_set.carry_fetch_size(admitted)
+            counts = {
+                rung: {key: rungs[rung][key] for key in working_set.CARRY_SPAN_FIELDS}
+                for rung in rungs
+            }
+            work = f"{notes} notes, {admitted} admitted: {counts}"
+            assert sum(rungs[rung][call_spans.STATS_REBUILT] for rung in rungs) == 0, work
+            assert sum(rungs[rung][call_spans.PAGES_TOKENIZED] for rung in rungs) == 0, work
+            # Both counts must also be read: a rung that answered without passing
+            # the counted scan (a one-statement query, say) reports 0 and would
+            # pass every upper bound.
+            assert 1 <= rungs["phrase"][call_spans.STEM_ROWS] <= len(stems) * (window + 1), work
+            assert 1 <= rungs["title"][call_spans.CANDIDATES] <= ranked, work
+        if notes == N_NOTES_LARGE:
+            large_ms = statistics.median(ms for ms, _rungs in samples)
 
-    small_ms, large_ms = medians[N_NOTES], medians[N_NOTES_LARGE]
-    bound = max(small_ms * CEIL_CARRY_RATIO, small_ms + CARRY_RATIO_SLACK_MS)
-    assert large_ms < bound, (
-        f"an unresolved turn's carry scaled {small_ms:.1f}ms @ {N_NOTES} to "
-        f"{large_ms:.1f}ms @ {N_NOTES_LARGE} after a catalogue write (bound {bound:.1f}ms)"
+    assert large_ms < CEIL_CARRY_MS, (
+        f"an unresolved turn's carry took {large_ms:.1f}ms @ {N_NOTES_LARGE} notes after a "
+        f"catalogue write (ceiling {CEIL_CARRY_MS:.0f}ms)"
     )
 
 
