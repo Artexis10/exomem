@@ -102,11 +102,18 @@ def test_an_approved_method_without_an_authored_title_is_named_by_its_ref_never_
     freshness.on_files_changed(vault, [vault / first, vault / renamed])
     _index(vault)
 
-    item = _method(_activate(vault, turn=TURN, max_chars=8000), renamed)
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+    item = _method(packet, renamed)
 
     assert item["approval"] == "approved"
     assert item["attribution"] == REF
     assert "ship" not in context_task.item_line(item, method=True)
+    # The rendered line carries its read handle too, so that handle is the ref and not the renamed path.
+    assert item["read_ref"] == REF
+    rendered = _hook()._format_task_context(packet["task_context"], 4000)  # noqa: SLF001 - the render under test
+    approved_line = next(line for line in rendered.splitlines() if line.startswith("- approved procedure:"))
+    assert "ship" not in approved_line
+    assert _read(vault, item["read_ref"])["path"] == renamed
 
 
 def _hook():

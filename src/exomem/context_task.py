@@ -468,6 +468,8 @@ def compile_context(
                 method["approval"] = value
                 if value == procedure_approval.APPROVED:
                     method["attribution"] = approved_title(sources[path])
+                    # The read handle is the stable ref, never the path: a rename must not put words into the line.
+                    method["read_ref"] = sources[path].ref
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
