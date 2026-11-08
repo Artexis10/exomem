@@ -351,6 +351,7 @@ def create_file(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
+                draft_bound=any(item is not None for item in (draft_id, draft_hash, draft_token)),
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error

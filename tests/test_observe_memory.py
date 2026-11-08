@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    activation_manifest,
     capabilities,
     commands,
     index_paths,
@@ -732,31 +733,11 @@ def test_compact_content_cannot_be_silently_reinterpreted(
 def test_validate_then_reviewed_none_commit_round_trips_exact_transition(
     tmp_path: Path,
 ) -> None:
-    _write_page(tmp_path)
-    first_preview = commands.op_observe_memory(
-        tmp_path,
-        path=PAGE,
-        operation="validate",
-        category="rule",
-        content="Activate the page lifecycle",
-    )
-    first_semantic = first_preview["semantic"]
-    first = commands.op_observe_memory(
-        tmp_path,
-        path=PAGE,
-        operation="add",
-        category="rule",
-        content="Activate the page lifecycle",
-        transition_token=first_semantic["transition_token"],
-        relation_disposition="reviewed_none",
-        relation_review_hash=first_semantic["transition_hash"],
-        relation_review_reason="No honest relation exists for the first observation",
-    )
+    _write_page_needing_review(tmp_path)
     proposal = {
         "path": PAGE,
         "category": "rule",
-        "content": "Second disconnected observation",
-        "expected_hash": first["after_hash"],
+        "content": "Activate the page lifecycle",
     }
 
     preview = commands.op_observe_memory(tmp_path, **proposal, operation="validate")
@@ -770,10 +751,29 @@ def test_validate_then_reviewed_none_commit_round_trips_exact_transition(
         transition_token=semantic["transition_token"],
         relation_disposition="reviewed_none",
         relation_review_hash=semantic["transition_hash"],
-        relation_review_reason="No honest relation exists for this atomic observation",
+        relation_review_reason="No honest relation exists for the first observation",
     )
     assert committed["mutated"] is True
     assert committed["semantic"]["contract_result"]["should_block"] is False
+
+
+def test_a_later_observation_commits_in_one_call_under_the_standing_decision(
+    tmp_path: Path,
+) -> None:
+    first = _first_observation(tmp_path)
+
+    # The first observation recorded the decision; neither a hash nor a fresh reason is asked again.
+    second = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="rule",
+        content="Second disconnected observation",
+        expected_hash=first["after_hash"],
+    )
+
+    assert second["mutated"] is True
+    assert second["semantic"]["contract_result"]["should_block"] is False
 
 
 @pytest.mark.parametrize("tier", ["readonly", "excluded"])
@@ -1076,8 +1076,15 @@ def test_add_preserves_unrelated_body_whitespace_and_logs_once(tmp_path: Path) -
     assert "] observe | Notes/Insights/observe" in log_text
 
 
+def _write_page_needing_review(root: Path) -> Path:
+    """The fixture page, written past the activation boundary with no relation decision."""
+    (root / "Knowledge Base" / "Notes").mkdir(parents=True, exist_ok=True)
+    activation_manifest.ensure_manifest(root)
+    return _write_page(root)
+
+
 def _first_observation(tmp_path: Path) -> dict:
-    _write_page(tmp_path)
+    _write_page_needing_review(tmp_path)
     preview = commands.op_observe_memory(
         tmp_path, path=PAGE, operation="validate", category="rule", content="First"
     )["semantic"]
@@ -1094,54 +1101,53 @@ def _first_observation(tmp_path: Path) -> dict:
     )
 
 
-def test_blocked_add_names_this_tools_validate_form_and_no_doubled_prefix(
-    tmp_path: Path,
-) -> None:
-    first = _first_observation(tmp_path)
+def test_a_blocked_add_names_the_one_call_fix_and_no_other_route(tmp_path: Path) -> None:
+    _write_page_needing_review(tmp_path)
     with pytest.raises(ValueError, match="SEMANTIC_CONTRACT_BLOCKED") as refusal:
         commands.op_observe_memory(
             tmp_path,
             path=PAGE,
             operation="add",
             category="rule",
-            content="Second disconnected observation",
-            expected_hash=first["after_hash"],
+            content="Disconnected observation",
         )
 
     message = str(refusal.value)
-    assert "Retriggers: operation=validate;" in message
+    assert 'relation_disposition="reviewed_none"' in message
     assert "validate_only" not in message
+    assert "operation=validate" not in message
     assert "fix: Fix:" not in message
 
 
-def test_validate_payload_remediation_names_operation_validate(tmp_path: Path) -> None:
-    first = _first_observation(tmp_path)
+def test_validate_payload_remediation_names_the_one_call_fix(tmp_path: Path) -> None:
+    _write_page_needing_review(tmp_path)
     payload = commands.op_observe_memory(
         tmp_path,
         path=PAGE,
         operation="validate",
         category="rule",
-        content="Second disconnected observation",
-        expected_hash=first["after_hash"],
+        content="Disconnected observation",
     )
 
     remediation = payload["semantic"]["contract_result"]["findings"][0]["remediation"]
-    assert "operation=validate" in remediation
+    assert 'relation_disposition="reviewed_none"' in remediation
     assert "validate_only" not in remediation
+    assert "operation=validate" not in remediation
 
 
-def test_blocked_edit_still_names_validate_only(tmp_path: Path) -> None:
-    first = _first_observation(tmp_path)
+def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path) -> None:
+    _write_page_needing_review(tmp_path)
     with pytest.raises(Exception, match="SEMANTIC_CONTRACT_BLOCKED") as refusal:
         commands.op_edit(
             tmp_path,
             path=PAGE,
             why="change content",
             new_body="# Observe\n\nChanged prose.\n",
-            expected_hash=first["after_hash"],
+            expected_hash=vault.content_hash(_page_source()),
         )
 
     message = str(refusal.value)
-    assert "Retriggers: validate_only=true;" in message
+    assert 'relation_disposition="reviewed_none"' in message
+    assert "validate_only" not in message
     assert "operation=validate" not in message
     assert "fix: Fix:" not in message

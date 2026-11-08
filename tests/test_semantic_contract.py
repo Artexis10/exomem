@@ -763,14 +763,11 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "RELATION_DISPOSITION_MISSING" in codes
     assert "missing_semantic_unit" not in codes
     finding = next(item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING")
-    assert "validate_only" in finding.remediation
-    assert "transition_token" in finding.remediation
     assert "draft_id" not in finding.remediation
     assert "draft_hash" not in finding.remediation
     assert "draft_token" not in finding.remediation
     assert 'relation_disposition="reviewed_none"' in finding.remediation
     assert "re-issue the same edit" in finding.remediation
-    assert "relation_review_hash" in finding.remediation
     assert "relation_review_reason" in finding.remediation
 
 
@@ -824,7 +821,7 @@ def test_posthoc_existing_page_uses_edit_remediation(tmp_path: Path) -> None:
         for item in result.findings
         if item.code == "RELATION_DISPOSITION_MISSING"
     )
-    assert "transition_token" in finding.remediation
+    assert 'relation_disposition="reviewed_none"' in finding.remediation
     assert "draft_id" not in finding.remediation
 
 
@@ -2573,6 +2570,42 @@ def _lone_governed_page(tmp_path: Path, body: str):
     return page, corpus
 
 
+def _page_with_peer(
+    tmp_path: Path, body: str, *, peer_body: str = "## Relations\n"
+) -> tuple[
+    semantic_contract.SemanticPageState,
+    semantic_contract.SemanticPageState,
+    semantic_contract.SemanticCorpusContext,
+]:
+    """The page `_ID_A` beside a second governed page, and the corpus holding both."""
+    page = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(exomem_id=_ID_A, body=body),
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+    )
+    peer = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/peer.md",
+        _source(exomem_id=_ID_B, body=peer_body),
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page, peer),
+        registry=relation_registry.core_registry(),
+        identity_census=semantic_contract.StableIdentityCensus(
+            (
+                semantic_contract.StableIdentityEntry(page.path, _ID_A),
+                semantic_contract.StableIdentityEntry(peer.path, _ID_B),
+            )
+        ),
+    )
+    return page, peer, corpus
+
+
 def test_reviewed_none_survives_an_edit_when_no_relation_target_can_exist(
     tmp_path: Path,
 ) -> None:
@@ -2597,6 +2630,7 @@ def test_reviewed_none_survives_an_edit_when_no_relation_target_can_exist(
         after=after,
         before_corpus=before_corpus,
         after_corpus=after_corpus,
+        before_review=review,
         after_review=review,
     )
 
@@ -2607,31 +2641,21 @@ def test_reviewed_none_survives_an_edit_when_no_relation_target_can_exist(
     assert not [f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE"]
 
 
-def test_renewal_never_applies_once_a_governed_peer_exists(tmp_path: Path) -> None:
-    """With a peer to relate to, `reviewed_none` CAN go stale — and must."""
-    before, _ = _lone_governed_page(tmp_path, "## Relations\n")
-    after, _ = _lone_governed_page(tmp_path, "## Relations\n\nAppended.\n")
-    peer = semantic_contract.build_page_state(
-        tmp_path,
-        "Knowledge Base/Notes/Insights/peer.md",
-        _source(exomem_id=_ID_B, body="## Relations\n"),
-        relation_registry=relation_registry.core_registry(),
-        language_registry=semantic_language_registry.core_registry(),
-    )
-    census = semantic_contract.StableIdentityCensus(
-        (
-            semantic_contract.StableIdentityEntry(after.path, _ID_A),
-            semantic_contract.StableIdentityEntry(peer.path, _ID_B),
-        )
-    )
-    corpus = semantic_contract.SemanticCorpusContext.from_states(
-        tmp_path,
-        (after, peer),
-        registry=relation_registry.core_registry(),
-        identity_census=census,
-    )
+def test_reviewed_none_stays_in_force_across_an_edit_when_a_peer_exists(tmp_path: Path) -> None:
+    """The decision binds the page's identity, not its bytes: an unconnected edit is not re-asked.
+
+    The fingerprint hashes the whole page, `updated:` stamp included, so every edit
+    moved it. Re-asking each time made the agent copy a hash three calls per edit
+    and filled the page's decision directory toward its limit.
+    """
+    before, _, _ = _page_with_peer(tmp_path, "## Relations\n")
+    after, _, corpus = _page_with_peer(tmp_path, "## Relations\n\nAppended.\n")
     review = semantic_contract.RelationReviewState(
-        "reviewed_none", _ID_A, before.review_fingerprint, reason="stale now"
+        "reviewed_none",
+        _ID_A,
+        before.review_fingerprint,
+        reason="nothing fits",
+        reference="r/1.json",
     )
 
     result = _evaluate(
@@ -2639,55 +2663,127 @@ def test_renewal_never_applies_once_a_governed_peer_exists(tmp_path: Path) -> No
         after=after,
         before_corpus=corpus,
         after_corpus=corpus,
+        before_review=review,
         after_review=review,
     )
 
-    assert result.relation_disposition.kind == "stale"
-
-
-def test_remediation_leads_with_the_fix_and_says_the_fallback_re_triggers(
-    tmp_path: Path,
-) -> None:
-    """Presented as equals, an agent always picks the branch that reliably succeeds."""
-    before, _ = _lone_governed_page(tmp_path, "## Relations\n")
-    after, _ = _lone_governed_page(tmp_path, "## Relations\n\nAppended.\n")
-    peer = semantic_contract.build_page_state(
-        tmp_path,
-        "Knowledge Base/Notes/Insights/peer.md",
-        _source(exomem_id=_ID_B, body="## Relations\n"),
-        relation_registry=relation_registry.core_registry(),
-        language_registry=semantic_language_registry.core_registry(),
+    disposition = result.relation_disposition
+    assert (disposition.kind, disposition.satisfied, disposition.review_renewed) == (
+        "reviewed_none", True, True
     )
-    corpus = semantic_contract.SemanticCorpusContext.from_states(
+    assert (disposition.review_reason, disposition.review_reference) == ("nothing fits", "r/1.json")
+    assert not [f for f in result.findings if f.code.startswith("RELATION_DISPOSITION")]
+
+
+def test_a_reviewed_none_creation_never_carries_a_stale_review(tmp_path: Path) -> None:
+    """A creation has no before state, so an old review cannot stand for it."""
+    page, _, corpus = _page_with_peer(tmp_path, "## Relations\n")
+    review = semantic_contract.RelationReviewState(
+        "reviewed_none", _ID_A, "0" * 64, reason="an earlier page"
+    )
+
+    result = _evaluate(
+        before=None, after=page, before_corpus=corpus, after_corpus=corpus,
+        operation="create", after_review=review,
+    )
+
+    assert result.relation_disposition.kind == "stale"
+    assert result.should_block
+
+
+@pytest.mark.parametrize("grandfathered", (False, True))
+def test_removing_the_last_connection_is_refused_despite_an_old_reviewed_none(
+    tmp_path: Path, grandfathered: bool
+) -> None:
+    """An old receipt must not hide a lost relation: the page was connected before the edit."""
+    connected, _, corpus_before = _page_with_peer(
+        tmp_path, "## Relations\n\n- supports [[Knowledge Base/Notes/Insights/peer]]\n"
+    )
+    unlinked, _, corpus_after = _page_with_peer(tmp_path, "## Relations\n\nUnlinked.\n")
+    # The receipt dates from before the page was connected, so it is stale by fingerprint.
+    old_review = semantic_contract.RelationReviewState(
+        "reviewed_none", _ID_A, "0" * 64, reason="not connected yet"
+    )
+
+    result = _evaluate(
+        before=connected,
+        after=unlinked,
+        before_corpus=corpus_before,
+        after_corpus=corpus_after,
+        before_review=old_review,
+        after_review=old_review,
+        grandfathered=grandfathered,
+    )
+
+    assert result.relation_disposition.kind == "stale"
+    assert result.should_block
+    assert "RELATION_DISPOSITION_STALE" in {item.code for item in result.blocking_findings}
+
+
+def test_a_contested_identity_does_not_carry_a_reviewed_none(tmp_path: Path) -> None:
+    """A second path claiming the identity may be a conflict copy; the review may not fit it."""
+    before, _, _ = _page_with_peer(tmp_path, "## Relations\n")
+    after, peer, _ = _page_with_peer(tmp_path, "## Relations\n\nAppended.\n")
+    contested = semantic_contract.SemanticCorpusContext.from_states(
         tmp_path,
         (after, peer),
         registry=relation_registry.core_registry(),
         identity_census=semantic_contract.StableIdentityCensus(
             (
                 semantic_contract.StableIdentityEntry(after.path, _ID_A),
+                semantic_contract.StableIdentityEntry(
+                    "Knowledge Base/Notes/Insights/copy.md", _ID_A
+                ),
                 semantic_contract.StableIdentityEntry(peer.path, _ID_B),
             )
         ),
     )
     review = semantic_contract.RelationReviewState(
-        "reviewed_none", _ID_A, before.review_fingerprint, reason="stale now"
+        "reviewed_none", _ID_A, before.review_fingerprint, reason="nothing fits"
     )
 
     result = _evaluate(
-        before=before,
-        after=after,
-        before_corpus=corpus,
-        after_corpus=corpus,
-        after_review=review,
+        before=before, after=after, before_corpus=contested, after_corpus=contested,
+        before_review=review, after_review=review,
     )
 
-    finding = next(
-        f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE"
+    assert result.relation_disposition.kind == "stale"
+
+
+def test_a_bootstrap_review_does_not_carry_once_a_second_page_exists(tmp_path: Path) -> None:
+    """The first page's free pass is not a decision about its unconnected state."""
+    before, _, _ = _page_with_peer(tmp_path, "## Relations\n")
+    after, _, corpus = _page_with_peer(tmp_path, "## Relations\n\nAppended.\n")
+    review = semantic_contract.RelationReviewState(
+        "bootstrap", _ID_A, before.review_fingerprint, reason="first page"
     )
-    # The causal fix reads first, and the fallback is labelled with its cost.
-    assert finding.remediation.startswith("Add a qualifying typed relation.")
-    assert "Retriggers:" in finding.remediation
-    assert finding.remediation.index("Add a qualifying") < finding.remediation.index("reviewed_none")
+
+    result = _evaluate(
+        before=before, after=after, before_corpus=corpus, after_corpus=corpus,
+        before_review=review, after_review=review,
+    )
+
+    assert result.relation_disposition.kind == "stale"
+
+
+def test_remediation_offers_a_relation_or_one_call_reviewed_none(tmp_path: Path) -> None:
+    """The finding names a route every writer offers: the review fields, in the same call."""
+    before, _, _ = _page_with_peer(tmp_path, "## Relations\n")
+    after, _, corpus = _page_with_peer(tmp_path, "## Relations\n\nAppended.\n")
+    review = semantic_contract.RelationReviewState(
+        "bootstrap", _ID_A, before.review_fingerprint, reason="first page"
+    )
+
+    result = _evaluate(
+        before=before, after=after, before_corpus=corpus, after_corpus=corpus,
+        before_review=review, after_review=review,
+    )
+
+    finding = next(f for f in result.findings if f.code == "RELATION_DISPOSITION_STALE")
+    assert finding.remediation.startswith("Add a qualifying typed relation")
+    assert 'relation_disposition="reviewed_none"' in finding.remediation
+    assert "relation_review_reason" in finding.remediation
+    assert "Retriggers" not in finding.remediation
 
 
 def test_identity_census_consumes_text_before_reading_next_page(tmp_path, monkeypatch):

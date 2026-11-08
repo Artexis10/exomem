@@ -199,6 +199,35 @@ def test_an_edit_adding_a_generic_edge_is_refused_and_a_later_edit_of_the_kept_e
     assert later["state"] == "committed", later
 
 
+def test_a_generic_edit_without_the_validated_hash_is_refused_for_the_missing_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only reviewed-none has a one-call route; generic names what it lacks, not a mismatch."""
+    _vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    ben = _target(_entity(call, "person", "Ben Quay"))
+    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
+
+    refused = call(
+        "edit_note",
+        {
+            "path": page,
+            "why": "link the person",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": f"- supports [[{anchor}]]",
+                "new_string": f"- supports [[{anchor}]]\n- relates_to [[{ben}]]",
+                "relation_disposition": "generic",
+                "relation_review_reason": REASON,
+            },
+        },
+    )
+
+    error = refused["error"]
+    assert error["code"] == "INVALID_RELATION_REVIEW"
+    assert "relation_review_hash" in error["message"]
+    assert "transition_token" in error["message"]
+
+
 def test_a_page_that_is_not_live_and_an_adoption_import_are_never_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
