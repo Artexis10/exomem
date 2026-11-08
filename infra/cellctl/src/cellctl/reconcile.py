@@ -1747,7 +1747,7 @@ async def _cleanup_alerts(
 MEDIA_METER_RETRY = timedelta(minutes=5)
 # Failed listings in a row before the unknown-figure alert fires. Three, five minutes apart, outlast a
 # provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
-# switch off the hide and over-allowance alerts with no notice.
+# switch off the over-allowance alert with no notice.
 MEDIA_METER_UNKNOWN_AFTER = 3
 
 
@@ -1761,7 +1761,7 @@ async def _media_physical_meter(
     MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. collect-released-media D4: a hide raises no
     alert, since every owner deletion ends in one; the log lists the hidden names, and the out-of-cluster
     watcher alerts on a burst. Without the list key each try counts
-    as a failed listing, since a missing key switches off both abuse alerts as a revoked one does. The figure
+    as a failed listing, since a missing key switches off the over-allowance alert as a revoked one does. The figure
     is the operator's; the owner's meter and the cell's record stay as they are."""
     edge = cluster_config.media_edge
     if edge is None:

@@ -10,8 +10,10 @@ It still holds the stored per-cell key of each cell created before the switch, l
 ## Credentials
 
 Terraform creates the credentials above except the per-cell keys and the operator key. The cell-data keys come from
-`infra/terraform/cell-data/keys.tf`. The two media keys come from `infra/terraform/durability/media.tf`.
-No media key can delete a file version, so a captured media key cannot destroy a stored original.
+`infra/terraform/cell-data/keys.tf`. The three media keys come from `infra/terraform/durability/media.tf`.
+No media key can delete a file version. A captured edge key can still hide a name, and the media bucket's
+lifecycle rule deletes a hidden version when the grace period ends. The key watcher's hide budget and the
+grace period bound that exposure: see "Triage a burst of hides" in `cloud-media-edge.md`.
 Each credential has one holder.
 
 | Credential | Account | Restricted to | Capabilities | Held by |
@@ -21,6 +23,7 @@ Each credential has one holder.
 | `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log |
 | `<prefix>-media-edge` | founder | The media bucket | `readFiles`, `writeFiles` | The media edge, in Secret `exomem-media-edge-b2` |
 | `<prefix>-cellctl-media-list` | founder | The media bucket | `listBuckets`, `listFiles` | `cellctl`, to meter each cell's stored bytes. Source: `infra/terraform/durability/media.tf` |
+| `<prefix>-key-watcher-media-list` | founder | The media bucket | `listFiles` | The key watcher, to count hide markers, in secrets `B2_WATCHER_MEDIA_KEY_ID` and `B2_WATCHER_MEDIA_KEY` of environment `key-watcher` |
 | One key per cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | The cell's backup and restore Jobs, in Secret `cell-object-store-key` |
 | Operator key | One account per key | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles`; for founder also `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the clean-up script only |
 
@@ -48,6 +51,26 @@ Never replace it from a template; read the current value, change it and write it
 
 Until step 4, the watcher reports the new key as unpinned. The alert is expected for that window.
 A bucket setting that differs from the copy shows as a reason token that names the field and no value.
+
+## Pin the media watch
+
+Do this after the durability apply of "Turn on collection" in `cloud-media-edge.md`. That apply adds the
+watcher's media key and the grace period to the media bucket's lifecycle rule. Agree the change with the
+owner of `contain-cloud-controller-compromise` first, because that change owns the pinned set.
+
+1. Open your copy of the current pinned set.
+2. In the `founder` account, add the ID from `key_watcher_media_list_application_key_id` to `pinned_key_ids`.
+3. In that account's `buckets`, replace the media bucket's `lifecycleRules` with the provider's current value
+   from `b2_list_buckets`. Expect `daysFromHidingToDeleting` equal to the grace period.
+4. Add the media watch to the `founder` account, with the budget and window that you chose:
+   `"media": {"bucket_id": "<media bucket id>", "key_id_env": "B2_WATCHER_MEDIA_KEY_ID", "key_env": "B2_WATCHER_MEDIA_KEY", "hide_budget": <budget>, "window_hours": <hours>}`
+5. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+6. Run the watcher once: `gh workflow run b2-key-watcher.yml`.
+   Expect `0 active` for both accounts and a line `account founder: <n> media hides in the window`.
+
+`window_hours` is the period that `hide_budget` covers. Keep it at 2 or more, because a scheduled run can
+start late. Until step 5, the watcher reports the new key as unpinned and the lifecycle rule as drift.
+A pinned set without `media` still parses, and its watcher counts no hides.
 
 ## Clean up after a cell deletion
 
