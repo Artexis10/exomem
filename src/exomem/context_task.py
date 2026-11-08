@@ -65,10 +65,12 @@ def _add_missing(block: dict[str, Any], reason: str) -> None:
 
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
     if method:
+        # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
+        title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
         if item.get("approval") == procedure_approval.APPROVED:
             # The line is part of the method, so the allowance charges it with the method. It carries only the title.
-            return f"Approved procedure: {item.get('attribution', '')}. Read it, then follow it where it fits."
-        return f"Method: {item.get('attribution', '')}. Read the source for applicability and exclusions."
+            return f"Approved procedure: {title}. Read it, then follow it where it fits."
+        return f"Method: {title}. Read the source for applicability and exclusions."
     line = f"{item.get('title', '')}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
     links = [f"{link['relation']} {link['title']} {link['target_ref']}" for link in item.get("links") or ()]
@@ -300,6 +302,8 @@ def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[
     owner = procedure_approval.owner_view(root, principal.effective_principal())
     ledgers = procedure_approval.ledgers(root, refs.values())
     named: dict[str, str | None] | None = None
+    # A ledger that cannot be read leaves its source unchecked, even though its verdict reads unapproved.
+    complete = not any(ledgers[ref].unavailable for ref in refs.values())
 
     def holders(path: str, ref: str) -> tuple[str, ...]:
         # The index names a ref for a path only when that page is the single valid owner of its id.
@@ -308,7 +312,6 @@ def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[
             named = memory_refs.ReferenceIndex(root).refs_for_paths(list(refs), recall_reader=True)
         return (path,) if named.get(path) == ref else ()
 
-    complete = True
     for path, ref in refs.items():
         source = projections[path]
 
@@ -327,6 +330,17 @@ def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[
             log.warning("approval verdict unavailable for %s", path, exc_info=True)
             complete = False
     return values, complete
+
+
+def approved_title(source: SourceProjection) -> str:
+    """The title an approved method shows: the approved page's own title or first heading, else its ref.
+
+    It never falls back to the file name. A move keeps an approval when the bytes are unchanged, so a name
+    given by a rename must not read as part of what the owner approved.
+    """
+    public = source.public
+    title = vault.authored_title(public.get("frontmatter"), str(public.get("body") or ""))
+    return egress.without_wikilinks(title) if title else str(source.ref or "")
 
 
 def _revalidate(root: Path, held: Sequence[Mapping[str, str]], caller: Any, sources: dict) -> bool:
@@ -446,8 +460,14 @@ def compile_context(
         if not checked:
             _add_missing(block, "lane_failed")
         for path, methods in methods_by_source.items():
+            value = verdicts.get(path, procedure_approval.UNAPPROVED)
+            # An unapproved method carries no field, so an ordinary method gains nothing; the absence reads unapproved.
+            if value == procedure_approval.UNAPPROVED:
+                continue
             for method in methods:
-                method["approval"] = verdicts.get(path, procedure_approval.UNAPPROVED)
+                method["approval"] = value
+                if value == procedure_approval.APPROVED:
+                    method["attribution"] = approved_title(sources[path])
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
@@ -553,10 +573,11 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
     methods = block["methods"]
 
     def versions(items):
-        # These are fixed version-hint fields of the activation protocol.
+        # These are fixed version-hint fields of the activation protocol. A method item carries `approval` only
+        # when it is approved or stale, so the hint carries it only then.
         return [
             {**{key: item[key] for key in ("ref", "source_ref", "source_version")},
-             "approval": item.get("approval", procedure_approval.UNAPPROVED)}
+             **({"approval": item["approval"]} if "approval" in item else {})}
             for item in items
         ]
 

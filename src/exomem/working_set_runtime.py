@@ -606,9 +606,11 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
                 for key in ("ref", "source_ref", "source_version")
             ):
                 hint = {key: item[key] for key in ("ref", "source_ref", "source_version")}
-                # A token from before approvals, or one naming a value this server never writes, reads as unapproved.
+                # Only `approved` and `stale` ride a hint. A token from before approvals, or one naming a value this
+                # server never writes, carries none, and the absence reads unapproved.
                 held = item.get("approval")
-                hint["approval"] = held if held in (procedure_approval.APPROVED, procedure_approval.STALE) else procedure_approval.UNAPPROVED
+                if held in (procedure_approval.APPROVED, procedure_approval.STALE):
+                    hint["approval"] = held
                 decoded["method_versions"].append(hint)
     return decoded
 
