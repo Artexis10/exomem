@@ -1399,6 +1399,7 @@ def task_candidates(
         context_task,
         context_views,
         epistemic_graph,
+        find,
         find_types,
         lexstore,
         record_governance,
@@ -1503,7 +1504,29 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_truncated"})
         for path, _score in hits[:limit]:
             add(path, origin)
-        if categories:
+        if budget_exhausted("working_set.task_context_vector"):
+            missing.append({"role": "task_context", "reason": "budget"})
+            break
+        # The vector ranking search_memory fuses, so a paraphrase or a typo reaches the page that shares no
+        # material term with the turn. It never loads a model on this thread: while the encoder warms, find
+        # skips the lane and reports it degraded.
+        degraded: list[str] = []
+        failed: list[str] = []
+        with find_types.timing_span(timings, "working_set.task_context_vector"):
+            vector_hits = find.find(
+                vault_root, query=query, limit=limit + 1, scope="kb", mode="vector", graph=False,
+                rerank=False, result_level="page", prefer_compiled=True, prefer_active=True,
+                prefer_used=False, admit_path=allowed.__contains__, timings=timings,
+                degraded_out=degraded, failed_out=failed,
+            )
+        # Only the dense lane's own state counts; find's keyword fallback on an empty dense ranking is not a failure.
+        if "embeddings" in degraded or "vector" in failed:
+            missing.append({"role": "task_context", "reason": "lane_failed"})
+        for hit in vector_hits[:limit]:
+            add(str(getattr(hit, "path", "") or ""), origin)
+        if categories and budget_exhausted("working_set.task_context_methods"):
+            missing.append({"role": "task_context", "reason": "budget"})
+        elif categories:
             with find_types.timing_span(timings, "working_set.task_context_methods"):
                 methods = lexstore.get_store(vault_root).search_semantic_units_result(
                     [], limit + 1, categories, (), "kb", fresh,
@@ -1527,6 +1550,9 @@ def task_candidates(
         nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
         try:
             for path in list(found)[:MAX_ITEMS_PER_ROLE]:
+                if budget_exhausted("working_set.task_context_graph"):
+                    missing.append({"role": "task_context", "reason": "budget"})
+                    break
                 with find_types.timing_span(timings, "working_set.task_context_graph"):
                     graph = epistemic_graph.graph_context(
                         vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
