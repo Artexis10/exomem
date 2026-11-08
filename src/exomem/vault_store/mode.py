@@ -23,11 +23,11 @@ def store_mode_active(vault_root: Path) -> bool:
 
     It reads the records each time and keeps no cache: it prevents a service from writing Markdown
     into a vault that the store owns, so a stale answer would cost more than the read.
-    A store that is absent, or older than schema 15, is file mode: it holds no pages. A store
-    that cannot be read raises, because an unknown mode must never pass for file mode.
+    A manifest that is absent, a store that is absent and a store older than schema 15 are file mode:
+    none of them holds pages. A manifest or a store that cannot be read raises, because an unknown
+    mode must never pass for file mode.
     """
-    recorded = state_migration.recorded_descriptor_ids(vault_root)
-    if recorded is None or state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
+    if not state_migration.vault_store_recorded(vault_root):
         return False
     path = connection.store_path(vault_root)
     if not path.is_file():

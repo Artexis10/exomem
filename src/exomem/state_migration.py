@@ -241,6 +241,19 @@ def recorded_descriptor_ids(vault_root: Path) -> tuple[str, ...] | None:
     return tuple(str(entry) for entry in descriptors)
 
 
+def vault_store_recorded(vault_root: Path) -> bool:
+    """Whether the published state manifest records ``vault-store-v1``.
+
+    An absent manifest answers False. A manifest that cannot be read, is not valid JSON or belongs to
+    another vault raises ``StateMigrationManifestError``: it never reads as "not recorded", because the
+    caller decides whether this vault's pages live in the store.
+    """
+
+    manifest = _load_manifest(state_paths.vault_state_dir(vault_root), vault_root=vault_root)
+    # `_load_manifest` has validated that `descriptors` is a list of strings.
+    return manifest is not None and VAULT_STORE_COMPATIBILITY_ID in manifest["descriptors"]
+
+
 def supported_state_compatibility_ids() -> tuple[str, ...]:
     """Optional state formats this runtime can use, not merely parse.
 

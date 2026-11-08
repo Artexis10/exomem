@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
 
-from exomem import state_migration
+from exomem import state_migration, state_paths
 from exomem.collection_store import connection, schema
 from exomem.vault_store.mode import store_mode_active
 
@@ -101,6 +102,25 @@ def test_a_store_that_cannot_be_read_raises_instead_of_reading_as_file_mode(vaul
     connection.store_path(vault).parent.mkdir(parents=True, exist_ok=True)
     connection.store_path(vault).write_bytes(b"not a database" * 100)
     with pytest.raises(sqlite3.DatabaseError):
+        store_mode_active(vault)
+
+
+@pytest.mark.parametrize("damage", ["not json", "another vault"])
+def test_a_manifest_that_cannot_be_trusted_raises_instead_of_reading_as_file_mode(vault, damage):
+    """Defect: a damaged manifest reads as "id not recorded", so a service writes Markdown into a vault that the store owns."""
+    with _store(vault) as writer:
+        _set_mode(writer, "store")
+    _record_id(vault)
+    assert store_mode_active(vault) is True
+    manifest = state_paths.vault_state_dir(vault) / state_migration.MANIFEST_NAME
+    if damage == "not json":
+        manifest.write_text("{not json")
+    else:
+        recorded = json.loads(manifest.read_text())
+        recorded["vault_identity"] = "another-vault"
+        manifest.write_text(json.dumps(recorded))
+
+    with pytest.raises(state_migration.StateMigrationManifestError):
         store_mode_active(vault)
 
 
