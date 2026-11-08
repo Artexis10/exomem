@@ -7,15 +7,16 @@
 consolidation command that owns its run state; until that command exists, no public
 command SHALL mutate or enumerate it. `_Approvals` SHALL be reserved exclusively for
 `approve_procedure`, the owner-only operation that owns the approvals ledger. The operation
-SHALL append approval and revocation entries and SHALL NOT rewrite or delete one. Owner identity, L6 disclosure, Tier-2 enablement,
+SHALL append approval and revocation entries, SHALL NOT rewrite or delete one, and SHALL move
+an unreadable entry file aside only through its `quarantine` action. Owner identity, L6 disclosure, Tier-2 enablement,
 an idempotency key, a filesystem alias, or a caller-provided bypass flag MUST NOT grant
 generic administration-tree authority.
 
 Generic create, directory-create, edit, observe, replace, append, move, delete, recover,
 dataset, import, capture, Records, media, frame, upload/download/transfer, repair, and multiplexed alias
 operations SHALL refuse before touching any of these trees. Read/list/search routes SHALL treat
-them as structurally absent, except that the approval verdict and the owner listing of
-`approve_procedure` SHALL read the approvals ledger. Both source and destination SHALL be checked for moves;
+them as structurally absent, except that the approval verdict and the `procedure_approvals`
+listing of `read_review` SHALL read the approvals ledger. Both source and destination SHALL be checked for moves;
 trash source, requested restore target, metadata-derived original target, and every
 recursive child SHALL be checked for recovery. Owning commands SHALL receive a private,
 non-serializable authority from the dispatcher and SHALL remain subject to their normal
@@ -28,7 +29,9 @@ anchors. Stable pre-existing and anchor-observable parent swaps, rename/link cha
 hard links, reparse/junction points, and bind aliases SHALL refuse reserved-tree access.
 A platform without equivalent handle-relative primitives SHALL disable the affected
 route. The private owning-command authority
-MAY enter its tree only through the same safe traversal plus its receipt-first lifecycle.
+MAY enter its tree only through the same safe traversal plus its receipt-first lifecycle. The
+exception is `approve_procedure`, which SHALL write each approvals entry as one atomic
+whole-file rename that is itself the entry's receipt, with no separate receipt-first lifecycle.
 
 #### Scenario: Generic write cannot author governance policy
 
@@ -68,7 +71,7 @@ MAY enter its tree only through the same safe traversal plus its receipt-first l
 #### Scenario: Approve procedure retains exclusive ledger authority
 
 - **WHEN** the owner calls `approve_procedure` for an eligible page with its current version
-- **THEN** its private dispatcher authority appends one entry to the approvals ledger
+- **THEN** its private dispatcher authority writes one entry file under `_Approvals` by atomic rename
 - **AND** no generic public flag can reproduce that authority
 
 #### Scenario: Consolidation root is reserved before its owner exists
