@@ -1122,6 +1122,21 @@ def schema_version(conn: sqlite3.Connection, *, ceiling: int | None = None) -> i
     return version
 
 
+def divergence_reason(conn: sqlite3.Connection) -> str | None:
+    """Why the store fences business writes as diverged, or None when it records no divergence.
+
+    Either record fences them: the replica divergence marker, whose JSON carries a ``reason``, or a view
+    that carries another store instance's stamp. Every reader of the fence asks here, so none restates the keys.
+    """
+    found = dict(conn.execute(
+        "SELECT key, value FROM store_meta WHERE key IN (?, ?)", (META_REPLICA_DIVERGENCE, META_VIEW_DIVERGED)))
+    if META_REPLICA_DIVERGENCE in found:
+        return json.loads(found[META_REPLICA_DIVERGENCE])["reason"]
+    if found.get(META_VIEW_DIVERGED) == "1":
+        return "a view carries another store instance's stamp"
+    return None
+
+
 def ensure_schema(conn: Connection) -> int:
     """Apply packaged revisions in one writer-owned immediate transaction."""
     # Store libraries load with the first store, not with every CLI import.

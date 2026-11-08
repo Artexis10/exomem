@@ -428,11 +428,10 @@ class CollectionStoreRuntime:
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
         token = self.manager._fencing_token
         if token is not None and self.reporting_ready(token):
-            divergence, view = self._meta(schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)
-            if divergence is not None or view is not None:
-                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True,
-                        "reason": json.loads(divergence)["reason"] if divergence is not None
-                        else "a view carries another store instance's stamp"}
+            with connection.store_reader(self.path, self.reader_pool()) as reader:
+                reason = schema.divergence_reason(reader)
+            if reason is not None:
+                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True, "reason": reason}
             return {"status": "admitted"}
         return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
 

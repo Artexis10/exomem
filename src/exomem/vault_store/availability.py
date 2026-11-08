@@ -8,7 +8,6 @@ which reads the manifest first and never opens the store of a file-mode vault.
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import closing
 from pathlib import Path
@@ -108,7 +107,8 @@ def write_refusal(vault_root: Path):
         if pending is not None:
             error = pending.error()
             return OpError(error.code, error.reason, "Writes resume once the takeover settles.")
-    reason = _divergence(root)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        reason = schema.divergence_reason(reader)
     if reason is not None:
         return OpError(
             "COLLECTION_STORE_DIVERGED", reason, "The owner reconciles the store with maintain_memory mode collections-store-adopt-local.")
@@ -116,19 +116,6 @@ def write_refusal(vault_root: Path):
         WRITE_PATH_PENDING,
         "this vault's pages live in the collection store, and this build cannot write them there yet",
         f"Run {ROLLBACK} to return the pages to files.")
-
-
-def _divergence(vault_root: Path) -> str | None:
-    """Why the store records divergence, or None when it records none: either record fences writes."""
-    with closing(connection.open_reader(connection.store_path(vault_root))) as reader:
-        found = dict(reader.execute(
-            "SELECT key, value FROM store_meta WHERE key IN (?, ?)",
-            (schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)))
-    if schema.META_REPLICA_DIVERGENCE in found:
-        return json.loads(found[schema.META_REPLICA_DIVERGENCE])["reason"]
-    if found.get(schema.META_VIEW_DIVERGED) == "1":
-        return "a view carries another store instance's stamp"
-    return None
 
 
 def refuse_page_loss(vault_root: Path, operation: str) -> None:

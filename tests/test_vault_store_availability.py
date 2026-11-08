@@ -10,7 +10,15 @@ import pytest
 
 from exomem import commands, doctor, server_runtime, state_migration, state_paths
 from exomem.cli_ops import OpError
-from exomem.collection_store import admission, connection, migration, preflight, schema
+from exomem.collection_store import (
+    admission,
+    connection,
+    export,
+    migration,
+    preflight,
+    schema,
+    takeover,
+)
 from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance.principal import library_scope
 from exomem.vault_store import availability
@@ -40,11 +48,10 @@ def _coordinator(monkeypatch, url, topology=None):
         monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOPOLOGY", topology)
 
 
-def _record_divergence(vault, reason):
+def _record_divergence(vault, key, value):
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as writer:
         with writer.transaction() as tx:
-            tx.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                       (schema.META_REPLICA_DIVERGENCE, json.dumps({"reason": reason})))
+            tx.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)", (key, value))
 
 
 def _record_id_only(vault):
@@ -96,10 +103,14 @@ def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):
     assert doctor._check_vault_store_records(vault) is None
 
 
+@pytest.mark.parametrize("record", [
+    (schema.META_REPLICA_DIVERGENCE, json.dumps({"reason": "the vault replica records unresolved divergence"})),
+    (schema.META_VIEW_DIVERGED, "1"),
+], ids=["replica divergence", "view stamp"])
 def test_a_write_to_a_diverged_store_mode_vault_refuses_with_the_stores_code_and_changes_no_markdown(
-        store_mode_vault):
+        store_mode_vault, record):
     """Defect: a page write reaches disk while the store that owns the pages awaits reconciliation."""
-    _record_divergence(store_mode_vault, "the vault replica records unresolved divergence")
+    _record_divergence(store_mode_vault, *record)
     before = _vault_bytes(store_mode_vault)
     with pytest.raises(OpError) as refused:
         commands.op_remember(store_mode_vault, title="Pump note", status="draft",
@@ -121,11 +132,41 @@ def test_a_write_to_a_healthy_store_mode_vault_refuses_until_the_store_takes_pag
     assert _vault_bytes(store_mode_vault) == before
 
 
+@pytest.fixture
+def export_steps(monkeypatch):
+    """The owner's offline session as a stub that runs the route's callback, with each export step recording itself."""
+    ran = []
+    monkeypatch.setattr(admission, "_offline_owner",
+                        lambda root, operation, work, **_options: work(SimpleNamespace(root=root), None, None))
+    for name in ("apply", "retire_local", "abandon"):
+        monkeypatch.setattr(export, name, lambda *_args, _name=name, **_kwargs: ran.append(_name))
+    return ran
+
+
 @pytest.mark.parametrize("flags", [{"retire_local": True}, {"plan_id": "any-plan", "why": "return to files"}])
-def test_the_reverse_export_refuses_in_store_mode(store_mode_vault, flags):
-    """Defect: exporting the collections to files retires the store that holds the pages."""
+def test_the_reverse_export_refuses_inside_the_owners_session_before_any_step(store_mode_vault, export_steps, flags):
+    """Defect: exporting the collections to files retires the store that holds the pages, or checks outside the lease."""
     with library_scope(), pytest.raises(CollectionStoreError) as refused:
         admission.export_route(store_mode_vault, **flags)
+    assert refused.value.code == availability.PAGES_AT_RISK
+    assert export_steps == []
+
+
+def test_abandoning_an_export_still_runs_in_store_mode(store_mode_vault, export_steps):
+    """Defect: the page-loss refusal blocks the step that gives up an unfinished export, which drops no store."""
+    with library_scope():
+        admission.export_route(store_mode_vault, plan_id="any-plan", why="stop", abandon=True)
+    assert export_steps == ["abandon"]
+
+
+@pytest.mark.parametrize("primitive", [
+    lambda session: takeover.replace_live(session, "leaf", lambda: None),
+    lambda session: export._tombstone_store(session, AT),
+], ids=["replace_live", "tombstone_store"])
+def test_the_steps_that_swap_or_retire_the_live_store_refuse_for_any_caller_in_store_mode(store_mode_vault, primitive):
+    """Defect: a caller with no guard of its own swaps or retires the store that holds the pages."""
+    with pytest.raises(CollectionStoreError) as refused:
+        primitive(SimpleNamespace(root=store_mode_vault))  # the refusal comes before any use of the session
     assert refused.value.code == availability.PAGES_AT_RISK
 
 

@@ -656,6 +656,10 @@ def _retire_marker(session, token, intent):
 
 def _tombstone_store(session, at):
     """Fold the live store into one file and rename it, with any derived rows beside it, as the final step."""
+    from ..vault_store import availability
+
+    # The export's own guard refuses before any step; this one holds for any caller, because a store-mode store holds the pages.
+    availability.refuse_page_loss(session.root, "retiring the live collection store")
     path = session.path
     if path.exists():
         try:
