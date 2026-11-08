@@ -28,6 +28,8 @@ run "media_storage_is_absent_until_selected" {
       length(b2_application_key.cellctl_media_list) == 0 &&
       output.cloud_media_list_application_key_id == null &&
       output.cloud_media_list_application_key == null &&
+      length(b2_application_key.key_watcher_media_list) == 0 &&
+      output.key_watcher_media_list_application_key_id == null &&
       length(b2_bucket.cloud_backups) == 1
     )
     error_message = "Enabling Cloud backups must not create media storage or an edge credential."
@@ -87,9 +89,20 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
 
   assert {
     condition = (
+      length(b2_application_key.key_watcher_media_list) == 1 &&
+      b2_application_key.key_watcher_media_list[0].bucket_id == null &&
+      b2_application_key.key_watcher_media_list[0].bucket_ids == toset(["mock-media-bucket"]) &&
+      toset(b2_application_key.key_watcher_media_list[0].capabilities) == toset(["listFiles"])
+    )
+    error_message = "The key watcher's media key must only list the media bucket's file versions."
+  }
+
+  assert {
+    condition = (
       !contains(flatten([
         b2_application_key.cloud_media_edge[0].capabilities,
         b2_application_key.cellctl_media_list[0].capabilities,
+        b2_application_key.key_watcher_media_list[0].capabilities,
       ]), "deleteFiles")
     )
     error_message = "No service holds deleteFiles on the media bucket; the operator deletes with a short-lived key."

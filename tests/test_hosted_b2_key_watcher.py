@@ -37,6 +37,11 @@ BACKUP_BUCKET_ID = "fixturebackupbucketid01"
 STAGING_BUCKET_ID = "fixturestagingbucketid2"
 CELL_PREFIX = "cells/abcdefghijklmnop/"
 CELL_CAPABILITIES = ["listBuckets", "listFiles", "readFiles", "writeFiles", "deleteFiles"]
+MEDIA_BUCKET_ID = "fixturemediabucketid003"
+MEDIA_KEY_ID_ENV, MEDIA_KEY_ENV = "WATCHER_FIXTURE_MEDIA_KEY_ID", "WATCHER_FIXTURE_MEDIA_KEY"
+MEDIA_KEY_ID, MEDIA_KEY = "0050000000000fixturemedia01", "K005fixturemediasecret"
+NOW_MS = int(NOW.timestamp() * 1000)
+HOUR_MS = 3_600_000
 
 
 def _load_watcher() -> ModuleType:
@@ -245,6 +250,7 @@ def transport(
     authorize: Any = None,
     key_outcomes: list[Any] | None = None,
     alert_outcomes: list[Any] | None = None,
+    file_outcomes: list[Any] | None = None,
 ) -> FakeTransport:
     """Defaults to a clean account. An outcome list replaces one endpoint's answers."""
     listed = keys if keys is not None else [custodian_key()]
@@ -260,6 +266,8 @@ def transport(
                 }
             ],
             "alert": alert_outcomes or [{"ok": True}],
+            "b2_list_file_versions": file_outcomes
+            or [{"files": [], "nextFileName": None, "nextFileId": None}],
         }
     )
 
@@ -639,6 +647,10 @@ def test_a_receiver_5xx_is_retried_once_and_a_client_error_withholds_the_heartbe
         lambda document: document["accounts"][0].update(
             per_cell={"bucket_id": STAGING_BUCKET_ID, "capabilities": CELL_CAPABILITIES}
         ),
+        lambda document: document["accounts"][0].update(
+            media={"bucket_id": STAGING_BUCKET_ID, "key_id_env": MEDIA_KEY_ID_ENV,
+                   "key_env": MEDIA_KEY_ENV, "hide_budget": 10, "window_hours": 2}
+        ),
     ],
     ids=[
         "top-level-field",
@@ -648,6 +660,7 @@ def test_a_receiver_5xx_is_retried_once_and_a_client_error_withholds_the_heartbe
         "missing-bucket-field",
         "label",
         "per-cell-bucket-not-pinned",
+        "media-bucket-not-pinned",
     ],
 )
 def test_an_invalid_pinned_set_fails_loudly_and_sends_nothing(mutate: Any) -> None:
@@ -728,3 +741,115 @@ def test_an_unexpected_error_prints_only_its_class(
     assert "RuntimeError" in captured.err
     assert BACKUP_BUCKET_ID not in captured.out + captured.err
     assert fake.endpoints() == ["authorize"]  # no heartbeat after a crash
+
+
+# --- collect-released-media D4: the media watch ---------------------------------
+
+
+def media_account(*, hide_budget: int, window_hours: int = 24) -> dict[str, Any]:
+    """An account that pins the media bucket and a media watch over it."""
+    return {
+        **account(
+            per_cell=False,
+            pinned=[CUSTODIAN_KEY_ID, MEDIA_KEY_ID],
+            buckets={BACKUP_BUCKET_ID: locked_settings(), MEDIA_BUCKET_ID: unlocked_settings()},
+        ),
+        "media": {
+            "bucket_id": MEDIA_BUCKET_ID,
+            "key_id_env": MEDIA_KEY_ID_ENV,
+            "key_env": MEDIA_KEY_ENV,
+            "hide_budget": hide_budget,
+            "window_hours": window_hours,
+        },
+    }
+
+
+def media_environment(watched: dict[str, Any]) -> dict[str, str]:
+    return {**environment(watched), MEDIA_KEY_ID_ENV: MEDIA_KEY_ID, MEDIA_KEY_ENV: MEDIA_KEY}
+
+
+def media_transport(*pages: list[dict[str, Any]]) -> FakeTransport:
+    """A clean account whose media bucket lists these pages of file versions, in order."""
+    outcomes = []
+    for number, files in enumerate(pages, start=1):
+        last = number == len(pages)
+        outcomes.append({
+            "files": files,
+            "nextFileName": None if last else f"{CELL_PREFIX}page-{number}",
+            "nextFileId": None if last else f"fixture-cursor-{number}",
+        })
+    return transport(
+        keys=[custodian_key(), listed_key(MEDIA_KEY_ID, capabilities=["listBuckets", "listFiles"],
+                                          bucket_ids=[MEDIA_BUCKET_ID], prefix=None)],
+        buckets=[listed_bucket(BACKUP_BUCKET_ID, locked_settings()),
+                 listed_bucket(MEDIA_BUCKET_ID, unlocked_settings())],
+        file_outcomes=outcomes,
+    )
+
+
+def version(name: str, action: str, *, hours_ago: float) -> dict[str, Any]:
+    """One file version in B2's v4 list shape."""
+    return {
+        "accountId": ACCOUNT_ID,
+        "action": action,
+        "bucketId": MEDIA_BUCKET_ID,
+        "contentLength": 0 if action == "hide" else 512,
+        "fileId": f"fixture-file-{name}-{action}",
+        "fileName": f"{CELL_PREFIX}{name}",
+        "uploadTimestamp": NOW_MS - int(hours_ago * HOUR_MS),
+    }
+
+
+def test_a_hide_burst_above_the_budget_alerts_with_a_count_and_a_token_and_no_name() -> None:
+    """A compromised edge or Job that hides many names must page the operator inside the grace, and the
+    public log must not name what it hid. The third hide sits on the second page, so a watcher that
+    counted one page would stay at the budget and stay quiet."""
+    fake = media_transport(
+        [version("first", "upload", hours_ago=30), version("first", "hide", hours_ago=2),
+         version("second", "hide", hours_ago=1)],
+        [version("third", "upload", hours_ago=5), version("third", "hide", hours_ago=0.5)],
+    )
+
+    code, out, err = run(media_environment(media_account(hide_budget=2)), fake)
+
+    assert code == 1
+    assert active_alerts(fake) == {"fixture:MEDIA_HIDE_BURST"}
+    assert "account fixture: 3 media hides in the window" in out
+    assert "MEDIA_HIDE_BURST" in out
+    assert [item for item in (CELL_PREFIX, MEDIA_BUCKET_ID, MEDIA_KEY_ID, MEDIA_KEY, "fixture-file-")
+            if item in out + err] == []
+    assert all(set(json.loads(raw)) == {"schema_version", "transition_id", "job", "alert", "active"}
+               for endpoint, _, raw in fake.sent if endpoint == "alert")
+
+
+def test_hides_at_the_budget_or_outside_the_window_raise_no_alert() -> None:
+    """Every owner deletion ends in a hide, so the normal rate must stay quiet; the hide from before the
+    window is a burst that an earlier run already counted."""
+    fake = media_transport([
+        version("old", "hide", hours_ago=25), version("first", "hide", hours_ago=3),
+        version("second", "hide", hours_ago=1),
+    ])
+
+    code, out, _ = run(media_environment(media_account(hide_budget=2)), fake)
+
+    assert code == 0, out
+    assert fake.alerts()["fixture:MEDIA_HIDE_BURST"] is False
+    assert "account fixture: 2 media hides in the window" in out
+
+
+@pytest.mark.parametrize("blind", ["the media key is missing", "the file listing is refused"])
+def test_a_blind_media_watch_alerts_and_clears_no_burst(blind: str) -> None:
+    """A revoked or missing media key must not switch the burst alert off, nor clear one that is active."""
+    fake = media_transport([version("first", "hide", hours_ago=1)])
+    env = media_environment(media_account(hide_budget=0))
+    if blind == "the media key is missing":
+        del env[MEDIA_KEY_ENV]
+    else:
+        fake._outcomes["b2_list_file_versions"] = [401]
+
+    code, out, _ = run(env, fake)
+
+    assert code == 1
+    assert fake.alerts()["fixture:MEDIA_LISTING_FAILURE"] is True
+    assert "fixture:MEDIA_HIDE_BURST" not in fake.alerts()
+    assert "account fixture: unknown media hides in the window" in out
