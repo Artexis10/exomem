@@ -55,6 +55,13 @@ def empty(state: str = "empty", *, reset: bool = False) -> dict[str, Any]:
     return block
 
 
+def _add_missing(block: dict[str, Any], reason: str) -> None:
+    """Record a reason beside those already reported, so a later gap never hides an earlier one."""
+    gap = {"role": "task_context", "reason": reason}
+    if gap not in block["missing"]:
+        block["missing"].append(gap)
+
+
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
     if method:
         return f"Method: {item.get('attribution', '')}. Read the source for applicability and exclusions."
@@ -330,7 +337,7 @@ def compile_context(
             with find_types.timing_span(timings, "working_set.task_context_projection"):
                 source = project_source(root, candidate["source_ref"], caller, cache=sources)
             if source is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                _add_missing(block, "lane_failed")
                 continue
             item = {
                 **candidate, "source_version": source.version,
@@ -350,7 +357,7 @@ def compile_context(
             identities[identity] = item
             candidates.append(item)
             if source.methods is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                _add_missing(block, "lane_failed")
             for reference in source.methods or ():
                 method = {
                     "ref": reference,
@@ -375,7 +382,7 @@ def compile_context(
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
                 else:
                     linked.append((item, links, False))
             elif links:
@@ -385,13 +392,13 @@ def compile_context(
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
         for item, links, named in linked:
             if named:
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
                     continue
             item["links"] = []
             for link in links:
@@ -406,7 +413,7 @@ def compile_context(
                 if named:
                     # A named lead without one listed link would only repeat the turn slice's route.
                     block["candidates"].remove(item)
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)
@@ -491,7 +498,7 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
                 break
             methods["items"].pop()
         block["state"] = "partial"
-        block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+        _add_missing(block, "lane_truncated")
     packet["budget"]["used_chars"] = context_views.packet_chars(
         packet["map"], packet.get("turn_slice"), block, packet.get("stance"), packet.get("next_action"),
     )
