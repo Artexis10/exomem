@@ -26,5 +26,5 @@
 
 - [x] 5.1 Move the barrier, options, generators and census requirements out of `promote-referents-without-nudges` into this change.
   Its tasks 2.7, 2.8 and 2.9 and the census requirement point here, and its stale semantic-write-contract requirement (already in the canonical spec) is removed so the rule lives in one place.
-- [ ] 5.2 Edit the canonical `Purpose` line of `graph-semantic-integrity` at archive: similarity-only and co-participation suggestions carry no relation, rather than `relates_to`.
+- [x] 5.2 Edit the canonical `Purpose` line of `graph-semantic-integrity` at archive: similarity-only and co-participation suggestions carry no relation, rather than `relates_to`.
 - [x] 5.3 Run `openspec validate --all --strict` with the pinned CLI before and after the work.
