@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Safe normal-mode residency
-Outside an explicit Cloud service profile, Normal mode SHALL avoid startup model and O(vault) cache preloads and SHALL run idle resource reclamation by default. Performance mode MAY preload when explicitly selected. Environment overrides SHALL remain available for deliberate operator choices. An explicit Cloud service profile SHALL independently resolve selective core residency and validated service budgets, without implicitly selecting workstation Performance or retaining all corpus caches. Conflicting legacy compute overrides SHALL be rejected under the service profile rather than silently defeating it.
+Outside an explicit Cloud service profile, Normal mode SHALL avoid startup model and O(vault) cache preloads and SHALL run idle resource reclamation by default. In normal mode an idle CPU cache SHALL be released only when the host's available memory or the service cgroup's headroom falls below the configured floor, and SHALL be released on idle when neither reading is available. Performance mode MAY preload when explicitly selected. Environment overrides SHALL remain available for deliberate operator choices. An explicit Cloud service profile SHALL independently resolve selective core residency and validated service budgets, without implicitly selecting workstation Performance or retaining all corpus caches. Conflicting legacy compute overrides SHALL be rejected under the service profile rather than silently defeating it.
 
 #### Scenario: Normal-mode startup
 - **WHEN** the service starts in normal mode without an explicit Cloud service profile
@@ -12,6 +12,18 @@ Outside an explicit Cloud service profile, Normal mode SHALL avoid startup model
 - **WHEN** an operator selects performance mode outside an explicit Cloud service profile
 - **THEN** the service may preload latency-oriented resources
 - **AND** the choice is visible through resource status
+
+#### Scenario: Normal mode keeps an idle recall cache while memory is plentiful
+- **WHEN** the effective mode is `normal`
+- **AND** a find-related RAM cache has been idle longer than the idle threshold
+- **AND** available memory and cgroup headroom are both above the configured floor
+- **THEN** the idle reaper keeps that cache resident
+
+#### Scenario: Normal mode releases an idle recall cache under memory pressure
+- **WHEN** the effective mode is `normal`
+- **AND** a find-related RAM cache has been idle longer than the idle threshold
+- **AND** available memory or cgroup headroom is below the configured floor, or neither can be read
+- **THEN** the idle reaper releases that cache
 
 #### Scenario: Cloud policy has independent residency
 - **WHEN** the Cloud service profile selects core residency
