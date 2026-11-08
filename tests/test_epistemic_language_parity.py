@@ -599,18 +599,17 @@ def test_pages_that_contradict_or_answer_one_target_are_a_declared_pair(
     assert _pair(index, "res-a", "res-b") == "answers_same_question"  # CORE
 
 
-def test_pages_that_resolve_one_target_are_not_a_declared_pair(fixture_vault: Path) -> None:
-    """FLIPS 10: stance reads `answers` only, so two `resolves` pages are no pair.
+def test_pages_that_resolve_one_target_are_a_declared_pair(fixture_vault: Path) -> None:
+    """FLIPS 10: stance read `answers` only, so two `resolves` pages were no pair.
 
-    After intended change 10, stance reads `settles` and both assertions below
-    return `"answers_same_question"`. The `res-a`/`res-c` line also reflects
-    the extension reaching through its parent (`x.closes` is an extension of
+    Stance reads `settles` now, so both pairs are declared. The `res-a`/`res-c` line also
+    reflects the extension reaching through its parent (`x.closes` is an extension of
     `resolves`), which follows from the same read.
     """
     index = build_graph(fixture_vault)
 
-    assert _pair(index, "rr-1", "rr-2") is None  # FLIPS 10
-    assert _pair(index, "res-a", "res-c") is None  # FLIPS 10
+    assert _pair(index, "rr-1", "rr-2") == "answers_same_question"  # FLIPS 10
+    assert _pair(index, "res-a", "res-c") == "answers_same_question"  # FLIPS 10
 
 
 # ---------------------------------------------------------------------------
