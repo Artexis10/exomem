@@ -1947,24 +1947,30 @@ def upsert_after_write(
     created_rels = {rel for path in created_paths if (rel := _rel(Path(path))) is not None}
     created_semantic_paths = [item.path for item in semantic_items if item.rel_path in created_rels]
 
-    def stale_report() -> IndexSyncReport:
+    def stale_report(drifted: frozenset[str] | None = None) -> IndexSyncReport:
+        # `drifted` is the identities that disagree with disk after the batch
+        # published. None means every identity is owed: nothing was published
+        # yet, or the policy identity changed and any admission may have flipped.
+        def owed(rel: str) -> bool:
+            return drifted is None or rel in drifted
+
         if watcher_mode:
             from . import lexstore
 
             # The batch disagreed with disk, so its lexical rows may be behind.
-            # Replay exactly its paths against current disk; the worker still
+            # Replay exactly the owed paths against current disk; the worker still
             # escalates a failed replay to the whole-catalogue rebuild.
             lexstore.request_repair(
                 vault_root,
                 deferred_paths=[
-                    *(item.path for item in batch.identity_paths),
+                    *(item.path for item in batch.identity_paths if owed(item.rel_path)),
                     *(vault_root / rel for rel in (*batch.missing_paths, *(watcher_deleted_rels or []))),
                 ],
                 cause=lexstore.RepairCause.WATCHER_BATCH_STALE,
             )
         return _stale_batch_report(
             vault_root,
-            [item.rel_path for item in identity_items],
+            [item.rel_path for item in identity_items if owed(item.rel_path)],
             requested_report,
             eligible_report,
             truncated=requested_truncated or eligible_truncated,
@@ -1994,8 +2000,10 @@ def upsert_after_write(
                 defer_semantic=defer_semantic,
                 created_semantic_paths=[],
             )
-        if watcher_mode and batch.identity_paths and not batch.revalidate(vault_root):
-            return stale_report()
+        if watcher_mode and batch.identity_paths:
+            drifted = batch.drifted_identities(vault_root)
+            if drifted is None or drifted:
+                return stale_report(drifted)
         return IndexSyncReport(
             "upsert",
             requested_report,
@@ -2066,10 +2074,21 @@ def upsert_after_write(
         )
     finally:
         semantic_index.reset_parent_states(token)
+    report = IndexSyncReport(
+        "upsert",
+        requested_report,
+        eligible_report,
+        tuple(components),
+        requested_truncated or eligible_truncated,
+    )
     with call_spans.span("index.policy_revalidate"):
-        current = batch.revalidate(vault_root)
-    if not current:
-        return stale_report()
+        drifted = batch.drifted_identities(vault_root)
+    if drifted is None or drifted:
+        # Only the drifted identities are owed when every component published. A
+        # degraded or failed one leaves rows that custody below repairs, and a
+        # stale batch skips custody, so then the whole batch is owed. The checks
+        # before the dispatch also owe the whole batch.
+        return stale_report(None if report.reconcile_required else drifted)
     with call_spans.span(
         "index.path_custody", {"paths": len(batch.identity_paths)}
     ):
@@ -2084,13 +2103,6 @@ def upsert_after_write(
             deleted=watcher_deleted_rels or [],
             reason="governed_write",
         )
-    report = IndexSyncReport(
-        "upsert",
-        requested_report,
-        eligible_report,
-        tuple(components),
-        requested_truncated or eligible_truncated,
-    )
     return report
 
 
