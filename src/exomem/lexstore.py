@@ -5086,6 +5086,37 @@ def page_rows(
     return PageRows(columns, stemmed, title_lower, body_lower, structure_json, tuple(units))
 
 
+def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
+    """``(in_kb, in_vault)`` of the page at these vault-relative path parts.
+
+    These are the walks' directory skip rules.
+    """
+    from . import find as find_module
+    from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
+
+    dirs = rel_parts[:-1]
+    in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage(
+        "/".join(dirs)
+    )
+    in_kb = (
+        len(rel_parts) > 1
+        and rel_parts[0] == kb_dirname()
+        and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
+    )
+    return in_kb, in_vault
+
+
+def page_membership(rel: str) -> tuple[bool, bool]:
+    """Would each walk yield the page at this vault-relative POSIX path, from the path alone?
+
+    Returns ``(in_kb, in_vault)``.
+
+    A store-mode commit has no file to walk, so it asks here for the flags that ``page_rows``
+    stores.
+    """
+    return _membership_of_parts(tuple(rel.split("/")))
+
+
 def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
     """Insert one row of ``table`` from its column values and return the new row id."""
     cur = conn.execute(
@@ -5115,6 +5146,32 @@ def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
             conn.execute(
                 "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
             )
+
+
+def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
+    if fts5_available():
+        rowids = conn.execute(
+            "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
+        ).fetchall()
+        for (rowid,) in rowids:
+            conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
+    conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+
+
+def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
+    row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
+    if row is not None:
+        _delete_unit_rows(conn, row[0])
+    if fts5_available():
+        conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
+    conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+
+
+def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
+    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
+        _delete_page_rowid(conn, rowid)
 
 
 def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
@@ -7013,13 +7070,7 @@ class LexicalStore:
             write_page_rows(conn, rows)
 
     def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
-        if fts5_available():
-            rowids = conn.execute(
-                "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
-            ).fetchall()
-            for (rowid,) in rowids:
-                conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
-        conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+        _delete_unit_rows(conn, parent_path)
 
     def _delete_orphan_rows(self, conn: sqlite3.Connection) -> None:
         """Remove side-table rows whose owning record was deleted out-of-band."""
@@ -7037,13 +7088,7 @@ class LexicalStore:
             conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
     def _delete_rowid(self, conn: sqlite3.Connection, rowid: int) -> None:
-        row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
-        if row is not None:
-            self._delete_semantic_units(conn, row[0])
-        if fts5_available():
-            conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
-            conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
-        conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+        _delete_page_rowid(conn, rowid)
 
     # -------------------------------------------------------------- dual-write
 
@@ -7082,21 +7127,11 @@ class LexicalStore:
     def _membership(self, path: Path) -> tuple[bool, bool]:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
-        from . import find as find_module
-        from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
-
         try:
             rel_parts = path.resolve().relative_to(self.vault_root.resolve()).parts
         except ValueError:
             return False, False
-        dirs = rel_parts[:-1]
-        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage("/".join(dirs))
-        in_kb = (
-            len(rel_parts) > 1
-            and rel_parts[0] == kb_dirname()
-            and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
-        )
-        return in_kb, in_vault
+        return _membership_of_parts(rel_parts)
 
     def upsert_paths(self, paths: list[Path]) -> bool:
         """Bounded inline upsert under the publication barrier.

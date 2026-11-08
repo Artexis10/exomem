@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 
 MULTI_HOST = "VAULT_STORE_MULTI_HOST"
 NOT_SERVED = "VAULT_STORE_NOT_SERVED"
-WRITE_PATH_PENDING = "VAULT_STORE_WRITE_PATH_PENDING"
+OFF_THREAD = "VAULT_STORE_OFF_THREAD"
+SERVICE_REQUIRED = "VAULT_STORE_SERVICE_REQUIRED"
 PAGES_AT_RISK = "VAULT_STORE_PAGES_AT_RISK"
 
 ROLLBACK = "`exomem store-mode rollback`"
@@ -87,35 +88,69 @@ def marker_inconsistency(vault_root: Path) -> str | None:
 
 
 def write_refusal(vault_root: Path):
-    """The OpError that a Markdown write to a store-mode vault gets, or None for a file-mode vault.
+    """The OpError that a Markdown write to a store-mode vault gets, or None.
 
-    A write that reached disk would put bytes where the store holds the pages. Until the store takes page
-    writes, every one refuses, and the first cause that applies names itself: the serving thread, a
-    takeover still pending, a recorded divergence, then the unfinished write path.
+    None means a file-mode vault, or a store-mode vault whose write reaches the store: the caller
+    runs on the store thread. A write that reached disk would put bytes where the store holds the
+    pages, so the first cause that applies names itself: the serving thread, a takeover still
+    pending, a recorded divergence, then a write that did not come through the store thread.
     """
-    if not mode.store_mode_active(vault_root):
+    return _write_state(vault_root)[1]
+
+
+def page_writer(vault_root: Path):
+    """The collection store writer that a governed batch commits through; None for file mode.
+
+    It raises ``write_refusal``'s error, so a store-mode vault never gets a Markdown write.
+    """
+    in_store_mode, refusal = _write_state(vault_root)
+    if refusal is not None:
+        raise refusal
+    if not in_store_mode:
         return None
+    from ..collection_store.preview import bound_writer
+
+    return bound_writer(Path(vault_root).resolve())
+
+
+def _write_state(vault_root: Path):
+    """Whether the vault is in store mode, and the refusal that a write to it gets."""
+    if not mode.store_mode_active(vault_root):
+        return False, None
     from ..cli_ops import OpError
     from ..collection_store import runtime
+    from ..collection_store.preview import bound_writer
 
     root = Path(vault_root).resolve()
     server = runtime._SERVERS.get(root)
     if server is not None:
         if server.runtime is None:
-            return server.unserved()
+            return True, server.unserved()
         pending = server.runtime._takeover
         if pending is not None:
             error = pending.error()
-            return OpError(error.code, error.reason, "Writes resume once the takeover settles.")
+            return True, OpError(
+                error.code, error.reason, "Writes resume once the takeover settles."
+            )
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         reason = schema.divergence_reason(reader)
     if reason is not None:
-        return OpError(
-            "COLLECTION_STORE_DIVERGED", reason, "The owner reconciles the store with maintain_memory mode collections-store-adopt-local.")
-    return OpError(
-        WRITE_PATH_PENDING,
-        "this vault's pages live in the collection store, and this build cannot write them there yet",
-        f"Run {ROLLBACK} to return the pages to files.")
+        return True, OpError(
+            "COLLECTION_STORE_DIVERGED",
+            reason,
+            "The owner reconciles the store with maintain_memory "
+            "mode collections-store-adopt-local.",
+        )
+    if bound_writer(root) is None:
+        # Waiting for the store thread from here, under the mutation boundary, would deadlock it; no
+        # caller may reach the store from another thread, so this is an invariant, not a retry.
+        return True, OpError(
+            OFF_THREAD,
+            "this write reached a store-mode vault outside the thread that serves its store",
+            "Send the request to the service that serves this vault. "
+            f"Run {ROLLBACK} to return the pages to files.",
+        )
+    return True, None
 
 
 def refuse_page_loss(vault_root: Path, operation: str) -> None:
