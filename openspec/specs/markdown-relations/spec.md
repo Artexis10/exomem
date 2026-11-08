@@ -49,11 +49,11 @@ Compiled-note writes SHALL report counts for typed note relations, typed block r
 - **AND** the write still succeeds because relation debt is reviewable, not a hard schema failure
 
 ### Requirement: Entity creation can author typed relations
-Entity creation SHALL accept optional typed relations as `{kind, target}` pairs and SHALL write each pair as one canonical `- kind [[target]]` bullet under the entity's `## Relations` section. Bare `connections` SHALL keep their `relates_to` rendering and their existing input forms. Typed targets SHALL resolve through the same writer resolver and visibility rules as `connections`. Identical pairs SHALL collapse, and different kinds for one target SHALL remain distinct edges. A pair that is malformed, or that would not parse back as exactly one canonical relation bullet with the same kind, SHALL refuse the creation before any write. Registration and scope of the kind SHALL be decided by the existing creation preflight and its relation findings, with no stricter label policy. Typed relations supplied to any other connection operation SHALL be refused rather than ignored. A `relations` value that is present but not a list SHALL be refused, and an empty list SHALL be treated as unset. Before any write, entity creation SHALL parse its rendered page once and SHALL refuse when summary or `why_in_kb` text hides a relation bullet that the call rendered, such as by leaving a code fence open. A curation plan's entity-creation step SHALL accept typed relations and SHALL apply them through the same entity writer.
+Entity creation SHALL accept optional typed relations as `{kind, target}` pairs and SHALL write each pair as one canonical `- kind [[target]]` bullet under the entity's `## Relations` section. Bare `connections` SHALL render as plain links, with the plain link's key taken from the registry, and SHALL keep their existing input forms. Typed targets SHALL resolve through the same writer resolver and visibility rules as `connections`. Identical pairs SHALL collapse, and different kinds for one target SHALL remain distinct edges. A pair that is malformed, that carries any field other than `kind` and `target`, or that would not parse back as exactly one canonical relation bullet with the same kind, SHALL refuse the creation before any write. Registration and scope of the kind SHALL be decided by the existing creation preflight and its relation findings, with no stricter label policy. Typed relations supplied to any other connection operation SHALL be refused rather than ignored. A `relations` value that is present but not a list SHALL be refused, and an empty list SHALL be treated as unset. Before any write, entity creation SHALL parse its rendered page once and SHALL refuse when summary or `why_in_kb` text hides a relation bullet that the call rendered, such as by leaving a code fence open. A curation plan's entity-creation step SHALL accept typed relations and SHALL apply them through the same entity writer.
 
 #### Scenario: Two predicates for one target survive creation
 - **WHEN** an entity is created with typed relations `supports` and `part_of` to the same target, a repeated `supports` pair, and that target in `connections`
-- **THEN** the page lists `supports`, `part_of` and `relates_to` bullets to that target once each
+- **THEN** the page lists `supports`, `part_of` and plain-link bullets to that target once each
 - **AND** the graph indexes each bullet as its own typed edge
 
 #### Scenario: A value that would add a line is refused
@@ -68,7 +68,12 @@ Entity creation SHALL accept optional typed relations as `{kind, target}` pairs 
 
 #### Scenario: Bare connections stay generic
 - **WHEN** an entity is created with `connections` only
-- **THEN** each connection is written as a `relates_to` bullet exactly as before
+- **THEN** each connection is written as a plain-link bullet, which says two pages are connected and nothing more
+- **AND** none is written as the generic relation
+
+#### Scenario: The generic relation is refused as a typed relation
+- **WHEN** an entity is created with a typed relation whose kind is the generic relation
+- **THEN** the creation is refused with `GENERIC_RELATION_REFUSED` and no entity page is written
 
 #### Scenario: Summary text cannot hide authored edges
 - **WHEN** an entity is created with a typed relation and a summary that opens a code fence without closing it
