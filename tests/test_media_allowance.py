@@ -147,12 +147,20 @@ def test_allowance_counts_large_transcripts_once_with_bounded_body_prefetch(cust
         b"---\n- a scalar sequence\n---\n",
         b"---\nvalue: [\n---\n",
         b"---\nunterminated: header\n",
+        b"---\nvalue: \xff\n---\n",
+        b"---\n" + b"x" * runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
     ],
+    ids=["duplicate-key", "sequence-root", "yaml-error", "unterminated", "not-utf-8", "oversized"],
 )
-def test_invalid_header_makes_the_whole_allowance_unknown(custody, invalid):
+def test_invalid_header_makes_the_whole_allowance_unknown_and_is_named(custody, invalid):
+    """Catches a damaged header that the census cannot name, or that stops the walk before a later damaged note."""
     vault, page, header = custody
     (page.parent / "invalid.md").write_bytes(invalid)
-    assert media_allowance.reference_usage(vault).used_bytes is None
+    (page.parent / "later.md").write_bytes(b"---\nvalue: [\n---\n")
+    usage = media_allowance.reference_usage(vault)
+    assert usage.used_bytes is None
+    assert [blocker.path for blocker in usage.blockers] == ["Knowledge Base/Evidence/invalid.md", "Knowledge Base/Evidence/later.md"]
+    assert all(blocker.reason for blocker in usage.blockers)
     assert runtime_resources.semantic_preparation_status()["reserved_bytes"] == 0
 
 
