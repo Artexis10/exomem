@@ -43,6 +43,7 @@ from test_collection_store_migration import (  # noqa: F401 - the env fixture
     migrate,
     printed,
     start_service,
+    stop_writer,
 )
 from test_collection_store_preflight import EVIDENCE
 from test_collection_store_s1_gate import _until
@@ -78,6 +79,9 @@ OUTCOME = "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1"
 INITIATIVE = "d2d2d2d2-d2d2-4d2d-8d2d-d2d2d2d2d2d2"
 #: A derived collection as a release before C2.1 created it: rows in the store, manifest still markdown-items.
 OLD_DERIVED_TEXT = DERIVED_TEXT.replace("strategy: sqlite\n", "strategy: markdown-items\n")
+#: A Records collection that joins the Planning collection, which summary mode cannot carry.
+JOINED = manifest_path().replace("Work", "Joined")
+JOINED_ID = "6f6f6f6f-6f6f-4f6f-8f6f-6f6f6f6f6f6f"
 CONVERTED = {WORK: CID, PLANNING: OTHER, LEDGER_COLLECTION_PATH: LEDGER_ID, KEPT_PATH: KEPT}
 #: The ledger names its item folder in ``storage.source``; the others keep the default.
 SOURCES = {LEDGER_COLLECTION_PATH: "Entries"}
@@ -183,12 +187,16 @@ def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every
         before = {path: contents(root, path) for path in (*CONVERTED, SAMPLES_PATH)}
         files = {path: item_files(root, path) for path in CONVERTED}
         hierarchy = tree(root)
+        # How many items of each collection carry body text, as a read of each item file answers it.
+        bodies = {path: sum(1 for item in files[path] if call(root, "read_memory", path=item)["body"].strip())
+                  for path in CONVERTED}
         _until(lambda: all(settled(root, cid) for cid in (*CONVERTED.values(), DERIVED)), 30)
         # The agent's one call previews; it changes nothing and names the CLI for the apply.
         agent = call(root, "maintain_memory", mode="collections-cutover")
     finally:
         service.stop()
     assert all(files.values()) and hierarchy == [{"parent": OUTCOME, "child": INITIATIVE}]
+    assert bodies[WORK] == 1
 
     assert cutover(root, "--dry-run") == 0
     preview = printed(capsys)
@@ -196,6 +204,9 @@ def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every
     assert {row["path"]: row["steps"] for row in preview["collections"]} == {
         WORK: ["convert"], PLANNING: ["convert"], LEDGER_COLLECTION_PATH: ["convert"],
         KEPT_PATH: ["migrate", "convert"], SAMPLES_PATH: ["rewrite_strategy"], DATASET: []}
+    # The body text of a converted item lives only in the store; the preview says how many items carry one.
+    assert {row["path"]: row["bodies"] for row in preview["collections"]} == {
+        **bodies, SAMPLES_PATH: 0, DATASET: None}
 
     backup = backup_file(tmp_path)
     assert apply(root, preview["plan_id"], backup) == 0, capsys.readouterr().err
@@ -262,10 +273,10 @@ def view_mode(root, cid):
         return reader.execute("SELECT view_mode FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
 
 
-def backup_file(tmp_path):
+def backup_file(tmp_path, name="before-cutover.sqlite"):
     folder = tmp_path / "backups"
     folder.mkdir(exist_ok=True)
-    return folder / "before-cutover.sqlite"
+    return folder / name
 
 
 def test_a_records_collection_with_a_presentation_table_converts_and_keeps_its_child_rows(
@@ -305,9 +316,10 @@ def test_a_records_collection_with_a_presentation_table_converts_and_keeps_its_c
 
 def test_a_cutover_cut_after_any_step_resumes_from_its_record_and_repeats_nothing(
         env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
-    """Defect: a cutover cut after its migration, after one collection's conversion committed, or
-    while that collection's query index builds, migrates or converts again, breaks parity on the
-    resumed collection, leaves item files that nothing removes, or forgets where they went."""
+    """Defect: a cutover cut after its migration, after one collection's conversion committed, while
+    that collection's query index builds, or after a conversion finished but before the run recorded
+    it, migrates or converts again, breaks parity on the resumed collection, leaves item files that
+    nothing removes, forgets where they went, or reports a count it lost as 0."""
     root = vault_with_every_shape(env, monkeypatch)
     files = {path: item_files(root, path) for path in CONVERTED}
     assert cutover(root, "--dry-run") == 0
@@ -330,7 +342,8 @@ def test_a_cutover_cut_after_any_step_resumes_from_its_record_and_repeats_nothin
         cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
         cut.setattr(conversion, "_archive", crash)
         with pytest.raises(SystemExit):
-            apply(root, plan_id, backup)
+            # Each resume measures the collections no step changed yet from its own new snapshot.
+            apply(root, plan_id, backup_file(tmp_path, "resume-1.sqlite"))
     assert view_mode(root, OTHER) == "summary" and item_files(root, PLANNING) == files[PLANNING]
 
     # Cut 3: Planning's files left the vault, and its query index had not published.
@@ -338,15 +351,30 @@ def test_a_cutover_cut_after_any_step_resumes_from_its_record_and_repeats_nothin
         cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
         cut.setattr(collections_cutover, "_publish_projection", crash)
         with pytest.raises(SystemExit):
-            apply(root, plan_id, backup)
+            apply(root, plan_id, backup_file(tmp_path, "resume-2.sqlite"))
     assert item_files(root, PLANNING) == {}
+
+    # Cut 4: Kept's conversion finished, and the run had not recorded it.
+    with monkeypatch.context() as cut:
+        cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
+        cut.setattr(collections_cutover, "_store_measures", crash)
+        with pytest.raises(SystemExit):
+            apply(root, plan_id, backup_file(tmp_path, "resume-3.sqlite"))
+    assert view_mode(root, KEPT) == "summary" and item_files(root, KEPT_PATH) == {}
 
     with monkeypatch.context() as cut:
         cut.setattr(admission, "migrate_route", lambda *a, **k: pytest.fail("the migration ran again"))
-        assert apply(root, plan_id, backup) == 0, capsys.readouterr().err
+        assert apply(root, plan_id, backup_file(tmp_path, "resume-4.sqlite")) == 0, capsys.readouterr().err
     receipt = printed(capsys)
     done = {row["path"]: row for row in receipt["collections"]}
     assert all(row["parity"]["status"] == "held" and row["projection"] == "ready" for row in done.values()), done
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == receipt["backup"]["sha256"]
+    # Its verified archive names what it archived; which files the removal kept went with the cut.
+    assert (done[KEPT_PATH]["archived"], done[KEPT_PATH]["removed"], done[KEPT_PATH]["not_removed"]) == (
+        len(files[KEPT_PATH]), None, None)
+    kept = Path(done[KEPT_PATH]["archive"]) / "files"
+    assert {entry: hashlib.sha256((kept / entry).read_bytes()).hexdigest()
+            for entry in files[KEPT_PATH]} == files[KEPT_PATH]
     archive = Path(done[PLANNING]["archive"]) / "files"
     assert {entry: hashlib.sha256((archive / entry).read_bytes()).hexdigest()
             for entry in files[PLANNING]} == files[PLANNING]
@@ -466,9 +494,115 @@ def test_a_parity_failure_stops_the_cutover_at_that_collection_and_leaves_later_
     assert {path: item_files(root, path) for path in (LEDGER_COLLECTION_PATH, WORK)} == {
         path: files[path] for path in (LEDGER_COLLECTION_PATH, WORK)}
 
-    assert apply(root, plan_id, backup) == 0, capsys.readouterr().err
+    assert apply(root, plan_id, backup_file(tmp_path, "resume-1.sqlite")) == 0, capsys.readouterr().err
     assert all(row["parity"]["status"] == "held" for row in printed(capsys)["collections"])
     assert {path: item_files(root, path) for path in CONVERTED} == {path: {} for path in CONVERTED}
+
+
+def test_the_preview_names_a_manifest_that_summary_mode_cannot_carry_and_the_apply_refuses_it_first(
+        env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
+    """Defect: the preview plans the conversion of a collection whose manifest summary mode refuses,
+    such as a Records collection that joins a Planning collection, so the apply stops halfway."""
+    root = vault_with_every_shape(env, monkeypatch)
+    files = item_files(root, WORK)
+    joined = manifest_text().replace(CID, JOINED_ID).replace("title: Work", "title: Joined")
+    joined = joined[:-len("---\n")] + (f"links:\n  plans:\n    - reference: exomem://memory/{OTHER}\n"
+                                        "      query: {limit: 50}\n      join: {title: title}\n---\n")
+    with monkeypatch.context() as older:
+        # A release before the cutover still created Records collections in files.
+        older.setattr(records, "require_store_storage", lambda manifest: None)
+        records.create_collection(root, JOINED, joined, why="joins a plan", scaffold=True)
+    stop_writer()
+    backup = backup_file(tmp_path)
+
+    assert cutover(root, "--dry-run") == 1
+    blocked = printed(capsys)
+    assert [(row["path"], row["code"]) for row in blocked["blockers"]] == [(JOINED, "UNSUPPORTED_VIEW_MODE")]
+    # The blocker names what to change.
+    assert "links.plans[0].join" in blocked["blockers"][0]["reason"]
+    assert apply(root, blocked["plan_id"], backup) == 1
+    assert collections_cutover.BLOCKED in capsys.readouterr().err
+    assert not backup.exists() and view_mode(root, CID) == "items" and item_files(root, WORK) == files
+
+
+def test_a_cutover_never_writes_its_backup_over_a_file(
+        env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
+    """Defect: the backup replaces the file that --backup-to names, such as the owner's own copy."""
+    root = vault_with_every_shape(env, monkeypatch)
+    files = item_files(root, WORK)
+    assert cutover(root, "--dry-run") == 0
+    plan_id = printed(capsys)["plan_id"]
+    backup = backup_file(tmp_path)
+    backup.write_bytes(b"the owner's own copy")
+
+    assert apply(root, plan_id, backup) == 1
+    error = capsys.readouterr().err
+    assert collections_cutover.BACKUP_EXISTS in error and "--backup-to" in error
+    assert backup.read_bytes() == b"the owner's own copy"
+    assert view_mode(root, CID) == "items" and item_files(root, WORK) == files
+
+
+def test_a_resume_measures_again_each_collection_that_the_owner_changed_after_a_stop(
+        env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
+    """Defect: a stop whose fix changes a collection never finishes, because the resume compares it
+    with measures from before the fix; a resume measures again a collection that the run already
+    changed, so its parity proves nothing; or a resume writes its snapshot over the first backup."""
+    root = vault_with_every_shape(env, monkeypatch)
+    assert cutover(root, "--dry-run") == 0
+    preview = printed(capsys)
+    plan_id, rows = preview["plan_id"], {row["path"]: row["rows"] for row in preview["collections"]}
+    first = backup_file(tmp_path)
+
+    # Stop 1: before the migration. The owner then corrects an item of the collection still in files.
+    with monkeypatch.context() as cut:
+        cut.setattr(admission, "migrate_route", crash)
+        with pytest.raises(SystemExit):
+            apply(root, plan_id, first)
+    taken = hashlib.sha256(first.read_bytes()).hexdigest()
+    [item] = (root / KEPT_PATH).parent.glob("Items/*.md")
+    item.write_text(item.read_text().replace("count: 1\n", "count: 2\n"))
+
+    # The same command again: the resume's snapshot would replace the first backup.
+    assert apply(root, plan_id, first) == 1
+    assert collections_cutover.BACKUP_EXISTS in capsys.readouterr().err
+    assert hashlib.sha256(first.read_bytes()).hexdigest() == taken
+
+    # Stop 2: the ledger's conversion stops on parity after Planning and Kept converted. The owner
+    # then adds a ledger row through the service.
+    real = collections_cutover.measure
+
+    def one_row_more(conn, cid):
+        found = real(conn, cid)
+        return {**found, "rows": found["rows"] + 1} if cid == LEDGER_ID and conn.in_transaction else found
+
+    with monkeypatch.context() as broken:
+        broken.setattr(collections_cutover, "measure", one_row_more)
+        assert apply(root, plan_id, backup_file(tmp_path, "resume-1.sqlite")) == 1
+    error = capsys.readouterr().err
+    assert collections_cutover.PARITY in error and LEDGER_COLLECTION_PATH in error
+    service = start_service(root)
+    try:
+        call(root, "record_memory", action="append", collection=LEDGER_COLLECTION_PATH,
+             item=ledger_item(slug="added-after-the-stop"), why="the owner's fix")
+        _until(lambda: settled(root, LEDGER_ID), 30)
+    finally:
+        service.stop()
+
+    assert apply(root, plan_id, backup_file(tmp_path, "resume-2.sqlite")) == 0, capsys.readouterr().err
+    receipt = printed(capsys)
+    done = {row["path"]: row for row in receipt["collections"]}
+    assert all(row["parity"]["status"] == "held" for row in done.values()), done
+    # The first backup is the state before the run; each resume names its own snapshot.
+    assert (receipt["backup"]["path"], receipt["backup"]["sha256"]) == (str(first), taken)
+    resumes = receipt["resumes"]
+    assert [resume["backup"]["path"] for resume in resumes] == [
+        str(backup_file(tmp_path, "resume-1.sqlite")), str(backup_file(tmp_path, "resume-2.sqlite"))]
+    assert KEPT_PATH in resumes[0]["measured"]
+    # Planning and Kept converted in this run, so the second resume kept their first measures.
+    assert LEDGER_COLLECTION_PATH in resumes[1]["measured"]
+    assert not {PLANNING, KEPT_PATH} & set(resumes[1]["measured"])
+    # The owner's row is in the converted ledger.
+    assert done[LEDGER_COLLECTION_PATH]["parity"]["rows"] == rows[LEDGER_COLLECTION_PATH] + 1
 
 
 def test_after_the_cutover_writes_on_both_types_write_no_item_file(

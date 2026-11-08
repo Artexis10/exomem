@@ -1517,7 +1517,9 @@ A summary row's governance subject is the collection path (§7). The conversion 
 3. convert every store collection;
 4. check parity against the backup.
 
-The first `sqlite` create or the first conversion, whichever comes first, records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state as an unknown descriptor instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, rollback restores the backup snapshot and the archive under the previous release.
+The first `sqlite` create or the first conversion, whichever comes first, records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state as an unknown descriptor instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, the rollback is the copy of the vault root and the state root that the operator takes with the service stopped, before the apply. Restoring both roots whole also restores the state manifest without `collections-sqlite-only-v1`, so the previous release accepts the state again. The cutover backup and the archive are recovery material for rows and item files, not a rollback: no step restores them under the previous release.
+
+A resume measures again each collection that no step of the run has changed yet, from its own new snapshot, because what stopped the run may have needed a change to that collection. A collection that the run migrated or converted keeps its first measures. The first backup stays the state before the run, and the receipt names it and each resume's snapshot. No backup replaces an existing file.
 
 **Relation to the canonical vault store.** `make-vault-store-canonical` keeps this per-vault database as the store that survives, with its collection tables unchanged. This cutover adds no second transaction owner and no Markdown dependency for collections, so a later store-mode switch for knowledge pages needs nothing from it.
 

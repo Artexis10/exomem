@@ -309,8 +309,11 @@ UNDECIDED = (BoundaryUnavailable, membership.MembershipUnresolved, OSError)
 
 
 def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: policy.Policy,
-                   mutation: bool = False, capture: frozenset[str] | None = None) -> Decision:
-    """The connector ceiling over ``scope_ids``; ``capture`` is the subject's ``capture_membership``."""
+                   mutation: bool = False, capture: frozenset[str] | None = None, strict: bool = False) -> Decision:
+    """The connector ceiling over ``scope_ids``; ``capture`` is the subject's ``capture_membership``.
+
+    ``strict`` raises the ``UNDECIDED`` error instead, for a caller that must not remember the withholding.
+    """
     try:
         scope_ids = frozenset(scope_ids)
         current = snapshot(root, compiled)
@@ -324,6 +327,8 @@ def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: pol
             return Decision(policy.DISCLOSURE_MIN)
         return Decision(policy.DISCLOSURE_MIN if denied.intersection(scope_ids) else policy.DISCLOSURE_MAX)
     except UNDECIDED:
+        if strict:
+            raise
         return Decision(policy.DISCLOSURE_MIN)
 
 

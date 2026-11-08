@@ -13553,7 +13553,7 @@ def op_record_memory(
         manifest_text: Manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Rebuild managed Markdown with guards.
-        item_key: Update UUID; append uses the natural key.
+        item_key: Row UUID; on query, that row with its body; append uses the natural key.
         expected_container_hash: Current snapshot for guarded writes.
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Queried item version.

@@ -26,6 +26,10 @@ MAX_PAGES = 16
 MAX_PAGE_BYTES = 64 * 1024
 MAX_TOTAL_BYTES = MAX_PAGES * MAX_PAGE_BYTES
 MODE_CHANGE_UNSUPPORTED = "VIEW_MODE_CHANGE_UNSUPPORTED"
+#: The note types of the generated pages; each is registered in the core note-types pack, so audit
+#: reads a summary or saved-view page as a typed page.
+SUMMARY_PAGE_TYPE = "collection-summary"
+SAVED_VIEW_PAGE_TYPE = "collection-saved-view"
 
 
 def page_paths(manifest: collections.CollectionManifest) -> tuple[str, ...]:
@@ -134,7 +138,7 @@ def render_page(conn: sqlite3.Connection, manifest: collections.CollectionManife
                             (manifest.collection_id,)).fetchone()[0]
         source, line = "collection store", f"{rows} committed rows as of collection generation {generation}."
     frontmatter = {
-        "type": "collection-summary",
+        "type": SUMMARY_PAGE_TYPE,
         "collection_id": manifest.collection_id,
         "metric": "committed rows",
         "value": rows,
@@ -174,7 +178,7 @@ def _view_page(manifest: collections.CollectionManifest, name: str, extra: Mappi
         if len(text.encode()) > MAX_PAGE_BYTES // 2:
             text = "(the definition is too large for this page; inspect the collection to read it)"
         shown = f"```json\n{text}\n```\n\n"
-    frontmatter = {"type": "collection-saved-view", "collection_id": manifest.collection_id, "view": name,
+    frontmatter = {"type": SAVED_VIEW_PAGE_TYPE, "collection_id": manifest.collection_id, "view": name,
                    "source": "collection manifest", **extra}
     body = (f"# {manifest.title}: {name}\n\n"
             f"Run this saved view with the collection's query action and `view: {name}` for its current rows.\n\n"
@@ -218,7 +222,7 @@ def released_page(operation, manifest, path, *, include_raw=False):
                  [subject.basis.identity for subject in operation.released_subjects(manifest.collection_id)
                   if isinstance(subject.row_id, int)])
     digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
-    frontmatter = {"type": "collection-summary", "collection_id": manifest.collection_id,
+    frontmatter = {"type": SUMMARY_PAGE_TYPE, "collection_id": manifest.collection_id,
                    "metric": "released rows", "value": release.released, "window": "all released rows",
                    "source": "collection store", "basis": {"released_rows": digest},
                    "completeness": "complete at basis"}

@@ -993,6 +993,8 @@ class OperationAuthorization:
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
+        # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
+        self.undecided = 0
         self.grants_loaded = False
         self.failed = self.context is not None and not isinstance(
             self.context, authorization_session_lifecycle.AuthorizationSessionContext
@@ -1167,18 +1169,21 @@ class OperationAuthorization:
             return Decision(0)
         try:
             inputs = path_inputs(self, subject, path, mutation=self.mutation)
+            if not inputs.shown or (self.mutation and inputs.write_withheld):
+                return Decision(0)
+            scope_ids = inputs.scopes
+            ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
+                                                       mutation=self.mutation, capture=inputs.capture, strict=True)
+            if ceiling.level == 0:
+                return ceiling
         except connector_boundary.UNDECIDED:
+            # Withheld for this operation only: the input may read again on the next one.
+            self.undecided += 1
             return Decision(0)
-        if not inputs.shown or (self.mutation and inputs.write_withheld):
-            return Decision(0)
-        scope_ids = inputs.scopes
-        ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                   mutation=self.mutation, capture=inputs.capture)
-        if ceiling.level == 0:
-            return ceiling
         try:
             key = self._decision_key(subject)
         except connector_boundary.BoundaryUnavailable:
+            self.undecided += 1
             return Decision(0)
         active = self.grants.get(basis.identity, ()) if session else ()
         if not active and key in self.cache.decisions:
@@ -1380,11 +1385,15 @@ class OperationAuthorization:
         manifest_decision = self.decision(manifest)
         if manifest_decision.level < 6:
             self.refuse()
-        if dependency not in state.summaries:
-            denied = {identity for identity, subject in state.subjects.items() if subject.row_id is not None
-                      and self.decision(subject, session=False).level < 6}
-            self.cache._remember(state.summaries, dependency, (denied, {}), 16)
-        denied, dirty = state.summaries[dependency]
+        summary = state.summaries.get(dependency)
+        if summary is None:
+            undecided = self.undecided
+            summary = ({identity for identity, subject in state.subjects.items() if subject.row_id is not None
+                        and self.decision(subject, session=False).level < 6}, {})
+            # A denial that an unreadable connector input decided would outlive the input's repair.
+            if self.undecided == undecided:
+                self.cache._remember(state.summaries, dependency, summary, 16)
+        denied, dirty = summary
         changed = {identity.rsplit("/", 1)[-1] for identity, subject in dirty.items()
                    if subject is not None and isinstance(subject.row_id, int)}
         if changed:
@@ -1398,12 +1407,14 @@ class OperationAuthorization:
                     continue  # An unreadable hold follows no item; its decision cannot change with one.
                 if follows and identity in state.subjects:
                     dirty.setdefault(identity, state.subjects[identity])
-        for identity, subject in dirty.items():
+        for identity, subject in list(dirty.items()):
+            undecided = self.undecided
             if subject is not None and self.decision(subject, session=False).level < 6:
                 denied.add(identity)
             else:
                 denied.discard(identity)
-        dirty.clear()
+            if self.undecided == undecided:  # Else it stays dirty, so the next selection decides it again.
+                del dirty[identity]
         return state, denied, self.cache.overlay(cid), manifest, manifest_decision
 
     def _subject(self, cid, state, overlay, identity):
@@ -1413,11 +1424,23 @@ class OperationAuthorization:
         subject = self.cache.point(identity)
         return subject if subject is not None and subject.collection_id == cid else None
 
-    def require_complete_fields(self, cid: str) -> None:
-        manifest = self.field_manifest(cid)
+    def holds_every_field(self, manifest) -> bool:
+        """Whether this caller's field plan admits every field of ``manifest``, the full stored manifest."""
         plan = self.field_plan(manifest)
+        return plan.owner or plan.whole_fields == set(manifest.schema.fields)
+
+    def reads_whole_row(self, cid: str, subject: CanonicalSubject | None) -> bool:
+        """Whether this caller reads the row ``subject`` of ``cid`` whole: at full disclosure, every field.
+
+        A row's body, its history and its file view can carry what any field holds, so only such a
+        reader gets them; a reader of some fields gets the query's released projection instead.
+        """
+        return (subject is not None and self.decision(subject).level >= egress.LEVEL_FULL
+                and self.holds_every_field(self.field_manifest(cid)))
+
+    def require_complete_fields(self, cid: str) -> None:
         # Partial field readers cannot guard full-state writes; a false refusal costs them a retry by the owner.
-        if not plan.owner and (plan.whole_fields != set(manifest.schema.fields)):
+        if not self.holds_every_field(self.field_manifest(cid)):
             self.refuse()
 
     def require_collection(self, cid: str, *, complete: bool = True, refresh=False) -> tuple[CanonicalSubject, ...]:
@@ -1902,7 +1925,7 @@ class OperationAuthorization:
             if not plan.owner and projection_kind == ("summary",):
                 # The stored page carries private stamps; direct reads use the canonical released overview instead.
                 return Decision(0)
-            if not plan.owner and plan.whole_fields != set(manifest.schema.fields):
+            if not self.holds_every_field(manifest):
                 # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
                 return Decision(0)
             decisions = tuple(self.decision(subject) for subject in targets)

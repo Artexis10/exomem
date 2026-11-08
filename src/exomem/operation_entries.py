@@ -331,7 +331,7 @@ _RECORD_IMPORT_FIELDS = ("collection", "import_request")
 _RECORD_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "expand_children", "expand_child",
-    "continuation", "include_agent_history", "output_format", "query",
+    "continuation", "include_agent_history", "output_format", "query", "item_key",
 )
 _MANIFEST_REVISION_FIELDS = (
     "collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why",
@@ -449,7 +449,7 @@ _PLAN_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "lifecycle", "hierarchy_mode",
     "hierarchy_depth", "hierarchy_limit", "continuation", "include_agent_history",
-    "output_format",
+    "output_format", "plan_id",
 )
 _PLAN_GUARDED_FIELDS = (
     "collection", "plan_id", "expected_container_hash", "expected_item_version", "why",

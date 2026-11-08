@@ -33,9 +33,9 @@ from test_collection_store_s1_gate import _until
 from test_collection_store_service import OWNER, call, refused
 from test_collection_store_writer import CID, KEY, OTHER
 from granted_writer import grant_writer
-from test_governance_egress import SCOPE_ID, write_rule, write_scope
+from test_governance_egress import EXTERNAL, SCOPE_ID, write_rule, write_scope
 
-from exomem import records, state_migration
+from exomem import commands, records, state_migration, writer_lease
 from exomem import structured_collections as collections
 from exomem.collection_store import (
     capability,
@@ -46,7 +46,7 @@ from exomem.collection_store import (
     runtime,
     summary,
 )
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import RequestPrincipal, request_scope
 
 FLOOR = "collections-sqlite-only-v1"
 # The env fixture silences the due-state carrier; a case that reads the due-state projection restores it.
@@ -272,6 +272,59 @@ def test_an_old_item_path_reads_as_its_store_row_and_a_file_written_there_is_hel
                          CID, edit_back.UNBOUND), 30)
     rows = call(root, "record_memory", action="query", collection=WORK)["rows"]
     assert [(row["title"], row["count"]) for row in rows] == [("One", 3)]
+
+
+def test_an_item_body_reads_the_same_through_the_public_tools_before_and_after_conversion(served):
+    """Defect: conversion leaves a row's Markdown body only in the store, where no tool reads it, so the
+    body an owner wrote is lost to every reader once the item file is archived."""
+    root = served
+    (item,) = item_files(root, WORK)
+    plans = call(root, "plan_memory", action="query", collection=PLANNING)
+    call(root, "plan_memory", action="update", collection=PLANNING, plan_id=PLAN, body="Why this outcome.\n",
+         why="a plan body", expected_container_hash=plans["snapshot"],
+         expected_item_version=plans["rows"][0]["item_version"])
+    _until(lambda: settled(root, OTHER), 30)
+
+    def bodies():
+        record = call(root, "record_memory", action="query", collection=WORK, item_key=KEY)
+        plan = call(root, "plan_memory", action="query", collection=PLANNING, plan_id=PLAN)
+        assert [row["record_id"] for row in record["rows"]] == [KEY]
+        assert [row["plan_id"] for row in plan["rows"]] == [PLAN]
+        return record["body"], plan["body"], call(root, "read_memory", path=item)["body"]
+
+    before = bodies()
+    assert before[:2] == ("Authored body\n", "Why this outcome.\n")
+    for path in (WORK, PLANNING):
+        convert(root, path)
+    assert not (root / item).exists()
+    assert bodies() == before
+
+
+def as_guest(root, tool, **arguments):
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == tool)
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        return writer_lease.invoke_command(command, root, **arguments)
+
+
+def test_a_guest_reads_an_old_item_path_only_as_far_as_the_row_is_released(served):
+    """Defect: the read of a retired item path tells a guest that a withheld row exists, by an answer
+    that differs from a missing file's, or withholds the body of a row the guest may read whole."""
+    root = served
+    (item,) = item_files(root, WORK)
+    convert(root, WORK)
+    missing = item.replace("Original", "Never-written")
+    write_scope(root, paths="Records/Work/**", default_deny=True)
+    write_rule(root, ceiling=0)
+    answers = []
+    for path in (item, missing):
+        with pytest.raises(ValueError) as error:
+            as_guest(root, "read_memory", path=path)
+        answers.append(str(error.value))
+    assert answers[0].startswith("NOT_FOUND") and answers[0].replace(item, missing) == answers[1]
+
+    write_rule(root, ceiling=6, extra="# The guest reads the collection whole.\n")
+    page = as_guest(root, "read_memory", path=item)
+    assert (page["store_row"]["record_id"], page["body"]) == (KEY, "Authored body\n")
 
 
 def test_conversion_refuses_while_a_view_edit_is_unsettled(served, monkeypatch):

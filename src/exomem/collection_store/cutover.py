@@ -18,7 +18,10 @@ After each step it checks parity against the measures of step 1: row count, key 
 hashes and audit event count. A conversion checks them inside its own transaction, so a failure
 leaves that collection and every later one as they were. A run record under the vault's state
 root names the phase reached and each collection done, so a re-run of the same ``plan_id`` after
-a crash resumes there and repeats nothing. The finished record is the receipt.
+a crash resumes there and repeats nothing. A resume measures each collection that no step has
+changed yet again, from its own new snapshot, because what stopped the run may have needed a change
+to one; the first backup stays the state before the run. A backup never replaces a file. The
+finished record is the receipt.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import tempfile
 from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
@@ -44,6 +48,7 @@ from . import (
     inventory,
     ownership,
     preflight,
+    types,
 )
 from . import summary as summary_module
 from .connection import CollectionStoreError
@@ -53,6 +58,8 @@ MODE = "collections-cutover"
 MIGRATE, CONVERT, REWRITE = "migrate", "convert", "rewrite_strategy"
 BACKED_UP, MIGRATED, COMPLETE = "backed_up", "migrated", "complete"
 MEASURES = ("rows", "keys", "payload_hashes", "audit_events")
+#: The fields of a conversion receipt that the run record keeps for each collection.
+COUNTS = ("archive", "archived", "removed", "not_removed")
 #: The states of a published or failed query projection mapping (``index_migrations``).
 READY, FAILED = "ready", "failed"
 #: The strategy the cutover cannot convert; a member of ``structured_collections.SUPPORTED_STORAGE``.
@@ -62,6 +69,7 @@ BLOCKED = "COLLECTIONS_CUTOVER_BLOCKED"
 PARITY = "COLLECTIONS_CUTOVER_PARITY"
 BACKUP_REQUIRED = "COLLECTIONS_CUTOVER_BACKUP_REQUIRED"
 BACKUP_CHANGED = "COLLECTIONS_CUTOVER_BACKUP_CHANGED"
+BACKUP_EXISTS = "COLLECTIONS_CUTOVER_BACKUP_EXISTS"
 MIGRATION_INCOMPLETE = "COLLECTIONS_CUTOVER_MIGRATION_INCOMPLETE"
 #: The run records, beside the archives of the item files the conversions retired.
 RUNS = "cutover"
@@ -134,10 +142,21 @@ def _unsettled(root, conn, cid):
         root, conversion.published_views(conn, cid, ("manifest", "item"))) is not None
 
 
+def _stored(root, conn, cid):
+    """``cid``'s current manifest, its type and its stored text in ``conn``, as the conversion reads them."""
+    path, text = conn.execute(
+        "SELECT c.manifest_path, m.manifest_text FROM collections c JOIN collection_manifests m "
+        "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
+        (cid,)).fetchone()
+    current = collections.parse_manifest_bytes(root, path, text.encode())
+    return current, types.type_for_manifest(current), text
+
+
 def _conversion_blocker(root, conn, row):
     """What stops this collection's conversion that a preview can see, or None.
 
     ``conn`` is the live store, or the proof import for a file collection, which has no views yet.
+    The manifest checks and the disclosure check are the conversion's own (``conversion.summary_form``).
     """
     cid, path = row["collection_id"], row["path"]
     if row["authority"] == inventory.STORE and _unsettled(root, conn, cid):
@@ -145,14 +164,11 @@ def _conversion_blocker(root, conn, row):
                         path)
     operation = governance.OperationAuthorization(root, conn, mutation=False)
     try:
-        changed = governance.policy_path_changes(operation, cid, path)
-    except collections.CollectionError as error:
+        conversion.summary_form(root, operation, *_stored(root, conn, cid))
+    except (collections.CollectionError, types.CollectionTypeError) as error:
         return _blocker(error.code, error.reason, path)
     finally:
         operation.close()
-    if changed:
-        error = conversion.disclosure_change(changed)
-        return _blocker(error.code, error.reason, path)
     return None
 
 
@@ -173,6 +189,18 @@ def _vault_blockers(root, steps):
     return found
 
 
+def _bodies(conn, cid):
+    """How many items of ``cid`` carry body text, which after the conversion only the store holds.
+
+    None when ``conn`` holds no row of ``cid``: a dataset, or a file collection the preflight did not import.
+    """
+    if conn is None or not cid or conn.execute(
+            "SELECT 1 FROM collections WHERE collection_id=?", (cid,)).fetchone() is None:
+        return None
+    return conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=? "
+                        "AND trim(body, ' ' || char(9, 10, 13)) != ''", (cid,)).fetchone()[0]
+
+
 def _sealed(root, proof, rows, staging):
     """The plan: each collection with its steps and blocker, the vault's blockers, and its ``plan_id``."""
     planned, blockers = [], []
@@ -182,13 +210,16 @@ def _sealed(root, proof, rows, staging):
             live = stack.enter_context(connection.reader_snapshot(connection.store_path(root)))
         for row in rows:
             steps, blocker = _steps(row)
+            # A file collection's rows are in the proof import; a store collection's in the live store.
+            held = staging if row["authority"] == inventory.FILE else live
             if blocker is None and steps and row["conversion"] is None:
-                blocker = _conversion_blocker(root, staging if MIGRATE in steps else live, row)
+                blocker = _conversion_blocker(root, held, row)
             if blocker is not None:
                 blockers.append(blocker)
             planned.append({name: row[name] for name in (
                 "path", "collection_id", "authority", "storage_strategy", "view_mode", "rows", "conversion")}
-                | {"steps": steps if blocker is None else [], "blocker": blocker})
+                | {"steps": steps if blocker is None else [], "blocker": blocker,
+                   "bodies": _bodies(held, row["collection_id"])})
     work = {step for row in planned for step in row["steps"]}
     if work:
         blockers.extend(_vault_blockers(root, work))
@@ -220,8 +251,8 @@ def preview(vault_root) -> dict:
     run = _unfinished(root)
     if run is not None:
         return {"mode": MODE, "step": "resume", "dry_run": True, "plan_id": run["plan_id"], "phase": run["phase"],
-                "outcome": (f"A cutover stopped at phase {run['phase']}. Apply its plan_id again to finish it: "
-                            f"{APPLY}."),
+                "outcome": (f"A cutover stopped at phase {run['phase']}. Apply its plan_id again to finish it, "
+                            f"with --backup-to naming a new file for the resume's own snapshot: {APPLY}."),
                 "collections": [{name: entry[name] for name in ("path", "collection_id", "steps", "done")}
                                 for entry in run["collections"]],
                 "blockers": []}
@@ -318,8 +349,13 @@ def _backup(root, destination):
         return None, {"status": "none", "reason": "this host had no collection store yet, so every collection was "
                       "in files; each file is archived and verified before it leaves the vault"}
     if destination is None:
-        raise CollectionStoreError(BACKUP_REQUIRED, "the cutover takes a backup snapshot first; name a file outside "
-                                   "the vault with --backup-to")
+        raise CollectionStoreError(BACKUP_REQUIRED, "the cutover measures the collections it changes from a backup "
+                                   "snapshot it takes first; name a new file outside the vault with --backup-to")
+    target = Path(destination).expanduser()
+    # Never over a file: it may be this run's first backup, the state before any step, or the owner's own copy.
+    if any(os.path.lexists(found) for found in (target, target.with_name(f"{target.name}.derived"))):
+        raise CollectionStoreError(BACKUP_EXISTS, f"{target} already exists, and the cutover never replaces a file; "
+                                   "name a file that does not exist yet with --backup-to")
     from . import owner
 
     taken = owner.backup(root, destination=destination, include_derived=True)
@@ -352,6 +388,58 @@ def _routed(root, entries):
     proof = ownership.current(root)
     return all((found := proof.selected(root, entry["path"])) is not None and found["collection_id"] in proof.admitted
                for entry in entries)
+
+
+def _from_files(run, entry):
+    """Whether ``entry``'s measures come from a proof import of its files: its migration has not been checked."""
+    return MIGRATE in entry["steps"] and run["phase"] == BACKED_UP
+
+
+def _untouched(root, live, run, entry):
+    """Whether no step of this run has changed ``entry``'s collection yet, so a resume may measure it again.
+
+    A file collection counts as changed once the migration routes it, until the migration's parity
+    check. A conversion this run committed changed the collection; one committed before the run
+    (``converting``) adds no audit event when the run finishes it.
+    """
+    if entry["parity"] is not None:
+        return False
+    if _from_files(run, entry):
+        return not _routed(root, [entry])
+    if entry["converting"]:
+        return True
+    cid = entry["collection_id"]
+    return conversion.record(live, cid) is None and conversion.convertible(_stored(root, live, cid)[0])
+
+
+def _remeasure(root, run, destination):
+    """On a resume, measure each collection the run has not changed yet again, from a new verified snapshot.
+
+    What stopped the run may have needed a change to a collection, which its first measures do not
+    hold. Each later step compares with the state it starts from. The first backup stays the state
+    before the run, and the receipt names it and each resume's snapshot.
+    """
+    store = connection.store_path(root)
+    with ExitStack() as stack:
+        live = stack.enter_context(closing(connection.open_reader(store))) if store.exists() else None
+        pending = [entry for entry in run["collections"] if _untouched(root, live, run, entry)]
+    if not pending:
+        return
+    snapshot_path, backup = _backup(root, destination)
+    with ExitStack() as stack:
+        snapshot = None if snapshot_path is None else stack.enter_context(
+            closing(connection.open_reader(snapshot_path)))
+        staging = None
+        if any(_from_files(run, entry) for entry in pending):
+            _, _, staging = stack.enter_context(_surveyed(root))
+            if staging is None:
+                raise CollectionStoreError(MIGRATION_INCOMPLETE, "the files of a collection the migration has not "
+                                           "moved yet no longer import; run `exomem collections migrate --dry-run` "
+                                           "for its blockers, then apply again")
+        for entry in pending:
+            entry["baseline"] = measure(staging if _from_files(run, entry) else snapshot, entry["collection_id"])
+    run.setdefault("resumes", []).append({"backup": backup, "measured": [entry["path"] for entry in pending]})
+    _write(root, run)
 
 
 def _migrate(root, run):
@@ -392,6 +480,21 @@ def _publish_projection(root, writer, cid):
     return state
 
 
+def _archived(root, cid):
+    """The archive counts of a conversion that finished after the run's last record, or None where unknown.
+
+    Its verified archive manifest names the files it archived. Which of them the removal kept went
+    with the receipt the cut lost, so ``removed`` and ``not_removed`` stay unknown.
+    """
+    folder = state_paths.vault_state_dir(root) / conversion.ARCHIVE_TREE / cid
+    found = [(path, held) for path in sorted(folder.iterdir()) if (held := conversion._verified(path)) is not None] \
+        if folder.is_dir() else []
+    if len(found) != 1:
+        return dict.fromkeys(COUNTS)
+    path, (files, _) = found[0]
+    return {"archive": str(path), "archived": len(files), "removed": None, "not_removed": None}
+
+
 def _convert_all(root, run):
     """Convert each collection the plan converts, in the owner's offline session, recording each one done."""
     from ..governance import principal
@@ -419,8 +522,9 @@ def _convert_all(root, run):
                     parity = _parity(entry, _store_measures(root, entry["collection_id"]),
                                      added=0 if entry["converting"] else 1)
                     # Recorded before the projection build, so a run cut during it keeps what was archived.
-                    entry.update(parity=parity, archive=result.get("archive"), archived=result.get("archived", 0),
-                                 removed=result.get("removed", 0), not_removed=result.get("not_removed", []))
+                    entry.update(parity=parity, **(_archived(root, entry["collection_id"])
+                                                   if result["outcome"] == "already_converted" else
+                                                   {name: result[name] for name in COUNTS}))
                     _write(root, run)
                 entry.update(done=True, projection=_publish_projection(root, bound_writer(root), entry["collection_id"]))
                 _write(root, run)
@@ -433,8 +537,12 @@ def _convert_all(root, run):
     run["outcome"] = (f"Moved {moved} collection(s) to SQLite-only storage; parity held for every one. "
                       + (f"The query index of {', '.join(failed)} failed to build; a revise of the collection's "
                          "declaration builds it again. " if failed else "")
-                      + (f"The backup is {run['backup']['path']}." if run["backup"]["status"] == "verified"
-                         else "No backup was taken: " + run["backup"]["reason"] + "."))
+                      + (f"The backup from before the run is {run['backup']['path']}."
+                         if run["backup"]["status"] == "verified"
+                         else "No backup was taken: " + run["backup"]["reason"] + ".")
+                      + "".join(f" A resume measured {', '.join(resume['measured'])} again from its snapshot "
+                                f"{resume['backup']['path']}." for resume in run.get("resumes", [])
+                                if resume["backup"]["status"] == "verified"))
     _write(root, run)
 
 
@@ -466,9 +574,11 @@ def apply(vault_root, *, plan_id, why, backup_to=None) -> dict:
                     f"{blocker['path'] or 'the vault'} ({blocker['code']}: {blocker['reason']})"
                     for blocker in sealed["blockers"]))
             run = _begin(root, sealed, staging, plan_id, why, backup_to)
-    elif run["backup"]["status"] == "verified" and conversion._file_sha(Path(run["backup"]["path"])) != run["backup"]["sha256"]:
-        raise CollectionStoreError(BACKUP_CHANGED, f"the backup at {run['backup']['path']} no longer verifies; "
-                                   "restore its bytes, or keep a copy, before the run continues")
+    else:
+        if run["backup"]["status"] == "verified" and conversion._file_sha(Path(run["backup"]["path"])) != run["backup"]["sha256"]:
+            raise CollectionStoreError(BACKUP_CHANGED, f"the backup at {run['backup']['path']} no longer verifies; "
+                                       "restore its bytes, or keep a copy, before the run continues")
+        _remeasure(root, run, backup_to)
     if run["phase"] == BACKED_UP:
         _migrate(root, run)
     if run["phase"] == MIGRATED:

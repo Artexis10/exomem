@@ -77,6 +77,51 @@ def summary_manifest(text):
     return record_formats.splice_markdown_frontmatter(text, {"storage": storage, "view_mode": summary.SUMMARY})
 
 
+def _uncarried(error):
+    """``error`` from a summary manifest check, with its fix: summary mode cannot carry what it names."""
+    field = (getattr(error, "details", None) or {}).get("field")
+    return collections.CollectionError(
+        error.code, f"{error.reason}{f' ({field})' if field else ''}; summary mode cannot carry this, so revise "
+        "the collection's manifest without it, then retry", getattr(error, "details", {}))
+
+
+def summary_form(root, operation, current, declared, stored):
+    """The summary manifest that ``current`` converts to, with its text, or the error that refuses it.
+
+    The one decision that ``CollectionWriter.convert_to_summary`` and the cutover preview share, so
+    a preview that names no blocker plans only conversions that the apply makes. ``declared`` is the
+    collection's type, ``stored`` its stored manifest text, and ``operation`` the governance
+    operation that compares each row's disclosure decision under the collection path.
+    """
+    from .. import planning
+    from . import governance, types
+
+    if not convertible(current):
+        raise unsupported(current.storage.strategy, current.view_mode)
+    text = summary_manifest(stored)
+    try:
+        proposed = collections.parse_manifest_bytes(root, current.path, text.encode())
+    except collections.CollectionError as error:
+        raise _uncarried(error) from error
+    if ((proposed.collection_id, proposed.semantic_profile, proposed.schema, proposed.storage.source,
+         proposed.view_mode, proposed.derived) != (current.collection_id, current.semantic_profile, current.schema,
+                                                   current.storage.source, summary.SUMMARY, current.derived)
+            or types.type_for_manifest(proposed).name != declared.name):
+        raise RuntimeError("a summary conversion changes only the storage strategy and view mode")
+    try:
+        if proposed.view_diagnostics:
+            raise collections.CollectionError(proposed.view_diagnostics[0].code, proposed.view_diagnostics[0].reason)
+        record_formats.validate_storage_contract(proposed)
+        if declared.kind == "intended":
+            planning.require_planning_profile(proposed)
+    except collections.CollectionError as error:
+        raise _uncarried(error) from error
+    changed = governance.policy_path_changes(operation, current.collection_id, current.path)
+    if changed:
+        raise disclosure_change(changed)
+    return text, proposed
+
+
 def record(conn, cid):
     """The pending conversion of ``cid``, or None when none is pending."""
     row = conn.execute("SELECT value FROM store_meta WHERE key=?", (PREFIX + cid,)).fetchone()

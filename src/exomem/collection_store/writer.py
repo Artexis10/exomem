@@ -381,6 +381,20 @@ class CollectionWriter:
         )
         return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
 
+    def row_body(self, cid: str, key: str) -> dict[str, str]:
+        """``body``: the Markdown body of row ``key`` of ``cid``; or ``body_withheld`` with its reason.
+
+        Only a reader of the whole row gets the body, as only such a reader got the item file. Call
+        it inside ``read_collection``, after the row itself was released.
+        """
+        subject = next(iter(governance.iter_subjects(
+            self.connection, cid, self._operation.logical_vault_id, row_key=key)), None)
+        row = self.connection.execute(
+            "SELECT body FROM items WHERE collection_id = ? AND item_key = ?", (cid, key)).fetchone()
+        if row is None or not self._operation.reads_whole_row(cid, subject):
+            return {"body_withheld": "the body goes only to a reader of every field of this collection"}
+        return {"body": row[0]}
+
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
 
@@ -3607,22 +3621,7 @@ class CollectionWriter:
             stored = self.connection.execute(
                 "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                 (cid, row["manifest_version"])).fetchone()[0]
-            manifest_text = conversion.summary_manifest(stored)
-            proposed = collections.parse_manifest_bytes(self.root, current.path, manifest_text.encode())
-            if ((proposed.collection_id, proposed.semantic_profile, proposed.schema, proposed.storage.source,
-                 proposed.view_mode, proposed.derived) != (cid, current.semantic_profile, current.schema,
-                                                           current.storage.source, summary.SUMMARY, current.derived)
-                    or types.type_for_manifest(proposed).name != declared.name):
-                raise RuntimeError("a summary conversion changes only the storage strategy and view mode")
-            if proposed.view_diagnostics:
-                raise collections.CollectionError(proposed.view_diagnostics[0].code,
-                                                  proposed.view_diagnostics[0].reason)
-            record_formats.validate_storage_contract(proposed)
-            if declared.kind == "intended":
-                planning.require_planning_profile(proposed)
-            changed = governance.policy_path_changes(self._operation, cid, current.path)
-            if changed:
-                raise conversion.disclosure_change(changed)
+            manifest_text, proposed = conversion.summary_form(self.root, self._operation, current, declared, stored)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
             self._execute("UPDATE collections SET view_mode=?, manifest_version=?, audit_reader_version=2 "

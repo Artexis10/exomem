@@ -3,8 +3,8 @@
 Converting a collection to summary mode removes its item files and keeps each row's former view
 path in ``items.view_path`` as that row's retired alias (``CollectionWriter.convert_to_summary``).
 A read of a retired path answers the stored row as the collection's governed query releases it,
-read-only and labelled as a store row. Nothing writes the file back. A wikilink that names a retired
-path resolves through ``link_target`` to the same row.
+with its body for a reader of the whole row, read-only and labelled as a store row. Nothing writes
+the file back. A wikilink that names a retired path resolves through ``link_target`` to the same row.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ def read(vault_root, path):
             result = record_governance.query_collection(
                 vault_root, manifest, semantic_profile=manifest.semantic_profile,
                 filters=[{"column": profile.item_id_property, "op": "eq", "value": key}], limit=1)
+            body = writer.row_body(cid, key) if result.rows else {}
     except collections.CollectionError as error:
         if error.code == "COLLECTION_NOT_FOUND":
             return None
@@ -55,6 +56,7 @@ def read(vault_root, path):
                     f"This is its stored row, read-only; change it with {profile.tool}."),
         "path": path,
         "store_row": result.rows[0],
+        **body,
         "collection": manifest.path,
         "collection_id": cid,
         "source": "collection store",

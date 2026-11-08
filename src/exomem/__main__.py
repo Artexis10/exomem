@@ -2464,7 +2464,8 @@ def _collections_main(argv: list[str]) -> int:
     )
     cutover.add_argument("--why", help="reason recorded with each conversion (required with --plan-id)")
     cutover.add_argument("--backup-to", type=Path,
-                         help="snapshot file outside the vault, written and verified before any step")
+                         help="new snapshot file outside the vault, written and verified before any step; "
+                         "a resume names another new file")
     for command in (backup, adopt, create, rollback, migrate, export, cutover):
         command.add_argument(
             "--vault",

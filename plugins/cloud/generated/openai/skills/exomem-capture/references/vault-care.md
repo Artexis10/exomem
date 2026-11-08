@@ -198,7 +198,7 @@ Previews the return of a migrated vault's store collections to file-canonical fi
 
 ### collections-cutover
 
-Previews the move of every structured collection to SQLite-only storage. It is owner-only and writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every blocker with its fix, and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step, `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, with the service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and resumes after a crash when run again.
+Previews the move of every structured collection to SQLite-only storage. It is owner-only and writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every blocker with its fix, and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step, `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, with the service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and resumes after a crash when run again with a new `--backup-to` file. The preview counts, for each collection, the items that carry a body: after the apply, that body is read with `read_memory` on the old item path or with a `query` that names the row.
 
 ### Sidecar collapse (`fix`)
 
