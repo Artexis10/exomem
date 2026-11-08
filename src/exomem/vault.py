@@ -235,6 +235,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
 #: stays under `Knowledge Base/_Schema/`. It belongs to the user, it is small, and
 #: it is not markdown, so it is not what pollutes a note index.
 SHIPPED_SCHEMA_DIRNAME = ".exomem"
+#: The per-vault overlay under the Knowledge Base: YAML registries, contracts and private skills.
+#: Store mode owns it as pages (`vault_store.ownership`).
+SCHEMA_OVERLAY_DIRNAME = "_Schema"
 _SHIPPED_SCHEMA_SUBDIR = "schema"
 _SCHEMA_SENTINEL = "SKILL.md"
 

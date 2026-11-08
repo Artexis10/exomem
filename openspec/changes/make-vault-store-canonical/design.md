@@ -75,15 +75,18 @@ Today's lexical rows also arrive late on smaller vaults, where its graph edges d
 
 ### D1. The canonical store is the per-vault collection store database
 
-Pages join the database that already holds collections, rather than a new file. One file means one transaction can cover a page and a collection row, one backup unit and one migration framework (`collection_store/migration.py`, `export.py`). New tables hold page bytes and frontmatter (`store_pages`), the projection manifest and queue, held corrections, and the audit trail. The lexical catalogue and graph tables keep their current schemas inside the same file, so their readers and row builders are reused unchanged. The spike proved the schemas coexist: no table names clash.
+Pages join the database that already holds collections, rather than a new file. One file means one transaction can cover a page and a collection row, one backup unit and one migration framework (`collection_store/migration.py`, `export.py`). New tables hold page bytes and frontmatter (`store_pages`), the projection manifest and queue, held corrections, and the audit trail. The lexical catalogue and graph tables copy into the same file, so their readers and row builders are reused unchanged. Their owners' own DDL creates them, without the graph's file-mode publication-capture triggers, and they are not `STRICT`, because full-text tables cannot be. The collection schema's `STRICT` rule covers only the tables it creates. The spike proved the schemas coexist: no table names clash.
 
 *Alternative rejected:* a second "page store" file beside the collection store. SQLite in WAL mode does not commit atomically across attached databases, so two files would put two transaction owners back between a page and the collection row that cites it.
 
 **What the store owns.** Every text file a governed write commits: pages, navigation indexes, logs, compiled history and the governed schema overlay. Binary media stays on disk (D2). Dataset files that the structured-collections contract keeps file-canonical stay outside the store, and vault content outside the managed Knowledge Base stays a read-only input, as today.
 
-**What joining the collection store changes.** Three things follow from one file, and the collection changes must say so (task 1.6):
+**Store mode needs an adopted collection store.** Not every vault has one: the collection migration creates none when it has nothing to move, and the service starts no store thread without one. Store mode never creates a store as a side effect. Migration refuses with `VAULT_STORE_NEEDS_COLLECTION_STORE` unless the vault has an admitted collection store.
+
+**What joining the collection store changes.** Four things follow from one file, and the collection changes must say so (task 1.6):
 - The collection store's in-vault replica keeps covering collection tables only. The Markdown projection is the in-vault copy of pages; republishing a 1.56 GB database every minute is not. The replica today comes from the SQLite online backup API, which copies the whole file, so it changes to a staging database filled from the collection tables inside one read transaction.
 - Knowledge writes share the store's availability. When the store cannot accept writes (engine unsupported, sync pending, diverged or unknown custody), a store-mode knowledge write refuses with the store's reason. Today's collection contracts promise that knowledge writes continue in those states; that promise holds only in file mode.
+- Page writes do not advance the collection chain. The store revision lives in `store_mode.revision`, so a page write never advances `txns.commit_seq` and never makes the replica republish. Takeover's adopt step and the reverse export both act on chain position, so each would replace or tombstone the store and drop its pages. Both refuse in store mode.
 - Store-mode writes take the collection store's writer lease and transaction owner. Multi-host writer-lease takeover assumes every host receives the same canonical vault through file replication; in store mode the canonical pages live in the store, which file replication never copies. Store mode therefore refuses to start or activate while multi-host writer-lease coordination is configured, until a takeover path carries the store. The clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine` that keep knowledge out of the store and build the replica by whole-file backup, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`, become file-mode clauses.
 
 ### D2. Derive from bytes, then commit everything in one transaction
@@ -95,6 +98,8 @@ In the spike, derivation took 391 ms and the transaction 1.23 s at p50 on the re
 ### D3. Readers read the store
 
 Every reader of page bytes or derived rows reads the store: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision instead of file mtime), the frontmatter reads that governance makes, and the registry overlay loaders that read the schema overlay's YAML files. Row readers keep their query code and point at the store's tables. In store mode they drop freshness witnesses, mtime checks and sync-on-first-use repair, because a committed write cannot leave those rows behind.
+
+The lexical catalogue also holds rows for files that the store does not own: notes outside the Knowledge Base folder, files under dot-directories and the collection layers. In store mode nothing refreshes those rows. Tasks 2.2 and 3.1 must give them an owner before store mode serves reads.
 
 ### D4. Markdown is a projection
 
@@ -155,6 +160,10 @@ Vector rows stay derived and are computed after commit by the semantic drain, ke
 
 ### D8. Migration and rollback
 
+A vault is in store mode when two records agree: the vault state manifest records the compatibility id `vault-store-v1`, and the store's `store_mode` row says `store`. Activation records the id before its commit, and rollback drops it after its own commit, so a crash between the two leaves file mode and both commands rerun cleanly. Every build supports the id, so a build that keeps the release capability off can still roll a vault back. The release capability of the same name stays off until the switch, and the managed upgrade migrator never switches a vault.
+
+The marker is machine-local, because each state root holds its own manifest. A second service on another state root over the same vault, such as Windows and WSL sharing one coordinator, reads file mode. Before store mode serves reads, the design must choose a vault-side check or a stated one-service rule.
+
 Migration runs offline:
 
 1. Load every text file's exact bytes and frontmatter.
@@ -173,7 +182,7 @@ Some data exists only in the store: the audit trail, queued projection intents, 
 
 ### D9. What store mode retires
 
-For writes that Exomem commits, store mode does not need the modules that keep sidecars in step with files: `graph_sync` (4,153 lines), `graph_drain` (844), `derived_drain` (1,066), `derived_receipts` (3,408), `deferred_index` (2,733), `freshness` (2,468), `index_sync` (2,439), `pending_recall` (934), and the repair, witness and catch-up paths inside `lexstore` (12,289 lines in total) and `epistemic_graph` (14,880 in total). The watcher (2,564 lines) shrinks to the manifest importer. File mode keeps them until it retires; deleting them is the last phase.
+For writes that Exomem commits, store mode does not need the modules that keep sidecars in step with files: `graph_sync` (4,153 lines), `graph_drain` (844), `derived_drain` (1,066), `derived_receipts` (3,408), `deferred_index` (2,733), `freshness` (2,468), `index_sync` (2,439), `pending_recall` (934), `graph_publication` (155), and the repair, witness and catch-up paths inside `lexstore` (12,289 lines in total) and `epistemic_graph` (14,880 in total). The watcher (2,564 lines) shrinks to the manifest importer. File mode keeps them until it retires; deleting them is the last phase.
 
 ### D10. Semantic units are first-class rows
 
@@ -245,6 +254,7 @@ The design's epistemics check is a separate outcome evaluation, run in its own s
 ## Open Questions
 
 - Whether append-only pages such as `log.md` should become rows that the projection renders, so a write appends one row instead of re-indexing a 1.3 MB page. Measure the transaction with and without that file first.
+- Whether a second service on another state root finds store mode through a check on the vault itself or through a rule that one service runs per vault (D8).
 - Switch timing: before or after the public release. The owner decides from these numbers.
 - Whether a Cloud cell projects Markdown at all, or exports only on request.
 - Whether recall keeps the one-hop graph lane before task 5.4 or the outcome evaluation shows a gain. In the live logs of 2026-09-09 to 2026-11-07, 4.6% of returned hits came from that lane alone, and agents read them within 30 s at about a sixth of the rate of other hits at the same ranks.
