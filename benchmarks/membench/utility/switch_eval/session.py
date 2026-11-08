@@ -442,6 +442,12 @@ def _read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def rejected_limit(event: Mapping) -> dict | None:
+    """The ``rate_limit_info`` of a ``rate_limit_event`` that reports the subscription limit as rejected, else None."""
+    info = event.get("rate_limit_info") if event.get("type") == "rate_limit_event" else None
+    return info if isinstance(info, dict) and info.get("status") == "rejected" else None
+
+
 def hook_push(event: Mapping) -> str:
     """The text a ``UserPromptSubmit`` hook response added to the turn."""
 
@@ -988,13 +994,8 @@ class ClaudeSessionExecutor:
                     turn_events.append(event)
                     turn_times.append(received - sent)
                     all_events.append(event)
-                    info = (
-                        event.get("rate_limit_info")
-                        if event.get("type") == "rate_limit_event"
-                        else None
-                    )
-                    if isinstance(info, dict) and info.get("status") == "rejected":
-                        quota = info
+                    if (rejected := rejected_limit(event)) is not None:
+                        quota = rejected
                         break
                     got_result = event.get("type") == "result"
                 turn_slices.append(

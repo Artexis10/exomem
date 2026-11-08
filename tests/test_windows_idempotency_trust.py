@@ -12,8 +12,10 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="native Windows idempote
 
 
 @pytest.mark.parametrize("unsafe_replacement", [False, True])
+# 5: the sidecar is delete-pending; 32: DeleteFile still holds its DELETE handle (sharing violation).
+@pytest.mark.parametrize("pending_errno", [5, 32])
 def test_sidecar_delete_pending_preserves_runtime_trust_checks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_replacement: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_replacement: bool, pending_errno: int
 ) -> None:
     from exomem import mutation_lock
     from exomem.writer_lease import IdempotencyStore
@@ -33,7 +35,7 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
         try:
             return real_open(path, **kwargs)
         except OSError as error:
-            if path == sidecar and error.errno == 5:
+            if path == sidecar and error.errno == pending_errno:
                 observed.append(error.errno)
                 release.set()
                 assert replaced.wait(timeout=5), "the pending sidecar was not released"
@@ -43,6 +45,8 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
         try:
             # The main thread's finally releases this; a timer must not erase the pending state.
             release.wait()
+            if pending_errno == 32:
+                mutation_lock._windows_delete_handle(handle)
             mutation_lock._windows_close_handle(handle)
             if unsafe_replacement:
                 sidecar.write_bytes(b"\0")
@@ -56,8 +60,9 @@ def test_sidecar_delete_pending_preserves_runtime_trust_checks(
     thread = threading.Thread(target=finish_delete)
     thread.start()
     try:
-        # Retained-handle disposition keeps deletion pending; path deletion may unlink immediately.
-        mutation_lock._windows_delete_handle(handle)
+        if pending_errno == 5:
+            # Retained-handle disposition keeps deletion pending; path deletion may unlink immediately.
+            mutation_lock._windows_delete_handle(handle)
         if unsafe_replacement:
             with pytest.raises(mutation_lock.WindowsRuntimeDaclError):
                 store._ensure_private_runtime_state()

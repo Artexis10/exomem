@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.164.1](https://github.com/Artexis10/exomem/compare/v0.164.0...v0.164.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **episodes:** name record_episode in recap-kind refusals ([#2529](https://github.com/Artexis10/exomem/issues/2529)) ([fcad3b6](https://github.com/Artexis10/exomem/commit/fcad3b6df19518506bc673f8293ffb4b2fa62d4d))
+
+
+### Performance
+
+* **recall:** time each task-context stage so a slow recall names its cause ([#2528](https://github.com/Artexis10/exomem/issues/2528)) ([20c444c](https://github.com/Artexis10/exomem/commit/20c444c068b10d667c2e38e7f337ab584fac611c))
+
+## [0.164.0](https://github.com/Artexis10/exomem/compare/v0.163.1...v0.164.0) (2026-11-08)
+
+
+### Features
+
+* **media:** show stored images to agents and shorten download links ([#2522](https://github.com/Artexis10/exomem/issues/2522)) ([42f4a3a](https://github.com/Artexis10/exomem/commit/42f4a3a3cd83c294d1a85b810b6562fa4c04f5cb))
+
+
+### Bug Fixes
+
+* **media:** keep the media supervisor alive while the identity guard is busy ([#2509](https://github.com/Artexis10/exomem/issues/2509)) ([a6f3ca0](https://github.com/Artexis10/exomem/commit/a6f3ca03b2700aa5bb5e3a63e2529e3956c4fb8d))
+* **recall:** lead task context with the compiled note, and ask for a recap at each landing ([#2524](https://github.com/Artexis10/exomem/issues/2524)) ([ce67a3b](https://github.com/Artexis10/exomem/commit/ce67a3b72d6e6be7e7a37852bd554358220c6139))
+* **taxonomy:** register a second domain under the real heading, not the header comment ([#2516](https://github.com/Artexis10/exomem/issues/2516)) ([1fe255e](https://github.com/Artexis10/exomem/commit/1fe255ed270275745cc404ee7bf25a04f38dcec3))
+
+## [0.163.1](https://github.com/Artexis10/exomem/compare/v0.163.0...v0.163.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **activation:** carry the relation, adoption and delivery capture routes ([#2503](https://github.com/Artexis10/exomem/issues/2503)) ([5748764](https://github.com/Artexis10/exomem/commit/57487646911ceb5db94e98c07fbdd3726d4d9cb9))
+* **cellctl:** refuse an empty volume passphrase for a per-cell key class ([#2490](https://github.com/Artexis10/exomem/issues/2490)) ([ddbba31](https://github.com/Artexis10/exomem/commit/ddbba3126125dcee6496dcfe6aeeb94b1beafa67))
+* **media:** keep the media supervisor alive while the job ledger is held ([#2502](https://github.com/Artexis10/exomem/issues/2502)) ([d03c38f](https://github.com/Artexis10/exomem/commit/d03c38f5269f6ac211a67d4415fc2cea8c7fcb61))
+* **plugins:** keep network sending out of the Cloud hook scripts ([#2513](https://github.com/Artexis10/exomem/issues/2513)) ([c1e300a](https://github.com/Artexis10/exomem/commit/c1e300a936a72994c02bdb4df991cb8edd770abe))
+
 ## [0.163.0](https://github.com/Artexis10/exomem/compare/v0.162.0...v0.163.0) (2026-11-07)
 
 
