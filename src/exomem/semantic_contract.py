@@ -55,9 +55,6 @@ _DISPOSITION_KINDS = frozenset(
     {"qualifying_relation", "reviewed_none", "bootstrap", "missing", "stale"}
 )
 _TARGET_STATUSES = frozenset({"resolved", "unresolved", "ambiguous"})
-_EXCLUDED_FAMILIES = frozenset(
-    {"link", "citation", "derivation", "evidence", "mention", "observation", "provenance"}
-)
 # Origins that can carry a connectivity signal, chosen to mirror
 # `audit._check_relation_debt` exactly: it clears a page on authored relation rows
 # or body wikilinks, and ignores `sources:`.
@@ -4562,6 +4559,14 @@ def _authored_relations(
     return registry
 
 
+def page_relation_behaviours(
+    page: SemanticPageState, corpus: SemanticCorpusContext, canonical_relation: str | None
+) -> frozenset[str]:
+    """What code does with a relation authored on `page`, read in the registry that judged it."""
+    registry = _authored_relations(page, corpus.registry)
+    return registry.behaviours_of(canonical_relation or "")
+
+
 def _derive_relation_facts(
     root: Path,
     states: Mapping[str, SemanticPageState],
@@ -4784,7 +4789,7 @@ def _structural_relation_reasons(
     expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
     mutual_supersession = bool(
         definition is not None
-        and definition.family == "supersession"
+        and "replaces" in registry.behaviours_of(definition.key)
         and target_page is not None
         and target_page.status_class == "superseded"
         and any(
@@ -4843,18 +4848,18 @@ def qualify_relation(
 ) -> RelationQualification:
     """Whether ``fact`` is a deliberate typed epistemic edge.
 
-    Registry-marked generic associations and excluded families do not qualify.
-    Frontmatter only counts for supersession; targets must be eligible governed pages.
+    Registry-marked generic associations and associative relations do not qualify.
+    Frontmatter only counts for a relation that replaces; targets must be eligible governed pages.
     """
     reasons, definition = _structural_relation_reasons(
         fact, registry=registry, corpus=corpus, target_paths=corpus.eligible_governed_paths
     )
-    if definition is not None and definition.family in _EXCLUDED_FAMILIES:
+    if definition is not None and "associative" in registry.behaviours_of(definition.key):
         reasons.append("excluded_family")
     if definition is not None and definition.generic:
         reasons.append("generic_relation")
     if fact.origin == "frontmatter":
-        if definition is None or definition.family != "supersession":
+        if definition is None or "replaces" not in registry.behaviours_of(definition.key):
             reasons.append("frontmatter_not_supersession")
     elif fact.origin not in {"markdown_relation", "semantic_relation", "semantic_block"}:
         reasons.append("unsupported_origin")

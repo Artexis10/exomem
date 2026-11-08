@@ -1063,15 +1063,16 @@ def test_a_relation_row_is_a_typed_edge_unless_it_only_records_a_link(
     assert _qualification(fixture_vault, relation) == reasons  # CORE
 
 
-def test_a_grandfathered_extension_is_a_typed_edge_by_its_saved_family(
+def test_a_grandfathered_extension_stays_a_typed_edge_when_its_parent_is_not_associative(
     fixture_vault: Path,
 ) -> None:
-    """FLIPS 9: `x.leans_on` is saved in family `support`, so it qualifies today.
+    """`x.leans_on` is saved in family `support` and has parent `relates_to`.
 
-    After intended change 9 it follows its parent `relates_to`, which is generic,
-    and the reasons become `("generic_relation",)`.
+    It qualified by its saved family, which is not excluded. It qualifies by its
+    parent now, which is not `associative`, so no flip reaches this reader on
+    this fixture. The generic mark is the parent's alone and is not inherited.
     """
-    assert _qualification(fixture_vault, "x.leans_on") == ()  # FLIPS 9
+    assert _qualification(fixture_vault, "x.leans_on") == ()  # CORE
 
 
 def _frontmatter_qualification(vault: Path, name: str) -> dict[str, tuple[str, ...]]:
