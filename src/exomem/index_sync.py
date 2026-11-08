@@ -2074,12 +2074,21 @@ def upsert_after_write(
         )
     finally:
         semantic_index.reset_parent_states(token)
+    report = IndexSyncReport(
+        "upsert",
+        requested_report,
+        eligible_report,
+        tuple(components),
+        requested_truncated or eligible_truncated,
+    )
     with call_spans.span("index.policy_revalidate"):
         drifted = batch.drifted_identities(vault_root)
     if drifted is None or drifted:
-        # The components above published every identity, so only the drifted
-        # ones are owed. The checks before the dispatch still owe the whole batch.
-        return stale_report(drifted)
+        # Only the drifted identities are owed when every component published. A
+        # degraded or failed one leaves rows that custody below repairs, and a
+        # stale batch skips custody, so then the whole batch is owed. The checks
+        # before the dispatch also owe the whole batch.
+        return stale_report(None if report.reconcile_required else drifted)
     with call_spans.span(
         "index.path_custody", {"paths": len(batch.identity_paths)}
     ):
@@ -2094,13 +2103,6 @@ def upsert_after_write(
             deleted=watcher_deleted_rels or [],
             reason="governed_write",
         )
-    report = IndexSyncReport(
-        "upsert",
-        requested_report,
-        eligible_report,
-        tuple(components),
-        requested_truncated or eligible_truncated,
-    )
     return report
 
 

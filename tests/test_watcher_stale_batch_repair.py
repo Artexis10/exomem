@@ -28,6 +28,7 @@ from exomem import (
     freshness,
     index_sync,
     lexstore,
+    memory_refs,
     recall_policy,
 )
 
@@ -249,3 +250,29 @@ def test_a_batch_that_went_stale_before_publishing_still_owes_every_page(
     _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
 
     assert set(deferred_index.list_full_paths(tmp_path)) == {*NOTES, LOG, INDEX}
+
+
+def test_a_degraded_component_in_a_stale_batch_owes_every_page(
+    tmp_path: Path, whole_kb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A degraded component leaves rows that custody would repair, and a stale batch
+    # skips custody. The page whose reference row is wrong did not change since, so
+    # only the whole batch brings it back.
+    alpha, log = tmp_path / NOTES[0], tmp_path / LOG
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()
+    alpha.write_text(
+        f"---\nexomem_id: {memory_refs.new_id()}\n---\n\n# alpha\n\nbatch text\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_args, **_kwargs: False)
+
+    def append_to_log() -> None:
+        log.write_text("# log\n\nbatch text\nwritten during the batch\n", encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=[log])
+
+    _during_dispatch(monkeypatch, append_to_log)
+
+    replayed = _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
+
+    everything = {*NOTES, LOG, INDEX}
+    assert set(deferred_index.list_full_paths(tmp_path)) == everything
+    assert replayed == everything

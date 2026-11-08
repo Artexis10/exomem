@@ -406,7 +406,7 @@ def test_a_slow_deferred_queue_delays_upkeep_without_starving_it(
     """A full-upsert queue that drains a dozen rows per pass can outlast days.
     The worker reads that real queue and holds a tick for it only until the bound."""
     monkeypatch.setenv("EXOMEM_DREAMER", "on")
-    monkeypatch.setattr(foreground_activity, "_STARTED", time.monotonic() - 3600.0)  # idle an hour
+    monkeypatch.setattr(foreground_activity, "idle_seconds", lambda _vault: 3600.0)  # idle an hour
     vault = _vault(tmp_path, 2)
     assert deferred_index.add_full(vault, ["Knowledge Base/Notes/Insights/page-00.md"]) == 1
     skew = [0.0]

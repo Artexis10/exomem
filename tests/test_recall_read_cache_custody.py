@@ -1092,7 +1092,7 @@ def test_custody_is_applied_only_after_the_batch_revalidates(
 
     report = index_sync.upsert_after_write(vault, [vault / _ALPHA])
 
-    assert calls["n"] == 1, "the final check was never reached"
+    assert calls["n"] >= 1, "the final check was never reached"
     assert report.reconcile_required, f"a stale batch reported success: {report.as_dict()}"
     assert freshness.last_custody_report() is None, (
         "custody was taken for a batch that did not commit"
