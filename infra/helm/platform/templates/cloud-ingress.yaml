@@ -161,6 +161,15 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+    # The Exomem icon at the conventional site-icon path. Clients that show a site icon for
+    # this MCP server read it here; without the route they fall back to the parent domain's.
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/favicon.ico`) && (Method(`GET`) || Method(`HEAD`))
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
 {{- if .Values.cloudGateway.uploadCellIds }}
     # The gateway's fixed upload route (CLOUD_UPLOAD_PATH). It checks the signed handoff
     # before it reads a body byte, so the route adds no buffering or body-size middleware:
