@@ -211,9 +211,9 @@ _BASELINE_CAPTURE = (
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
     "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Before an affiliation facet, check the relation queue: a confirmed match goes "
-    "to link_acceptance instead. Fleeting preferences, one-offs, incidental associations, "
-    "trivia, and tentative claims stay quiet."
+    "measurement. Before an affiliation facet, check the relation queue: a match the user "
+    "confirms goes to link_acceptance instead. Fleeting preferences, one-offs, incidental "
+    "associations, trivia, and tentative claims stay quiet."
 )
 
 #: What a selected or sent draft is worth as a save, positive rule first. The activation block

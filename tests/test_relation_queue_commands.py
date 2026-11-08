@@ -213,6 +213,8 @@ def test_accepting_an_alias_writes_the_bare_label_and_the_edge_resolves_to_its_k
         why="Accepted reviewed relation",
         expected_fingerprint=item["fingerprint"],
         requested_relation="has_pet",
+        # The caller holds the recorded vocabulary choice that names it; the writer validates that.
+        bound=True,
         edit_memory=commands.op_edit_memory,
     )
 

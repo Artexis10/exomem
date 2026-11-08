@@ -1302,7 +1302,7 @@ def test_hintless_compatibility_is_limited_to_the_ordinary_queue_prefix(
         },
     }
     outside_ref = relation_queue.relation_review_ref(
-        relation_queue._candidate_identity(outside_candidate)
+        relation_queue.candidate_identity(outside_candidate)
     )
     with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
         relation_queue.resolve_candidate(root, outside_ref)
@@ -1314,7 +1314,7 @@ def test_hintless_compatibility_is_limited_to_the_ordinary_queue_prefix(
     )
 
     embedding_ref = relation_queue.relation_review_ref(
-        relation_queue._candidate_identity(
+        relation_queue.candidate_identity(
             {
                 "from": outside_source,
                 "to": target,
