@@ -2183,7 +2183,12 @@ def _format_task_context(block: object, max_chars: int) -> str:
     for item in block.get("candidates") or ():
         lines.append(_packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or "")))
     for item in methods.get("items") or ():
-        lines.append(_packet_line("method", f"{item.get('attribution', '')}; read the source for applicability and exclusions.", str(item.get("read_ref") or "")))
+        read_ref = str(item.get("read_ref") or "")
+        # `approved` is the server's closed verdict token. The line carries the title and a fixed instruction, no page text.
+        if item.get("approval") == "approved":
+            lines.append(_packet_line("approved procedure", f"{item.get('attribution', '')}. Read it, then follow it where it fits.", read_ref))
+            continue
+        lines.append(_packet_line("method", f"{item.get('attribution', '')}; read the source for applicability and exclusions.", read_ref))
     if lines:
         lines.insert(0, _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""))
     kept, used = [], 0

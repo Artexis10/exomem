@@ -26,7 +26,7 @@ import json
 import re
 import secrets
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -171,6 +171,10 @@ class Finding:
     kind: str
     entries: tuple[str, ...]
     message: str
+
+    def row(self) -> dict[str, object]:
+        """The one wire shape of a finding, for the listing and the owner's page read."""
+        return {"ref": self.ref, "kind": self.kind, "message": self.message, "entries": list(self.entries)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,6 +514,12 @@ def listed_refs(vault_root: Path) -> tuple[str, ...]:
 # --- eligibility and verdict ---------------------------------------------------------------
 
 
+def page_ref(frontmatter: Mapping[str, object]) -> str | None:
+    """The stable ref that a page's frontmatter names, or None when it names none."""
+    identifier = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+    return memory_refs.memory_ref(identifier) if identifier else None
+
+
 def page_facts(
     vault_root: Path,
     rel_path: str,
@@ -578,6 +588,36 @@ def verdict(
     if latest.version == facts.version:
         return Verdict(APPROVED, entry, findings)
     return Verdict(STALE if owner else UNAPPROVED, entry, findings)
+
+
+def served_verdict(
+    vault_root: Path,
+    rel_path: str,
+    ref_ledger: RefLedger | None,
+    *,
+    owner: bool,
+    full_release: bool,
+    read: Callable[[], bytes],
+    holders: Callable[[], Sequence[str]],
+) -> Verdict:
+    """The verdict a read surface reports, reading the page and its holders only when they decide it.
+
+    The page's bytes and holders matter only when the latest verified entry is an `approve` entry
+    that a reader may see. Every other case reads `unapproved` whatever the page is, so it gives the
+    value and findings of `verdict` without the page's facts. A serving surface passes `read` and
+    `holders` as callables, and a page with no approval entry costs one ledger read and no more.
+    """
+    if (
+        ref_ledger is None
+        or not full_release
+        or ref_ledger.unreadable
+        or ref_ledger.unavailable
+        or ref_ledger.latest is None
+        or ref_ledger.latest.action != APPROVE
+    ):
+        return verdict(None, ref_ledger, owner=owner, full_release=full_release)
+    facts = page_facts(vault_root, rel_path, read(), holders=holders())
+    return verdict(facts, ref_ledger, owner=owner, full_release=full_release)
 
 
 # --- writing -----------------------------------------------------------------------------------

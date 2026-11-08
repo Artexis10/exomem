@@ -24,6 +24,7 @@ from . import (
     find_types,
     lifecycle_statuses,
     memory_refs,
+    procedure_approval,
     provenance,
     runtime_resources,
     semantic_index,
@@ -32,7 +33,7 @@ from . import (
     working_set,
     working_set_currency,
 )
-from .governance import egress, principal
+from .governance import egress, principal, raw_protection
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ def _add_missing(block: dict[str, Any], reason: str) -> None:
 
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
     if method:
+        if item.get("approval") == procedure_approval.APPROVED:
+            # The line is part of the method, so the allowance charges it with the method. It carries only the title.
+            return f"Approved procedure: {item.get('attribution', '')}. Read it, then follow it where it fits."
         return f"Method: {item.get('attribution', '')}. Read the source for applicability and exclusions."
     line = f"{item.get('title', '')}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
@@ -156,6 +160,8 @@ class SourceProjection:
     methods: tuple[str, ...] | None
     title: str | None
     carrier: str | None
+    #: The page's stable memory ref, read from the raw frontmatter, for the approval verdict.
+    ref: str | None = None
 
 
 def _deadline_check() -> None:
@@ -204,6 +210,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
         result = SourceProjection(
             {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body},
             page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
+            procedure_approval.page_ref(page.frontmatter),
         )
     else:
         with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
@@ -270,22 +277,80 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             check()
             version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             result = SourceProjection(released, page.snapshot_hash, version, methods,
-                                      egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None)
+                                      egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None,
+                                      reference)
     if cache is not None and provider is None:
         cache[source_ref] = result
     return result
 
 
+def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[dict[str, str], bool]:
+    """The approval verdict of each released source for this caller, and whether every source could be checked.
+
+    The projection exists only for a page the caller reads at FULL release, so the release leg is met here. A
+    source that cannot be checked reads `unapproved`, because approval only ever adds an endorsement, and the
+    flag lets the packet say so. The page's holders come from the reference index that every read already
+    consults for a page's ref: one indexed read, only when a ledger entry makes holders matter, and never a
+    walk of the vault. That index follows each write, so a page approved a moment ago reads `approved` here.
+    """
+    values = dict.fromkeys(projections, procedure_approval.UNAPPROVED)
+    refs = {path: source.ref for path, source in projections.items() if source.ref}
+    if not refs:
+        return values, True
+    owner = raw_protection.is_owner(principal.effective_principal())
+    ledgers = procedure_approval.ledgers(root, refs.values())
+    named: dict[str, str | None] | None = None
+
+    def holders(path: str, ref: str) -> tuple[str, ...]:
+        # The index names a ref for a path only when that page is the single valid owner of its id.
+        nonlocal named
+        if named is None:
+            named = memory_refs.ReferenceIndex(root).refs_for_paths(list(refs), recall_reader=True)
+        return (path,) if named.get(path) == ref else ()
+
+    complete = True
+    for path, ref in refs.items():
+        source = projections[path]
+
+        def read(path: str = path, source: SourceProjection = source) -> bytes:
+            raw, _guard = vault.read_bounded_guarded_bytes(
+                root, path, limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES, expected_hash=source.raw_hash,
+            )
+            return raw
+
+        try:
+            values[path] = procedure_approval.served_verdict(
+                root, path, ledgers[ref], owner=owner, full_release=True,
+                read=read, holders=lambda path=path, ref=ref: holders(path, ref),
+            ).value
+        except Exception:  # noqa: BLE001 - an unchecked source stays unapproved and the packet reports a failed lane
+            log.warning("approval verdict unavailable for %s", path, exc_info=True)
+            complete = False
+    return values, complete
+
+
 def _revalidate(root: Path, held: Sequence[Mapping[str, str]], caller: Any, sources: dict) -> bool:
+    checked: list[tuple[Mapping[str, str], SourceProjection]] = []
     for item in held:
         try:
             source = project_source(root, item["source_ref"], caller, cache=sources)
             if (source is None or source.version != item["source_version"]
                     or source.methods is None or item["ref"] not in source.methods):
                 return True
+            checked.append((item, source))
         except Exception:  # noqa: BLE001 - absent, withheld and uncheckable invalidate identically
             return True
-    return False
+    if not checked:
+        return False
+    # Approve and revoke change no page bytes, so the version check alone cannot see them. An entry that carries
+    # no approval reads as unapproved, and an unchecked source reads the same, so it resets only a held approval.
+    try:
+        current, _complete = approvals(root, {item["source_ref"]: source for item, source in checked})
+    except Exception:  # noqa: BLE001 - uncheckable invalidates like an absent source
+        return True
+    return any(
+        item.get("approval", procedure_approval.UNAPPROVED) != current[item["source_ref"]] for item, _source in checked
+    )
 
 
 def _remember_sources(root: Path, caller: Any, sources: Mapping[str, SourceProjection | None]) -> None:
@@ -373,6 +438,16 @@ def compile_context(
             candidates, block["interpretation"] = context_fit.interpret(
                 root, caller=caller, candidates=candidates, turn=turn, conversation=conversation, sources=sources,
             )
+        with find_types.timing_span(timings, "working_set.approvals"):
+            kept = {item["source_ref"] for item in candidates}
+            verdicts, checked = approvals(
+                root, {path: sources[path] for path in methods_by_source if path in kept},
+            )
+        if not checked:
+            _add_missing(block, "lane_failed")
+        for path, methods in methods_by_source.items():
+            for method in methods:
+                method["approval"] = verdicts.get(path, procedure_approval.UNAPPROVED)
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
             # Links spend only what every lead and method leaves, so a link never displaces one.
@@ -479,7 +554,11 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
 
     def versions(items):
         # These are fixed version-hint fields of the activation protocol.
-        return [{key: item[key] for key in ("ref", "source_ref", "source_version")} for item in items]
+        return [
+            {**{key: item[key] for key in ("ref", "source_ref", "source_version")},
+             "approval": item.get("approval", procedure_approval.UNAPPROVED)}
+            for item in items
+        ]
 
     retained = {} if methods["reset"] else {item["ref"]: dict(item) for item in held}
     retained.update({item["ref"]: item for item in versions(methods["items"])})

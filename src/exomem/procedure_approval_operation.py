@@ -314,10 +314,7 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
                 "client": result.entry.client,
             }
         approvals.append(row)
-        findings.extend(
-            {"ref": item.ref, "kind": item.kind, "message": item.message, "entries": list(item.entries)}
-            for item in result.findings
-        )
+        findings.extend(item.row() for item in result.findings)
     counts = {
         value: sum(row["verdict"] == value for row in approvals)
         for value in (procedure_approval.APPROVED, procedure_approval.STALE, procedure_approval.UNAPPROVED)
