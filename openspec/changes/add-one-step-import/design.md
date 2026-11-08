@@ -19,21 +19,23 @@
 
 ### D1. `file` is a driver over the step functions, chosen from saved state
 
-Each call finds the newest page. A `continuation` names the run that issued it. A path alone resumes the newest unfinished run of that path, so a retried first call makes no second run and two drivers that take turns file each source once. The call then runs the step that the saved phase calls for:
+Each call finds the newest page. A `continuation` names the run that issued it. A path alone resumes the newest run of that path with a step left, else the newest run, so a retried first call makes no second run, two drivers that take turns file each source once, and a finished import answers `done` again. A path alone with another collection than the run's is refused with the continuation's refusal, because the scan keeps the label of its first page. The call then runs the step that the saved phase calls for:
 
 - `selecting` with no selection: `select` the whole stage. A page with nothing eligible is cancelled, so the scan moves to the next page.
 - `selecting` with a selection: `plan`.
 - `planned` or `applying`: `apply` the stored plan with its cursor.
+- `partial` or `failed` with failed files that no retry has run: `apply` with `retry_failed`. The marker is `apply`'s own `scope`, which a full `apply` leaves empty and a retry sets to the files it retried, so the retry runs once.
 - `applied` or `partial`: `finish`.
+- `failed` after its retry: `cancel`. `finish` refuses a failed page and `plan` refuses a later page while it stays open. The failed outcomes stay on the page, so the counts and the residual keep them.
 - `done` or `cancelled` with an open `after` cursor: `start` the next page.
 
 The state is the run object, never the arguments, so a call carries on from wherever the run stands, including a run that the step path began.
 
-A call ends after `apply`, after `finish`, after a `plan` that leaves the page `selecting`, before a `start` once it has run a step, and when the budget cannot cover the delivery reserve. One page costs two or three calls.
+A call ends after `apply` or its retry, after `finish`, after a `plan` that leaves the page `selecting`, before a `start` once it has run a step, and when the budget cannot cover the delivery reserve. One page costs two or three calls.
 
 ### D2. The reply is small and claims only what the run records
 
-`filing` is `working`, `stopped` or `done`. The envelope key `state` is reserved, so `filing` carries it. `summary` is built from three counts, filed, failed and left, and nothing else. Only `finish` verifies filed text against its Source page, so `done` is the only state that carries `filed`, which holds coverage, the first question, the route, indexing and the residual from `finish`.
+`filing` is `working`, `stopped` or `done`. The envelope key `state` is reserved, so `filing` carries it. `summary` is built from three counts, filed, failed and left, and nothing else. `progress` counts the whole import over every page, and carries the newest page's position (`page`: number, phase, files planned) so that a caller can see a call that moved the page without moving a count. Only `finish` verifies filed text against its Source page, so `done` is the only state that carries `filed`. It holds the stage's residual, and under `last_finished_page`, with the page number, the coverage, first question, route and indexing of the last `finish`, which describe that page alone. The reply names its `collection`.
 
 `stopped` carries `stop` with a code and a reason. A space stop (`apply_stop`) names the bytes needed and free. An error after a run exists stops the reply instead of raising, so work already committed stays reported. An error before any run exists raises, because it is a bad argument.
 
@@ -49,7 +51,7 @@ Both apply-only gates in `writer_lease.py` take `file` in their action set: the 
 
 ### D4. The CLI files each landed window
 
-A staged window lands on the cell as a separate import. `exomem cloud import` calls `file` for each landed window while it waits for the next, and again for every unfiled window at the end. State is in memory: a rerun seeds it from landed windows that still report unfiled members. A `stopped` reply ends filing for that window with its continuation kept, and the command reports the stop. A cell that refuses `file` raises `FilingUnavailable`, and the command falls back to the step path for the rest of the run. `--no-file` leaves every window for the agent.
+A staged window lands on the cell as a separate import. `exomem cloud import` calls `file` for each landed window while it waits for the next, and again for every unfiled window at the end. State is in memory: a rerun seeds it from landed windows that still report unfiled members and whose filing the status does not report done (`filing_done`). A `stopped` reply, or an error reply, ends filing for that window with its continuation kept, and the command reports the cell's code and reason. The command repeats the exact call once after an unknown outcome, and after a wait while the acknowledgement is pending, because the cell reconciles only under the same call. Only a refusal of the action itself is an older cell: `INVALID_MODE`, or a tool error from a cell whose published `import_memory` schema lists kinds without `file`. That raises `FilingUnavailable`, and the command leaves the windows to the step path for the rest of the run. A window stalls when five replies move no count and leave the page's position unchanged. The CLI reads the reply's states and counts from `adoption_run`. `--no-file` leaves every window for the agent.
 
 ### D5. Guidance names one call
 
