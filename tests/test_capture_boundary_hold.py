@@ -258,3 +258,32 @@ def test_a_directory_named_like_a_page_is_counted_and_descended_as_rglob_did(
     assert indexes._count_notes_by_subfolder(notes) == _oracle_notes_by_subfolder(notes)
     assert indexes._count_notes_by_subfolder(notes) == {"Research": {"Alpha": 3}}
     assert indexes._count_sources(sources) == {"Articles": 2}
+
+
+def test_a_batch_workspace_in_sources_is_not_a_source_type_even_when_it_vanishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another write's batch workspace under Sources is removed when that write finishes.
+    An edit that counted Sources in that window failed with FileNotFoundError and
+    returned 500 (observed live 2026-11-08)."""
+    from exomem import indexes
+
+    sources = tmp_path / "Sources"
+    (sources / "Articles").mkdir(parents=True)
+    (sources / "Articles" / "a.md").write_text("x", encoding="utf-8")
+    workspace = sources / ".exomem-batch-0123456789abcdef0123456789abcdef"
+    workspace.mkdir()
+    (workspace / "staged.md").write_text("x", encoding="utf-8")
+
+    assert indexes._count_sources(sources) == {"Articles": 1}
+
+    # The workspace is listed, then removed before the count reaches it.
+    listed = list(sources.iterdir())
+    (workspace / "staged.md").unlink()
+    workspace.rmdir()
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(
+        Path, "iterdir", lambda self: iter(listed) if self == sources else real_iterdir(self)
+    )
+
+    assert indexes._count_sources(sources) == {"Articles": 1}

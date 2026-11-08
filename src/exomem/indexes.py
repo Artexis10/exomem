@@ -24,6 +24,7 @@ from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
+    VAULT_SCAN_SKIP_DIR_PREFIXES,
     PlannedWrite,
     document_newline,
     escape_wikilinks_for_log,
@@ -214,7 +215,9 @@ def _count_sources(
         on_error(error)
         return out
     for sub in entries:
-        if sub.name.startswith("_"):
+        # A batch workspace is another write in flight, not a source type; it can vanish
+        # between the listing and the stat below.
+        if sub.name.startswith("_") or sub.name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES):
             continue
         try:
             if not stat.S_ISDIR(sub.stat().st_mode):
