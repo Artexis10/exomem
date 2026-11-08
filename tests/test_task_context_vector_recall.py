@@ -1,25 +1,20 @@
 """Task discovery ranks with the dense lane search_memory uses, so wording that shares no term still finds a page.
 
-The fixtures plant the vectors: the encoder is out of the loop; the vault, the catalogue, the recall sidecar,
-the lexical index, egress and the task-context lanes are real.
+The fixtures plant the vectors (every activation query lands on the planted page's direction, as a real encoder
+places a paraphrase near its source); the vault, the catalogue, the resident recall matrix, the lexical index,
+egress and the task-context lanes are real.
 """
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 from test_activate_context_maps import _activate
-from test_activation_related_pages import AXIS, _planted_vault, _toward_turn
+from test_activation_related_pages import _planted_vault, _toward_turn
 from test_context_catalogue import _built
 
 from exomem import embeddings, readiness
 
 BODY = "Bring the handheld gauge to the depot service desk for a calibration quote."
-
-
-def _vector_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Every query lands on the planted page's direction, as a real encoder places a paraphrase near its source.
-    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, **_kw: np.vstack([AXIS for _ in texts]))
 
 
 def _task_refs(vault: Path, turn: str) -> tuple[dict, set[str]]:
@@ -52,7 +47,6 @@ def test_a_turn_without_a_shared_term_finds_the_page_through_the_dense_lane(
     assert planted not in keyword_only  # the keyword lane alone misses it
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
-    _vector_query(monkeypatch)
     _block, refs = _task_refs(vault, turn)
     assert planted in refs
 
@@ -60,7 +54,7 @@ def test_a_turn_without_a_shared_term_finds_the_page_through_the_dense_lane(
 def test_a_warming_encoder_keeps_the_keyword_result_and_says_it_is_partial(
     vault: Path, planted: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _vector_query(monkeypatch)
+    embeddings.get_embedding_index(vault).unload_cache()  # the recall matrix is not resident yet
     monkeypatch.setattr(readiness, "should_defer", lambda component: component == "embeddings")
     block, refs = _task_refs(vault, "Bring the handheld gauge to the depot for a calibration quote")
     assert planted in refs  # the keyword lane still ranks it

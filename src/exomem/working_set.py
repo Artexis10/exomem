@@ -29,6 +29,7 @@ import logging
 import os
 import posixpath
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -1399,7 +1400,6 @@ def task_candidates(
         context_task,
         context_views,
         epistemic_graph,
-        find,
         find_types,
         lexstore,
         record_governance,
@@ -1462,6 +1462,7 @@ def task_candidates(
         if origin not in found[path]["origins"]:
             found[path]["origins"].append(origin)
 
+    method_queries: list[tuple[str, str]] = []
     # Origin values name the two request input segments, not inferred intent.
     for origin, query in (("turn", turn), ("focus", focus)):
         if not query.strip():
@@ -1507,42 +1508,17 @@ def task_candidates(
         if budget_exhausted("working_set.task_context_vector"):
             missing.append({"role": "task_context", "reason": "budget"})
             break
-        # The vector ranking search_memory fuses, so a paraphrase or a typo reaches the page that shares no
-        # material term with the turn. It never loads a model on this thread: while the encoder warms, find
-        # skips the lane and reports it degraded.
-        degraded: list[str] = []
-        failed: list[str] = []
+        # The dense reading search_memory fuses, so a paraphrase or a typo reaches the page that shares no
+        # material term with the turn. It reads only the resident recall matrix and an encoder already in
+        # memory: it never loads a model or a matrix on this thread.
         with find_types.timing_span(timings, "working_set.task_context_vector"):
-            vector_hits = find.find(
-                vault_root, query=query, limit=limit + 1, scope="kb", mode="vector", graph=False,
-                rerank=False, result_level="page", prefer_compiled=True, prefer_active=True,
-                prefer_used=False, admit_path=allowed.__contains__, timings=timings,
-                degraded_out=degraded, failed_out=failed,
-            )
-        # Only the dense lane's own state counts; find's keyword fallback on an empty dense ranking is not a failure.
-        if "embeddings" in degraded or "vector" in failed:
+            vector_paths, vector_state = _resident_vector_paths(vault_root, query, allowed, limit)
+        if vector_state == "lane_failed":
             missing.append({"role": "task_context", "reason": "lane_failed"})
-        for hit in vector_hits[:limit]:
-            add(str(getattr(hit, "path", "") or ""), origin)
-        if categories and budget_exhausted("working_set.task_context_methods"):
-            missing.append({"role": "task_context", "reason": "budget"})
-        elif categories:
-            with find_types.timing_span(timings, "working_set.task_context_methods"):
-                methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                    [], limit + 1, categories, (), "kb", fresh,
-                    allowed_parent_paths=allowed,
-                    admitted_parent_paths=allowed,
-                    # This branch proved FULL source access and filtered this request's catalogue paths.
-                    released_parent_paths=allowed,
-                    query_units=bm25.token_units(query_text, query=True),
-                    term_budget=working_set_runtime.material_term_budget(),
-                    recall_checkpoint=checkpoint, allow_delta=False,
-                )
-            if not methods.readiness.complete:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-            else:
-                for hit in (methods.value or [])[:limit]:
-                    add(hit.parent_path, origin)
+        for path in vector_paths:
+            add(path, origin)
+        if categories:
+            method_queries.append((origin, query_text))
     if restricted:
         # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
         missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -1572,6 +1548,27 @@ def task_candidates(
         except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
             log.debug("task-context graph unavailable", exc_info=True)
             missing.append({"role": "task_context", "reason": "lane_failed"})
+    # The method-unit search is the costliest lane, so it runs last and only while the request can afford it.
+    for origin, query_text in method_queries:
+        if budget_exhausted("working_set.task_context_methods"):
+            missing.append({"role": "task_context", "reason": "budget"})
+            break
+        with find_types.timing_span(timings, "working_set.task_context_methods"):
+            methods = lexstore.get_store(vault_root).search_semantic_units_result(
+                [], limit + 1, categories, (), "kb", fresh,
+                allowed_parent_paths=allowed,
+                admitted_parent_paths=allowed,
+                # This branch proved FULL source access and filtered this request's catalogue paths.
+                released_parent_paths=allowed,
+                query_units=bm25.token_units(query_text, query=True),
+                term_budget=working_set_runtime.material_term_budget(),
+                recall_checkpoint=checkpoint, allow_delta=False,
+            )
+        if not methods.readiness.complete:
+            missing.append({"role": "task_context", "reason": "lane_failed"})
+        else:
+            for hit in (methods.value or [])[:limit]:
+                add(hit.parent_path, origin)
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
     with find_types.timing_span(timings, "working_set.task_context_order"):
@@ -3212,6 +3209,53 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
         log.debug("activation carry title lookup failed", exc_info=True)
         return ""
     return titles.get(path, "")
+
+
+def _resident_vector_paths(
+    vault_root: Path, text: str, allowed: AbstractSet[str], limit: int,
+) -> tuple[list[str], str]:
+    """`(paths, state)`: the `allowed` pages whose stored recall chunks lie nearest `text`, best chunk first.
+
+    Reads only what is resident, as `related_pages` does: no matrix load, no encoder load, no wait. Only the
+    admitted `allowed` pages can be returned, and each page's rank depends on its own chunks alone, so a page
+    the caller may not see never changes the result. `state` is `ready`, `off` when this install runs without
+    embeddings or no recall matrix exists yet, or `lane_failed` when the dense reading should run and cannot
+    (a cold matrix or encoder while the service warms, or a matrix built by another encoder).
+    """
+    import numpy as np
+
+    from . import embeddings, readiness
+
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return [], "off"
+    try:
+        embedding_index = embeddings.peek_embedding_index(vault_root)
+        resident = embedding_index.resident_matrix() if embedding_index is not None else None
+        if resident is None:
+            return [], "lane_failed" if readiness.should_defer("embeddings") else "off"
+        identity = embedding_index.identity
+        fingerprint = embeddings.activation_fingerprint()
+        if identity is None or fingerprint is None or identity.fingerprint != fingerprint:
+            return [], "lane_failed"
+        vector = embeddings.embed_activation_query_if_loaded(text)
+        if vector is None:
+            return [], "lane_failed"
+        query = np.asarray(vector, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0 or resident.matrix.ndim != 2 or query.shape[0] != resident.matrix.shape[1]:
+            return [], "lane_failed"
+        similarities = resident.matrix @ (query / norm)
+        paths: list[str] = []
+        for row in np.argsort(-similarities):
+            path = resident.metadata[int(row)][0]
+            if path in allowed and path not in paths:
+                paths.append(path)
+                if len(paths) >= limit:
+                    break
+        return paths, "ready"
+    except Exception:  # noqa: BLE001 - a failed dense reading leaves the keyword lanes standing
+        log.debug("task-context dense reading unavailable", exc_info=True)
+        return [], "lane_failed"
 
 
 def related_pages(
