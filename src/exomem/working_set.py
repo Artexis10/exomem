@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import posixpath
+import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
@@ -1549,10 +1550,13 @@ def task_candidates(
             log.debug("task-context graph unavailable", exc_info=True)
             missing.append({"role": "task_context", "reason": "lane_failed"})
     # The method-unit search is the costliest lane, so it runs last and only while the request can afford it.
+    method_seconds: float | None = None
     for origin, query_text in method_queries:
-        if budget_exhausted("working_set.task_context_methods"):
+        # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
+        if budget_exhausted("working_set.task_context_methods", reserve=method_seconds):
             missing.append({"role": "task_context", "reason": "budget"})
             break
+        started = time.monotonic()
         with find_types.timing_span(timings, "working_set.task_context_methods"):
             methods = lexstore.get_store(vault_root).search_semantic_units_result(
                 [], limit + 1, categories, (), "kb", fresh,
@@ -1564,6 +1568,7 @@ def task_candidates(
                 term_budget=working_set_runtime.material_term_budget(),
                 recall_checkpoint=checkpoint, allow_delta=False,
             )
+        method_seconds = time.monotonic() - started
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
         else:
@@ -3233,6 +3238,9 @@ def _resident_vector_paths(
     managed = readiness.runtime_managed()
     # A one-shot process never loads the encoder or the matrix, so cold is expected there; a service warms them.
     cold = "lane_failed" if managed else "off"
+    if readiness.should_defer("embeddings"):
+        # The boot warm-up holds the index lock while it loads; asking for the matrix now would wait on it.
+        return [], "lane_failed"
     try:
         embedding_index = embeddings.peek_embedding_index(vault_root)
         if embedding_index is None:
@@ -3267,7 +3275,8 @@ def _resident_vector_paths(
         )
         if rows.size == 0:
             return [], "ready"
-        similarities = resident.matrix[rows] @ (query / norm)
+        # Score the whole matrix, then mask: indexing first copies most of the matrix on every query (#951).
+        similarities = (resident.matrix @ (query / norm))[rows]
         config = ranking_config.DEFAULT_RANKING
         cleared = chance_band.semantic_band(
             similarities,
