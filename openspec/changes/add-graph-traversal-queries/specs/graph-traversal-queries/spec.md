@@ -97,14 +97,14 @@ Renames SHALL preserve identity/aliases; compatible merges SHALL preserve histor
 
 ### Requirement: Graph projection shares the vault transaction store
 
-The system SHALL migrate derived graph nodes/edges, document metadata, vocabulary and replay/projection metadata into the single per-vault SQLite store while preserving canonical collection data/history/audit and Markdown/registry authority. Collection row/link/edge updates SHALL commit transactionally together. File/registry writes SHALL retain durable replay/checkpoints and current-source/semantic/registry proof; no false atomicity across files and SQLite SHALL be claimed. Graph rebuild/cutover SHALL publish only derived table mappings and coherent generations, never replace/reinitialize the combined store file or drop canonical tables. A graph-only rebuild SHALL leave canonical collection commit head/audit unchanged. Backup/portable restore SHALL prove current derived bases for each admitted query dependency relation before its graph results are served, under Graph continuation separates public basis from private freshness; unrelated hidden-only replay debt SHALL NOT gate public availability.
+The system SHALL migrate derived graph nodes/edges, document metadata, vocabulary and replay/projection metadata into the single per-vault SQLite store while preserving canonical collection data/history/audit and, in file mode, Markdown/registry authority. Collection row/link/edge updates SHALL commit transactionally together. In file mode, file and registry writes SHALL retain durable replay/checkpoints and current-source/semantic/registry proof; no false atomicity across files and SQLite SHALL be claimed. In store mode (`make-vault-store-canonical`) the store holds the page bytes, so a page write commits with its graph rows in one transaction, and the replay and checkpoint clauses of this requirement apply to vault content the store does not own. Graph rebuild/cutover SHALL publish only derived table mappings and coherent generations, never replace/reinitialize the combined store file or drop canonical tables. A graph-only rebuild SHALL leave canonical collection commit head/audit unchanged. Backup/portable restore SHALL prove current derived bases for each admitted query dependency relation before its graph results are served, under Graph continuation separates public basis from private freshness; unrelated hidden-only replay debt SHALL NOT gate public availability.
 
 #### Scenario: Graph rebuild overlaps canonical writes
 - **WHEN** a replacement graph projection is built while a collection write commits
 - **THEN** cutover preserves that row/history/audit/head and publishes only a fenced proven graph mapping, with no whole-store file replacement
 
 #### Scenario: Crash after Markdown write before projection acknowledgement
-- **WHEN** source bytes commit but replay/projection publication is interrupted
+- **WHEN** source bytes commit in file mode but replay/projection publication is interrupted
 - **THEN** graph/mixed reads whose admitted dependencies changed return warming/unavailable until their current checkpoint is proven, queries with independently proven unchanged admitted dependencies continue successfully despite hidden-only debt, and fresh independent collection reads remain available
 
 #### Scenario: Failed migration retains previous placement

@@ -2,9 +2,9 @@
 
 `dreamer_policy.decide` sees only a `TickSignals` snapshot and a clock value.
 Every gate is a signal the worker probes once per loop. A tick starts when no
-request is live and the graph owes nothing; the idle and settle preferences hold
-it for at most `MAX_DEFER_SECONDS` since the last tick. `sensor_gate` is the
-sensor child's own, narrower gate.
+request is live and the graph owes nothing; the idle, settle and index-backlog
+preferences hold it for at most `MAX_DEFER_SECONDS` since the last tick.
+`sensor_gate` is the sensor child's own, narrower gate.
 """
 
 from __future__ import annotations
@@ -161,11 +161,25 @@ def test_a_live_request_holds_a_tick_even_past_the_bound() -> None:
     assert (decision.run, decision.reason) == (False, "foreground")
 
 
+def test_a_slow_index_backlog_delays_a_tick_but_not_past_the_bound() -> None:
+    # A deferred queue that drains a dozen rows per pass can hold hundreds of
+    # rows for days. The backlog is a preference: it picks the moment, and the
+    # bound ends it, so upkeep is late rather than starved.
+    backlog = {"full_upsert_backlog": 500}
+    held = policy.decide(_ready(**backlog, seconds_since_tick=10.0))
+    assert (held.run, held.reason) == (False, "index_backlog")
+    assert held.sleep_s <= policy.MAX_DEFER_SECONDS - 10.0
+    released = policy.decide(_ready(**backlog, seconds_since_tick=policy.MAX_DEFER_SECONDS))
+    assert released.run is True
+    assert released.page_budget == policy.PAGES_PER_TICK
+
+
 def test_graph_debt_and_the_other_hard_gates_hold_past_the_bound() -> None:
     past = {"seconds_since_tick": 10 * policy.MAX_DEFER_SECONDS, "idle_seconds": 5.0}
     for overrides, reason in (
         ({"graph_debt": True}, "graph_debt"),
-        ({"full_upsert_backlog": 1}, "index_backlog"),
+        # An old backlog does not soften the graph hold, and graph debt names itself.
+        ({"graph_debt": True, "full_upsert_backlog": 500}, "graph_debt"),
         ({"freshness_live": False}, "freshness_unavailable"),
         ({"hour_cpu_used": policy.HOURLY_CPU_SECONDS}, "budget_exhausted"),
         ({"consecutive_failures": 3, "seconds_since_failure": 1.0}, "backoff"),

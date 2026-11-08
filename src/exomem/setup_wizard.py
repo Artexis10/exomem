@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import adopt as adopt_module
-from . import client_config, install_info
+from . import client_config, install_info, prominence
 from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
@@ -36,6 +36,7 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .governance.principal import library_scope
 from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
@@ -563,13 +564,96 @@ def _register_codex(
 
 
 def _report_codex_file_outcome(outcome: dict, *, path: Path, print_fn, report) -> None:
+    _report_file_outcome("register-codex", outcome, path=path, print_fn=print_fn, report=report)
+
+
+def _report_file_outcome(name: str, outcome: dict, *, path: Path, print_fn, report) -> None:
+    """Show a changed user file's diff and backup, then report the step."""
     if outcome["diff"]:
         print_fn(f"  {path}:")
         for line in outcome["diff"].splitlines():
             print_fn(f"    {line}")
     if outcome["backup"]:
         print_fn(f"  backup: {outcome['backup']}")
-    report("register-codex", f"[done] {outcome['action']} in config.toml")
+    report(name, f"[done] {outcome['action']} in {path.name}")
+
+
+def _offer_learning_instruction(
+    *,
+    vault_root: Path,
+    targets: list[tuple[str, str, Path]],
+    choice: bool | None,
+    yes: bool,
+    input_fn,
+    print_fn,
+    report,
+) -> None:
+    """Offer the learning instruction in each (step, client, instruction file) target.
+
+    The file is the user's, so nothing is written unasked: an interactive run shows
+    the text and asks per file, and `--yes` writes only with `--learning-instruction`.
+    The instruction asks for unprompted saves, which `off` and `light` exist to refuse,
+    so the step follows the level's own capture gate rather than a list of levels.
+    """
+    if choice is False:
+        for name, _client, _path in targets:
+            report(name, "[skipped: --no-learning-instruction]")
+        return
+    # Setup is the owner-local CLI: read the level as the owner inside the vault's
+    # scope, so a level saved through the agent (for example coding: off) counts.
+    with library_scope(), prominence.request_scope(vault_root):
+        level = prominence.resolve_context(prominence.CODING_CONTEXT)["level"]
+    if not any(rule["proactive_permitted"] for rule in prominence.capture_gate(level).values()):
+        for name, _client, _path in targets:
+            report(name, f"[skipped: prominence is {level}, which saves only when asked]")
+        return
+    if yes and not choice:
+        for name, _client, _path in targets:
+            report(
+                name,
+                "[skipped: --yes edits no instruction file; add --learning-instruction to place it]",
+            )
+        return
+
+    pending: list[tuple[str, str, Path, str]] = []
+    for name, client, path in targets:
+        try:
+            change = client_config.learning_instruction_change(
+                path, prominence.LEARNING_INSTRUCTION
+            )
+        except (OSError, ValueError) as exc:
+            # Only an explicit --learning-instruction makes an unusable file a failure;
+            # an offered step the user never asked for is skipped with the reason.
+            report(name, f"[failed: {exc}]" if choice else f"[skipped: {exc}]")
+            continue
+        if change == "current":
+            report(name, f"[skipped: already current in {path}]")
+        else:
+            pending.append((name, client, path, change))
+    if pending and not choice:
+        print_fn("")
+        print_fn(
+            "  Learning instruction: your request to the agent to recall Exomem before a "
+            "task and save what it learns."
+        )
+        print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
+        print_fn(
+            "  Setup keeps it between Exomem markers. Delete that block, or run "
+            "`exomem install-hook --uninstall --client all`, to remove it."
+        )
+    for name, client, path, change in pending:
+        verb = "Update it in" if change == "updated" else "Add it to"
+        if not choice and not _ask_yn(input_fn, f"{verb} {client}'s {path}?", True):
+            report(name, "[skipped: declined]")
+            continue
+        try:
+            outcome = client_config.place_learning_instruction(
+                path, prominence.LEARNING_INSTRUCTION
+            )
+        except (OSError, ValueError) as exc:
+            report(name, f"[failed: {exc}]")
+            continue
+        _report_file_outcome(name, outcome, path=path, print_fn=print_fn, report=report)
 
 
 def run_setup(
@@ -583,6 +667,7 @@ def run_setup(
     mcp_url: str | None = None,
     force_stdio: bool = False,
     replace_client_registration: bool = False,
+    learning_instruction: bool | None = None,
     input_fn=input,
     run_fn=subprocess.run,
     which_fn=shutil.which,
@@ -965,6 +1050,33 @@ def run_setup(
     else:
         report("hooks", "[skipped]")
 
+    # 9. learning instruction — the user's own request to recall and save, placed in
+    # the instruction file each detected client reads. Never served by Exomem itself.
+    claude_root = home if home is not None else install_module.client_home("claude")
+    targets: list[tuple[str, str, Path]] = []
+    if which_fn("claude") or claude_root.is_dir():
+        targets.append(
+            ("learning", "Claude Code", client_config.instruction_file("claude", claude_root))
+        )
+    else:
+        report("learning", "[skipped: Claude Code not detected on this machine]")
+    if _codex_present(which_fn, codex_home):
+        codex_root = _resolve_codex_home(codex_home)
+        targets.append(
+            ("learning-codex", "Codex", client_config.instruction_file("codex", codex_root))
+        )
+    else:
+        report("learning-codex", "[skipped: Codex not detected on this machine]")
+    _offer_learning_instruction(
+        vault_root=vault_path,
+        targets=targets,
+        choice=learning_instruction,
+        yes=yes,
+        input_fn=input_fn,
+        print_fn=print_fn,
+        report=report,
+    )
+
     code = finish()
     print_fn("")
     print_fn("Next steps:")
@@ -1016,6 +1128,22 @@ def setup_main(argv: list[str]) -> int:
                        help="Also install the capture/retrieval nudge hooks.")
     hooks.add_argument("--no-hooks", action="store_const", const=False, dest="with_hooks",
                        help="Skip the hooks step without asking.")
+    learning = parser.add_mutually_exclusive_group()
+    learning.add_argument(
+        "--learning-instruction",
+        action="store_const",
+        const=True,
+        dest="learning_instruction",
+        help="Add Exomem's learning instruction to the CLAUDE.md and AGENTS.md of detected "
+        "clients without asking. --yes adds it only with this flag.",
+    )
+    learning.add_argument(
+        "--no-learning-instruction",
+        action="store_const",
+        const=False,
+        dest="learning_instruction",
+        help="Skip the learning-instruction step without asking.",
+    )
     parser.add_argument("--skip-claude-register", action="store_true",
                         help="Don't touch Claude Code's MCP registration.")
     route = parser.add_mutually_exclusive_group()
@@ -1049,4 +1177,5 @@ def setup_main(argv: list[str]) -> int:
         mcp_url=args.mcp_url,
         force_stdio=args.force_stdio,
         replace_client_registration=args.replace_client_registration,
+        learning_instruction=args.learning_instruction,
     )

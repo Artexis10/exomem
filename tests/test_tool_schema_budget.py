@@ -60,7 +60,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The image kind on read_media, which returns a stored photo as image content an agent can
 # see, adds its path, paths and max_side fields: read_media measures 1,584 B and its ceiling
 # rounds to 1,600 B. The complete local wire measures 168,422 B, so the budget rises 400 B.
-TOTAL_BUDGET = 168_450
+# The caller now chooses the image size up to "original" and a crop `region`, instead of a fixed
+# count and size range in code: read_media measures 1,747 B and its ceiling rounds to 1,750 B. The
+# complete local wire measures 168,585 B, so the budget rises 150 B.
+TOTAL_BUDGET = 168_600
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -103,7 +106,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_connections": 3300,
     "read_episode": 2000,
     "read_governance": 2250,
-    "read_media": 1600,
+    "read_media": 1750,
     "read_memory": 3450,
     "read_plans": 2700,
     "read_records": 3300,

@@ -39,21 +39,22 @@ def test_lists_all_pages_including_hide_markers_with_the_same_bucket_and_prefix(
     storage, requests = _storage([
         httpx.Response(200, json={
             "files": [
-                {"fileName": PREFIX + "snapshot", "fileId": "upload-2", "action": "upload"},
+                {"fileName": PREFIX + "snapshot", "fileId": "upload-2", "action": "upload", "contentLength": 7},
                 {"fileName": PREFIX + "snapshot", "fileId": "hide-1", "action": "hide"},
             ],
             "nextFileName": PREFIX + "snapshot", "nextFileId": "upload-1",
         }),
         httpx.Response(200, json={
-            "files": [{"fileName": PREFIX + "snapshot", "fileId": "upload-1", "action": "upload"}],
+            "files": [{"fileName": PREFIX + "snapshot", "fileId": "upload-1", "action": "upload", "contentLength": 5}],
             "nextFileName": None, "nextFileId": None,
         }),
     ])
 
+    # The size and action the provider reports ride along for the physical meter; a size it omits stays unknown.
     assert storage.list_object_versions(PREFIX) == [
-        ObjectVersion(key=PREFIX + "snapshot", version_id="upload-2"),
-        ObjectVersion(key=PREFIX + "snapshot", version_id="hide-1"),
-        ObjectVersion(key=PREFIX + "snapshot", version_id="upload-1"),
+        ObjectVersion(key=PREFIX + "snapshot", version_id="upload-2", size=7, action="upload"),
+        ObjectVersion(key=PREFIX + "snapshot", version_id="hide-1", action="hide"),
+        ObjectVersion(key=PREFIX + "snapshot", version_id="upload-1", size=5, action="upload"),
     ]
     assert requests == [
         {"bucketId": "bucket-1", "prefix": PREFIX, "maxFileCount": 2},

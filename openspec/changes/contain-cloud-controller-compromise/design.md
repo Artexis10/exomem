@@ -312,11 +312,12 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret. Every key listing uses the provider's v4 API: on 2026-11-01 the v3 listing of a live account returned 6 of its 25 keys.
 - It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
 
-**What `cellctl` keeps.** It keeps two keys that cannot create keys, both in the cell-data account:
+**What `cellctl` keeps.** It keeps two keys that cannot create keys in the cell-data account, and one in the founder account:
 - a key limited to the staging bucket, for presigning and removing export and import objects;
-- a key that can only list files in the backup bucket, for version bookkeeping.
+- a key that can only list files in the backup bucket, for version bookkeeping;
+- in the founder account, a key that can only list the media bucket (`listBuckets`, `listFiles`), for the physical meter. It cannot read, write or delete a file. `add-cloud-media-store` D7 defines it.
 
-`cellctl` holds no bucket-wide credential in the founder account. It still unwraps the stored per-cell key of each cell created before the switch and renders it into that cell's Secret for its backup Jobs. That key is limited to the cell's prefix but can delete files in an unlocked bucket, so this residual lasts until those cells migrate to the locked bucket (step 5). The operator's cleanup script deletes the keys of a cell created before the switch, and every file version under its prefix in the old bucket. That bucket has no lock, so no grace applies there.
+`cellctl` holds no bucket-wide credential that can read, write or delete files in the founder account. It still unwraps the stored per-cell key of each cell created before the switch and renders it into that cell's Secret for its backup Jobs. That key is limited to the cell's prefix but can delete files in an unlocked bucket, so this residual lasts until those cells migrate to the locked bucket (step 5). The operator's cleanup script deletes the keys of a cell created before the switch, and every file version under its prefix in the old bucket. That bucket has no lock, so no grace applies there.
 
 **The key watcher.** The provider cannot limit a key that creates keys, so detection catches a rogue key.
 - It runs as a scheduled CI job outside the cluster, at least hourly. It alerts with its own receiver credential, which no in-cluster component holds.

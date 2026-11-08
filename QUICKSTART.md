@@ -59,8 +59,11 @@ It prompts for your vault, **scans it and shows what's already there** —
 existing notes are never touched; exomem writes only under `Knowledge Base/` —
 then initializes the KB, picks lean vs hybrid, runs `doctor`, registers the
 server with Claude Code (or prints the `.mcp.json` snippet if the `claude` CLI
-isn't on PATH), installs the skill, and offers the optional hooks. Re-running
-is safe: completed steps report `[skipped]`.
+isn't on PATH), installs the skill, and offers the optional hooks. Last, it
+shows Exomem's learning instruction and asks before it adds that text to your
+Claude Code `CLAUDE.md` and Codex `AGENTS.md`. The text asks the agent to recall
+Exomem before a task and save what it learns. Re-running is safe: completed
+steps report `[skipped]`.
 
 Setup prefers one already-running authenticated service when `--mcp-url` or
 `EXOMEM_BASE_URL` is configured, including cwd `.env`; Claude Code and Codex
@@ -70,6 +73,9 @@ confirm replacement or pass `--replace-client-registration`.
 
 Non-interactive (scripts/CI):
 `uv run python -m exomem setup --yes --vault "/path/to/vault" --lean`
+
+`--yes` edits no instruction file. Add `--learning-instruction` to place the
+learning instruction too.
 
 ## Not CLI-comfortable? Ask an assistant to drive
 
@@ -560,6 +566,9 @@ to unwire the config but leave the yadm-synced hook tree in place, `--client
 codex` (or `--client all`) to pick the client, and `--json` for the machine
 report. Restart the client afterwards; it keeps running the hooks it already
 loaded. Existing checkpoint state is inert and may be deleted separately.
+Uninstall also removes the learning instruction that setup placed between its
+markers in that client's `CLAUDE.md` or `AGENTS.md`, and leaves the rest of the
+file alone.
 
 **If your dotfiles are yadm-managed, the deployed file is not the file that
 matters.** Where `settings.json` is produced from alternates

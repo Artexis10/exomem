@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import client_config, prominence
 from exomem import install_hook as hook_module
 
 FOREIGN = {
@@ -176,6 +177,60 @@ def test_a_second_uninstall_changes_nothing_and_writes_no_backup(
     assert report["backup"] is None
     assert settings.read_bytes() == before
     assert len(list(tmp_path.glob("settings.json.backup-*"))) == 1
+
+
+def test_uninstall_takes_the_learning_instruction_out_of_claude_md_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """`exomem setup` may have placed the learning instruction in the user's own
+    CLAUDE.md. Uninstall must take back exactly that span: the rest of the file
+    is the user's, and leaving the span would keep agents saving after the user
+    removed Exomem.
+    """
+    hook_dir, settings = _install(tmp_path)
+    claude_md = tmp_path / "CLAUDE.md"
+    users_own = "# My rules\nAnswer briefly.\n"
+    claude_md.write_text(users_own, encoding="utf-8")
+    client_config.place_learning_instruction(claude_md, prominence.LEARNING_INSTRUCTION)
+
+    report = hook_module.uninstall_hook(hook_dir=hook_dir, settings_path=settings)
+
+    assert claude_md.read_text(encoding="utf-8") == users_own
+    assert report["instruction"]["changed"] is True
+    assert report["success"] is True
+
+
+def test_uninstall_succeeds_beside_a_claude_md_exomem_could_not_have_written(
+    tmp_path: Path,
+) -> None:
+    """A user's CLAUDE.md in a legacy encoding holds nothing of Exomem's, because
+    placing refuses a file it cannot decode. Uninstall must still succeed and leave
+    the file alone, not report a failure the user cannot act on.
+    """
+    hook_dir, settings = _install(tmp_path)
+    claude_md = tmp_path / "CLAUDE.md"
+    claude_md.write_bytes("caf\xe9 rules\n".encode("latin-1"))
+
+    report = hook_module.uninstall_hook(hook_dir=hook_dir, settings_path=settings)
+
+    assert report["success"] is True
+    assert claude_md.read_bytes() == "caf\xe9 rules\n".encode("latin-1")
+
+
+def test_uninstall_refuses_ambiguous_markers_and_keeps_the_users_lines(
+    tmp_path: Path,
+) -> None:
+    """With a BEGIN marker but no END, removing "from BEGIN on" would delete the
+    user's own lines below it. Uninstall must refuse and change nothing.
+    """
+    claude_md = tmp_path / "CLAUDE.md"
+    text = f"# My rules\n{client_config.LEARNING_BEGIN}\nold text\nMy own line after it.\n"
+    claude_md.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one Exomem learning-instruction span"):
+        client_config.remove_learning_instruction(claude_md)
+
+    assert claude_md.read_text(encoding="utf-8") == text
 
 
 def test_an_absent_config_is_nothing_to_do_rather_than_an_error(

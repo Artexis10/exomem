@@ -31,3 +31,14 @@ resource "b2_application_key" "cloud_media_edge" {
   # B2 capability names are protocol tokens. The edge cannot destroy versions.
   capabilities = ["readFiles", "writeFiles"]
 }
+
+# cellctl's physical meter lists the media prefixes with this key (add-cloud-media-store D10). It
+# cannot read, write or delete a file, and no service holds deleteFiles on this bucket: the operator
+# deletes with a short-lived key (docs/runbooks/cloud-key-custody.md).
+resource "b2_application_key" "cellctl_media_list" {
+  count      = var.cloud_media_enabled ? 1 : 0
+  key_name   = "${var.bucket_prefix}-cellctl-media-list"
+  bucket_ids = [b2_bucket.cloud_media[0].bucket_id]
+  # B2 capability names are protocol tokens: listBuckets resolves the bucket, listFiles lists versions.
+  capabilities = ["listBuckets", "listFiles"]
+}

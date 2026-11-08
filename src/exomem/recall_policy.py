@@ -92,22 +92,35 @@ class RecallBatch:
 
     def revalidate(self, vault_root: Path) -> bool:
         """Prove the policy and every captured live source still match."""
-        if recall_policy_identity(vault_root) != (
+        return self._policy_current(vault_root) and next(self._drifted(vault_root), None) is None
+
+    def drifted_identities(self, vault_root: Path) -> frozenset[str] | None:
+        """The captured identities that no longer match, or None if the policy changed.
+
+        A changed policy identity can flip any admission, so no identity is then
+        provably unchanged. An empty set proves the batch current.
+        """
+        if not self._policy_current(vault_root):
+            return None
+        return frozenset(self._drifted(vault_root))
+
+    def _policy_current(self, vault_root: Path) -> bool:
+        return recall_policy_identity(vault_root) == (
             self.policy_version,
             self.access_policy_fingerprint,
-        ):
-            return False
+        )
+
+    def _drifted(self, vault_root: Path) -> Iterator[str]:
+        """Rel paths whose source changed, vanished or flipped admission since capture."""
         admitted = {item.rel_path for item in self.admitted_paths}
         for item in self.identity_paths:
             try:
                 item.guard.recheck(vault_root)
-                if freshness.stat_signature(item.path) != item.signature:
-                    return False
+                moved = freshness.stat_signature(item.path) != item.signature
             except (OSError, vault.PathGuardError):
-                return False
-            if is_recall_candidate(vault_root, item.path) != (item.rel_path in admitted):
-                return False
-        return True
+                moved = True
+            if moved or is_recall_candidate(vault_root, item.path) != (item.rel_path in admitted):
+                yield item.rel_path
 
 
 def partition_markdown_paths(vault_root: Path, paths: Iterable[Path | str]) -> RecallBatch:

@@ -869,7 +869,7 @@ def _counted_publications(monkeypatch):
 def _stalled_copy(monkeypatch):
     """Stall every replica copy once staged, as a large store's copy and checks would, until released."""
     staged, release = threading.Event(), threading.Event()
-    stage = snapshot.staged_snapshot
+    stage = snapshot.staged_collection_snapshot
 
     @contextmanager
     def stalled(*args, **kwargs):
@@ -878,7 +878,7 @@ def _stalled_copy(monkeypatch):
             release.wait(60)
             yield artifact
 
-    monkeypatch.setattr(snapshot, "staged_snapshot", stalled)
+    monkeypatch.setattr(snapshot, "staged_collection_snapshot", stalled)
     return staged, release
 
 

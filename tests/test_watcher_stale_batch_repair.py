@@ -7,6 +7,10 @@ which leaves retrieval unavailable for the length of a full build. The cause is
 one page's disagreement with disk, so the repair replays that page. A replay
 that fails still escalates to the rebuild; `test_lexical_deferred_upsert.py`
 covers that worker path.
+
+A batch that published and then went stale owes only the identities that
+changed, not every page it carried: the governed log and index change on every
+write, so one concurrent write used to requeue the whole knowledge base.
 """
 
 from __future__ import annotations
@@ -17,7 +21,16 @@ from pathlib import Path
 
 import pytest
 
-from exomem import embeddings, epistemic_graph, freshness, index_sync, lexstore
+from exomem import (
+    deferred_index,
+    embeddings,
+    epistemic_graph,
+    freshness,
+    index_sync,
+    lexstore,
+    memory_refs,
+    recall_policy,
+)
 
 PAGE = "Knowledge Base/Notes/item.md"
 UNTOUCHED = "Knowledge Base/Notes/untouched.md"
@@ -64,6 +77,10 @@ def _run_stale_batch(root: Path, page: Path):
         root, [page], publish_corpus_change=False, watcher_deleted_rel_paths=[]
     )
     assert report.reconcile_required, "the rewrite during dispatch did not make the batch stale"
+    _wait_for_lexical_repair(root)
+
+
+def _wait_for_lexical_repair(root: Path) -> None:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         with lexstore._REPAIRS_LOCK:
@@ -111,3 +128,151 @@ def test_a_stale_watcher_batch_replays_its_paths_and_names_its_cause(
         for fields in started
     ), started
 
+
+
+LOG = "Knowledge Base/log.md"
+INDEX = "Knowledge Base/index.md"
+NOTES = [f"Knowledge Base/Notes/{name}.md" for name in ("alpha", "beta", "gamma")]
+
+
+@pytest.fixture
+def whole_kb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A catalogue and a watcher batch over the whole knowledge base.
+
+    Three notes plus the governed log and index, all changed since the catalogue
+    was built, as after a bulk change. The graph step stands in for the long
+    dispatch: each test says which concurrent write lands in it.
+    """
+    freshness.clear()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    files = [tmp_path / rel for rel in (*NOTES, LOG, INDEX)]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {path.stem}\n\nbefore\n", encoding="utf-8")
+    entries = [(str(path), freshness.stat_signature(path)) for path in files]
+    for scope in freshness.SCOPES:
+        freshness.seed(tmp_path, scope, entries)
+    assert lexstore.get_store(tmp_path).rebuild_atomic()
+    for path in files:
+        path.write_text(f"# {path.stem}\n\nbatch text\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=files)
+    yield files
+    freshness.clear()
+    lexstore.clear_stores()
+
+
+def _during_dispatch(monkeypatch: pytest.MonkeyPatch, concurrent_write) -> None:
+    def graph_join(*_args, **_kwargs):
+        concurrent_write()
+        return epistemic_graph.GraphDispatchResult("completed", "incremental_completed")
+
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", graph_join)
+
+
+def _dispatch_whole_kb(
+    monkeypatch: pytest.MonkeyPatch, root: Path, files: list[Path]
+) -> set[str]:
+    """Run the watcher batch as quiet mode does; return the pages its lexical replay named."""
+    replayed: set[str] = set()
+    request_repair = lexstore.request_repair
+
+    def spy(vault_root, *, deferred_paths=None, **kwargs):
+        replayed.update(path.relative_to(root).as_posix() for path in deferred_paths or [])
+        return request_repair(vault_root, deferred_paths=deferred_paths, **kwargs)
+
+    monkeypatch.setattr(lexstore, "request_repair", spy)
+    report = index_sync.upsert_after_write(
+        root, files, defer_semantic=True, publish_corpus_change=False, watcher_deleted_rel_paths=[]
+    )
+    assert report.reconcile_required, "the concurrent write did not make the batch stale"
+    _wait_for_lexical_repair(root)
+    return replayed
+
+
+def test_a_governed_write_mid_batch_requeues_only_what_it_changed(
+    tmp_path: Path, whole_kb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    beta = tmp_path / NOTES[1]
+    log, index = tmp_path / LOG, tmp_path / INDEX
+
+    def governed_write() -> None:
+        # What every governed write does: a page the batch never saw, a page it
+        # did, and the log and index entries about both.
+        (tmp_path / "Knowledge Base/Notes/delta.md").write_text("# delta\n", encoding="utf-8")
+        beta.write_text("# beta\n\nedited during the batch\n", encoding="utf-8")
+        log.write_text("# log\n\nbatch text\nwrote beta and delta\n", encoding="utf-8")
+        index.write_text("# index\n\nbatch text\n[[delta]]\n", encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=[beta, log, index])
+
+    _during_dispatch(monkeypatch, governed_write)
+
+    replayed = _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
+
+    changed = {NOTES[1], LOG, INDEX}
+    assert set(deferred_index.list_full_paths(tmp_path)) == changed
+    assert replayed == changed
+
+
+def test_a_policy_change_mid_batch_requeues_the_whole_batch(
+    tmp_path: Path, whole_kb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def policy_change() -> None:
+        # No batch file changes, but admission of any of them may have flipped.
+        (tmp_path / "Knowledge Base/_access.yaml").write_text(
+            "excluded:\n  - Archive\n", encoding="utf-8"
+        )
+
+    _during_dispatch(monkeypatch, policy_change)
+
+    replayed = _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
+
+    everything = {*NOTES, LOG, INDEX}
+    assert set(deferred_index.list_full_paths(tmp_path)) == everything
+    assert replayed == everything
+
+
+def test_a_batch_that_went_stale_before_publishing_still_owes_every_page(
+    tmp_path: Path, whole_kb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing was published yet, so the unchanged pages owe their work as much
+    # as the changed one. Narrowing this case would drop their derived-index work.
+    log = tmp_path / LOG
+    partition = recall_policy.partition_markdown_paths
+
+    def partition_then_write(root, paths):
+        batch = partition(root, paths)
+        log.write_text("# log\n\nbatch text\nwritten during the read\n", encoding="utf-8")
+        return batch
+
+    monkeypatch.setattr(recall_policy, "partition_markdown_paths", partition_then_write)
+    _during_dispatch(monkeypatch, lambda: None)
+
+    _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
+
+    assert set(deferred_index.list_full_paths(tmp_path)) == {*NOTES, LOG, INDEX}
+
+
+def test_a_degraded_component_in_a_stale_batch_owes_every_page(
+    tmp_path: Path, whole_kb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A degraded component leaves rows that custody would repair, and a stale batch
+    # skips custody. The page whose reference row is wrong did not change since, so
+    # only the whole batch brings it back.
+    alpha, log = tmp_path / NOTES[0], tmp_path / LOG
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()
+    alpha.write_text(
+        f"---\nexomem_id: {memory_refs.new_id()}\n---\n\n# alpha\n\nbatch text\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_args, **_kwargs: False)
+
+    def append_to_log() -> None:
+        log.write_text("# log\n\nbatch text\nwritten during the batch\n", encoding="utf-8")
+        freshness.on_files_changed(tmp_path, changed=[log])
+
+    _during_dispatch(monkeypatch, append_to_log)
+
+    replayed = _dispatch_whole_kb(monkeypatch, tmp_path, whole_kb)
+
+    everything = {*NOTES, LOG, INDEX}
+    assert set(deferred_index.list_full_paths(tmp_path)) == everything
+    assert replayed == everything
