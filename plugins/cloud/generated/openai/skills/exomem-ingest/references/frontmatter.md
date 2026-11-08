@@ -12,7 +12,7 @@ These appear on every page type:
 | Field | Required | Type | Notes |
 |---|---|---|---|
 | `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
-| `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `experiment`, `production-log`, `entity` |
+| `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `procedure`, `experiment`, `production-log`, `entity` |
 | `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
 | `created` | yes | ISO instant or date | `YYYY-MM-DDTHH:MM:SSZ`, set on creation, never edited |
@@ -94,6 +94,15 @@ the page to its kind's folder and rewrites every link to it.
 | `supersedes`, `superseded_by` | optional | as above |
 | `severity` | failure-only, optional | qualitative: `minor`, `moderate`, `serious`, `critical` |
 | `pattern_type` | pattern-only, optional | `architectural`, `workflow`, `prompting`, `governance`, `pedagogical`, etc. |
+
+### procedure
+
+| Field | Required | Notes |
+|---|---|---|
+| `summary` | recommended | one line that says when to use the procedure |
+| `sources` | optional | list of wikilinks |
+| `projects` | optional | list of project keys this applies to |
+| `supersedes`, `superseded_by` | optional | as above |
 
 ### experiment
 
