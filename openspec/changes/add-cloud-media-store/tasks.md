@@ -14,7 +14,7 @@
   - a failed store leaves the job retryable;
   - a duplicate of a live-referenced version reuses it;
   - bytes whose version is no longer referenced upload a new version.
-- [ ] 3.3 Encrypt with `age` to the cell's recipient and name objects with the keyed digest. Verify: a test shows that stored bytes are `age` ciphertext and that no object name equals an original's SHA-256.
+- [ ] 3.3 Encrypt with `age` to the cell's recipient and name objects with the keyed digest (`collect-released-media` D1 gives each new protection record a fresh random name instead). Verify: a test shows that stored bytes are `age` ciphertext and that no object name equals an original's SHA-256.
 - [ ] 3.4 Route every consumer that tests physical presence through `original_state`: media reconciliation and provenance, governance companions, the deletion fan-out, orphan healing, move and rename, trash recovery and listing, adoption, backlinks and media locators, vault scans, the file watcher, the media worker and frame reads, and export and download. Verify: one end-to-end test evicts an original, runs reconciliation, governance and the deletion fan-out, and asserts that the sidecar, transcript and vectors remain. Verify that the test fails when any one path tests file existence directly.
 - [ ] 3.5 Add hydration and eviction.
   - Hydration: verify, then rename; record the cache identity; bound concurrency and temporary space.

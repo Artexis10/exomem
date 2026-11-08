@@ -1490,6 +1490,39 @@ A moved view keeps its item identity through its stamp, and Obsidian rewrites li
 - **Deadline and remaining cost.** Apply the caller deadline to existing identity-lock acquisition, bounded material and envelope iteration, assembly and SQLite validation. Expiry before seal abandons publication; after seal the existing installation and recovery sequence owns completion. Changed-only import and proof do not promise constant total I/O: audit capture, base copying and final single-file assembly still grow. Measure them against the existing budget.
 - **Live base rules.** A moved live S1 head abandons managed handoff. Changed bookkeeping under the same head requires a fresh snapshot, while eligible file imports can retain their proofs. The store swap leaves the derived database beside it under the same store identity.
 
+### 17. SQLite-only collections (owner decision, 2026-11-07)
+
+The owner decided that no structured collection keeps per-item Markdown files. This supersedes the per-item views of §5 and §6. The store already serves summary collections from rows alone (`add-collection-query-engine` §12), so the cutover makes summary mode universal. It builds no second storage path.
+
+**What stays Markdown.** These are human-readable and bounded:
+- the collection manifest;
+- at most 16 summary pages of at most 64 KiB each;
+- the history pages;
+- held-candidate views;
+- explicitly requested exports.
+
+Manifests declare `storage.strategy: sqlite`. A manifest that still declares `markdown-items` names an unconverted collection.
+
+**Create follows the vault until P6.** A vault with an enrolled store creates only `sqlite` collections, through every create path. A vault without one keeps file-canonical create until the cutover or P6.1 moves it. In P6, a fresh vault enrolls its store at init, so file-canonical create can be deleted.
+
+**Conversion keeps every row and every decision.** Converting a populated store collection rewrites no row. One store transaction writes a new manifest version and retires the item projection state. Each row keeps its former view path as a retired alias, so references to old item paths still resolve to the row.
+
+A summary row's governance subject is the collection path (§7). The conversion therefore refuses a collection when that change would alter any row's disclosure decision for any standing audience, and it names the scope. The owner adjusts the scope first; the conversion never widens or narrows access as a side effect.
+
+**Files leave last.** The item files move into a checksummed archive outside the active vault tree only after the store transaction commits. The archive is verified before the files are removed from the vault, so the files are never the only copy at any step. The archive on the state root is a machine-local recovery copy; the cutover backup covers portability.
+
+**Order and floor.** The cutover runs as one resumable, plan-bound operation:
+1. backup and inventory;
+2. migrate the remaining file-canonical collections through the existing importer;
+3. convert every store collection;
+4. check parity against the backup.
+
+The first `sqlite` create or the first conversion, whichever comes first, records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state as an unknown descriptor instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, the rollback is the copy of the vault root and the state root that the operator takes with the service stopped, before the apply. Restoring both roots whole also restores the state manifest without `collections-sqlite-only-v1`, so the previous release accepts the state again. The cutover backup and the archive are recovery material for rows and item files, not a rollback: no step restores them under the previous release.
+
+A resume measures again each collection that no step of the run has changed yet, from its own new snapshot, because what stopped the run may have needed a change to that collection. A collection that the run migrated or converted keeps its first measures. The first backup stays the state before the run, and the receipt names it and each resume's snapshot. No backup replaces an existing file.
+
+**Relation to the canonical vault store.** `make-vault-store-canonical` keeps this per-vault database as the store that survives, with its collection tables unchanged. This cutover adds no second transaction owner and no Markdown dependency for collections, so a later store-mode switch for knowledge pages needs nothing from it.
+
 ## Risks / Trade-offs
 
 - **Opaque storage.** Canonical rows are no longer greppable Markdown. *Mitigation:* views at today's paths, the replica as one portable file, the reverse exporter, and the history page.

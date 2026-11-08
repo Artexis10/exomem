@@ -648,7 +648,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         )
         if (
             type(strategy) is not str
-            or strategy not in {"markdown-log", "markdown-items", "dataset"}
+            or strategy not in collections.SUPPORTED_STORAGE
             or source is None
             or format_version != 1
         ):
@@ -1509,9 +1509,8 @@ def _authorize_saved_view(
             manifest.schema,
             manifest.storage,
             manifest.semantic_profile,
-            manifest.record_presentation,
         ),
-        collections._saved_view_child_shapes(manifest.storage, manifest.record_presentation),
+        collections._saved_view_child_shapes(manifest.storage, manifest.child_tables),
         selected_child,
     )
     if any(field not in allowed_fields for field in _saved_view_query_fields(query)):
@@ -1543,16 +1542,16 @@ def _saved_view_field_spec(
     child_requested = query.get("expand_children") is True or query.get("expand_child") is not None
     if child_requested and selected is None:
         return None
-    recipe = manifest.record_presentation
-    if type(selected) is str and recipe is not None:
-        table = next((item for item in recipe.tables if item.field == selected), None)
+    tables = manifest.child_tables
+    if type(selected) is str and tables:
+        table = next((item for item in tables if item.field == selected), None)
         if table is not None:
             child = next((item for item in table.columns if item.field == column), None)
             if child is not None:
                 return collections.FieldSpec(child.type, link_kind=child.link_kind)
             if column in {
                 candidate.field
-                for candidate_table in recipe.tables
+                for candidate_table in tables
                 for candidate in candidate_table.columns
             }:
                 return None
@@ -1566,15 +1565,11 @@ def _saved_view_child_selector(
 ) -> str | None:
     explicit = query.get("expand_child")
     if type(explicit) is str:
-        candidates = collections._saved_view_child_fields(
-            manifest.storage, manifest.record_presentation
-        )
+        candidates = collections._saved_view_child_fields(manifest.storage, manifest.child_tables)
         return explicit if explicit in candidates else None
     if query.get("expand_children") is not True:
         return None
-    candidates = collections._saved_view_child_fields(
-        manifest.storage, manifest.record_presentation
-    )
+    candidates = collections._saved_view_child_fields(manifest.storage, manifest.child_tables)
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
@@ -2244,9 +2239,8 @@ def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -
 def _query_value_fields(manifest: collections.CollectionManifest) -> set[str]:
     """Return schema fields plus the manifest-declared markdown-log projections."""
     fields = set(manifest.schema.fields)
-    if manifest.record_presentation is not None:
-        for table in manifest.record_presentation.tables:
-            fields.update(column.field for column in table.columns)
+    for table in manifest.child_tables:
+        fields.update(column.field for column in table.columns)
     if manifest.storage.strategy != "markdown-log":
         return fields
     descriptor = manifest.storage.descriptor

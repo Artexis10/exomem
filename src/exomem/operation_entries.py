@@ -331,7 +331,7 @@ _RECORD_IMPORT_FIELDS = ("collection", "import_request")
 _RECORD_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "expand_children", "expand_child",
-    "continuation", "include_agent_history", "output_format", "query",
+    "continuation", "include_agent_history", "output_format", "query", "item_key",
 )
 _MANIFEST_REVISION_FIELDS = (
     "collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why",
@@ -449,7 +449,7 @@ _PLAN_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "lifecycle", "hierarchy_mode",
     "hierarchy_depth", "hierarchy_limit", "continuation", "include_agent_history",
-    "output_format",
+    "output_format", "plan_id",
 )
 _PLAN_GUARDED_FIELDS = (
     "collection", "plan_id", "expected_container_hash", "expected_item_version", "why",
@@ -801,8 +801,10 @@ def _maintenance_rows():
     from .curation import CURATION_ACTIONS, READ_ONLY_ACTIONS
 
     rows = [_row("audit", "check_memory", ("categories", "detail", "legacy_sample_limit")),
-            # The store preflight is read-only and checks the whole vault, so it takes no fields.
-            _row("collections-store", "check_memory", ())]
+            # The store preflight is read-only and checks the whole vault; cursor pages its inventory.
+            _row("collections-store", "check_memory", ("cursor",)),
+            # The cutover previews here and takes no argument; the owner applies its plan_id with the CLI.
+            _row("collections-cutover", "check_memory", ())]
     for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
                                                 ("backfill-ids", "dry_run", True, ()),
                                                 ("reconcile", "dry_run", False, ("rebuild_graph",))):

@@ -156,6 +156,16 @@ output "cloud_media_list_application_key" {
   sensitive = true
 }
 
+output "key_watcher_media_list_application_key_id" {
+  value     = one(b2_application_key.key_watcher_media_list[*].application_key_id)
+  sensitive = true
+}
+
+output "key_watcher_media_list_application_key" {
+  value     = one(b2_application_key.key_watcher_media_list[*].application_key)
+  sensitive = true
+}
+
 output "cloud_backup_bucket_id" {
   value = one(b2_bucket.cloud_backups[*].bucket_id)
 }

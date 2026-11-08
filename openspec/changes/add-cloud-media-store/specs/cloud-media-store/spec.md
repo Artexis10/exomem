@@ -276,7 +276,7 @@ The cell SHALL hydrate an evicted original in one stream: it fetches the version
 ### Requirement: Originals are encrypted in the cell under a per-cell media key bundle
 
 The cell SHALL encrypt each original with `age` to its own X25519 recipient before upload.
-Object names SHALL be HMAC-SHA-256 of the original's SHA-256 under a per-cell name key.
+Object names SHALL be HMAC-SHA-256 of the original's SHA-256 under a per-cell name key, until `collect-released-media` gives each new protection record a fresh random name.
 cellctl SHALL mint the media key bundle (identity and name key) per cell.
 The bundle SHALL be wrapped with AES-GCM under that cell's root key.
 The wrap SHALL bind cell ID, purpose and version as additional data.
@@ -304,7 +304,7 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 #### Scenario: The bucket is listed
 
 - **WHEN** anyone with bucket read access lists a cell's media prefix
-- **THEN** object names are keyed digests that do not match the SHA-256 of any original, and object content is `age` ciphertext
+- **THEN** object names do not match the SHA-256 of any original, and object content is `age` ciphertext
 
 #### Scenario: The edge's configuration is inspected
 
@@ -318,7 +318,7 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else. It SHALL NOT send a hide, list or delete request, although its key's write capability also permits a hide.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else, until `collect-released-media` adds `condemn` for a collector credential. It SHALL NOT send a list or delete request, and SHALL send a hide only for `condemn`, although its key's write capability permits any hide.
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL report its loaded generation, the SHA-256 of the loaded set's validated bytes and its bucket name beside the settled generation. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
@@ -385,7 +385,7 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 ### Requirement: No stored version that a retained backup references is destroyed
 
-Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions, hides nothing and uses no object lock. A bucket lifecycle rule MAY cancel unfinished multipart uploads and SHALL NOT delete versions. The bucket SHALL stay in the founder account.
+Media SHALL be stored in a dedicated bucket, separate from backup prefixes, that keeps versions and uses no object lock. Only `collect-released-media` SHALL hide a name. A bucket lifecycle rule MAY cancel unfinished multipart uploads. It SHALL NOT delete a version, except the hidden and superseded versions that the grace rule of `collect-released-media` deletes. The bucket SHALL stay in the founder account.
 
 This change SHALL destroy no stored version of a live cell. No service SHALL hold `deleteFiles` on the media bucket. cellctl SHALL hold a key that lists the media bucket and nothing else, and the edge SHALL hold the only key that reads and writes it. The change `collect-released-media` SHALL add the reference manifest and the destruction of versions that no retained backup references, because cellctl cannot read or delete backup manifests under `contain-cloud-controller-compromise`.
 
@@ -438,7 +438,7 @@ The owner allowance SHALL count original plaintext bytes, including versions ref
 Multiple live or trash references to one version SHALL count once.
 The operator's physical meter SHALL count provider ciphertext bytes separately.
 Once per backup hold, cellctl SHALL list each cell's media prefix with its list-only key, sum the content lengths of the upload versions while it pages, and count unfinished large files.
-It SHALL raise an alert for any hide entry, and for a prefix whose bytes exceed the cell's allowance times a configured headroom factor. Only a listing that shows no hide entry SHALL resolve the hide alert.
+It SHALL raise an alert for a prefix whose bytes exceed the cell's allowance times a configured headroom factor. It SHALL raise no alert for a hide entry, because `collect-released-media` hides each released name and its key watcher alerts on a burst of hides.
 A failed listing page SHALL report the physical figure as unknown, never as zero, and SHALL NOT change the owner figure. A figure that stays unknown for three listings in a row SHALL raise an alert.
 cellctl SHALL start without the list key, SHALL then log that every physical figure is unknown, and SHALL count each try as a failed listing.
 

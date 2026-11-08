@@ -90,7 +90,7 @@ def plan_memory(
 
     Args:
         collection: Vault-relative manifest path, collection UUID or memory reference. Omit to list.
-        plan_id: row plan_id.
+        plan_id: row plan_id; on query, that item and its body.
         expected_container_hash: Returned snapshot.
         expected_item_version: row item_version.
         changes: Update.
@@ -145,6 +145,16 @@ def plan_memory(
                 semantic_profile="planning",
                 limit=limit,
                 continuation=continuation,
+            )
+        if action == "query" and plan_id is not None:
+            from . import record_governance
+
+            # Resolved under the caller's authority first, so the refusal never confirms a withheld collection.
+            assert collection is not None
+            planning.require_planning_profile(record_governance.resolve_collection(vault_root, collection))
+            raise CollectionError(
+                "QUERY_UNAVAILABLE", "a query with plan_id reads a store-routed collection; this one keeps "
+                "each body in its item file, so read that file with read_memory"
             )
         if action == "query":
             assert collection is not None
@@ -270,6 +280,9 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "update" and values["changes"] is None and values["body"] is None:
         _invalid_arguments("update requires at least one of: changes, body")
+    if action == "query" and values["plan_id"] is not None and supplied - {"collection", "plan_id"}:
+        _invalid_arguments("a query with plan_id reads that one item and its body, so it takes only collection; "
+                           "remove " + ", ".join(sorted(supplied - {"collection", "plan_id"})))
 
 
 def refuse_arguments(detail: str) -> Never:

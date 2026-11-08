@@ -70,6 +70,39 @@ def _seed_note(vault: Path, slug: str, body: str) -> str:
     )["path"]
 
 
+def _seed_connected_note(vault: Path, slug: str, peer: str) -> str:
+    """A page whose only connection is a link to `peer`, so it needs no relation review."""
+    arguments = {
+        "title": f"Curation {slug}",
+        "slug": slug,
+        "content": (
+            f"## Observations\n\n- [finding] The page keeps the record. ^{slug}\n\n"
+            f"## Connections\n\n- [[{peer.removesuffix('.md')}]]\n"
+        ),
+    }
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    return commands.op_remember(
+        vault,
+        **arguments,
+        draft_id=validation["draft_id"],
+        draft_hash=validation["draft_hash"],
+        draft_token=validation["draft_token"],
+    )["path"]
+
+
+def _unlink_operation(vault: Path, path: str) -> dict[str, object]:
+    link = next(
+        line
+        for line in (vault / path).read_text(encoding="utf-8").splitlines()
+        if line.startswith("- [[")
+    )
+    return {
+        "kind": "replace_string",
+        "old_string": link,
+        "new_string": "- The peer no longer applies.",
+    }
+
+
 def _edit_step(vault: Path, path: str, operation: dict[str, object]) -> dict[str, object]:
     before = (vault / path).read_text(encoding="utf-8")
     return {
@@ -354,22 +387,14 @@ def test_a_created_page_missing_the_relation_review_it_needs_is_refused_at_propo
     assert "RELATION_DISPOSITION_MISSING" in str(refused.value)
 
 
-def test_an_edit_that_stales_the_saved_relation_review_needs_a_review_at_proposal(
+def test_an_edit_that_removes_the_last_connection_needs_a_review_at_proposal(
     vault: Path,
 ) -> None:
-    home = _seed_note(
-        vault, "curation-home", "## Observations\n\n- [finding] The home keeps the record. ^home\n"
+    peer = _seed_note(
+        vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n"
     )
-    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
-    reviewed = _edit_step(
-        vault,
-        home,
-        {
-            "kind": "replace_string",
-            "old_string": "keeps the record",
-            "new_string": "keeps the whole record",
-        },
-    )
+    home = _seed_connected_note(vault, "curation-home", peer)
+    reviewed = _edit_step(vault, home, _unlink_operation(vault, home))
     unreviewed = json.loads(json.dumps(reviewed))
     for key in ("relation_disposition", "relation_review_reason"):
         unreviewed["args"]["operation"].pop(key)
@@ -378,26 +403,18 @@ def test_an_edit_that_stales_the_saved_relation_review_needs_a_review_at_proposa
         _propose(vault, unreviewed)
 
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
-    assert "RELATION_DISPOSITION_STALE" in str(refused.value)
+    assert "RELATION_DISPOSITION_MISSING" in str(refused.value)
     assert _apply(vault, _propose(vault, reviewed))["phase"] == "completed"
 
 
 def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_review(
     vault: Path,
 ) -> None:
-    target = _seed_note(
-        vault, "curation-target", "## Observations\n\n- [finding] Keeps the record. ^target\n"
+    peer = _seed_note(
+        vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n"
     )
-    _seed_note(vault, "curation-peer", "## Observations\n\n- [finding] A peer exists. ^peer\n")
-    edit = _edit_step(
-        vault,
-        target,
-        {
-            "kind": "replace_string",
-            "old_string": "Keeps the record",
-            "new_string": "Keeps the whole record",
-        },
-    )
+    target = _seed_connected_note(vault, "curation-target", peer)
+    edit = _edit_step(vault, target, _unlink_operation(vault, target))
     for key in ("relation_disposition", "relation_review_reason"):
         edit["args"]["operation"].pop(key)
     edit["args"]["why"] = "Follow-up to [[Curation curation-home]]."
@@ -406,3 +423,4 @@ def test_a_link_only_in_the_reason_for_an_edit_does_not_defer_its_relation_revie
         _propose(vault, _home_step(), edit)
 
     assert refused.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "RELATION_DISPOSITION_MISSING" in str(refused.value)

@@ -4,6 +4,11 @@ It answers real httpx requests through a mock transport. It enforces the rules t
 edge depends on: SHA-1 on every upload, token use, two or more parts with a
 minimum size for all but the last, and a finish that is not repeatable. It also
 records every call, and it can lose a reply, with or without the call having taken effect.
+
+It models the media bucket's one lifecycle rule (collect-released-media D2): a hide
+or a newer version makes a version non-current, a HEAD by name answers 404 for a
+hidden name, and `lifecycle_tick` deletes each version that has been non-current for
+`hiding_days`. A current version is never deleted.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ UPLOAD = "https://up000.fake-b2.test"
 
 
 class FakeB2:
-    def __init__(self, *, bucket: str = "media-bucket", minimum_part: int = 1000, shape: str = "single"):
+    def __init__(self, *, bucket: str = "media-bucket", minimum_part: int = 1000, shape: str = "single",
+                 hiding_days: int = 7):
         self.bucket, self.bucket_id = bucket, "bucket-id-1"
+        self.hiding_days, self.day = hiding_days, 0
         self.minimum_part, self.shape = minimum_part, shape
         self.files: dict[str, dict] = {}
         self.calls: list[str] = []
@@ -55,6 +62,28 @@ class FakeB2:
         """Apply every parked write, as a slow provider would."""
         self.files.update(self._parked)
         self._parked.clear()
+        self._stamp()
+
+    def lifecycle_tick(self, days: int) -> list[str]:
+        """Let `days` pass and apply the rule. Returns the deleted version IDs."""
+        self._stamp()
+        self.day += days
+        deleted = [file_id for file_id, item in self.files.items()
+                   if item.get("noncurrent") is not None and self.day - item["noncurrent"] >= self.hiding_days]
+        for file_id in deleted:
+            del self.files[file_id]
+        return deleted
+
+    def current(self, name: str) -> dict | None:
+        """The name's newest upload or hide, in upload order. A hide means that the name is hidden."""
+        found = [item for item in self.files.values() if item["name"] == name and item["action"] in {"upload", "hide"}]
+        return found[-1] if found else None
+
+    def _stamp(self) -> None:
+        """Record the day on which each version stopped being its name's current one."""
+        for item in self.files.values():
+            if item["action"] == "upload" and item.get("noncurrent") is None and self.current(item["name"]) is not item:
+                item["noncurrent"] = self.day
 
     def names(self, action: str = "upload") -> list[str]:
         return [item["name"] for item in self.files.values() if item["action"] == action]
@@ -74,6 +103,7 @@ class FakeB2:
             raise httpx.ConnectError("the fake provider is down", request=request)
         before = copy.deepcopy(self.files) if self._lost else None
         endpoint, response = await self._dispatch(request)
+        self._stamp()
         self.calls.append(endpoint)
         if endpoint in self._lost:
             mode, then_outage = self._lost.pop(endpoint)
@@ -157,6 +187,15 @@ class FakeB2:
         del self.files[payload["fileId"]]
         return self._json(200, {"fileId": payload["fileId"]})
 
+    def _api_b2_hide_file(self, payload: dict) -> httpx.Response:
+        current = self.current(payload["fileName"])
+        if payload.get("bucketId") != self.bucket_id or current is None or current["action"] != "upload":
+            # Whether the provider rejects a second hide is open (task 1.1); the edge never sends one.
+            return self._json(400, {"code": "bad_request", "message": "no visible version"})
+        file_id = self._id()
+        self.files[file_id] = {"name": payload["fileName"], "action": "hide", "parts": {}, "info": {}, "data": b""}
+        return self._json(200, {"fileId": file_id, "fileName": payload["fileName"], "action": "hide"})
+
     def _api_b2_get_file_info(self, payload: dict) -> httpx.Response:
         item = self.files.get(payload["fileId"])
         if item is None:
@@ -193,10 +232,7 @@ class FakeB2:
             item = self.files.get(parse_qs(request.url.query.decode())["fileId"][0])
             endpoint = "download"
         else:
-            name = unquote(path.removeprefix(f"/file/{self.bucket}/"))
-            found = [(file_id, item) for file_id, item in self.files.items()
-                     if item["name"] == name and item["action"] == "upload"]
-            item = found[-1][1] if found else None
+            item = self.current(unquote(path.removeprefix(f"/file/{self.bucket}/")))
             endpoint = "head_name"
         if item is None or item["action"] != "upload":
             return endpoint, self._json(404, {"code": "not_found"})

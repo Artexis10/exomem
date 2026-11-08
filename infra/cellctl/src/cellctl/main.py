@@ -205,6 +205,7 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
         bucket=os.environ["CELLCTL_MEDIA_EDGE_BUCKET"],
         cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_CELL_IDS", "[]", list, "media edge cell IDs")),
         all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
+        collect_cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS", "[]", list, "media edge collect list")),
         credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
         store_policy=_json_env("CELLCTL_MEDIA_EDGE_STORE_POLICY", "{}", dict, "media store policy"),
         physical_headroom=float(os.environ["CELLCTL_MEDIA_PHYSICAL_HEADROOM"]),

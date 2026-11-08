@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, relation_review, semantic_contract, temporal, vault
+from exomem import (
+    activation_manifest,
+    commands,
+    relation_review,
+    semantic_contract,
+    temporal,
+    vault,
+)
 
 PAGE_ID = "00000000-0000-4000-8000-000000000091"
 PAGE = "Knowledge Base/Notes/Research/edit-review-handshake.md"
@@ -167,6 +174,16 @@ def test_public_edit_guidance_explains_frontmatterless_policy() -> None:
     assert "take-row operations still require frontmatter" in guidance
 
 
+def _write_page_needing_review(root: Path, relative: str, source: str) -> Path:
+    """A page that lies past the activation boundary and holds no relation decision.
+
+    An edit that leaves such a page unconnected is blocked until it records one.
+    """
+    (root / "Knowledge Base" / "Notes").mkdir(parents=True, exist_ok=True)
+    activation_manifest.ensure_manifest(root)
+    return _write(root, relative, source)
+
+
 def _save_current_review(root: Path, source: str) -> None:
     decision = relation_review.build_lifecycle_decision(
         page_identity=PAGE_ID,
@@ -253,8 +270,7 @@ def test_every_edit_kind_commits_the_exact_validated_bytes_across_a_clock_tick(
     updated: str | None,
 ) -> None:
     source = _source(updated)
-    page = _write(tmp_path, PAGE, source)
-    _save_current_review(tmp_path, source)
+    page = _write_page_needing_review(tmp_path, PAGE, source)
     ticks = iter(
         [
             dt.datetime(2026, 8, 10, 12, 0, 0, tzinfo=dt.UTC),
@@ -302,8 +318,7 @@ def test_validation_with_review_intent_returns_the_hash_it_needs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source("2026-08-09")
-    _write(tmp_path, PAGE, source)
-    _save_current_review(tmp_path, source)
+    _write_page_needing_review(tmp_path, PAGE, source)
     monkeypatch.setattr(
         temporal,
         "now",
@@ -338,8 +353,7 @@ def test_commit_still_rejects_the_wrong_relation_review_hash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source("2026-08-09")
-    _write(tmp_path, PAGE, source)
-    _save_current_review(tmp_path, source)
+    _write_page_needing_review(tmp_path, PAGE, source)
     monkeypatch.setattr(
         temporal,
         "now",
@@ -416,8 +430,7 @@ def test_travel_append_commits_four_observations(
 ) -> None:
     source = _source("2024-06-02", title="Mira Harbor accommodation plan")
     source = source.replace("Before section.", "Transport baseline.")
-    page = _write(tmp_path, TRIP, source)
-    _save_current_review(tmp_path, source)
+    page = _write_page_needing_review(tmp_path, TRIP, source)
     ticks = iter(
         [
             dt.datetime(2026, 8, 10, 15, 0, 0, tzinfo=dt.UTC),
@@ -468,8 +481,7 @@ def test_commit_without_a_relation_review_hash_names_the_missing_field(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source("2026-08-09")
-    _write(tmp_path, PAGE, source)
-    _save_current_review(tmp_path, source)
+    _write_page_needing_review(tmp_path, PAGE, source)
     monkeypatch.setattr(
         temporal,
         "now",

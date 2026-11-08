@@ -125,16 +125,38 @@ def test_a_page_that_needs_review_refuses_a_commit_that_lacks_the_hash(vault: Pa
 
 def test_validation_names_the_review_fields_a_commit_would_lack(vault: Path) -> None:
     _seed_peer(vault)
+    arguments = _unconnected_page()
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
 
+    # A commit that names this validated draft must also send its hash.
     needs_review = commands.op_remember(
         vault,
         validate_only=True,
-        **_unconnected_page(),
+        **_commit_arguments(arguments, validation),
         relation_disposition="reviewed_none",
         relation_review_reason=REASON,
     )
 
     assert needs_review["relation_review_fields"] == {"missing": ["relation_review_hash"]}
+
+
+def test_an_unconnected_page_commits_in_one_call_with_a_reason(vault: Path) -> None:
+    """No validate call and no hash: the server binds the decision to the draft it commits."""
+    _seed_peer(vault)
+
+    result = commands.op_remember(
+        vault,
+        **_unconnected_page(),
+        relation_disposition="reviewed_none",
+        relation_review_reason=REASON,
+    )
+
+    assert (vault / result["path"]).is_file()
+    receipts = [
+        r for r in relation_review.load_relation_reviews(vault)
+        if r.page_path_at_review == result["path"]
+    ]
+    assert [(r.kind, r.reason) for r in receipts] == [("reviewed_none", REASON)]
 
 
 def test_validation_names_the_review_fields_a_commit_would_ignore(vault: Path) -> None:

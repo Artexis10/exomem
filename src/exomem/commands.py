@@ -33,7 +33,7 @@ from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, get_args
 
@@ -2043,9 +2043,10 @@ def op_bootstrap(
                     "draft_hash plus draft_token; changed drafts must be validated again"
                 ),
                 "reviewed_none": (
-                    "when validation requires it, commit the unchanged draft with "
-                    'relation_disposition="reviewed_none", the returned '
-                    "relation_review_hash, and an explicit bounded relation_review_reason; "
+                    "when no truthful relation applies, send "
+                    'relation_disposition="reviewed_none" and a bounded '
+                    "relation_review_reason; a validated draft also sends its "
+                    "relation_review_hash; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
                 "generic": (
@@ -2063,10 +2064,11 @@ def op_bootstrap(
             "reviewed_existing_edit": (
                 {
                     "rule": (
-                        "validate the exact edit; retain transition_token and "
-                        "relation_review_hash; commit that edit unchanged with an explicit "
-                        "reviewed_none reason only when no truthful relation applies, or "
-                        "relation_disposition generic with a reason for a generic entity edge"
+                        "if refused for relation review, re-send the edit with "
+                        "relation_disposition reviewed_none and a reason when no truthful "
+                        "relation applies; a validated edit adds transition_token and "
+                        "relation_review_hash; generic with a reason needs both, for a "
+                        "generic entity edge"
                     )
                 }
                 if profile == "compact"
@@ -2103,10 +2105,10 @@ def op_bootstrap(
                         },
                     },
                     "rule": (
-                        "retain semantic.transition_token and "
-                        "semantic.relation_review_hash from validation; commit the "
-                        "identical proposed edit with a bounded reason: reviewed_none, or "
-                        "generic for a generic entity edge"
+                        "if refused, re-send the edit with reviewed_none and a bounded "
+                        "reason; a validated edit adds semantic.transition_token and "
+                        "semantic.relation_review_hash; generic needs both, for a generic "
+                        "entity edge"
                     ),
                 }
             ),
@@ -4375,6 +4377,13 @@ def op_propose_compilation(
         raise ValueError(f"{e.code}: {e.reason}") from e
 
 
+def _retired_item(vault_root: Path, path: str) -> dict | None:
+    """The stored row behind a retired item path of a converted collection, or None."""
+    from .collection_store import aliases
+
+    return aliases.read_named(vault_root, path)
+
+
 def op_get(
     vault_root: Path,
     path: str,
@@ -4463,6 +4472,8 @@ def op_get(
         with call_spans_module.span("read.prepare"):
             prepared = get_page_module.prepare_page_read(vault_root, path=path)
     except get_page_module.GetError as e:
+        if e.code == "NOT_FOUND" and (row := _retired_item(vault_root, path)) is not None:
+            return row
         raise ValueError(f"{e.code}: {e.reason}") from e
     _refuse_policy_tree_read(
         prepared.resolved_relative,
@@ -6070,6 +6081,12 @@ def _list_directory_payload(
             exclude=is_governance_path,
         )
     except list_directory_module.ListDirectoryError as e:
+        if e.code == "NOT_FOUND" and cursor is None and (row := _retired_item(vault_root, listing)) is not None:
+            entry = {"name": PurePosixPath(row["path"]).name, "type": "store_row", "path": row["path"],
+                     "size_bytes": None, "updated": None, "frontmatter_type": None,
+                     "collection_id": row["collection_id"], "source": row["source"], "read_only": True}
+            page = {"outcome": row["outcome"], "path": row["path"], "entries": [entry]}
+            return page if limit is None else {**page, "truncated": False, "next_cursor": None}
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
     if limit is not None:
@@ -11457,6 +11474,7 @@ def op_maintain_memory(
         "collections-store",
         "collections-store-adopt-local",
         "collections-store-export",
+        "collections-cutover",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -11505,6 +11523,8 @@ def op_maintain_memory(
     maintenance-job-cancel (run_id, why) stops one. One job runs per vault; reconcile holds
     writes for its run. A remote collections-store-export apply returns
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
+    collections-cutover only previews the move of every collection to SQLite-only storage;
+    the owner applies its plan_id with `exomem collections cutover` on the host.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -11536,7 +11556,7 @@ def op_maintain_memory(
         vocabulary_fingerprint: Reviewed vocabulary fingerprint; grants no write.
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
-        cursor: A next_cursor of a maintenance-job receipt.
+        cursor: The next_cursor of the previous page.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
@@ -11548,8 +11568,10 @@ def op_maintain_memory(
         raise ValueError("INVALID_ARGUMENTS: exclude_groups applies only to tag-variants")
     if acknowledge_skipped is not None and (mode != "collections-store-adopt-local" or apply is not True):
         raise ValueError("INVALID_ARGUMENTS: acknowledge_skipped applies only to a collections-store-adopt-local apply")
-    if cursor is not None and (mode != "maintenance-job" or run_id is None):
-        raise ValueError("INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id")
+    if cursor is not None and mode != "collections-store" and (mode != "maintenance-job" or run_id is None):
+        raise ValueError(
+            "INVALID_ARGUMENTS: cursor applies only to maintenance-job with a run_id or to collections-store"
+        )
     if mode == "curation":
         from . import curation as curation_module
         from . import due_state as due_state_module
@@ -11795,12 +11817,12 @@ def op_maintain_memory(
             or why is not None
         ):
             raise ValueError(
-                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight and takes no "
-                "arguments; migrating a vault is the declared offline upgrade step"
+                "INVALID_ARGUMENTS: collections-store runs only as a read-only preflight and takes only "
+                "an inventory cursor; migrating a vault is the declared offline upgrade step"
             )
         from .collection_store import preflight as store_preflight
 
-        return store_preflight.preflight(vault_root)
+        return store_preflight.preflight(vault_root, cursor)
     def store_preview_arguments_invalid() -> bool:
         # The preview-first store modes take no audit arguments; an apply needs true, plan_id and why.
         return (
@@ -11840,6 +11862,15 @@ def op_maintain_memory(
             )
         # The service answering this refuses an apply; the offline CLI applies it.
         return store_admission.export_route(vault_root, plan_id=plan_id, why=why)
+    if mode == "collections-cutover":
+        from .collection_store import cutover as store_cutover
+
+        if store_preview_arguments_invalid() or apply is not None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: collections-cutover previews without arguments; the owner applies its "
+                "plan_id on the host with `exomem collections cutover --plan-id`, the service stopped"
+            )
+        return store_cutover.preview(vault_root)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -11910,7 +11941,8 @@ def op_maintain_memory(
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
-        "maintenance-job-cancel, collections-store-adopt-local, or collections-store-export"
+        "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
+        "collections-store-export, or collections-cutover"
     )
 
 
@@ -13577,7 +13609,7 @@ def op_record_memory(
         manifest_text: Manifest for validate/create/revise.
         expand_child: Exact declared child container.
         refresh_presentation: Rebuild managed Markdown with guards.
-        item_key: Update UUID; append uses the natural key.
+        item_key: Row UUID; on query, that row with its body; append uses the natural key.
         expected_container_hash: Current snapshot for guarded writes.
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Queried item version.

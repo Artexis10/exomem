@@ -531,8 +531,8 @@ class LegacyAuditSpool:
             raise self._changed()
         return size
 
-    def _bounded_history(self, profile):
-        """Apply the legacy limits to captured occurrences, not fresh file reads."""
+    def _bounded_history(self, profile, collection_id, head):
+        """Apply the live reader's segment limits and selection to captured occurrences, not fresh file reads."""
         ordinary = 0
         for (path,) in self._rows("SELECT path FROM segments WHERE role IN ('archive','census')"):
             if Path(path).name.startswith(vault._BATCH_RESIDUE_PREFIX):
@@ -547,25 +547,22 @@ class LegacyAuditSpool:
                 ordinary += 1
             if ordinary > records._MAX_AUDIT_ARCHIVE_ENTRIES:
                 return records._AuditEvents((), False)
-        total = 0
         for (size,) in self._rows("SELECT size FROM segments WHERE role IN ('live','archive')"):
-            total += size
-            if size > records._MAX_AUDIT_SEGMENT_BYTES or total > records._MAX_AUDIT_HISTORY_BYTES:
+            if size > records._MAX_AUDIT_SEGMENT_BYTES:
                 return records._AuditEvents((), False)
         if self._sql(
             "SELECT 1 FROM findings WHERE proof=? LIMIT 1", ("scan:" + profile,)
         ).fetchone():
             return records._AuditEvents((), False)
-        events = []
-        for (original,) in self._rows(
-            "SELECT original FROM occurrences WHERE profile=? ORDER BY rank,path,line LIMIT ?",
-            (profile, records._MAX_AUDIT_EVENTS + 1),
-        ):
-            events.append(json.loads(original))
-        return records._AuditEvents(
-            tuple(events) if len(events) <= records._MAX_AUDIT_EVENTS else (),
-            len(events) <= records._MAX_AUDIT_EVENTS,
+        events, conflicts = records._select_audit_history(
+            self._rows,
+            "SELECT rank,path,line,transition,parent,collection,original FROM occurrences WHERE profile=?",
+            "rank,path,line",
+            (profile,),
+            collection_id=collection_id,
+            named=() if head is None else (head,),
         )
+        return records._AuditEvents(events, True, conflicts=conflicts)
 
     def inspect_captured(self, *, manifest, current_container_hash, markers):
         return self.capture_inspection(
@@ -596,7 +593,9 @@ class LegacyAuditSpool:
         ):
             chain = records._incomplete_audit_chain()
         else:
-            history = self._bounded_history(manifest.semantic_profile)
+            history = self._bounded_history(
+                manifest.semantic_profile, manifest.collection_id, manifest.audit_head
+            )
             chain = records._reconstruct_captured_audit_chain(
                 manifest,
                 history=history,

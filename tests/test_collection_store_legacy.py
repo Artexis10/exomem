@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+import tracemalloc
 
 import pytest
 from record_fixtures import copy_x3_fixture
@@ -494,7 +495,42 @@ def test_migration_history_has_no_legacy_size_count_or_depth_ceiling(
     assert list(stage.iterdir()) == []
 
 
-@pytest.mark.parametrize("bound", ["entries", "segment", "total", "events", "markers", "manifest"])
+def test_a_complete_history_past_the_old_total_and_event_caps_reads_complete_in_bounded_memory(tmp_path):
+    """Defect: the history read stops at 8 MB or 10,000 events and calls a complete chain
+    history_incomplete, or it holds every collection's events in memory to read one chain."""
+    root = tmp_path / "vault"
+    manifest = _manifest(root, f"{3:024x}")
+    (root / "Knowledge Base/log.md").write_text("".join(_event(manifest, n) + "\n" for n in (1, 2, 3)))
+    archive = root / "Knowledge Base/_archive/logs"
+    archive.mkdir(parents=True)
+    # Another collection's 11,000 events in eight segments, each under the 2,000,000-byte segment bound.
+    other = "33333333-3333-4333-8333-333333333333"
+    for segment in range(8):
+        with (archive / f"log-{_hash(segment)[:20]}.md").open("w") as file:
+            for number in range(1_000 + segment * 1_375 + 1, 1_000 + (segment + 1) * 1_375 + 1):
+                file.write(_rewrite(_event(manifest, number), collection_id=other) + "\n")
+    sizes = [path.stat().st_size for path in archive.iterdir()]
+    assert max(sizes) < 2_000_000 and sum(sizes) > 8_000_000
+
+    tracemalloc.start()
+    try:
+        historical = _inspection(root, manifest, _hash(3))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert historical == {"status": "ok", "gaps": []}
+    # The read holds one segment (its bytes, text and lines) and this collection's events, never the
+    # whole history: reading every event into memory peaks near 35 MB on this history.
+    assert peak < 6 * max(sizes), peak
+    with legacy.LegacyAuditSpool(_stage(tmp_path), deadline=time.monotonic() + 120) as audit:
+        audit.scan(root)
+        assert audit.inspect_captured(
+            manifest=manifest, current_container_hash=_hash(3), markers=iter(())) == historical
+
+
+# The total-bytes and event-count limits are gone: the read streams, so a long history reads complete
+# (test_a_complete_history_past_the_old_total_and_event_caps_reads_complete_in_bounded_memory).
+@pytest.mark.parametrize("bound", ["entries", "segment", "markers", "manifest"])
 def test_captured_legacy_limits_do_not_bless_exhaustive_history(tmp_path, monkeypatch, bound):
     # Each legacy refusal remains historical even when finite import proof passes.
     root = tmp_path / "vault"
@@ -506,17 +542,12 @@ def test_captured_legacy_limits_do_not_bless_exhaustive_history(tmp_path, monkey
     limit = {
         "entries": "_MAX_AUDIT_ARCHIVE_ENTRIES",
         "segment": "_MAX_AUDIT_SEGMENT_BYTES",
-        "total": "_MAX_AUDIT_HISTORY_BYTES",
-        "events": "_MAX_AUDIT_EVENTS",
         "markers": "_MAX_AUDIT_MARKERS",
         "manifest": "_MAX_AUDIT_SOURCE_BYTES",
     }[bound]
     if bound == "entries":
         (archive / "ordinary-note.md").write_text("not an activity segment")
-    value = 1
-    if bound == "total":
-        value = (root / "Knowledge Base/log.md").stat().st_size + 1
-    monkeypatch.setattr(records, limit, value)
+    monkeypatch.setattr(records, limit, 1)
     markers = tuple(
         records._AuditMarker(
             f"{number:024x}",

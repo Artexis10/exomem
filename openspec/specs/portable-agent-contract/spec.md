@@ -187,3 +187,64 @@ bootstrap payload, which carries the clause and its handling guidance in full.
 
 - **WHEN** the shipped scaffold is scanned by the public-artifact privacy gate
 - **THEN** the added clause introduces no personal, client, supplier or product name
+
+### Requirement: Portable carriers deliver the bounded recurring-identity check
+The generic scaffold, installed core skill, and hookless custom-instructions projection SHALL carry the same capability-honest recurrence cadence as bootstrap. At balanced and maximal prominence, an active agent SHALL request the explicit `entity_recurrence` category at most once ordinarily per bootstrapped conversation or session during the first user turn after successful bootstrap, after primary task work and before the final response, including when that interaction is not entity-topical. It MAY perform exactly one additional general state recheck after an Entity, accepted relation, or entity-type registry mutation outside hydration continuation. Each ordinary or general read SHALL request one audit pass and at most three candidates.
+
+After each separately confirmed hydration batch returns a terminal mutation receipt, the agent MAY perform exactly one immediate recheck bound to the same identity. Rechecks after processed batches 1–7 may expose at most the next eight contexts; the eighth recheck after processed batch 8 is closure-only and exposes no ninth batch. Another recheck requires another fresh confirmation and terminal receipt. The chain SHALL stop on the specified state/outcome stops or after eight mutated batches and eight identity rechecks in one session; remaining work stays open for the next session's ordinary read. Off and light SHALL remain explicit-request-only.
+
+The generic scaffold and installed core skill SHALL teach resolve-before-create, ambiguity stop, hydrate-before-duplicate, and governed unknown-kind registration without listing a closed ontology. The hookless custom-instructions projection is bounded by the 1,500-byte web custom-instructions limit: it SHALL carry the cadence and the unavailable-skip rule and SHALL defer the decision order to the bootstrap payload it already instructs the agent to follow, and that payload SHALL carry the order. When the exported surface cannot request the category, every carrier SHALL mark the check unavailable and skip it rather than inventing a command, local scan, model inference, or due-state result.
+
+#### Scenario: Hookless agent checks on an ordinary interaction
+- **GIVEN** a clean balanced client with only the generic portable contract and an explicit category-read surface
+- **WHEN** the first normal maintenance boundary follows a non-topical ordinary user prompt
+- **THEN** the agent requests `entity_recurrence` once with a limit of three and surfaces one returned candidate for semantic review
+- **AND** a frequency-matched incidental twin is absent
+
+#### Scenario: Later ordinary prompts do not rescan
+- **GIVEN** the session already spent its ordinary recurrence read
+- **WHEN** later prompts arrive without a qualifying mutation
+- **THEN** the carrier authorizes no second recurrence scan in that session
+
+#### Scenario: Post-mutation recheck observes lifecycle state
+- **GIVEN** the ordinary recurrence read was spent and an Entity, accepted relation, or registry entry is then committed
+- **WHEN** the mutation receipt is terminal
+- **THEN** the agent may perform one immediate general recurrence recheck to observe closure or transition
+- **AND** no second general read is authorized
+
+#### Scenario: Hydration continuation is user-paced and session-bounded
+- **GIVEN** a hydration identity has more than one batch of disconnected contexts
+- **WHEN** each separately confirmed batch reaches a terminal mutation receipt
+- **THEN** exactly one same-identity recheck may expose the next batch and then pauses for fresh confirmation
+- **AND** after eight mutated batches the eighth recheck is closure-only and any remainder stays open for the next session rather than exposing batch nine or causing a background loop
+
+#### Scenario: Portable carrier cannot overstate capability
+- **GIVEN** a hookless client without an explicit category-read surface
+- **WHEN** the recurrence boundary arrives
+- **THEN** the carrier marks the check unavailable and performs no substitute scan or semantic inference
+
+#### Scenario: Hookless projection stays within the web byte cap
+- **GIVEN** the maximal and balanced copyable custom-instruction blocks
+- **WHEN** each is measured as UTF-8 bytes
+- **THEN** each is at most 1,500 bytes
+- **AND** each names the once-per-conversation cadence and the unavailable-skip rule
+- **AND** each defers the decision order to bootstrap rather than restating it
+
+### Requirement: Portable capture carriers preserve the personal baseline predicate
+The hand-authored scaffold, capture workflow skill, relevant operations reference, prominence rendering and documentation, the activation capture-policy block, and generated Claude Code copies SHALL carry one coherent generic personal-baseline predicate. Each proactive carrier SHALL preserve both eligibility discriminators, at least one eligible route, and the quiet negative boundary. The capture reminder SHALL NOT carry the predicate: it SHALL remain an advisory and structural check rather than becoming a semantic classifier.
+
+#### Scenario: Carrier parity is semantic
+- **WHEN** portable carriers are checked
+- **THEN** each proactive carrier conveys stability or recurrence, reusable comparison value, semantic routing, and a casual-trivia negative even if sentence wording differs
+
+#### Scenario: Structural reminder does not decide meaning
+- **WHEN** the capture hook observes an ordinary interaction boundary
+- **THEN** it emits only a bounded advisory check and neither classifies content nor invokes a semantic model
+
+#### Scenario: Public artifacts remain generic
+- **WHEN** scaffold and generated or installed plugin artifacts are built
+- **THEN** privacy and leak gates prove that all fixtures, examples, and instructions use synthetic content
+
+#### Scenario: Generated copies cannot drift
+- **WHEN** a hand-authored source carrier changes
+- **THEN** sync checks fail until every defined derived copy is regenerated from its source

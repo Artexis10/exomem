@@ -1983,6 +1983,8 @@ def test_a_write_signal_still_starts_the_quiet_window(
 ) -> None:
     """The exemption is the drain's own thread; every other signal is a write."""
     monkeypatch.setattr(graph_drain, "_thread", None)
+    # An earlier test's fake clock can leave a reading above a fresh host's monotonic clock here.
+    monkeypatch.setattr(graph_drain, "_last_debt", 0.0)
     before = graph_drain._last_debt
     graph_drain.note_graph_debt()
     assert graph_drain._last_debt > before

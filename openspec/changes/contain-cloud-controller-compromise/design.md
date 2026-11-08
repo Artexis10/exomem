@@ -140,6 +140,8 @@ The subcommands:
 
 The policy also pins the remaining arguments where they carry trust. `cell-backup` takes no destination argument (D4).
 
+`collect-released-media` D3 and D5 add two backup steps: the media manifest before `restic backup`, and the collector pass after `forget`/`prune`. The closed backup template therefore gains one `cell-credentials` key, `media-edge-collector-credential`, mounted as a file in the backup Job only, and one egress rule to the media edge's port.
+
 Why pin the environment names? An unpinned environment could set `PYTHONPATH`, `LD_PRELOAD` or a restic hook variable and run other code inside an allowed subcommand. The command and the environment names are pinned together.
 
 ### D4. Data moves only to destinations that a signed grant names
@@ -252,7 +254,8 @@ A compromised `cellctl` would not report itself. The access record pipeline (`ma
 - a grant or destination refusal logged by a cell;
 - a Secret read by an identity outside the expected set;
 - a Job or StatefulSet that the policy denied as an unknown kind;
-- an object-store key or a backup bucket setting outside the fixed shapes, which the key watcher reports (D9).
+- an object-store key or a backup bucket setting outside the fixed shapes, which the key watcher reports (D9);
+- a burst of hides in the media bucket above a pinned budget, or a failed media listing, which the key watcher also reports (`collect-released-media` D4).
 
 Each alert carries only an identity, a cell ID and a reason token. It never carries content.
 
@@ -325,6 +328,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - It matches every single-purpose key by its key ID, from Terraform outputs. That covers the custodian, the lock extender, the watcher, the infrastructure key, the durability keys and every other key in the account. A clone with the same name and capabilities therefore does not pass.
 - It matches each per-cell key on its exact bucket, prefix shape and capability set, with at most one key per prefix.
 - It compares the backup bucket's Object Lock, default retention, lifecycle rules, bucket type, encryption, replication and CORS settings with pinned values.
+- `collect-released-media` D4 gives it one more key in the founder account, which can only list the media bucket. With it, the watcher counts the media bucket's hide markers in a window and alerts above a pinned hide budget. The key and the media watch join the pinned set by read-modify-write of its live value.
 - It raises an alert on any difference, on an authentication or listing failure, and on a missed run, because the receiver expects its heartbeat. Deleting the watcher's key therefore raises an alert.
 - A version written after its default retention was removed can be deleted at once, so the run interval bounds that window. The 23-day margin protects every version written before the change.
 

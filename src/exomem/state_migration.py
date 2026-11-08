@@ -47,13 +47,16 @@ CONNECTOR_BOUNDARY_COMPATIBILITY_ID = "connector-content-ceiling-v1"
 COLLECTION_MARKER_COMPATIBILITY_ID = "collections-marker-v2"
 #: What a store-routed vault records; its reverse export retires these with the store schema IDs.
 _COLLECTION_STORE_COMPATIBILITY_IDS = frozenset({"collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID})
+#: A store holding a sqlite collection records this: a release without it would render item views again.
+COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
 #: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
 #: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
 VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
-    "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, VAULT_STORE_COMPATIBILITY_ID,
+    "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID,
 })
 
 
@@ -263,7 +266,8 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
 
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
-        CONNECTOR_BOUNDARY_COMPATIBILITY_ID, VAULT_STORE_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
+        CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
+        VAULT_STORE_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -296,7 +300,10 @@ def _require_collection_store_recovery(session, token) -> None:
         if manifest is None or manifest["state"] != "complete":
             raise StateMigrationOfflineRequired("collection-store recovery requires complete state")
         physical, optional = partition_state_descriptor_ids(manifest["descriptors"])
-        if (physical != set(_descriptor_ids()) or optional - _store_owned_ids()
+        # As at startup, any optional format this release can use is ready, an armed connector boundary's
+        # included. An unknown ID partitions as physical, so the descriptor-set comparison refuses it.
+        _require_supported_compatibility(optional)
+        if (physical != set(_descriptor_ids())
                 or manifest.get("governance_rollback") is not None
                 or manifest.get("governance_adoption") is not None
                 or scan_vault_state(session.root)):
@@ -356,6 +363,20 @@ def record_collection_store_compatibility(
     """
 
     _record_optional(vault_root, authority_check, add=_COLLECTION_STORE_COMPATIBILITY_IDS)
+
+
+def record_collections_sqlite_only(
+    vault_root: Path, *, authority_check: Callable[[], bool],
+) -> None:
+    """Record that the store holds a sqlite collection, before its marker routes the collection.
+
+    An earlier release cannot read a sqlite manifest, and one from before the cutover would
+    render item views again, so with this ID recorded its startup gate and the managed
+    launcher refuse this state. The caller's authority is the same as for
+    ``record_collection_store_compatibility``.
+    """
+
+    _record_optional(vault_root, authority_check, add=frozenset({COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID}))
 
 
 def record_collection_store_schema(
@@ -433,7 +454,7 @@ def retire_collection_store_compatibility(
 def _store_owned_ids() -> frozenset[str]:
     """Every ID that a store-routed vault may record: the store's own, its schema's and the pages'."""
 
-    return (_COLLECTION_STORE_COMPATIBILITY_IDS | {VAULT_STORE_COMPATIBILITY_ID}
+    return (_COLLECTION_STORE_COMPATIBILITY_IDS | {COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID, VAULT_STORE_COMPATIBILITY_ID}
             | frozenset(store_schema.compatibility_ids()))
 
 

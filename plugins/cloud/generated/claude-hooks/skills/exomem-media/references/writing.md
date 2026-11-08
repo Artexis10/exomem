@@ -479,13 +479,16 @@ Read-only recall and review follow the live retrieval policy.
   is off by default; duplicate and overlap warnings run either way, and
   `write_feedback.suggestions.computed` says which happened.
 - **Relation recovery.** When `RELATION_DISPOSITION_STALE` or
-  `RELATION_DISPOSITION_MISSING` blocks an `edit_note`, replay the identical
-  operation with `validate_only=true`, then commit with the returned
-  `transition_token` and `relation_review_hash`, `relation_disposition="reviewed_none"`
-  and a `relation_review_reason`. The hash is the relation review's, never the
-  page content hash. The alternative is a typed `## Relations` entry
+  `RELATION_DISPOSITION_MISSING` blocks an `edit_note`, re-send the same
+  operation with `relation_disposition="reviewed_none"` and a
+  `relation_review_reason`; that one call commits. A validated edit
+  (`validate_only=true`) also sends its `transition_token` and
+  `relation_review_hash`, which is the relation review's, never the page content
+  hash. The decision then binds the page, not its bytes: later edits ask nothing
+  while the page stays unconnected, and an edit that removes its last connection
+  is still refused. The alternative is a typed `## Relations` entry
   (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
-  A `GENERIC_RELATION_NEEDS_REASON` refusal replays the same way with
+  A `GENERIC_RELATION_NEEDS_REASON` refusal replays the validated way with
   `relation_disposition="generic"`.
 
 ### Correcting existing knowledge

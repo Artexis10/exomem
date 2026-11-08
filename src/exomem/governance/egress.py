@@ -6485,6 +6485,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "collections-store": "structure",
         "collections-store-adopt-local": "apply-conditional",
         "collections-store-export": "apply-conditional",
+        "collections-cutover": "structure",
     },
     ("manage_memory_file", "operation"): {
         "list": "structure",

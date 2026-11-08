@@ -23,6 +23,7 @@ from contextlib import ExitStack, closing, suppress
 from pathlib import Path
 
 import pytest
+from granted_writer import grant_writer
 from record_fixtures import LEDGER_COLLECTION_PATH, copy_dataset_fixture, copy_x3_fixture
 from test_collection_store_legacy import _event, _rewrite
 from test_collection_store_legacy_import import _held
@@ -290,6 +291,22 @@ def test_public_progress_review_reads_canonical_planning_without_evidence(env):
             assert result["collections_unavailable"] == 0
             assert result["items_reviewed"] == 0
         assert call(root, "plan_memory", action="query", collection=PLANNING)["snapshot"] == before
+    finally:
+        service.stop()
+
+
+def test_a_vault_armed_while_the_service_is_stopped_admits_its_store_at_start(env, tmp_path, monkeypatch):
+    """Arming the connector boundary records its own optional state descriptor. A store recovery
+    that accepts only the store's descriptors refuses that vault at every start, so the store
+    stays unadmitted and no migrated collection is readable."""
+    root = legacy_vault(env)
+    expected = rows(root, WORK)
+    assert migrate(root, "apply") == 0
+    grant_writer(root, tmp_path, monkeypatch, writable_paths=["Inbox/**"], capture_paths=["Knowledge Base/Inbox"])
+    assert state_migration.CONNECTOR_BOUNDARY_COMPATIBILITY_ID in state_migration.recorded_descriptor_ids(root)
+    service = start_service(root)
+    try:
+        assert rows(root, WORK) == expected
     finally:
         service.stop()
 
