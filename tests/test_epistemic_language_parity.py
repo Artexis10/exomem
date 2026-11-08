@@ -1445,17 +1445,17 @@ def test_the_catalogue_reads_a_member_of_edge_and_its_extension_as_membership(
     assert "mem-link" not in members  # CORE
 
 
-def test_the_catalogue_reads_a_grandfathered_extension_as_membership_by_its_saved_family(
+def test_the_catalogue_reads_a_grandfathered_extension_as_membership_by_its_parent(
     fixture_vault: Path,
 ) -> None:
     """FLIPS 9: `x.joins` has parent `relates_to` and saved family `membership`.
 
-    After intended change 9 it follows its parent and `mem-grandfathered` leaves
-    the list.
+    It used to count by its saved family. It now follows its parent, so
+    `mem-grandfathered` is not a member.
     """
     build_graph(fixture_vault)
 
-    assert "mem-grandfathered" in _members(fixture_vault)  # FLIPS 9
+    assert "mem-grandfathered" not in _members(fixture_vault)  # FLIPS 9
 
 
 def test_the_built_in_traversal_profiles_keep_their_families_and_limits() -> None:
