@@ -70,7 +70,7 @@ Placement: `cellctl` renders the collector credential only into the backup Job. 
 
 Every owner deletion now ends in a hide. A single hide is therefore normal, and an alert on each would carry no signal.
 
-- **cellctl** reports the hidden names of each cell, from its list-only view. It raises no alert for a single hide.
+- **cellctl** reports the count of hidden names of each cell, with the first few, from its list-only view. It raises no alert for a single hide.
 - **The out-of-cluster key watcher** gets a list-only key limited to the media bucket. It counts the hide markers that appeared since its last run, and it alerts when the count exceeds a pinned budget. Its output is value-free: it carries a count and a reason token, never a name.
 - **Grace.** The grace period N must exceed the watcher's interval plus the operator's response time. An alert then arrives before the first deletion of a burst.
 - **Rescue.** The operator deletes the hide marker with the out-of-cluster cleanup key. The version is current again, with its content unchanged. A rescue is for a name that a sidecar or a protection record still holds, such as a hide by a compromised edge. A hold never condemns such a name, because candidates are only released names that no manifest references or protects (D5). So the next hold does not hide it again. A released name that nothing references is a correct candidate, and a later hold hides it again.

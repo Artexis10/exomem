@@ -127,6 +127,21 @@ async def test_the_log_lists_hidden_names_and_counts_repeated_ones_and_a_hide_ra
         await fleet.close()
 
 
+async def test_the_log_counts_every_hidden_name_but_names_only_a_few(cell_db, caplog) -> None:
+    """Every owner deletion adds a hidden name, so a line that named them all would grow with each one."""
+    fleet = await _fleet(cell_db, CANARY)
+    try:
+        fleet.media_listing = _named(*[(f"released{index}", None, "hide") for index in range(7)])
+        with caplog.at_level(logging.INFO, logger="cellctl"):
+            await fleet.run(NOW)
+        report = next(record.getMessage() for record in caplog.records if "hidden name(s)" in record.getMessage())
+
+        shown = ", ".join(f"{PREFIX}released{index}" for index in range(5))
+        assert report.endswith(f"7 hidden name(s) in the bucket: {shown} and 2 more")
+    finally:
+        await fleet.close()
+
+
 @pytest.mark.parametrize(
     ("headroom", "bytes_held", "fires"),
     [(1.5, 150, False), (1.5, 151, True), (None, 10**15, False)],

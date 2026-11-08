@@ -1752,6 +1752,18 @@ MEDIA_METER_RETRY = timedelta(minutes=5)
 # provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
 # switch off the over-allowance alert with no notice.
 MEDIA_METER_UNKNOWN_AFTER = 3
+# Hidden names the meter's line shows beside their count. Every owner deletion adds one, and a rescue lists
+# the markers from the bucket itself, so the line needs only a sample to show what is being hidden.
+MEDIA_HIDDEN_NAMES_LOGGED = 5
+
+
+def _hidden_sample(hidden: tuple[str, ...]) -> str:
+    """The first MEDIA_HIDDEN_NAMES_LOGGED hidden names in name order, and how many the line leaves out."""
+    if not hidden:
+        return ""
+    shown = ", ".join(hidden[:MEDIA_HIDDEN_NAMES_LOGGED])
+    left = len(hidden) - MEDIA_HIDDEN_NAMES_LOGGED
+    return f": {shown}" + (f" and {left} more" if left > 0 else "")
 
 
 async def _media_physical_meter(
@@ -1762,7 +1774,7 @@ async def _media_physical_meter(
     shows. A prefix above the cell's allowance times the configured headroom alerts. An unknown figure
     changes no alert, since it is not within the allowance, and a figure that stays unknown for
     MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. collect-released-media D4: a hide raises no
-    alert, since every owner deletion ends in one; the log lists the hidden names, and the out-of-cluster
+    alert, since every owner deletion ends in one; the log counts the hidden names, and the out-of-cluster
     watcher alerts on a burst. Without the list key each try counts
     as a failed listing, since a missing key switches off the over-allowance alert as a revoked one does. The figure
     is the operator's; the owner's meter and the cell's record stay as they are."""
@@ -1797,7 +1809,7 @@ async def _media_physical_meter(
                    "upload version and %d hidden name(s) in the bucket%s",
                    row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes, figure.unfinished,
                    "an unknown number of" if figure.repeated is None else figure.repeated, len(figure.hidden or ()),
-                   f": {', '.join(figure.hidden)}" if figure.hidden else "")
+                   _hidden_sample(figure.hidden or ()))
     allowance = edge.store_policy.get("allowance_bytes")
     for cell_id, figure in list(memory.media_physical.items()):
         over_alert, unknown_alert = alerts.media_alerts(cell_id)

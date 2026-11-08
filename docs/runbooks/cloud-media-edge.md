@@ -89,7 +89,7 @@ After each backup of a cell that has a media store, cellctl lists that cell's pr
 - the bytes of all upload versions;
 - the count of unfinished large files;
 - the count of names with more than one upload version;
-- the count of hidden names, followed by each hidden name.
+- the count of hidden names, followed by the first five in name order.
 
 The figure is the operator's. It is not the owner's allowance. A failed listing leaves it unknown, never 0.
 cellctl retries a failed listing after five minutes. If the provider does not list the names in order, the
@@ -241,7 +241,7 @@ prefix. The provider deletes each hidden version when the grace period ends, so 
    `prefix` set to `cells/<cell>/`.
 5. If a marker of the burst has no line in step 3, or the image differs, rescue every marker of the burst.
    Then read the provider's event log for the bucket, and the key watcher's other tokens for an unknown key.
-6. If every marker has a line, read each cell's backup Job log as in step 4 of "Turn on collection".
+6. If every marker has a line, read each cell's collection result as in step 17 of "Turn on collection".
    A cell whose owner deleted many originals at once explains its count.
 7. If nothing explains a cell's count, rescue its markers of the burst.
 

@@ -162,7 +162,7 @@ After a hold's backup and prune both succeed, the backup Job SHALL read the mani
 
 ### Requirement: Hides are detected and can be rescued within the grace
 
-`cellctl` SHALL report the hidden names of each cell. The out-of-cluster key watcher SHALL hold a list-only key that is limited to the media bucket. It SHALL alert when the hide markers that appeared since its last run exceed a pinned budget. The alert SHALL carry a count and a reason token and SHALL NOT carry a name. The grace period SHALL exceed the watcher's interval plus the operator's response time. The operator SHALL be able to rescue a name by deleting its hide marker with the out-of-cluster cleanup key.
+`cellctl` SHALL report the count of hidden names of each cell, with at most a few of the names. The out-of-cluster key watcher SHALL hold a list-only key that is limited to the media bucket. It SHALL alert when the hide markers that appeared since its last run exceed a pinned budget. The alert SHALL carry a count and a reason token and SHALL NOT carry a name. The grace period SHALL exceed the watcher's interval plus the operator's response time. The operator SHALL be able to rescue a name by deleting its hide marker with the out-of-cluster cleanup key.
 
 #### Scenario: A hide burst exceeds the budget
 
