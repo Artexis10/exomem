@@ -218,6 +218,8 @@ def test_an_image_too_large_to_decode_names_the_download(served, monkeypatch):
     assert "IMAGE_TOO_LARGE" in refused
     assert (9000, 6000) not in decoded, "the canvas was decoded before the size check"
     assert "transfer_artifact operation=download" in refused
+    # A PNG decodes at full size whatever is asked, so a smaller request would fail the same way.
+    assert "smaller max_side" not in refused
 
 
 def test_a_black_and_white_scan_keeps_its_thin_lines_when_downscaled(served):
@@ -238,3 +240,127 @@ def test_a_black_and_white_scan_keeps_its_thin_lines_when_downscaled(served):
     seen = Image.open(io.BytesIO(base64.b64decode(result.content[1].data))).convert("L")
     # Half the columns are black, so the shrunk image is mid grey, not blank white.
     assert 64 < sum(seen.getdata()) / (seen.size[0] * seen.size[1]) < 192
+
+
+def test_an_agent_can_ask_for_the_original_resolution(served):
+    """No size ceiling in code: a model that reads detail better at full size can have it."""
+    mcp, client = served
+    path = _upload(client, "IMG_0010.jpg", _photo(3000, 2000, orientation=6), "image/jpeg")
+
+    result = _call(mcp, {"kind": "image", "path": path, "max_side": "original"})
+
+    [shown] = result.structured_content["images"]
+    assert shown["shown_pixels"] == shown["original_pixels"] == [2000, 3000]
+
+
+def test_the_default_size_comes_from_the_setting(served, monkeypatch):
+    """The size a call gets by default is the deployment's setting, so a better model needs no release."""
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_SIDE", "640")
+    mcp, client = served
+    path = _upload(client, "IMG_0011.jpg", _photo(3000, 2000), "image/jpeg")
+
+    [shown] = _call(mcp, {"kind": "image", "path": path}).structured_content["images"]
+
+    assert max(shown["shown_pixels"]) == 640
+
+
+def test_a_region_shows_its_detail_at_full_resolution(served):
+    """A crop must come from the full-resolution decode, not from an already shrunk image."""
+    from PIL import Image
+
+    mcp, client = served
+    # The left half is dark: the top-left quarter of this photo is all dark.
+    path = _upload(client, "IMG_0012.jpg", _photo(4000, 3000), "image/jpeg")
+
+    result = _call(mcp, {"kind": "image", "path": path, "region": [0, 0, 0.25, 0.25], "max_side": 1000})
+
+    [shown] = result.structured_content["images"]
+    # The region is 1000 x 750 stored pixels, so a 1000 px view keeps every one of them.
+    assert shown["shown_pixels"] == [1000, 750]
+    seen = Image.open(io.BytesIO(base64.b64decode(result.content[1].data))).convert("L")
+    assert sum(seen.getdata()) / (seen.size[0] * seen.size[1]) < 40
+
+
+def test_a_region_outside_the_image_is_refused_with_what_to_change(served):
+    mcp, client = served
+    path = _upload(client, "IMG_0013.jpg", _photo(800, 600), "image/jpeg")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path, "region": [0.5, 0, 0.6, 1]}).structured_content)
+
+    assert "IMAGE_REGION_INVALID" in refused
+    assert "x + width" in refused
+
+
+def _noise(width: int, height: int) -> bytes:
+    """A photo JPEG compresses badly, like a real one, so its size can pass an inline limit."""
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(3)
+    image = Image.frombytes("RGB", (width, height), bytes(rng.getrandbits(8) for _ in range(width * height * 3)))
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=95)
+    return out.getvalue()
+
+
+def test_a_view_over_the_clients_image_limit_is_shrunk_and_links_the_original(served, monkeypatch):
+    """A client that rejects a large inline image still gets a view, and the original's link for its own crop.
+
+    The client's limit applies to the base64 an image block carries, a third larger than the JPEG: a
+    view whose JPEG fits but whose base64 does not must still be shrunk.
+    """
+    mcp, client = served
+    path = _upload(client, "IMG_0014.jpg", _noise(600, 400), "image/jpeg")
+    full = _call(mcp, {"kind": "image", "path": path, "max_side": "original"})
+    sent = len(full.content[1].data)
+    limit = sent - 1000
+    assert limit > len(base64.b64decode(full.content[1].data)), "the JPEG alone must fit the limit"
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_INLINE_MAX_BYTES", str(limit))
+
+    result = _call(mcp, {"kind": "image", "path": path, "max_side": "original"})
+
+    [shown] = result.structured_content["images"]
+    assert shown["shrunk_to_fit"] is True and max(shown["shown_pixels"]) < 600
+    assert len(result.content[1].data) <= limit
+    assert shown["original_link"].startswith("https://archive.example/download?grant=")
+
+
+def test_a_view_longer_than_the_clients_pixel_limit_is_shrunk_and_links_the_original(served, monkeypatch):
+    """A client rejects an image past its pixel limit however few bytes it has."""
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_INLINE_MAX_SIDE", "300")
+    mcp, client = served
+    path = _upload(client, "IMG_0015.jpg", _photo(800, 600), "image/jpeg")
+
+    [shown] = _call(mcp, {"kind": "image", "path": path, "max_side": "original"}).structured_content["images"]
+
+    assert shown["shown_pixels"] == [300, 225] and shown["shrunk_to_fit"] is True
+    assert shown["original_link"].startswith("https://archive.example/download?grant=")
+
+
+def test_a_call_that_runs_out_of_request_time_returns_what_it_showed(served, monkeypatch):
+    """Past the request's time, a call keeps the images it has and names the rest, never fails whole."""
+    from exomem import request_budget
+
+    mcp, client = served
+    paths = [_upload(client, f"IMG_003{n}.jpg", _photo(400, 300), "image/jpeg") for n in range(3)]
+    monkeypatch.setattr(request_budget, "can_afford", lambda reserve: False)
+
+    meta = _call(mcp, {"kind": "image", "paths": paths}).structured_content
+
+    assert [item["path"] for item in meta["images"]] == paths[:1]
+    assert meta["not_shown"] == paths[1:]
+    assert "2 more ran out of request time" in meta["outcome"]
+
+
+def test_images_past_the_calls_byte_limit_are_listed_not_dropped(served, monkeypatch):
+    """No count cap: a call shows what fits and names the rest, so nothing goes missing unseen."""
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_CALL_BYTES", "1")
+    mcp, client = served
+    paths = [_upload(client, f"IMG_002{n}.jpg", _photo(400, 300), "image/jpeg") for n in range(3)]
+
+    meta = _call(mcp, {"kind": "image", "paths": paths}).structured_content
+
+    assert [item["path"] for item in meta["images"]] == paths[:1]
+    assert meta["not_shown"] == paths[1:]
+    assert "2 more did not fit" in meta["outcome"]
