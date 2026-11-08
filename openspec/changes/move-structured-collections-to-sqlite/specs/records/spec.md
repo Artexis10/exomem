@@ -176,3 +176,22 @@ Both modes SHALL return one batch receipt with the batch identity, row count, ou
 #### Scenario: A generic client bulk-loads from describe alone
 - **WHEN** a client authors a batch only from the `describe` example against a fresh sample collection
 - **THEN** the batch is accepted without a guessed field, code or limit
+
+### Requirement: Representability is a property of the storage strategy
+Records item values SHALL be judged representable according to the collection's storage strategy. For Markdown-item storage, string values MAY contain line breaks and other control characters; before commit the writer SHALL serialise the complete candidate frontmatter, parse it back with the same reader the collection uses, normalise both sides through the item schema, and refuse with `UNREPRESENTABLE_RECORD_VALUE` naming the field path only when a parsed value differs from its candidate value. For SQLite storage, string values MAY contain line breaks, because the store keeps each value as typed JSON and renders no row into a page. For Markdown-log storage, heading values, notes and delimited child-row values SHALL continue to refuse line breaks and the row delimiter, naming the field path. A committed Markdown-item value SHALL read back equal to the candidate value.
+
+#### Scenario: Multi-line text commits into a Markdown item
+- **WHEN** a Markdown-item append supplies a required string field whose value contains two consecutive line breaks
+- **THEN** the append commits, the item's canonical frontmatter parses back to the identical string, and a digest computed over the read-back value equals the digest computed over the candidate
+
+#### Scenario: A converted collection keeps accepting multi-line text
+- **WHEN** a bulk upsert or update on a collection that the cutover converted to SQLite storage supplies, or keeps, a string value with line breaks that its rows held in Markdown items
+- **THEN** the write commits and the value reads back unchanged
+
+#### Scenario: Markdown-log still refuses a line break
+- **WHEN** a Markdown-log append supplies a heading, note or child-row value containing a line break
+- **THEN** it refuses with `UNREPRESENTABLE_RECORD_VALUE` whose details name the field path and the reason, and nothing is written
+
+#### Scenario: Round-trip mismatch refuses before commit
+- **WHEN** serialising a candidate value would parse back to a different value
+- **THEN** the writer refuses naming the field path and stages nothing

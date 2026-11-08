@@ -31,7 +31,7 @@ from test_collection_store_s1_gate import (
 from test_collection_store_s1_gate import (
     host as serving_host,
 )
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import CID, manifest_path
 
 from exomem import cloud_import_job, held_fs, state_migration, state_paths, vault_portability
@@ -480,7 +480,7 @@ def test_canonical_snapshot_can_extend_the_lagging_replicas_marker(abc, tmp_path
     second = "66666666-6666-4666-8666-666666666666"
     result = admission.create_new(
         abc.session, abc.manager, manifest_path().replace("Work", "Later"),
-        summary_text().replace(CID, second), why="second fixture", request_id="second",
+        sqlite_text().replace(CID, second), why="second fixture", request_id="second",
         scaffold=True, fence_client=abc.operator,
     )
     assert result["status"] == "marker_admitted"

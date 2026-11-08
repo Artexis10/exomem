@@ -2453,7 +2453,23 @@ def _collections_main(argv: list[str]) -> int:
         help="with --plan-id: give up that unfinished export, which keeps every row in the store and the vault "
         "routed to it; no vault file changes",
     )
-    for command in (backup, adopt, create, rollback, migrate, export):
+    cutover = subcommands.add_parser(
+        "cutover",
+        help="move every structured collection to SQLite-only storage: back up, migrate the file collections, "
+        "convert the rest and check each one's rows; preview first",
+    )
+    cutover_step = cutover.add_mutually_exclusive_group(required=True)
+    cutover_step.add_argument("--dry-run", action="store_true", help="preview each collection's steps; writes nothing")
+    cutover_step.add_argument(
+        "--plan-id",
+        help="apply, resume or repeat exactly the preview with this identity, with the service stopped and "
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    cutover.add_argument("--why", help="reason recorded with each conversion (required with --plan-id)")
+    cutover.add_argument("--backup-to", type=Path,
+                         help="new snapshot file outside the vault, written and verified before any step; "
+                         "a resume names another new file")
+    for command in (backup, adopt, create, rollback, migrate, export, cutover):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2506,6 +2522,19 @@ def _collections_main(argv: list[str]) -> int:
                                                 retire_local=args.retire_local, abandon=args.abandon)
             print(json.dumps(result, sort_keys=True))
             if result.get("verdict") == "blocked":
+                return 1
+        elif args.command == "cutover":
+            from .collection_store import cutover as collections_cutover
+
+            if args.plan_id is not None and not args.why:
+                print("collections cutover: --plan-id needs --why", file=sys.stderr)
+                return 2
+            with library_scope():
+                result = (collections_cutover.preview(Path(args.vault)) if args.dry_run else
+                          collections_cutover.apply(Path(args.vault), plan_id=args.plan_id, why=args.why,
+                                                    backup_to=args.backup_to))
+            print(json.dumps(result, sort_keys=True))
+            if result.get("blockers"):
                 return 1
         elif args.command == "create":
             import hashlib

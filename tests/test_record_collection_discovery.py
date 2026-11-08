@@ -48,7 +48,7 @@ def test_generic_client_can_discover_validate_create_inspect_and_append_from_emp
     assert described["closed_values"] == {
         "semantic_profile": ["planning", "records"],
         "collection_version": [1],
-        "storage.strategy": ["dataset", "markdown-items", "markdown-log"],
+        "storage.strategy": ["dataset", "markdown-items", "markdown-log", "sqlite"],
         "storage.format_version": [1],
         "item_schema.fields.*.type": [
             "array",
@@ -254,11 +254,11 @@ def test_validate_is_read_only_requires_no_reason_and_rejects_mutation_arguments
             "collection_version: 1",
         ),
         (
-            "strategy: sqlite",
+            "strategy: spreadsheet",
             "UNSUPPORTED_STORAGE_STRATEGY",
             "storage.strategy",
-            "sqlite",
-            ["dataset", "markdown-items", "markdown-log"],
+            "spreadsheet",
+            ["dataset", "markdown-items", "markdown-log", "sqlite"],
             "strategy: markdown-items",
         ),
     ],

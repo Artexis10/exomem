@@ -70,6 +70,25 @@ def unbound() -> Iterator[None]:
         _BOUND.reset(token)
 
 
+@contextmanager
+def producing(vault_root: Path, writer: CollectionWriter) -> Iterator[None]:
+    """Bind the producer's ``writer`` in place of the request's while the producer writes.
+
+    Opening the producer's writer retires the one a served request borrowed (``runtime.lent``), so a
+    canonical read nested in the producer's work reads through the producer's writer and transaction.
+    A context bound to no writer for this vault stays unbound.
+    """
+    binding = _BOUND.get()
+    if binding is None or not _bound_to(binding, vault_root):
+        yield
+        return
+    token = _BOUND.set((binding[0], writer, binding[2]))
+    try:
+        yield
+    finally:
+        _BOUND.reset(token)
+
+
 def _bound_to(binding: tuple[Path, CollectionWriter, bool], vault_root: Path) -> bool:
     # The vault root's canonical form is configuration, so a request's resolution scope resolves it once.
     return binding[0] == state_paths.resolved_vault_path(vault_root, expanduser=False)
@@ -532,7 +551,7 @@ def dispatch(
         if action == "create" and binding[2]:
             from .runtime import served_create
 
-            created = served_create(vault_root, args)
+            created = served_create(vault_root, args, facade_profile=profile)
             if created is not None:
                 return True, created
         if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
@@ -558,21 +577,31 @@ def dispatch(
 
         return True, route.run(writer, args["collection"], args["query"], facade_profile=profile)
     if action == "query":
-        from .. import planning, record_governance
+        from .. import collection_profiles, planning, record_governance
 
         collection = args.pop("collection")
+        # A query that names one row answers that row and its body; Records names the key item_key, Planning plan_id.
+        key = args.pop("item_key", args.pop("plan_id", None))
         with writer.read_collection(collection, facade_profile=profile) as manifest:
+            if key is not None:
+                column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
+                args["filters"] = [{"column": column, "op": "eq", "value": key}]
+                args["limit"] = 1
             if profile == "planning":
-                return True, planning.query(vault_root, manifest, **args)
-            include_history = args.pop("include_agent_history", False)
-            from .history import agent_history
+                # One named row is found whatever its lifecycle.
+                projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+            else:
+                include_history = args.pop("include_agent_history", False)
+                from .history import agent_history
 
-            result = record_governance.query_collection(vault_root, manifest, **args)
-            projected = record_governance.project_query_result(
-                result, manifest, output_format=args.get("output_format", "json"),
-                agent_history=agent_history(writer, manifest) if include_history else None,
-            )
-            projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
+                result = record_governance.query_collection(vault_root, manifest, **args)
+                projected = record_governance.project_query_result(
+                    result, manifest, output_format=args.get("output_format", "json"),
+                    agent_history=agent_history(writer, manifest) if include_history else None,
+                )
+                projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
+            if key is not None and projected.get("rows"):
+                projected = {**projected, **writer.row_body(manifest.collection_id, key)}
             return True, projected
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)

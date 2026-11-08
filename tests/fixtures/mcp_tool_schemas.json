@@ -1843,7 +1843,7 @@
             },
             "plan_id": {
               "type": "string",
-              "description": "row plan_id."
+              "description": "row plan_id; on query, that item and its body."
             },
             "expected_container_hash": {
               "type": "string",
@@ -2199,7 +2199,7 @@
             },
             "item_key": {
               "type": "string",
-              "description": "Update UUID; append uses the natural key."
+              "description": "Row UUID; on query, that row with its body; append uses the natural key."
             },
             "expected_container_hash": {
               "type": "string",
@@ -3009,6 +3009,20 @@
                 "kind": {
                   "const": "collections-store",
                   "type": "string"
+                },
+                "cursor": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "collections-cutover",
+                  "type": "string"
                 }
               },
               "required": [
@@ -3144,10 +3158,7 @@
                   "type": "string"
                 },
                 "run_id": {},
-                "cursor": {
-                  "type": "string",
-                  "description": "A next_cursor of a maintenance-job receipt."
-                }
+                "cursor": {}
               },
               "required": [
                 "kind"
@@ -3457,6 +3468,10 @@
               "minimum": 0,
               "type": "integer",
               "default": 5
+            },
+            "cursor": {
+              "type": "string",
+              "description": "The next_cursor of the previous page."
             },
             "rebuild_embeddings": {
               "description": "fix only.",
@@ -6193,7 +6208,8 @@
                     "csv"
                   ],
                   "type": "string"
-                }
+                },
+                "plan_id": {}
               },
               "required": [
                 "kind",
@@ -6211,10 +6227,7 @@
                 "collection": {},
                 "limit": {},
                 "continuation": {},
-                "plan_id": {
-                  "description": "row plan_id.",
-                  "type": "string"
-                }
+                "plan_id": {}
               },
               "required": [
                 "kind",
@@ -6237,6 +6250,10 @@
             },
             "continuation": {
               "type": "string"
+            },
+            "plan_id": {
+              "type": "string",
+              "description": "row plan_id; on query, that item and its body."
             }
           }
         }
@@ -6399,6 +6416,7 @@
                   ],
                   "type": "string"
                 },
+                "item_key": {},
                 "query": {
                   "type": "object",
                   "description": "v1 query object; grammar via describe."
@@ -6420,10 +6438,7 @@
                 "collection": {},
                 "limit": {},
                 "continuation": {},
-                "item_key": {
-                  "description": "Update UUID; append uses the natural key.",
-                  "type": "string"
-                }
+                "item_key": {}
               },
               "required": [
                 "kind",
@@ -6477,6 +6492,10 @@
             },
             "continuation": {
               "type": "string"
+            },
+            "item_key": {
+              "type": "string",
+              "description": "Row UUID; on query, that row with its body; append uses the natural key."
             }
           }
         }
