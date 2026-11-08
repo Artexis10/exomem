@@ -932,6 +932,29 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     return frozenset(carried)
 
 
+def _warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
+    """Build the method-unit statistics the promoted worker's first task context would build. Reads only.
+
+    Without this the first task context after a handoff builds them, which took 41 s on a vault of about
+    four thousand pages and 6 s on the next one. The standby becomes the serving process, so what it holds
+    in memory before promotion is what that request reuses. The post-promotion request-path warm cannot
+    do it: its neutral turn raises no method query. Only over a proven live catalogue, because a detached
+    build's rows are replaced at promotion and statistics over them would be built for nothing. Never
+    raises, and builds nothing when warm-up is disabled or the warm budget is already spent.
+    """
+    if not warmup.warmup_enabled() or time.monotonic() >= deadline:
+        return
+    from . import working_set
+
+    began = time.monotonic()
+    try:
+        outcome = working_set.warm_owner_method_units(vault_root)
+    except Exception:  # noqa: BLE001 - the first request builds them itself when this fails
+        log.info("standby method-unit statistics warm failed", exc_info=True)
+        return
+    log.info("standby method-unit statistics warm: %s (%.1f s)", outcome, time.monotonic() - began)
+
+
 def warm(vault_root: Path) -> None:
     """Warm a standby to cutover readiness without owning any state.
 
@@ -951,6 +974,7 @@ def warm(vault_root: Path) -> None:
 
     vault_root = Path(vault_root)
     started = time.monotonic()
+    catalogue_proven = False
     readiness.begin_warm()
     try:
         # Seed this process's recall registry before anything reads it. The
@@ -964,6 +988,7 @@ def warm(vault_root: Path) -> None:
             log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
             _warm_proven_catalogue(vault_root)
+            catalogue_proven = True
         elif prepare_detached_catalog(vault_root):
             # No caches are warmed over rows promotion replaces. The build took
             # up to a minute, during which this unwatched registry went stale;
@@ -976,6 +1001,7 @@ def warm(vault_root: Path) -> None:
             # A release-change build that ran and failed falls back to the
             # ordinary proof now, not at the next re-proof poll.
             _warm_proven_catalogue(vault_root)
+            catalogue_proven = True
         else:
             log.info(
                 "standby retrieval catalog is not current; awaiting a current "
@@ -1003,6 +1029,10 @@ def warm(vault_root: Path) -> None:
             )
         finally:
             readiness.finish_warm()
+    if catalogue_proven:
+        # After the last cutover component, because it is no component: it takes the better part of a
+        # minute on a large vault, and a standby that waited on it would hold the upgrade back for it.
+        _warm_method_unit_statistics(vault_root, deadline=started + standby_warm_budget())
 
 
 def start_warm(vault_root: Path) -> threading.Thread:

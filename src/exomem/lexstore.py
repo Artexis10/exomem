@@ -2618,6 +2618,12 @@ def _schedule_repair(
     a full pass is already active are one level-triggered observation and are
     coalesced into that pass instead of creating an unbounded rebuild chain.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # The serving worker is the one repair owner, and a standby's read can find the catalogue
+        # one publication ahead of its unwatched registry. A rebuild here would be a publication.
+        return False
     # Pending-only callers already hold the resolved key; idle recovery must
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
