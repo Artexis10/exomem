@@ -1404,19 +1404,9 @@ def _capture_source_adoption(
             outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
-        # After staging, before the commit boundary, as the ordinary path does: the bytes are already
-        # here, so a new key for them reports the earlier copy and writes nothing.
-        duplicate = _source_duplicate(
-            vault_root, destination, artifact.sha256,
-            raw_protection=bool(source_fields.get("raw_protection")),
-        )
-        if duplicate is not None:
-            mark_active_mutation_committed()
-            outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
-            return _finish_adoption(outcomes)
-
         manager = active_manager()
         payload: dict | None = None
+        duplicate: DuplicateArtifact | None = None
         try:
             with manager.absorbing_mutation_guard(
                 vault_root,
@@ -1431,24 +1421,35 @@ def _capture_source_adoption(
                     _assert_replay_identity(vault_root, raced, artifact, lane="source")
                     payload = None
                 else:
-                    result = add_module.add(
-                        vault_root,
-                        source_schema,
-                        content="",
-                        title=title,
-                        artifact=add_module.SourceArtifact(
-                            staged_path=artifact.path,
-                            filename=artifact.filename,
-                            content_type=artifact.content_type,
-                        ),
-                        adoption_seed=envelope.seed(
-                            lane="source", destination=destination
-                        ),
-                        **source_fields,
+                    # Looked up and committed under this one acquisition: a lookup made before the boundary
+                    # lets two identical hand-overs both find nothing, and both store.
+                    duplicate = _source_duplicate(
+                        vault_root, destination, artifact.sha256,
+                        raw_protection=bool(source_fields.get("raw_protection")),
                     )
-                    payload = result.as_dict()
+                    if duplicate is None:
+                        result = add_module.add(
+                            vault_root,
+                            source_schema,
+                            content="",
+                            title=title,
+                            artifact=add_module.SourceArtifact(
+                                staged_path=artifact.path,
+                                filename=artifact.filename,
+                                content_type=artifact.content_type,
+                            ),
+                            adoption_seed=envelope.seed(
+                                lane="source", destination=destination
+                            ),
+                            **source_fields,
+                        )
+                        payload = result.as_dict()
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(raced.receipt)
+            elif duplicate is not None:
+                # A terminal answer about canonical state with nothing written: the earlier copy.
+                mark_active_mutation_committed()
+                outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
             else:
                 mark_active_mutation_committed()
                 outcomes[selected_index] = _stored_outcome(

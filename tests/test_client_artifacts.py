@@ -1709,6 +1709,72 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     assert commits == ["commit", "commit", "commit"]
 
 
+def test_two_simultaneous_identical_hand_overs_under_different_identities_store_one_original(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second hand-over finds the first one's copy, because it looks up inside the boundary it commits in.
+
+    Both calls stage before either commits. The first holder stays inside the real boundary until the
+    second call is queued behind it, which is the interleaving that made both store when the lookup ran
+    before the boundary.
+    """
+    import uuid
+
+    from exomem import client_artifacts, media_processing
+
+    payload = b"synthetic hand-over bytes"
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        return _staged(tmp_path, file["file_id"], "brief.bin", payload)
+
+    entries: list[str] = []
+    second_is_queued = threading.Event()
+    real_boundary = client_artifacts.active_manager()
+
+    class _FirstHolderWaitsForTheSecond:
+        @contextmanager
+        def absorbing_mutation_guard(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            entries.append(threading.current_thread().name)
+            first, queued = len(entries) == 1, len(entries) == 2
+            if queued:
+                second_is_queued.set()
+            with real_boundary.absorbing_mutation_guard(*args, **kwargs) as held:
+                if first:
+                    assert second_is_queued.wait(timeout=30), "the second hand-over never reached the boundary"
+                yield held
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _FirstHolderWaitsForTheSecond)
+    results: dict[str, dict] = {}
+
+    def hand_over(identity: str) -> None:
+        results[identity] = client_artifacts.capture_source_artifacts(
+            vault,
+            source_schema=source_schema,
+            title="Reasoning input",
+            source_type="research-report",
+            files=[{"download_url": f"https://files.example/{uuid.uuid4().hex}", "file_id": "offer"}],
+            adoption={"key": identity, "trigger": "handed_over", "selected_file_id": "offer"},
+        )
+
+    threads = [threading.Thread(target=hand_over, args=(identity,)) for identity in ("brief:first", "brief:second")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+
+    rows = [result["files"][0] for result in results.values()]
+    states = {row.get("state", row["outcome"]): row for row in rows}
+    assert sorted(states) == ["already_stored", "stored"], rows
+    assert states["already_stored"]["duplicate_of"]["path"] == states["stored"]["stored_path"]
+    folder = vault / "Knowledge Base" / "Sources" / "Reports"
+    held = [entry for entry in folder.iterdir() if entry.name != "index.md"]
+    assert sorted(entry.suffix == ".md" for entry in held) == [False, True]
+    assert [entry.read_bytes() for entry in held if entry.suffix != ".md"] == [payload]
+
+
 # --------------------------------------------------------------------------- #
 # Media fan-out leaves the critical section
 # --------------------------------------------------------------------------- #
