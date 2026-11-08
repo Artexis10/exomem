@@ -3597,6 +3597,8 @@ FILING_COUNTS = ("filed", "failed", "remaining", "pages_done")  # nosemgrep: ep-
 _WORKING, _STOPPED, _DONE = FILING_STATES
 # The driver's own steps that publish: a reconciling call runs only the apply that its identity stored.
 _APPLY_STEPS = ("apply", "retry")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `apply`.
+# What a done `file` reply carries from the last `finish` reply, which reports on that page alone.
+_PAGE_REPORT = ("coverage", "first_question", "route", "indexing")  # nosemgrep: ep-word-set -- `finish`'s closed reply fields.
 
 
 def _chain_end(store: AdoptionRunStore, run: dict) -> dict:
@@ -3933,9 +3935,8 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         if finished is not None:
             finish = _presented_finish(finished)
             # A `finish` describes its own page, so it sits under a key that names that page, never as the import's totals.
-            # nosemgrep: ep-word-set -- the closed fields of `finish`'s own reply that a done `file` reply carries.
             done["last_finished_page"] = {"page": _page_number(finished), "run_id": finished["run_id"], **{
-                key: finish[key] for key in ("coverage", "first_question", "route", "indexing") if key in finish
+                key: finish[key] for key in _PAGE_REPORT if key in finish
             }}
         if residual is not None:
             done["residual"] = residual
