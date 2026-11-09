@@ -8375,6 +8375,11 @@ class WikilinkResolver:
         return resolver
 
     def _build(self) -> None:
+        from .vault_store import mode
+
+        if mode.store_mode_for_reads(self.vault_root):
+            self._build_from_store()
+            return
         vault_resolved = self.vault_root.resolve()
         for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
             request_budget.checkpoint()
@@ -8383,6 +8388,30 @@ class WikilinkResolver:
             except ValueError:
                 continue
             self._add_entry(rel, self._read_title_lower(md))
+
+    def _build_from_store(self) -> None:
+        """Build from the store's pages, plus the Markdown files that the store does not own.
+
+        The store holds every page that it owns, so a file at an owned path is its projection or a
+        stray and is left out. The walk of the disk adds a collection layer and a file outside the
+        Knowledge Base folder, which the store does not own.
+        """
+        from .vault_store import ownership, read
+
+        with read.snapshot(self.vault_root) as view:
+            entries = list(view.resolver_entries())
+        vault_resolved = self.vault_root.resolve()
+        for md in walk_vault_md(self.vault_root):
+            request_budget.checkpoint()
+            try:
+                rel = md.resolve().relative_to(vault_resolved).as_posix()
+            except ValueError:
+                continue
+            if ownership.classify(rel) is not ownership.Ownership.PAGE:
+                entries.append((rel, self._read_title_lower(md)))
+        for rel, title in sorted(entries, key=lambda entry: entry[0]):
+            request_budget.checkpoint()
+            self._add_entry(rel, title)
 
     @classmethod
     def from_maps(
@@ -8492,6 +8521,21 @@ class WikilinkResolver:
             if candidate.title_key:
                 _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
+    def _current_title(self, vault_root: Path, rel_path: str) -> tuple[bool, str | None]:
+        """Whether the page exists now, and its title key: from the store when it serves the page, else the file."""
+        from .vault_store import read
+
+        try:
+            page = read.owned_page(vault_root, rel_path)
+        except FileNotFoundError:
+            return False, None
+        if page is not None:
+            return True, title_key_from_bytes(page.body, rel_path)
+        abs_path = vault_root / rel_path
+        if not abs_path.is_file():
+            return False, None
+        return True, self._read_title_lower(abs_path)
+
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
@@ -8537,7 +8581,7 @@ class WikilinkResolver:
         deleted = _norm(deleted_rels)
         conflict = changed & deleted
         for rel_path in conflict:
-            if (vault_root / rel_path).is_file():
+            if self._current_title(vault_root, rel_path)[0]:
                 deleted.discard(rel_path)
             else:
                 changed.discard(rel_path)
@@ -8546,9 +8590,9 @@ class WikilinkResolver:
         for rel_path in deleted | changed:
             self._remove_entry(rel_path)
         for rel_path in sorted(changed):
-            abs_path = vault_root / rel_path
-            if abs_path.is_file():
-                self._add_entry(rel_path, self._read_title_lower(abs_path))
+            found, title = self._current_title(vault_root, rel_path)
+            if found:
+                self._add_entry(rel_path, title)
 
     def on_entries_changed(
         self,

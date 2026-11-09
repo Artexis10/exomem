@@ -51,7 +51,6 @@ from typing import Any, NamedTuple
 
 from . import find as find_module
 from . import freshness, recall_policy, text_scripts
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -1001,16 +1000,9 @@ def corpus_key(vault_root: Path, scope: str) -> tuple:
 
 
 def _recall_walk(vault_root: Path, scope: str):
-    if scope == "vault":
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
-    else:
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
-            return ()
-        walk = find_module._walk_md(kb)
-    return recall_policy.iter_recall_markdown(vault_root, walk)
+    return recall_policy.iter_recall_markdown(
+        vault_root, find_module._corpus_walk(vault_root, scope)
+    )
 
 
 _INDEX = BM25Index()

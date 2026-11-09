@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import reserved_paths, vault
+from .. import find_corpus, reserved_paths, vault
 from ..collection_store import connection, runtime
 from . import mode, ownership
 
@@ -152,6 +152,15 @@ class StoreSnapshot:
             page = self.page(meta.path)
             title = None if page is None else vault.title_key_from_bytes(page.body, meta.path)
             yield meta.path, title
+
+
+def corpus_member(rel: str, scope: str) -> bool:
+    """Whether the corpus of ``scope`` ("kb" or "vault") holds this stored page, as a walk of the disk would.
+
+    The Knowledge Base corpus is ``find_corpus.walk_md`` over that folder; the vault corpus is
+    ``vault.walk_vault_md``. The two differ in their anchor and in the folders they skip.
+    """
+    return find_corpus.kb_walk_member(rel) if scope == "kb" else _walk_member(rel)
 
 
 def _walk_member(rel: str) -> bool:

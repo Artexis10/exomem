@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -21,6 +22,9 @@ from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import relative_posix
+
+if TYPE_CHECKING:
+    from .vault_store.read import PageMeta
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +45,13 @@ EXCLUDED_DIR_NAMES = frozenset(
     }
 )
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
+
+
+def is_excluded_dir_name(name: str) -> bool:
+    """Whether a Knowledge Base walk skips the folder with this name: the one rule of every walk and of the store corpus."""
+    return name in EXCLUDED_DIR_NAMES or name.startswith(EXCLUDED_DIR_PREFIXES)
+
+
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 _DEFAULT_PAGE_CACHE_SIZE = 4096
@@ -101,9 +112,11 @@ class FrontmatterCache:
     """Per-process cache invalidated by file identity or content changes."""
 
     entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
-    _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
-        default_factory=dict, repr=False
-    )
+    #: A file's stat-and-hash signature, or ``("store", page revision, sha256)`` for a page that the store serves.
+    _signatures: dict[Path, tuple] = field(default_factory=dict, repr=False)
+    #: The store revision at which each stored page's signature was last checked: while the store stays at
+    #: that revision no page of it changed, so a hit needs no per-page query.
+    _validated_at: dict[Path, int] = field(default_factory=dict, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     _weights: dict[Path, int] = field(default_factory=dict, repr=False)
     _retained_bytes: int = field(default=0, repr=False)
@@ -139,6 +152,7 @@ class FrontmatterCache:
         with self._lock:
             self.entries.clear()
             self._signatures.clear()
+            self._validated_at.clear()
             self._weights.clear()
             self._retained_bytes = 0
 
@@ -146,6 +160,7 @@ class FrontmatterCache:
         with self._lock:
             removed = self.entries.pop(path, None) is not None
             self._signatures.pop(path, None)
+            self._validated_at.pop(path, None)
             self._retained_bytes -= self._weights.pop(path, 0)
             return removed
 
@@ -227,6 +242,9 @@ class FrontmatterCache:
         return tuple(stale)
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
+        stored = _stored_relative(path, vault_root)
+        if stored is not None:
+            return self._get_stored(path, vault_root, stored)
         snapshot = _read_page_snapshot(path, vault_root)
         if snapshot is None:
             self._discard(path)
@@ -244,6 +262,60 @@ class FrontmatterCache:
             snapshot.identity.inode,
             hashlib.blake2b(content, digest_size=16).digest(),
         )
+        cached = self._resident(path, signature)
+        if cached is not None:
+            return cached
+        return self._admit(
+            path, signature, parse_page(path, snapshot.mtime, vault_root, content=content)
+        )
+
+    def _get_stored(self, path: Path, vault_root: Path, rel: str) -> ParsedPage | None:
+        """``get`` for a page that the store serves: the store's revision and hash decide, not a file's stat.
+
+        One snapshot gives the store revision and the page. A page last checked at this revision is
+        current, so it costs no query. Otherwise the page's revision and hash decide, and only a changed
+        page reads its body. ``rel`` names the page, so a link at ``path`` never names its target.
+        """
+        from .vault_store import read
+
+        with read.snapshot(vault_root) as view:
+            with self._lock:
+                held = self._signatures.get(path)
+                current = held is not None and self._validated_at.get(path) == view.revision
+            if current:
+                cached = self._resident(path, held)
+                if cached is not None:
+                    return cached
+            meta = view.page_meta(rel)
+            if meta is None:
+                self._discard(path)
+                return None
+            signature = ("store", meta.revision, meta.sha256)
+            cached = self._resident(path, signature)
+            if cached is None:
+                stored = view.page(rel)
+                if stored is None:  # the page left between the two reads of one snapshot: it cannot
+                    self._discard(path)
+                    return None
+                cached = self._admit(
+                    path,
+                    signature,
+                    parse_page(
+                        path,
+                        meta.mtime_ns / 1e9,
+                        vault_root,
+                        content=stored.body,
+                        resolved_relative=rel,
+                    ),
+                )
+            if cached is not None:
+                with self._lock:
+                    if self.entries.get(path) is cached:
+                        self._validated_at[path] = view.revision
+            return cached
+
+    def _resident(self, path: Path, signature: tuple) -> ParsedPage | None:
+        """The cached page when its signature is ``signature``, counted as a hit and kept most recent."""
         with self._lock:
             if len(self._signatures) != len(self.entries):
                 self._signatures = {
@@ -265,7 +337,11 @@ class FrontmatterCache:
                 self.hits += 1
                 self._evict_to_limits(byte_limit)
                 return cached
-        parsed = parse_page(path, snapshot.mtime, vault_root, content=content)
+        return None
+
+    def _admit(self, path: Path, signature: tuple, parsed: ParsedPage | None) -> ParsedPage | None:
+        """Replace the row for ``path`` by ``parsed`` under ``signature``, within the cache's limits."""
+        byte_limit = _page_cache_bytes()
         weight = _page_retained_bytes(parsed) if parsed is not None and byte_limit is not None else 0
         with self._lock:
             self._discard(path)
@@ -278,6 +354,22 @@ class FrontmatterCache:
                 self.entries.move_to_end(path)
                 self._evict_to_limits(byte_limit)
         return parsed
+
+
+def _stored_relative(path: Path, vault_root: Path) -> str | None:
+    """The vault-relative path of ``path`` when the store serves that page, else None: read the file.
+
+    The mode comes first: it is one stat for a file-mode vault, and the path rule then runs only in store mode.
+    """
+    from .vault_store import ownership
+
+    if not store_serves(vault_root):
+        return None
+    try:
+        rel = path.absolute().relative_to(vault_root.absolute()).as_posix()
+    except ValueError:
+        return None
+    return rel if ownership.classify(rel) is ownership.Ownership.PAGE else None
 
 
 CACHE = FrontmatterCache()
@@ -330,7 +422,7 @@ def register_path_custody() -> None:
     )
 
 
-def walk_freshness_key(paths) -> tuple[int, int, str]:
+def walk_freshness_key(paths, signature=None) -> tuple[int, int, str]:
     """(file count, max mtime_ns, digest of sorted path+metadata records).
 
     Digest-strength on purpose: count/max-mtime alone miss a delete paired
@@ -338,14 +430,123 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     older mtime. Every consumer that caches corpus-derived state (the hot
     find cache, BM25, the wikilink resolver, the inbound-link index) compares
     the whole triple, so those histories now invalidate correctly.
+
+    ``signature`` reads one path's change signature; it defaults to the path's stat, or, for the
+    corpus of a store-mode vault, to the store's row for a stored page (``signature_lookup``).
     """
+    read_signature = signature or signature_lookup(paths)
     entries: list[tuple[str, freshness.FileSignature]] = []
     for p in paths:
         try:
-            entries.append((str(p), freshness.stat_signature(p)))
+            entries.append((str(p), read_signature(p)))
         except OSError:
             continue
     return freshness.triple_from_entries(entries)
+
+
+@dataclass(frozen=True)
+class StoreCorpus:
+    """The pages of one scope in a store-mode vault, read from the store and not from a walk of the disk.
+
+    It lists the pages that the store serves, then the Markdown files that the store does not own (a
+    Records or Planning layer, a page outside the Knowledge Base folder), which a walk of the disk
+    finds. A file that lies at a path that the store owns is the projection of a stored page, or a
+    stray: the store decides, so the walk's copy of it is left out.
+    """
+
+    vault_root: Path
+    #: The store revision that ``pages`` was listed at.
+    revision: int
+    #: The stored pages of the scope, in path order.
+    pages: tuple[PageMeta, ...]
+    #: The walk of the disk for this scope; it runs once for each pass over ``other_paths``.
+    disk: Callable[[], Iterable[Path]] = field(repr=False)
+
+    def __iter__(self):
+        for meta in self.pages:
+            yield self.vault_root.joinpath(*meta.path.split("/"))
+        yield from self.other_paths()
+
+    def other_paths(self):
+        """The walk's files that the store does not own."""
+        from .vault_store import ownership
+
+        for path in self.disk():
+            try:
+                rel = relative_posix(path, self.vault_root)
+            except ValueError:
+                yield path
+                continue
+            if ownership.classify(rel) is not ownership.Ownership.PAGE:
+                yield path
+
+    def signature_lookup(self) -> Callable[[Path], freshness.FileSignature]:
+        """The change signature of each page: the store's row for a stored page, the stat of any other file.
+
+        A stored page's signature is its mtime, its page revision and its size, so a rewrite of the
+        page changes it. The lookup raises ``OSError`` for a file that cannot be stat'ed, as a stat does.
+        """
+        stored = {
+            self.vault_root.joinpath(*meta.path.split("/")): (meta.mtime_ns, meta.revision, meta.size)
+            for meta in self.pages
+        }
+        return lambda path: stored.get(path) or freshness.stat_signature(path)
+
+    def freshness_key(self) -> tuple[int, int, str]:
+        """``walk_freshness_key``'s triple over every page of the corpus."""
+        return walk_freshness_key(self, self.signature_lookup())
+
+
+def signature_lookup(paths) -> Callable[[Path], freshness.FileSignature]:
+    """The change signature of one page path of ``paths``: a stat in file mode, see ``StoreCorpus``."""
+    return paths.signature_lookup() if isinstance(paths, StoreCorpus) else freshness.stat_signature
+
+
+def store_serves(vault_root: Path) -> bool:
+    """Whether this vault is in store mode, so its pages come from the store and its files are a projection."""
+    from .vault_store import mode
+
+    return mode.store_mode_for_reads(vault_root)
+
+
+def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[[], Iterable[Path]]):
+    """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a ``StoreCorpus`` in store mode.
+
+    A caller hands over its own walk of the disk, as a function, so that a file-mode vault pays only
+    a read of the mode records and calls the walk it always called.
+    """
+    from .vault_store import read
+
+    if not store_serves(vault_root):
+        return disk_walk()
+    with read.snapshot(vault_root) as view:
+        members = tuple(meta for meta in view.pages() if read.corpus_member(meta.path, scope))
+    return StoreCorpus(
+        vault_root=Path(vault_root), revision=view.revision, pages=members, disk=disk_walk
+    )
+
+
+def kb_walk_member(rel: str) -> bool:
+    """Whether ``walk_md`` over the Knowledge Base folder reaches the file at this vault-relative path, by path alone.
+
+    The walk's entry rule (`_classify_walk_entry`) also lstat's each entry, and a stored page may have
+    no file yet, so it cannot judge a page. That is the gap: this keeps the rule's path tests (the
+    reserved registry, the excluded folders, the Markdown suffix, the conflict copy).
+    """
+    from .kbdir import kb_dirname
+    from .reserved_paths import classify_logical
+
+    prefix = kb_dirname() + "/"
+    if not rel.startswith(prefix):
+        return False
+    parts = rel[len(prefix) :].split("/")
+    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
+    return (
+        parts[-1].lower().endswith(".md")
+        and not is_sync_conflict_copy(parts[-1])
+        and not any(is_excluded_dir_name(part) for part in parts[:-1])
+        and not classify_logical(rel).blocked
+    )
 
 
 class EntryKind(StrEnum):
@@ -421,7 +622,7 @@ def _classify_walk_entry(
         return None, None
     kind = entry_kind(child, info)
     if kind is EntryKind.DIRECTORY:
-        if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(EXCLUDED_DIR_PREFIXES):
+        if is_excluded_dir_name(child.name):
             return None, info
         return "dir", info
     if (
