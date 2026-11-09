@@ -42,6 +42,7 @@ def resolve_existing(vault_root: Path, path: str) -> tuple[Path, str]:
     resolution = vault.resolve_under_vault(
         vault_root, path, refuse_withheld=True, return_details=True
     )
+    assert isinstance(resolution, vault.VaultPathResolution)
     rel = resolution.relative
     withheld = vault._write_target_withheld(
         vault_root, resolution.resolved, Path(vault_root).resolve()
@@ -140,6 +141,13 @@ def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
         raise availability.unrouted(operation, why)
 
 
+def _relative(vault_root: Path, path: str) -> str:
+    """The vault-relative form of a path, or ``VaultPathError`` when it does not resolve."""
+    resolution = vault.resolve_under_vault(vault_root, path, return_details=True)
+    assert isinstance(resolution, vault.VaultPathResolution)
+    return resolution.relative
+
+
 def owns_any(
     vault_root: Path, *, files: tuple[str, ...] = (), folders: tuple[str, ...] = ()
 ) -> bool:
@@ -152,13 +160,9 @@ def owns_any(
         return False
     try:
         return any(
-            ownership.classify(vault.resolve_under_vault(vault_root, path)[1])
-            is not ownership.Ownership.NONE
+            ownership.classify(_relative(vault_root, path)) is not ownership.Ownership.NONE
             for path in files
-        ) or any(
-            ownership.owns_folder(vault.resolve_under_vault(vault_root, path)[1])
-            for path in folders
-        )
+        ) or any(ownership.owns_folder(_relative(vault_root, path)) for path in folders)
     except vault.VaultPathError:
         return False
 
