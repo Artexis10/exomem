@@ -378,7 +378,11 @@ def test_a_compile_that_runs_out_of_budget_inside_serve_is_a_skipped_slice(vault
     assert skipped["map"] == expected["map"]
 
 
-def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# The heat boundary sits in `serve`, the release boundary in the compile.
+@pytest.mark.parametrize("spent_at", ["working_set.release", "working_set.heat"])
+def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, spent_at: str
+) -> None:
     from exomem import request_budget
 
     _structured(vault)
@@ -386,13 +390,13 @@ def test_a_slice_that_runs_out_of_budget_is_skipped_and_keeps_the_map(vault: Pat
     _cold()
     exhausted = working_set.budget_exhausted
 
-    def release_exhausted(stage, *args, **kwargs):
-        if stage != "working_set.release":
+    def spent_at_one_stage(stage, *args, **kwargs):
+        if stage != spent_at:
             return exhausted(stage, *args, **kwargs)
         request_budget.current().note_skipped(stage)
         return True
 
-    monkeypatch.setattr(working_set, "budget_exhausted", release_exhausted)
+    monkeypatch.setattr(working_set, "budget_exhausted", spent_at_one_stage)
     token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
     try:
         skipped = _activate(vault, turn=SLED_TURN)
@@ -427,6 +431,42 @@ def test_a_slice_that_spends_the_request_budget_leaves_the_map_its_guard(vault: 
         request_budget.reset_current(token)
     assert not packet.get("abstained")
     assert packet["turn_slice"]["state"] == "skipped" and packet["map"] == expected["map"]
+
+
+def test_a_deadline_inside_the_anchor_resolution_skips_the_slice_and_keeps_the_map(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved host once resolved every anchor however late; the loop stops at its deadline and the map is still served."""
+    from types import SimpleNamespace
+
+    from exomem import request_budget
+
+    _structured(vault)
+    expected = _activate(vault, turn=IRRELEVANT_TURN)
+    _cold()
+    # One check per anchor row, so the loop has a row to stop at after the first.
+    monkeypatch.setattr(request_budget, "CHECKPOINT_EVERY", 1)
+    clock = [1000.0]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    alias_phrases = working_set_resolve._exact_alias_phrases
+    rows_resolved: list[int] = []
+
+    def starves_in_the_first_row(*args, **kwargs):
+        rows_resolved.append(len(rows_resolved))
+        clock[0] += 60.0
+        return alias_phrases(*args, **kwargs)
+
+    monkeypatch.setattr(working_set_resolve, "_exact_alias_phrases", starves_in_the_first_row)
+    budget = request_budget.RequestBudget(seconds=50)
+    token = request_budget.set_current(budget)
+    try:
+        packet = _activate(vault, turn=SLED_TURN)
+    finally:
+        request_budget.reset_current(token)
+    assert rows_resolved == [0]
+    assert packet["turn_slice"]["state"] == "skipped" and packet["turn_slice"]["items"] == []
+    assert "working_set.resolve" in budget.truncated
+    assert not packet.get("abstained") and packet["map"] == expected["map"]
 
 
 def test_a_carry_that_finds_the_budget_spent_skips_the_slice_and_names_the_stage(

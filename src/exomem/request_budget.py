@@ -68,6 +68,9 @@ ACTIVATION_DOOR_BUDGET_SECONDS = 6.0
 #: one. One constant covers every activation boundary, including the guard;
 #: there is no per-stage tuning.
 ACTIVATION_STAGE_RESERVE_SECONDS = 1.0
+#: Items of one CPU-bound activation loop between two checks of the budget: often enough that a starved
+#: loop over thousands of rows stops soon after its deadline, rarely enough that the checks cost nothing.
+CHECKPOINT_EVERY = 256
 #: The conversation stage is optional enrichment: it starts only with the flat
 #: stage reserve AND its own worst-case cost (its p95 budget, 60 ms) to spare,
 #: so a request running short gives it up first and is compiled exactly as

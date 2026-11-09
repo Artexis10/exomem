@@ -166,9 +166,17 @@ class SourceProjection:
     ref: str | None = None
 
 
+class TaskDeadline(TimeoutError):
+    """The request deadline arrived while task sources were prepared, as distinct from any other timeout."""
+
+
 def _deadline_check() -> None:
     if working_set.budget_exhausted("working_set.task_context"):
-        raise TimeoutError("task source preparation is unavailable")
+        raise TaskDeadline("task source preparation is unavailable")
+
+
+def _serve_without_deadline() -> None:
+    """The final guard re-reads only leads already served, so a deadline that has passed must not drop them."""
 
 
 def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
@@ -420,8 +428,13 @@ def compile_context(
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         for candidate in discovered:
-            with find_types.timing_span(timings, "working_set.task_context_projection"):
-                source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            try:
+                with find_types.timing_span(timings, "working_set.task_context_projection"):
+                    source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            except TaskDeadline:
+                # The leads already projected are complete; the rest stay unread and the block says so.
+                _add_missing(block, "budget")
+                break
             if source is None:
                 _add_missing(block, "lane_failed")
                 continue
@@ -564,7 +577,9 @@ def guarded(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) ->
                 if expected is None:
                     return empty("partial", reset=True)
                 if path not in sources:
-                    sources[path] = project_source(root, path, caller, expected_hash=expected)
+                    sources[path] = project_source(
+                        root, path, caller, expected_hash=expected, check=_serve_without_deadline,
+                    )
                 source = sources[path]
                 if (source is None or source.version != item["source_version"]
                         or (method and (source.methods is None or item["ref"] not in source.methods))):
