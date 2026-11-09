@@ -61,7 +61,7 @@ DEVIATIONS = (
     "credentials Secret does not hold",
     "the break-glass identity is the disposable cluster's admin kubeconfig with its context renamed "
     "`break-glass`, run with the runner's kubectl",
-    "the blocks run from the checkout root with this interpreter first on PATH, so `python3` imports cellctl",
+    "the blocks run from the checkout root with `CELLCTL_PYTHON` set to this interpreter, which imports cellctl",
     "the rehearsal stops between the blocks unless the first exits 0, as the operator stops without "
     "`hash matches the binding`",
     "the rehearsal runs a fixity pass in the pod instead of waiting up to an hour for the cell's next one",
@@ -331,25 +331,31 @@ def _kubeconfig(ctx: Context) -> Path:
     return path
 
 
+def runbook_env(variables: dict[str, str], kubeconfig: Path) -> dict[str, str]:
+    """The environment an operator sets before the blocks: the runbook's variables and the reviewed cellctl Python."""
+
+    return {**os.environ, **variables, "KUBECONFIG": str(kubeconfig), "CELLCTL_PYTHON": sys.executable}
+
+
+def runbook_script(blocks: list[str]) -> str:
+    """Both blocks in one bash, stopping between them unless the first exits 0, as the operator stops."""
+
+    return blocks[0] + '[ "$?" = 0 ] || exit 3\n' + blocks[1]
+
+
 def _run_runbook(ctx: Context, variables: dict[str, str]) -> dict:
     """Run the runbook's two blocks in one bash, as an operator pastes them, and report what they printed."""
 
     blocks = runbook_blocks(RUNBOOK.read_text())
     if shutil.which("kubectl") is None:
         raise StepFailure("the runbook's blocks need kubectl on the runner")
-    env = {
-        **os.environ,
-        **variables,
-        "KUBECONFIG": str(_kubeconfig(ctx)),
-        # `manifests` runs `python3`: this interpreter's, which has cellctl's dependencies.
-        "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
-    }
+    env = runbook_env(variables, _kubeconfig(ctx))
     versions = run(["kubectl", "version", "--output=json"], env=env, check=False, timeout=60)
     try:
         version = json.loads(versions.stdout)
     except ValueError:
         version = {}
-    script = blocks[0] + '[ "$?" = 0 ] || exit 3\n' + blocks[1]
+    script = runbook_script(blocks)
     result = run(["bash", "-c", script], cwd=images.REPO_ROOT, env=env, check=False, timeout=900)
     printed = result.stdout.splitlines()
     return {
@@ -390,6 +396,7 @@ async def run_original_fixity(ctx: Context, plan: FixityPlan) -> dict:
         pod = ctx.runtime_pod(cell_id)
         if pod is None:
             raise StepFailure("the synthetic runtime is absent")
+        # The runtime container, as Context.exec_in names it.
         container = next(c for c in pod["spec"]["containers"] if c["name"] == "exomem")
         record["cell_resources"] = container.get("resources")
         began = time.monotonic()
@@ -414,7 +421,7 @@ async def run_original_fixity(ctx: Context, plan: FixityPlan) -> dict:
         check("table_rebuild_found_every_original",
               record["measurement"]["table_rebuild"]["originals"] >= seeded, blocking=False)
         check("full_pass_verified_every_original",
-              record["measurement"]["full_pass_under_read_cap"]["unverified_after"] == 0, blocking=False)
+              record["measurement"]["full_pass_under_read_cap"]["outcomes"] == {"verified": seeded}, blocking=False)
 
         record["phase"] = "backup"
         snapshot = await ctx.backup(cell_id)
@@ -430,9 +437,10 @@ async def run_original_fixity(ctx: Context, plan: FixityPlan) -> dict:
         record["phase"] = "choose"
         facts = _in_cell(ctx, cell_id, FACTS, *candidates, what="the candidate facts")
         intact = [fact for fact in facts if fact["file_sha256"] and fact["file_sha256"] == fact["binding_sha256"]]
-        check("an_intact_candidate", bool(intact))
         # Fixity restores an original with a media-store copy itself; the runbook is for one without.
-        chosen = next((fact for fact in intact if not fact["store_copy"]), intact[0])
+        without_copy = [fact for fact in intact if not fact["store_copy"]]
+        check("an_intact_candidate_without_a_store_copy", bool(without_copy))
+        chosen = without_copy[0]
         original, expected = chosen["path"], chosen["binding_sha256"]
         record["original"] = {"path": original, "kind": KIND, "expected_sha256": expected,
                               "size": chosen["size"], "state": chosen["state"], "store_copy": chosen["store_copy"]}
@@ -444,16 +452,13 @@ async def run_original_fixity(ctx: Context, plan: FixityPlan) -> dict:
         check("damage_kept_size_and_changed_bytes", after["size"] == chosen["size"]
               and after["file_sha256"] == damaged["sha256"] != expected)
 
-        if not chosen["store_copy"]:
-            record["phase"] = "alert"
-            record["pass_after_damage"] = _in_cell(ctx, cell_id, PASS, what="the pass after the damage")
-            check("pass_counted_the_damage", record["pass_after_damage"]["unresolved_outcomes"] == 1, blocking=False)
-            record["readiness_after_damage"] = await _await_originals(ctx, cell_id, 1)
-            check("readiness_counted_one_unresolved", _verdict(record["readiness_after_damage"]) is True
-                  and record["readiness_after_damage"] == {"state": ORIGINALS_MEASURED, "unresolved": 1},
-                  blocking=False)
-        else:
-            record["alert_path"] = "not exercised: every intact candidate has a media-store copy"
+        record["phase"] = "alert"
+        record["pass_after_damage"] = _in_cell(ctx, cell_id, PASS, what="the pass after the damage")
+        check("pass_counted_the_damage", record["pass_after_damage"]["unresolved_outcomes"] == 1, blocking=False)
+        record["readiness_after_damage"] = await _await_originals(ctx, cell_id, 1)
+        check("readiness_counted_one_unresolved", _verdict(record["readiness_after_damage"]) is True
+              and record["readiness_after_damage"] == {"state": ORIGINALS_MEASURED, "unresolved": 1},
+              blocking=False)
 
         record["phase"] = "runbook"
         record["runbook"] = _run_runbook(ctx, {"CELL_ID": cell_id, "SNAPSHOT": snapshot, "SCRATCH": scratch,
@@ -480,10 +485,10 @@ async def run_original_fixity(ctx: Context, plan: FixityPlan) -> dict:
         if problems:
             raise StepFailure(f"the original-fixity checks {problems} failed")
         record["state"] = "PASS"
-    except BaseException as error:  # noqa: BLE001 - interrupted work must retain a sanitized receipt
+    except Exception as error:  # noqa: BLE001 - any failure leaves a PARTIAL receipt; cancellation passes through
         record["state"] = "PARTIAL"
         record["error_type"] = type(error).__name__
-        # Only the rehearsal's own messages; command output and exception text stay out of the shared report.
+        # Only the rehearsal's own messages, whose tails of in-cell output come from the synthetic fixture.
         if isinstance(error, StepFailure):
             record["failure"] = str(error)[:400]
         raise StepFailure(f"original fixity stopped during {record['phase']}; inspect the sanitized receipt") from None
