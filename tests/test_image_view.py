@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import tempfile
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -117,9 +118,73 @@ def test_agent_compares_photos_in_one_call(served):
     assert [block.type for block in result.content] == ["text", "image", "image"]
 
 
-def test_a_raw_photo_names_the_download_instead(served):
+SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
+
+
+def test_agent_sees_a_camera_raw_photo_upright_at_its_sensor_size(served, vault):
+    """Defect: a preserved DNG answers IMAGE_FORMAT_UNSUPPORTED, so the agent cannot look at it."""
+    from PIL import Image
+
     mcp, client = served
-    path = _upload(client, "IMG_0002.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
+    # A phone raw shot in portrait: the sensor rows are stored turned, with orientation 6.
+    original = (SAMPLES / "ocr-eng.dng").read_bytes()
+    path = _upload(client, "PXL_0001.dng", original, "image/x-adobe-dng")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    [shown] = result.structured_content["images"]
+    assert shown["original_pixels"] == [1068, 280]
+    assert shown["shown_pixels"] == [1068, 280]
+    seen = Image.open(io.BytesIO(base64.b64decode(result.content[1].data)))
+    assert seen.size == (1068, 280), "the raw must reach the model upright"
+    assert hashlib.sha256((vault / path).read_bytes()).hexdigest() == hashlib.sha256(original).hexdigest()
+
+
+def test_a_camera_raw_too_large_is_refused_before_it_is_demosaiced(served, monkeypatch):
+    import rawpy
+
+    from exomem import image_view
+
+    mcp, client = served
+    path = _upload(client, "PXL_0002.dng", (SAMPLES / "ocr-eng.dng").read_bytes(), "image/x-adobe-dng")
+    monkeypatch.setattr(image_view, "MAX_DECODE_PIXELS", 1068 * 280 - 1)
+    demosaiced = []
+    imread = rawpy.imread
+
+    class Recorded:
+        def __init__(self, raw):
+            self.raw, self.sizes = raw, raw.sizes
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.raw.__exit__(*exc)
+
+        def postprocess(self, **kwargs):
+            demosaiced.append(True)
+            return self.raw.postprocess(**kwargs)
+
+    monkeypatch.setattr(rawpy, "imread", lambda source: Recorded(imread(source).__enter__()))
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_TOO_LARGE" in refused
+    assert demosaiced == [], "the raw was demosaiced before the size check"
+
+
+def test_a_damaged_camera_raw_is_named_undecodable(served):
+    mcp, client = served
+    path = _upload(client, "PXL_0003.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_UNDECODABLE" in refused
+
+
+def test_a_format_without_a_decoder_names_the_download_instead(served):
+    mcp, client = served
+    path = _upload(client, "cover.psd", b"8BPS" + b"\x00" * 64, "image/vnd.adobe.photoshop")
 
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 

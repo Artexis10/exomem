@@ -186,7 +186,7 @@ def _render(
 ) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes, bool]:
     from PIL import Image, ImageOps
 
-    with image_codecs.open_image(io.BytesIO(data), suffix=suffix) as opened:
+    with image_codecs.open_image(io.BytesIO(data), suffix=suffix, max_pixels=MAX_DECODE_PIXELS) as opened:
         # The stored size, before a reduced-scale decode changes what `size` reports.
         stored = opened.size
         if max_side is not None:

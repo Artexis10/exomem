@@ -1422,7 +1422,12 @@ def _caption_image(path: Path) -> str | None:
         log.warning("vision-caption model load failed; using OCR only", exc_info=True)
         return None
     try:
-        out = captioner(str(path))
+        from . import image_codecs
+
+        # The decoded image, not the path: the pipeline would open the path with every Pillow
+        # decoder and with none for camera raw.
+        with image_codecs.open_image(path) as image:
+            out = captioner(image.convert("RGB"))
         # transformers image-to-text returns [{"generated_text": "..."}].
         if isinstance(out, list) and out and isinstance(out[0], dict):
             caption = str(out[0].get("generated_text", "")).strip()
