@@ -100,8 +100,8 @@ def _listed(response: dict) -> list[str]:
 def _promote(call, item: dict, summary: str = "A synthetic concept.", **extra) -> dict:
     """Run the `create-entity` route a block names, choosing the type and summary as an agent does."""
     route = item["route"]
-    operation = {**route["args"]["operation"], "entity_type": "concept", "summary": summary}
-    return call(route["tool"], {"operation": operation, **extra})
+    arguments = {**route["args"]["arguments"], "entity_type": "concept", "summary": summary}
+    return call(route["tool"], {**route["args"], "arguments": arguments, **extra})
 
 
 def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no_entity(
@@ -124,8 +124,11 @@ def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no
     )
     for item in written["undeclared_referents"]["names"]:
         assert item["route"] == {
-            "tool": "change_connections",
-            "args": {"operation": {"kind": "create-entity", "name": item["name"], "ref": _page_path(written)}},
+            "tool": "manage_memory",
+            "args": {
+                "operation": "connections.create_entity",
+                "arguments": {"name": item["name"], "ref": _page_path(written)},
+            },
         }
         assert item["review"].startswith("exomem://review/write-advisory/")
         assert re.fullmatch(r"[0-9a-f]{24}", item["fingerprint"])
@@ -259,7 +262,7 @@ def test_a_name_that_two_pages_of_one_batch_link_is_listed_once(
     ]
     assert _listed(resumed) == ["Kestrel", "Salt Ledger", "Quiet Ferry"]
     kestrel = resumed["undeclared_referents"]["names"][0]
-    assert kestrel["route"]["args"]["operation"]["ref"].endswith("first-episode-note.md"), "the first page to link it"
+    assert kestrel["route"]["args"]["arguments"]["ref"].endswith("first-episode-note.md"), "the first page to link it"
 
 
 # The last alternative is a page's short id: its first part comes from a random page id, so it differs per vault.
@@ -397,7 +400,7 @@ def test_an_entity_made_through_the_route_names_the_originating_write_path_and_o
     _as(monkeypatch, "session-a")
     written = _note(call, "Harbour review", "Kestrel", full=True)
 
-    created = _promote(call, written["undeclared_referents"]["names"][0], response_detail="full")
+    created = _promote(call, written["undeclared_referents"]["names"][0], detail="full")
 
     entry = _log_entry(vault, _page_path(created))
     note_operation = _logged_operation_id(vault, _page_path(written))

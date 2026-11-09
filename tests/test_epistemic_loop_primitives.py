@@ -987,11 +987,9 @@ def test_governed_arguments_are_registered_on_every_generated_surface() -> None:
             / "mcp_tool_schemas.json"
         ).read_text(encoding="utf-8")
     )
-    operation = schemas["change_observations"]["inputSchema"]["properties"]["operation"]
-    branches = {branch["properties"]["kind"]["const"]: branch for branch in operation["oneOf"]}
-    for kind in ("add", "update"):
-        properties = {**branches[kind]["properties"], **operation.get("properties", {})}
-        assert {"verdict", "check_by", "id"} <= set(properties)
+    assert {"verdict", "check_by"} <= set(schemas["add_observation"]["inputSchema"]["properties"])
+    # An update names its unit by id; the unit's own governed metadata persists.
+    assert "observation" in schemas["edit_note"]["inputSchema"]["properties"]
 
 
 def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> None:
@@ -1011,18 +1009,17 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
             / "mcp_tool_schemas.json"
         ).read_text(encoding="utf-8")
     )
-    description = schemas["change_observations"]["description"]
-    operation = schemas["change_observations"]["inputSchema"]["properties"]["operation"]
-    update = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "update")
-    properties = {**update["properties"], **operation.get("properties", {})}
+    writing = Path("src/exomem/_scaffold/_Schema/references/writing.md").read_text(encoding="utf-8")
+    section = " ".join(
+        writing.split("### Updating one unit with `edit_note`", 1)[1].split("\n#", 1)[0].split()
+    )
+    properties = schemas["edit_note"]["inputSchema"]["properties"]
 
-    assert "omitted governed metadata and id persist" in description
-    assert "tags/context/relations clear unless resent" in description
-    assert "never discards an authored metadata row" not in description
-    for replaced in ("tags", "context", "relations"):
-        assert "Replaces on update" in properties[replaced]["description"]
-    for preserved in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
-        assert "'' clears" in properties[preserved]["description"]
+    assert "`verdict`, `check_by` and the unit id persist" in section
+    assert "`tags`, `context` and `links` are replace-on-omit" in section
+    assert "never discards an authored metadata row" not in section
+    for replaced in ("tags", "links"):
+        assert "the full list" in properties[replaced]["description"]
 
 
 # --------------------------------------------------------------------------
