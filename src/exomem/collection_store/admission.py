@@ -1026,7 +1026,7 @@ def require_owner(root, operation):
 
 
 #: Seconds the offline owner's hand-back has to drain views and publish the replica of the whole store.
-#: One mutation's timeout (5 s by default) is too short for a large store; this matches a backup's bound.
+#: One mutation's timeout (5 s by default) is too short for a large store.
 OFFLINE_HANDBACK_SECONDS = 300.0
 
 

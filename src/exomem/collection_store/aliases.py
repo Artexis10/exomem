@@ -95,8 +95,8 @@ def link_target(vault_root, target):
     checking = _CHECKING_LINK.set(True)
     try:
         row = read_named(vault_root, target)
-    except (OpError, CollectionStoreError):
-        # A store that this process cannot reach leaves the link a forward reference, as before conversion.
+    except (OpError, CollectionStoreError, collections.CollectionError):
+        # A store or row this process cannot read leaves the link a forward reference, as before conversion.
         return None
     finally:
         _CHECKING_LINK.reset(checking)
