@@ -346,26 +346,69 @@ def _lines_by_ref(packet: dict) -> dict[str, str]:
 
 
 @pytest.mark.usefixtures("anchors_packet")
-def test_context_renders_and_merges_units_that_differ_in_modality_or_asserter(vault: Path) -> None:
+def test_context_renders_and_merges_units_that_differ_in_modality(vault: Path) -> None:
+    """Catches a norm folded into a lede that states practice, and a modality that context drops.
+
+    The baseline page also held the vendor claim below. Serving the norm filled the lane, so
+    the vendor claim became a pointer, and it moved to its own test.
+    """
     packet = _activate(
         vault,
         "Deploys need two approvals.\n\n"
         "## Claim\n- id: norm\n- category: fact\n- modality: should\n\nDeploys need two approvals.\n\n"
         "## Claim\n- id: practice\n- category: fact\n\nDeploys need one approval.\n\n"
-        "## Claim\n- id: rule\n- category: fact\n- modality: must\n\nDeploys need one approval.\n\n"
+        "## Claim\n- id: rule\n- category: fact\n- modality: must\n\nDeploys need one approval.\n",
+    )
+    served = {unit["ref"]: unit for unit in packet["units"]}
+    lines = _lines_by_ref(packet)
+
+    # A `should` unit that repeats the page's lede, which states what is.
+    assert f"{POLICY_REF}#norm" in served  # FLIPS slice4: was absent (folded into the lede)
+    # Two units with one sentence and different modalities.
+    assert f"{POLICY_REF}#practice" in served  # CORE
+    assert f"{POLICY_REF}#rule" in served  # CORE
+    assert served[f"{POLICY_REF}#rule"]["provenance"]["modality"] == "must"  # FLIPS slice4: was absent
+    assert "must" in lines[f"{POLICY_REF}#rule"]  # FLIPS slice4: was absent
+    assert "modality" not in served[f"{POLICY_REF}#practice"]["provenance"]  # CORE: `is` stores nothing
+
+
+@pytest.mark.usefixtures("anchors_packet")
+def test_context_presents_a_vendors_figure_as_the_vendors_claim(vault: Path) -> None:
+    """Catches a third party's figure served as the vault's own fact."""
+    packet = _activate(
+        vault,
+        "Deploys need two approvals.\n\n"
         "## Claim\n- id: vendor\n- category: fact\n- asserted_by: Acme Hosting\n\n"
         "The service has 99.99% uptime.\n",
     )
     served = {unit["ref"]: unit for unit in packet["units"]}
     lines = _lines_by_ref(packet)
 
-    # A `should` unit that repeats the page's lede, which states what is.
-    assert f"{POLICY_REF}#norm" not in served  # FLIPS slice4: was absent (folded into the lede)
-    # Two units with one sentence and different modalities.
-    assert f"{POLICY_REF}#practice" in served  # CORE
-    assert f"{POLICY_REF}#rule" in served  # CORE
-    assert "modality" not in served[f"{POLICY_REF}#rule"]["provenance"]  # FLIPS slice4: was absent
-    assert "must" not in lines[f"{POLICY_REF}#rule"]  # FLIPS slice4: was absent
-    # A third party's figure.
-    assert "asserted_by" not in served[f"{POLICY_REF}#vendor"]["provenance"]  # FLIPS slice4: was absent
-    assert "Acme Hosting" not in lines[f"{POLICY_REF}#vendor"]  # FLIPS slice4: was absent
+    assert served[f"{POLICY_REF}#vendor"]["provenance"]["asserted_by"] == "Acme Hosting"  # FLIPS slice4: was absent
+    assert "Acme Hosting" in lines[f"{POLICY_REF}#vendor"]  # FLIPS slice4: was absent
+
+
+@pytest.mark.usefixtures("anchors_packet")
+def test_context_presents_each_holders_belief_about_one_claim(vault: Path) -> None:
+    """Catches one holder's belief replacing another's, or a belief served without its holder."""
+    packet = _activate(
+        vault,
+        "Deploys need two approvals.\n\n"
+        "## Claim\n- id: friday\n- category: fact\n\nThe deploy policy change ships by Friday.\n\n"
+        "## Belief\n- id: platform\n- category: fact\n- credence_holder: Platform team\n"
+        "- credence: likely\n- relations: assesses: [[Deploy policy#friday]]\n\n"
+        "The deploy policy change will ship by Friday.\n\n"
+        "## Belief\n- id: finance\n- category: fact\n- credence_holder: Finance lead\n"
+        "- credence: speculative\n- relations: assesses: [[Deploy policy#friday]]\n\n"
+        "The deploy policy change will ship by Friday.\n",
+    )
+    served = {unit["ref"]: unit for unit in packet["units"]}
+    lines = _lines_by_ref(packet)
+
+    for anchor, holder, level in (
+        ("platform", "Platform team", "likely"), ("finance", "Finance lead", "speculative"),
+    ):
+        provenance = served[f"{POLICY_REF}#{anchor}"]["provenance"]
+        assert (provenance["credence_holder"], provenance["credence"]) == (holder, level)
+        assert holder in lines[f"{POLICY_REF}#{anchor}"]
+        assert level in lines[f"{POLICY_REF}#{anchor}"]

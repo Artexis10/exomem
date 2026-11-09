@@ -461,7 +461,10 @@ def _without_lede_repeats(
     twice, charged twice, and reported as a second reference where there is
     one page. The page-level item already carries it, so the fragment goes.
     Keep qualified units: the page does not carry their metadata, authored
-    dates or correction links. Different lifecycles are not interchangeable.
+    dates or correction links. A unit with a `modality` row is one of them, so
+    a norm never folds into a lede that states what is, and a unit with
+    `asserted_by` stays that party's claim. Different lifecycles are not
+    interchangeable.
     Other units and the same sentence on another page are kept.
     """
     ledes: dict[str, list[tuple[str, str]]] = {}

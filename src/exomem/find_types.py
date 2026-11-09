@@ -537,6 +537,18 @@ class SemanticUnitHit:
     check_by: str | None = None
     as_of: str | None = None
     until: str | None = None
+    # A belief's rows and the statement rows (`semantic_units.UNIT_ROW_KEYS`). Context reads
+    # them; no serializer below emits them.
+    credence: str | None = None
+    credence_holder: str | None = None
+    credence_basis: str | None = None
+    asserted_by: str | None = None
+    modality: str | None = None
+    occurred_at: str | None = None
+    quantity_value: str | None = None
+    quantity_unit: str | None = None
+    quantity_error: str | None = None
+    inference_mode: str | None = None
     relation_match: dict[str, Any] | None = None
     bm25_rank: int | None = None
     bm25_score: float | None = None

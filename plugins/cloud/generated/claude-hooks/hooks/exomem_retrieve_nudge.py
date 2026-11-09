@@ -1849,8 +1849,12 @@ def _packet_lines(packet: dict) -> list[str]:
         if history:
             label = "carried history" if carried else "history"
         if isinstance(provenance, dict):
-            # These are closed semantic-metadata rows, rendered without interpreting prose.
-            for key in ("verdict", "check_by"):
+            # These are closed semantic-metadata rows, rendered without interpreting prose: the
+            # judgment, the revisit date, whose claim it is, how it binds and whose belief at
+            # what strength. This standalone hook cannot import the language's key list.
+            for key in (
+                "verdict", "check_by", "asserted_by", "modality", "credence_holder", "credence",
+            ):
                 value = provenance.get(key)
                 if value:
                     label += f" {key}={value}"

@@ -50,6 +50,11 @@ STRUCTURAL_FORMAT = 1
 
 #: Governed rich unit-metadata keys this module parses, validates, and projects.
 GOVERNED_UNIT_METADATA_KEYS = semantic_blocks.GOVERNED_UNIT_METADATA_KEYS
+# The governed rows `governed_row_values` projects: a belief's rows and the statement rows. The
+# other governed keys keep their own validators.
+UNIT_ROW_KEYS = (
+    *semantic_blocks.BELIEF_UNIT_METADATA_KEYS, *semantic_blocks.STATEMENT_UNIT_METADATA_KEYS,
+)
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -503,6 +508,17 @@ class UnitStructure:
     fingerprint: str | None = None
     as_of: str | None = None
     until: str | None = None
+    # The projected `UNIT_ROW_KEYS`, read from the stored rows as the parser reads them.
+    credence: str | None = None
+    credence_holder: str | None = None
+    credence_basis: str | None = None
+    asserted_by: str | None = None
+    modality: str | None = None
+    occurred_at: str | None = None
+    quantity_value: str | None = None
+    quantity_unit: str | None = None
+    quantity_error: str | None = None
+    inference_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,6 +779,10 @@ def interpret_structural_summary(
             row["start_offset"], unit_ref, fingerprint,
             as_of=calendar_date(row.get("metadata", {}).get("as_of")),
             until=calendar_date(row.get("metadata", {}).get("until")),
+            **(
+                governed_row_values(row["metadata"], kind=kind, language=language_registry)
+                if form == "rich" else {}
+            ),
         )
         for (row, form, kind, category, relations), (unit_ref, fingerprint, _) in zip(
             emitted, bindings, strict=True,
