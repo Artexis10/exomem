@@ -9,8 +9,8 @@ It still holds the stored per-cell key of each cell created before the switch, l
 
 ## Credentials
 
-Terraform creates the credentials above except the per-cell keys and the operator key. The cell-data keys come from
-`infra/terraform/cell-data/keys.tf`. The three media keys come from `infra/terraform/durability/media.tf`.
+Terraform creates the credentials below except the per-cell keys, the purge keys and the operator keys. The cell-data
+keys come from `infra/terraform/cell-data/keys.tf`. The four media keys come from `infra/terraform/durability/media.tf`.
 No media key can delete a file version. A captured edge key can still hide a name, and the media bucket's
 lifecycle rule deletes a hidden version when the grace period ends. The key watcher's hide budget and the
 grace period bound that exposure: see "Triage a burst of hides" in `cloud-media-edge.md`.
@@ -20,14 +20,18 @@ Each credential has one holder.
 | --- | --- | --- | --- | --- |
 | `exomem-cell-data-key-custodian` | cell-data | None. B2 allows key creation only on an account-level key. | `listKeys`, `writeKeys`, `deleteKeys` | The key custodian, in Secret `exomem-key-custodian-b2` |
 | `exomem-cell-data-cellctl-staging` | cell-data | The staging bucket | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | `cellctl`, for exports, imports and the staging sweep of a deletion |
-| `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log |
+| `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log and to relay deletion grants |
+| `exomem-cell-data-key-watcher-backup-list` | cell-data | The locked backup bucket | `listFiles` | The key watcher, to list each deleted cell's backup prefix, in secrets `B2_WATCHER_BACKUP_LIST_KEY_ID` and `B2_WATCHER_BACKUP_LIST_KEY` of environment `key-watcher` |
 | `<prefix>-media-edge` | founder | The media bucket | `readFiles`, `writeFiles` | The media edge, in Secret `exomem-media-edge-b2` |
-| `<prefix>-cellctl-media-list` | founder | The media bucket | `listBuckets`, `listFiles` | `cellctl`, to meter each cell's stored bytes. Source: `infra/terraform/durability/media.tf` |
+| `<prefix>-media-edge-list` | founder | The media bucket | `listFiles` | The media edge, to find a deleted cell's names for its purge, in Secret `exomem-media-edge-list` |
+| `<prefix>-cellctl-media-list` | founder | The media bucket | `listBuckets`, `listFiles` | `cellctl`, to meter each cell's stored bytes and to relay deletion grants. Source: `infra/terraform/durability/media.tf` |
 | `<prefix>-key-watcher-media-list` | founder | The media bucket | `listFiles` | The key watcher, to count hide markers, in secrets `B2_WATCHER_MEDIA_KEY_ID` and `B2_WATCHER_MEDIA_KEY` of environment `key-watcher` |
 | One key per cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | The cell's backup and restore Jobs, in Secret `cell-object-store-key` |
-| Operator key | One account per key | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles`; for founder also `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the clean-up script only |
+| One purge key per deleted cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listFiles`, `writeFiles` | The key custodian, for one pass of at most one hour. It deletes the key after the pass. |
+| Operator key | founder | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`, `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the old bucket's clean-up only |
+| Operator rescue key | cell-data or founder | One bucket: the locked backup bucket or the media bucket | `listFiles`, `deleteFiles` | The operator, for `--rescue` only. Create it for the rescue and delete it after. |
 
-The key custodian creates each per-cell key. `cellctl` cannot create that Secret.
+The key custodian creates each per-cell key and each purge key. `cellctl` cannot create that Secret.
 Until D3 is in force, `cellctl` can render a Job that reads the Secret, so it can reach a cell's key by that route.
 No other credential can create or delete a key.
 
@@ -72,18 +76,50 @@ owner of `contain-cloud-controller-compromise` first, because that change owns t
 start late. Until step 5, the watcher reports the new key as unpinned and the lifecycle rule as drift.
 A pinned set without `media` still parses, and its watcher counts no hides.
 
+## Pin the deletion watch
+
+The deletion watch lets the key watcher report each deleted cell's purge (`automate-cell-storage-deletion` D4).
+Do this before the purge is turned on, after "Pin the media watch". Agree the change with the owner of
+`contain-cloud-controller-compromise` first, because that change owns the pinned set.
+
+1. Apply the cell-data root and the durability root with the operator's approval. Expect one new key in each:
+   `key_watcher_backup_list` and `cloud_media_edge_list`.
+2. Set the watcher's backup list key from the cell-data outputs `key_watcher_backup_list_application_key_id`
+   and `key_watcher_backup_list_application_key`. Each command asks for its value.
+   `gh secret set B2_WATCHER_BACKUP_LIST_KEY_ID --env key-watcher`
+   `gh secret set B2_WATCHER_BACKUP_LIST_KEY --env key-watcher`
+3. Set the address of Substrate's deletion set. It must end with the same capability as `KEY_WATCHER_ALERT_URL`.
+   `gh secret set KEY_WATCHER_DELETIONS_URL --env key-watcher`
+4. Open your copy of the current pinned set.
+5. In the `cell-data` account, add the ID from `key_watcher_backup_list_application_key_id` to `pinned_key_ids`.
+6. In the `founder` account, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids`.
+7. Add the deletion watch at the top level, with the skew margin that you chose (the design proposes 60 minutes):
+   `"deletions": {"account": "cell-data", "media_account": "founder", "backup_key_id_env": "B2_WATCHER_BACKUP_LIST_KEY_ID", "backup_key_env": "B2_WATCHER_BACKUP_LIST_KEY", "purge_capabilities": ["listFiles", "writeFiles"], "skew_margin_minutes": <minutes>}`
+   On a platform without the media watch, set `media_account` to `null`.
+8. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+9. Run the watcher once: `gh workflow run b2-key-watcher.yml`.
+   Expect `0 active` for both accounts and a line `deletions: <n> in the set, <w> watched: ...`.
+
+The watcher reads the backup retention from the backup bucket's pinned `defaultRetention`, and the media
+grace from the media bucket's pinned lifecycle rule. It refuses a `purge_capabilities` equal to the per-cell
+shape. Until step 8, the watcher reports the new keys as unpinned. Until Substrate serves the deletion set,
+expect `deletions: unknown (DELETIONS_UNKNOWN)` and that alert. A pinned set without `deletions` still
+parses, and its watcher watches no deletion.
+
 ## Clean up after a cell deletion
 
-`cellctl` cannot delete the deleted cell's key. It cannot delete a new cell's backup files, which the lock keeps.
-A cell created before the key custodian keeps its backups in the old founder bucket. `cellctl` holds that
-cell's stored key until the cell migrates, but it does not delete the files. When a cell reaches `deleted`, `cellctl` raises the platform alert
-`cell-storage-cleanup-pending-<cell_id>`. It raises the alert again after each restart.
+The key custodian and the media edge purge every deleted cell's prefixes in the locked backup bucket and the
+media bucket, on the cell's deletion grant. The custodian also deletes the cell's key in the cell-data account.
+See "Purge a deleted cell's storage" in `cloud-cell-deletion.md`. The script has no apply mode for those buckets.
+
+This section covers only the old founder bucket. A cell created before the key custodian keeps its backups
+there, which has no lock and no executor. `cellctl` holds that cell's stored key until the cell migrates, but it
+deletes neither the key nor the files. When such a cell reaches `deleted`, `cellctl` raises the platform alert
+`cell-storage-cleanup-pending-<cell_id>`. It raises the alert again after each restart. The row keeps the cell's
+B2 key ID as the mark of that clean-up.
 
 The alert, `observed_at` and `updated_at` are inputs that `cellctl` controls. A compromised `cellctl`
-could use them to get a live cell's key deleted. Act only on what the control database says,
-and count the grace from your own first dry run. The custodian makes a key for every cell namespace,
-and `cellctl` clears the stored key ID at deletion. The database cannot say which account holds
-the key, so run the script for both accounts.
+could use them to get a live cell's key deleted. Act only on what the control database says.
 
 1. Run this read-only query on the control database.
    `SELECT cell_id, desired_state, observed_state FROM exomem_cloud_cells WHERE cell_id = '<cell_id>';`
@@ -94,61 +130,44 @@ the key, so run the script for both accounts.
    from the `cloud_backup_bucket_id` output of `infra/terraform/durability`.
    Check the corresponding `cloud_backup_bucket_name` output to confirm the intended bucket; pass its ID to `--bucket-id`.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account founder --bucket-id <old cloud bucket id>`
-5. Export the operator key for the `cell-data` account, then run its dry run.
-   `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id>`
-6. Write down the date that the `cell-data` dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
-7. If the `founder` dry run shows `keys_found` or `files_found` above 0, run its command again with `--apply`.
+5. If the dry run shows `keys_found` or `files_found` above 0, run its command again with `--apply`.
    This deletes the key and every file version under `cells/<cell_id>/` in the old bucket, hidden versions included.
    The old bucket has no lock, so no grace applies. Expect `keys_deleted` equal to `keys_found` and
-   `files_deleted` equal to `files_found`. For `cell-data`, use the command in step 8.
-8. For `cell-data`, add the date from step 6 to every later command.
-   `infra/scripts/cell_storage_cleanup.py <cell_id> --account cell-data --bucket-id <locked bucket id> --first-dry-run <date> --apply`
-9. Expect `hide=waiting` until the date in `grace_ends`. Rerun step 8 on or after that date.
-   Expect `hide=due` and `files_hidden` equal to `files_found`.
-10. Run the dry run again for both accounts. The clean-up is complete when `founder` and `cell-data` each show
-    `keys_found=0` and `files_found=0`. The alert does not show completion.
-11. If the cell used the media store, clean up the media bucket as well. See the next section.
+   `files_deleted` equal to `files_found`.
+6. Run the dry run again. The clean-up is complete when it shows `keys_found=0` and `files_found=0`.
+   The alert does not show completion.
 
-The grace starts from a date that you pass, not from a state file. The date is one value that you
-already keep with the deletion record. A file would need a path, a place that survives between sessions,
-and trust in its contents, with no gain.
-
-The script deletes only keys that the provider lists with the exact prefix `cells/<cell_id>/`.
-For `cell-data` it hides the cell's current backup files and never deletes a file version: the bucket's
-compliance lock keeps every version until its retention ends. For `founder` it deletes only versions that the
-provider lists under that prefix. Every step is safe to repeat.
-For `founder`, the listing includes unfinished large files, and the script sends the same
+The script deletes only keys that the provider lists with the exact prefix `cells/<cell_id>/`, and only
+versions that the provider lists under that prefix. Every step is safe to repeat.
+The listing includes unfinished large files, and the script sends the same
 [delete-file-version call](https://www.backblaze.com/apidocs/b2-delete-file-version) for each of them.
 This runbook does not rely on that call to cancel an unfinished upload, because that provider behaviour
 is unverified here. The final dry run counts unfinished files in `files_found`, so it shows any that remain.
-If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
+If `keys_found` is more than 1, stop and ask why the provider holds two keys for one cell.
 
 ## Media bucket of a deleted cell
 
 The media bucket stays in the founder account. Its only writer is the media edge, and no service holds
-`deleteFiles` on it. `cellctl` removes the cell from the edge's active set and reports `deleted` only after the
-edge shows that exact set (`add-cloud-media-store` D6, D9). So the alert for a cell that used the media store
-means the edge no longer admits that cell. The alert is still an input that a compromised `cellctl` controls:
-do the database check in steps 1 and 2 first. The bucket has no lock and its objects are the only copy,
-so the same 7-day grace applies, counted from your own first dry run.
+`deleteFiles` on it. `cellctl` reports a cell `deleted` only after the edge shows a set without the cell
+(`add-cloud-media-store` D6, D9). After the cell's `purge_after`, the edge's purge pass hides each current name
+under `cells/<cell_id>/`. The bucket's lifecycle rule deletes each hidden version when the media grace ends,
+and cancels each unfinished large file. The key watcher reports each step with `CELL_DELETION_PENDING`,
+`CELL_DELETION_HIDDEN` and `CELL_DELETION_ANOMALY`. Run no apply mode here: the script has none for this bucket.
 
-1. Export an operator key for the founder account that is limited to the media bucket, with `listFiles`, `deleteFiles`
-   and `writeFiles` (cancelling an upload is a write). It needs no key capability.
+Within the media grace, you can rescue a wrong deletion. Add the cell to the hold list `cellDeletion.holdCells`
+first, then run the script with `--rescue`. A rescued file is ciphertext. "Hold a cell", "Release a hold" and
+"Rescue hidden files" in `cloud-cell-deletion.md` give the steps, with the key and the dry run below.
+
+1. Export an operator key for the founder account that is limited to the media bucket, with `listFiles` and
+   `deleteFiles`. Deleting a hide marker deletes a file version. It needs no key capability.
    `export CELL_CLEANUP_B2_KEY_ID=<key id> CELL_CLEANUP_B2_APPLICATION_KEY=<application key>`
 2. Run the dry run. Take the media bucket's ID from the `cloud_media_bucket_id` output of `infra/terraform/durability`; check `cloud_media_bucket_name` for the intended bucket.
    `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id>`
-3. Write down the date that the dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
-4. Rerun the command with `--first-dry-run <date>` on every later run. Add `--apply` on or after the date in `grace_ends`.
-   Expect `delete=waiting` before that date, and no change.
-   `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id> --first-dry-run <date> --apply`
-5. Expect `delete=due`, `files_deleted` equal to `files_found` and `unfinished_cancelled` equal to `unfinished_found`.
-   The script deletes every file version under `cells/<cell_id>/`, hidden versions included. It cancels each unfinished
-   large file with the provider's cancel call. It does not rely on the delete call for an upload that never finished.
-6. Run the dry run again. The clean-up is complete when it shows `files_found=0` and `unfinished_found=0`.
+   Expect `uploads_found`, `hides_found` and `unfinished_found`. It changes nothing.
 
-Every step is safe to repeat. An upload that the edge started for this cell before its revocation stays unfinished until
-you cancel it here or the bucket's lifecycle rule removes it. If a rerun after the grace still shows a file, stop and
-ask why: the edge should admit no upload for this cell.
+After the media grace, the dry run shows `uploads_found=0` and `unfinished_found=0`. If a current name remains after `purge_after` plus 1 day, the watcher
+raises `CELL_DELETION_ANOMALY:<cell_id>`: follow "Triage an anomaly" in `cloud-cell-deletion.md`.
+Delete the operator key when you finish.
 
 ## Staging objects of a deleted cell
 

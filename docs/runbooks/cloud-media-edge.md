@@ -50,10 +50,14 @@ directory when you finish.
 6. Create the list-key Secret for cellctl. Take the values from the `cloud_media_list_application_key_id` and
    `cloud_media_list_application_key` outputs of `infra/terraform/durability`:
    `kubectl -n exomem-cloud create secret generic exomem-cloud-media-list --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
+7. Create the edge's list-key Secret, for its purge of a deleted cell. Take the values from the
+   `cloud_media_edge_list_application_key_id` and `cloud_media_edge_list_application_key` outputs of `infra/terraform/durability`:
+   `kubectl -n exomem-cloud create secret generic exomem-media-edge-list --from-literal=keyId=<key id> --from-literal=applicationKey=<application key>`
 
-The private key goes only to cellctl. The edge receives the public key and the
-bucket key, and never a cell's keys. cellctl receives the list key, which cannot read or change a file.
-For a managed deployment, deliver the same four Secrets through the static-secret
+The private key goes only to cellctl. The edge receives the public key and its two
+bucket keys, and never a cell's keys. cellctl receives the list key, which cannot read or change a file.
+The edge starts without its list key, but its purge pass then stays off and it logs `the purge pass is off`.
+For a managed deployment, deliver the same five Secrets through the static-secret
 procedure instead of `kubectl`.
 
 ## Turn it on for the canary
@@ -250,6 +254,9 @@ So rescue when in doubt.
 
 ## Rescue a hidden version
 
+This procedure rescues one name. To rescue every hidden name of a deleted cell, use `--rescue` of the clean-up
+script, as "Rescue hidden files" in `cloud-cell-deletion.md` says.
+
 A rescue deletes a hide marker. The version becomes current again, with its content unchanged. Rescue before
 the grace period ends: after it, the provider has deleted the version. You need the operator key for the
 media bucket from "Media bucket of a deleted cell" in `cloud-key-custody.md`, because it has `deleteFiles`.
@@ -370,11 +377,25 @@ only after `/v1/pending` on the edge reported `0` before you turned it off.
 ## Delete a cell that used the media store
 
 `cellctl` retires the cell's content keys first, then drops the cell from the active set. It reports the cell
-`deleted` only after the edge shows that exact set (`GET /v1/generation`), so the alert
-`cell-storage-cleanup-pending-<cell_id>` means the edge no longer admits the cell. A cell that stays `deleting`
-with the edge up means the edge has not loaded the new set: read the active set and the edge's evidence as in
-"Turn the edge off". Then delete the cell's objects with the media mode of the clean-up script. See
-"Media bucket of a deleted cell" in `cloud-key-custody.md`.
+`deleted` only after the edge shows that exact set (`GET /v1/generation`). A cell that stays `deleting` with the
+edge up means the edge has not loaded the new set: read the active set and the edge's evidence as in
+"Turn the edge off".
+
+After the cell's `purge_after`, the edge's purge pass hides each current name under the cell's prefix. The
+bucket's lifecycle rule deletes each hidden version when the grace period ends. The key watcher reports each
+step with `CELL_DELETION_PENDING`, `CELL_DELETION_HIDDEN` and `CELL_DELETION_ANOMALY`. No operator step deletes
+media. "Purge a deleted cell's storage" in `cloud-cell-deletion.md` gives the hold list `cellDeletion.holdCells`,
+its release, the rescue with `--rescue` and the anomaly triage.
+
+1. Read the edge's log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge | grep "purge pass is off"`
+   Expect no output.
+2. If the line shows, create the list-key Secret as in step 7 of "Create the Secrets".
+3. Restart the edge so that it reads the key: `kubectl -n exomem-cloud rollout restart deployment/exomem-media-edge`
+   The Recreate rollout stops the edge before the new pod is ready, so media requests fail for that time.
+4. Repeat step 1. Expect no output.
+
+Expected result: after the cell's `purge_after`, the watcher resolves `CELL_DELETION_PENDING:<cell_id>` and
+raises `CELL_DELETION_HIDDEN:<cell_id>`.
 
 ## Roll back the chart
 

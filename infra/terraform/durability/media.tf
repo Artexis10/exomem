@@ -46,7 +46,7 @@ resource "b2_application_key" "cloud_media_edge_list" {
 
 # cellctl's physical meter lists the media prefixes with this key (add-cloud-media-store D10). It
 # cannot read, write or delete a file, and no service holds deleteFiles on this bucket: the operator
-# deletes with a short-lived key (docs/runbooks/cloud-key-custody.md).
+# deletes only hide markers, for a rescue, with a short-lived key (docs/runbooks/cloud-cell-deletion.md).
 resource "b2_application_key" "cellctl_media_list" {
   count      = var.cloud_media_enabled ? 1 : 0
   key_name   = "${var.bucket_prefix}-cellctl-media-list"

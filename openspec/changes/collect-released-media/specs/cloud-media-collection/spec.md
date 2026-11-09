@@ -162,12 +162,22 @@ After a hold's backup and prune both succeed, the backup Job SHALL read the mani
 
 ### Requirement: Hides are detected and can be rescued within the grace
 
-`cellctl` SHALL report the count of hidden names of each cell, with at most a few of the names. The out-of-cluster key watcher SHALL hold a list-only key that is limited to the media bucket. It SHALL alert when the hide markers that appeared since its last run exceed a pinned budget. The alert SHALL carry a count and a reason token and SHALL NOT carry a name. The grace period SHALL exceed the watcher's interval plus the operator's response time. The operator SHALL be able to rescue a name by deleting its hide marker with the out-of-cluster cleanup key.
+`cellctl` SHALL report the count of hidden names of each cell, with at most a few of the names. The out-of-cluster key watcher SHALL hold a list-only key that is limited to the media bucket. It SHALL alert when the hide markers that appeared since its last run exceed a pinned budget. It SHALL NOT count a hide marker under the prefix of a cell in Substrate's deletion set, because the purge of a deleted cell hides every name of the cell (`automate-cell-storage-deletion`). When it cannot read that set, it SHALL raise `DELETIONS_UNKNOWN` and count every hide marker. The alert SHALL carry a count and a reason token and SHALL NOT carry a name. The grace period SHALL exceed the watcher's interval plus the operator's response time. The operator SHALL be able to rescue a name by deleting its hide marker with the out-of-cluster cleanup key.
 
 #### Scenario: A hide burst exceeds the budget
 
 - **WHEN** the number of new hide markers exceeds the pinned budget between two watcher runs
 - **THEN** the watcher alerts with a count and a reason token and no name
+
+#### Scenario: A deleted cell's purge hides every name
+
+- **WHEN** the media edge purges a cell in Substrate's deletion set and hides every name under its prefix
+- **THEN** the watcher counts none of those hide markers against the budget
+
+#### Scenario: The deletion set cannot be read
+
+- **WHEN** the watcher cannot read Substrate's deletion set
+- **THEN** it raises `DELETIONS_UNKNOWN` and counts every hide marker against the budget
 
 #### Scenario: A single owner deletion
 
