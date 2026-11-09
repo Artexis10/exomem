@@ -1,13 +1,13 @@
 ## 1. Fixity table and binding walk (D2, D3)
 
-- [ ] 1.1 Add the fixity table, keyed by vault path and payload SHA-256, in the vault's state folder. Fill it from `media_store.bound_originals` and the member manifests that `archive_members.read_manifest` reads. Write the pure identity and ordering logic test-first. Verify with tests:
+- [ ] 1.1 Add the fixity table, keyed by vault path and payload SHA-256, in the vault's state folder. Fill it from `media_store.bound_originals`, the member manifests that `archive_members.read_manifest` reads, and the fenced text originals that `adoption_plan.read_import_index` finds. Run the binding walk at start and then at its interval. Write the pure identity and ordering logic test-first. Verify with tests:
   - a deleted table is rebuilt from the bindings, with every row `unverified`;
   - with the lexical index absent, the binding walk finds every bound original and pool blob;
   - a row retires when its binding names another hash.
 
 ## 2. Thread, pass and budget (D1, D4)
 
-- [ ] 2.1 Start the fixity thread from `server_runtime.py`, as `_start_graph_drain` is started. Verify: with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set, the thread runs passes. A failing start logs and the server still serves.
+- [ ] 2.1 Start the fixity thread from `server_runtime.py`, as `_start_graph_drain` is started. Verify: with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set, the thread runs passes. With `EXOMEM_DISABLE_ORIGINAL_FIXITY=1`, no thread starts and status reports `off`. A failing start logs and the server still serves.
 - [ ] 2.2 Implement the pass: the presence check, the same-pass hash of a changed identity, and the budgeted re-hash. Verify with tests:
   - a pass hashes no more bytes than its budget;
   - an evicted original causes no store request;
@@ -22,7 +22,8 @@
 - [ ] 3.2 Verify the edges with tests, each one failing first:
   - an outside rewrite gives the cause `edited`;
   - a binding rebound during a pass moves nothing;
-  - changed bytes of a raw-protected original stay owner-only in Trash.
+  - changed bytes of a raw-protected original stay owner-only in Trash;
+  - changed fenced text of a Source page leaves the page unchanged and records `corrupt_no_copy`.
 
 ## 4. Signals (D9)
 
@@ -31,11 +32,12 @@
   - a count above zero fires the alert;
   - `unknown` or an unreadable answer neither fires nor resolves it;
   - the readiness answer stays ready and holds no path.
-- [ ] 4.3 Add the restic restore of one original to `docs/runbooks/cloud-operator-restore.md`. Verify: on a disposable rehearsal cell, the step restores one original whose bytes hash to its binding.
+- [ ] 4.3 Add the restic restore of one original to `docs/runbooks/cloud-operator-restore.md`. Verify: the step names the restic command, the target path and the hash check against the binding.
 
 ## 5. Measurement before release (D4)
 
 - [ ] 5.1 Measure one full pass and one table rebuild on WSL and on a Cloud cell. Record the original count, the bytes read, the duration and the read rate, with the run file of each. Verify: design.md cites the numbers, and the defaults for the interval, cycle, read cap and walk interval follow from them.
+- [ ] 5.2 Rehearse the runbook step on a disposable rehearsal cell. Verify: the step restores one original whose bytes hash to its binding.
 
 ## 6. Delivery
 

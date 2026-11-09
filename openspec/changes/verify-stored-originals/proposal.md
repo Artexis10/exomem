@@ -8,8 +8,8 @@ Exomem records a SHA-256 for every stored original, but nothing reads the origin
 - **Presence first, then a budgeted re-hash.** Each pass stats every known original. It hashes a changed file at once and reports a missing file. Then it re-hashes originals, oldest verification first, within a byte budget and a read-rate cap.
 - **Restore only from a matching copy.** On a mismatch, fixity restores from a copy whose SHA-256 matches the binding. It moves the changed bytes to Trash and never adopts the new hash. With no matching copy it changes nothing and reports `corrupt_no_copy`.
 - **Owner and operator signals.** The owner sees an attention item and an `originals` block in `exomem status`. A Cloud cell adds a content-free count to readiness, and cellctl alerts on it.
-- **Its own state.** Fixity keeps identity, last verification and state in its own table. It finds originals through walks that already exist, never through a derived lexical index.
-- **On by default, soft fail.** Every install runs the thread, because an integrity check that is off protects nothing. A start or pass failure never denies the core service.
+- **Its own state.** Fixity keeps identity, last verification and state in its own table. It finds originals through walks that already exist, never through a derived lexical index. Text originals fenced in a Source page are verified and reported, never repaired, because a repair would write the page.
+- **On by default, soft fail.** Every install runs the thread, because an integrity check that is off protects nothing. `EXOMEM_DISABLE_ORIGINAL_FIXITY=1` stops it for a rollback without a release revert. A start or pass failure never denies the core service.
 
 Agents see no new tool and no new step. No server-side model is added. Duplicate detection is a separate change, and this change neither specifies nor depends on it.
 

@@ -2,22 +2,27 @@
 
 ### Requirement: Fixity runs on its own budgeted background thread
 
-Exomem SHALL run fixity on a daemon thread of its own, started with the other background components of the server runtime. The thread SHALL run whether or not media extraction is enabled. A start or pass failure SHALL be logged and SHALL NOT deny the core service. The pass interval, the full-cycle length and the read-rate cap SHALL be configuration, with measured defaults. A pass SHALL read no more original bytes than its budget, and SHALL NOT read or download an evicted original.
+Exomem SHALL run fixity on a daemon thread of its own, started with the other background components of the server runtime. The thread SHALL run by default, whether or not media extraction is enabled. `EXOMEM_DISABLE_ORIGINAL_FIXITY=1` SHALL stop it, and status SHALL then report `off`. A start or pass failure SHALL be logged and SHALL NOT deny the core service. The pass interval, the full-cycle length, the read-rate cap and the binding-walk interval SHALL be configuration, with measured defaults. The re-hash of unchanged originals SHALL stay within the pass's byte budget, and every read SHALL stay under the read-rate cap. A pass SHALL NOT read or download an evicted original.
 
 #### Scenario: Media extraction is disabled
 
 - **WHEN** the server starts with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set
 - **THEN** the fixity thread starts and its passes run
 
+#### Scenario: The operator turns fixity off
+
+- **WHEN** the server starts with `EXOMEM_DISABLE_ORIGINAL_FIXITY=1`
+- **THEN** no fixity thread starts and the status block reports `off`
+
 #### Scenario: A pass stays within its budget
 
-- **WHEN** a pass runs over originals whose total size exceeds its byte budget, and one original is evicted
+- **WHEN** a pass runs over unchanged originals whose total size exceeds its byte budget, and one original is evicted
 - **THEN** the pass hashes no more bytes than the budget allows
 - **AND** the pass requests no download of the evicted original
 
 ### Requirement: Fixity keeps its own state and finds originals through their bindings
 
-Fixity SHALL keep its state in its own table, keyed by vault path and payload SHA-256. A row SHALL hold the file identity, the last verification time and one state: `unverified`, `verified`, `restored`, `missing`, `corrupt_no_copy` or `evicted`. A finding about changed bytes SHALL carry one cause: `edited` or `corrupted`. These are closed protocol values that this specification fixes. Fixity SHALL find originals through the existing sidecar-binding and member-manifest walks, and SHALL NOT depend on a derived lexical index. The expected hash SHALL always come from the binding.
+Fixity SHALL keep its state in its own table, keyed by vault path and payload SHA-256. A row SHALL hold the file identity, the last verification time and one state: `unverified`, `verified`, `restored`, `missing`, `corrupt_no_copy` or `evicted`. A finding about changed bytes SHALL carry one cause: `edited`, `corrupted`, or `unknown` when no identity was recorded before the change. These are closed protocol values that this specification fixes. Fixity SHALL find originals through the existing sidecar-binding, member-manifest and Source-page walks, and SHALL NOT depend on a derived lexical index. The binding walk SHALL run at start and then at its configured interval, once a day by default. The expected hash SHALL always come from the binding.
 
 #### Scenario: The lexical index is absent
 
@@ -72,6 +77,16 @@ An original whose bytes do not hash to its binding's SHA-256 is damaged. Fixity 
 - **WHEN** a binding starts to name another hash after fixity hashed its file
 - **THEN** fixity moves nothing and restores nothing for the earlier hash
 
+### Requirement: A text original is verified and never repaired automatically
+
+A text original is the text that a Source page fences, bound by the page's `original_sha256`. Fixity SHALL hash that text's UTF-8 bytes on each verification. On a mismatch it SHALL change nothing and record `corrupt_no_copy` with the cause and a route, because a repair is a Source page write.
+
+#### Scenario: The fenced text of a Source page changes
+
+- **WHEN** an outside program edits the fenced text of an imported Source page
+- **THEN** the page is unchanged by the pass
+- **AND** the row is `corrupt_no_copy` with the cause `edited`
+
 ### Requirement: A missing original is reported and never restored automatically
 
 Fixity SHALL report a missing original with its path, its expected SHA-256 and a restore route. The route SHALL name each matching copy that fixity finds. Fixity SHALL NOT restore a missing original by itself.
@@ -84,7 +99,7 @@ Fixity SHALL report a missing original with its path, its expected SHA-256 and a
 
 ### Requirement: Fixity results reach the owner without new agent steps
 
-Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass completes, and SHALL NOT report a zero for an unknown count. After a pass, it SHALL report the count of each state, the last pass time and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Fixity SHALL add no tool and no agent step.
+Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A `restored` finding SHALL be informational. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass completes, and SHALL NOT report a zero for an unknown count. After a pass, it SHALL report the count of each state, the last pass time and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Fixity SHALL add no tool and no agent step.
 
 #### Scenario: Status before the first pass
 
@@ -98,7 +113,7 @@ Attention SHALL compose an `original_fixity` category in its default union, with
 
 ### Requirement: A Cloud cell reports fixity without content
 
-A Cloud cell's readiness answer SHALL carry the count of originals in `missing` or `corrupt_no_copy`, and `unknown` before the first pass. It SHALL carry no path, name or hash. The count SHALL NOT make the cell unready. cellctl SHALL alert when the count is above zero. An unknown or unreadable answer SHALL neither fire nor resolve the alert.
+A Cloud cell's readiness answer SHALL carry the count of originals in `missing` or `corrupt_no_copy`, and `unknown` before the first pass. A `restored` original SHALL NOT enter the count, because it needs no action. It SHALL carry no path, name or hash. The count SHALL NOT make the cell unready. cellctl SHALL alert when the count is above zero. An unknown or unreadable answer SHALL neither fire nor resolve the alert.
 
 #### Scenario: A cell holds a damaged original
 
