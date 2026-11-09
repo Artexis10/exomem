@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _public_call import public_call
 from epistemic.journeys.f27_replay import AgentEnvelope
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
@@ -495,7 +496,7 @@ def test_seed_notes_in_a_fresh_vault_commit_whether_or_not_the_draft_asks_for_a_
     drafts = [
         event["result"]["structuredContent"]
         for event in read_jsonl(asyncio.run(seed()))
-        if event.get("name") == "create_note" and event["arguments"].get("validate_only")
+        if event.get("name") == "create_note" and event["arguments"].get("preview")
     ]
 
     # The first note bootstraps the vault; the second one's draft asks for the review.
@@ -527,7 +528,7 @@ def test_a_measured_session_that_opens_with_recall_meets_no_warm_up(tmp_path):
         async with Client(transport, timeout=240) as client:
             await client.list_tools()
             await client.call_tool(
-                "recall_context", {"turn": "What changed?"}, raise_on_error=False
+                *public_call("recall_context", {"turn": "What changed?"}), raise_on_error=False
             )
 
     asyncio.run(open_with_recall())

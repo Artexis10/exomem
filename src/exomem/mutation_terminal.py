@@ -929,10 +929,14 @@ _ROUTING_CALL_ACTIONS = frozenset({"append", "update"})
 _ROUTING_CALL_COMMAND = "record_memory"
 
 
-def _routing_call_tool() -> str:
-    """The tool a disposition names for its write: the active surface's change tool."""
-    (tool,) = capabilities.active_tools(_ROUTING_CALL_COMMAND, "write")
-    return tool
+def _routing_call_tool(value: Mapping[str, Any]) -> str | None:
+    """The key that carries a disposition's call: the one key beyond the advisory's own fields.
+
+    The active surface names the tool, `add_record` for a filing and `edit_record` for an
+    occurrence, so the key is read from the advisory and checked against the surface when it is lifted.
+    """
+    extra = set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS
+    return next(iter(extra)) if len(extra) == 1 else None
 
 
 _MAX_ROUTING_PROSE_CHARS = 480
@@ -1040,6 +1044,8 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
     question = value.get("question")
     if not isinstance(question, str) or not 0 < len(question) <= _MAX_COHESION_QUESTION_CHARS:
         return None
+    from .review_ids import item_id
+
     return {
         "kind": KIND,
         "units": units,
@@ -1047,6 +1053,7 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
         "next_step_units": following,
         "ref": ref,
         "fingerprint": fingerprint,
+        "id": item_id({"ref": ref, "fingerprint": fingerprint}),
         "question": question,
     }
 
@@ -1063,7 +1070,7 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         if (
             not isinstance(value, Mapping)
             or not _ROUTING_REQUIRED_KEYS <= set(value)
-            or set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS - {_routing_call_tool()}
+            or len(set(value) - _ROUTING_REQUIRED_KEYS - _ROUTING_OPTIONAL_KEYS) > 1
         ):
             continue
         collection = value.get("collection")
@@ -1118,7 +1125,7 @@ def _routing_disposition_projection(
     disposition is dropped whole, like any other malformed advisory: a partial
     instruction to act is worse than none.
     """
-    call_tool = _routing_call_tool()
+    call_tool = _routing_call_tool(value)
     if "disposition" not in value:
         return (
             {}
@@ -1143,7 +1150,7 @@ def _routing_disposition_projection(
         out[key] = text
     if "question" in out and disposition != "ask":
         return None
-    call = value.get(call_tool)
+    call = value.get(call_tool) if call_tool is not None else None
     if call is not None:
         # The call is spelled for the active surface; the checks run on the grouped call it stands for.
         grouped = (
@@ -1154,6 +1161,7 @@ def _routing_disposition_projection(
         if (
             disposition not in {"file", "append_occurrence"}
             or grouped is None
+            or grouped[0] != _ROUTING_CALL_COMMAND
             or grouped[1].get("action") not in _ROUTING_CALL_ACTIONS
             or grouped[1].get("collection") != collection
         ):

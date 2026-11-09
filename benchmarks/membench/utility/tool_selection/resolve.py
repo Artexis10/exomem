@@ -38,10 +38,23 @@ def product_resolver() -> Resolver:
     from exomem.cli_ops import OpError
     from exomem.command_surface import find_rendering, resolve_invocation
     from exomem.commands import product_commands_for
+    from exomem.public_surface import public_surface
 
     commands = product_commands_for("mcp")
+    surface = public_surface()
+    listed = surface.listed_names(commands)
 
     def resolve(name: str, arguments: Mapping[str, Any], shape: str):
+        if name in listed:
+            # A typed tool or door: the surface the server lists, which no shape switch changes.
+            try:
+                return surface.resolve(name, arguments, commands, strict=True, passthrough=frozenset())
+            except OpError as error:
+                # The execution boundary retains the identity of a door call whose fields it refused.
+                command, flat = getattr(error, "command", None), getattr(error, "arguments", None)
+                if command is not None and isinstance(flat, Mapping):
+                    return command, dict(flat)
+                raise UnresolvedTool(name) from error
         try:
             return resolve_invocation(name, arguments, commands, shape=shape)
         except OpError as error:

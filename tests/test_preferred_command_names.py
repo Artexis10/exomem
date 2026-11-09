@@ -7,10 +7,23 @@ import json
 from dataclasses import replace
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 
-from exomem import cli_ops, commands, product_invoke, server, writer_lease
+from exomem import (
+    cli_ops,
+    commands,
+    product_invoke,
+    public_surface,
+    public_tools,
+    server,
+    writer_lease,
+)
 from exomem.command_surface import resolve_command
+
+#: The tools a host lists on a local server; Cloud withholds the file transfers and lists its own two.
+_LISTED = set(public_tools.TOOLS) | set(public_surface.DOORS.values()) | {"recall_context"}
+_CLOUD_TRANSFERS = {"observe_transfer", "transfer_memory"}
 
 
 def test_name_resolution_preserves_filtered_command_identity() -> None:
@@ -29,69 +42,56 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
 
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default
 @pytest.mark.parametrize("cloud", (False, True))
-def test_mcp_discovery_and_both_names_reach_guarded_execution(vault, monkeypatch, cloud) -> None:
+def test_mcp_lists_the_public_tools_and_each_reaches_guarded_execution(vault, monkeypatch, cloud) -> None:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "name-lease"))
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1" if cloud else "0")
     if cloud:
         monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "name-proof")
         monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "a" * 40)
-    monkeypatch.delenv("EXOMEM_MCP_LEGACY_COMPAT", raising=False)
     mcp = server.build_server(require_auth=False)
 
     async def exercise():
         async with Client(mcp) as client:
             discovered = {tool.name for tool in await client.list_tools()}
-            for excluded in commands.CLOUD_SURFACE_EXCLUSIONS if cloud else ():
-                contributors = [command for command in commands.product_commands_for("mcp", cloud=True)
-                                if any(rendering.name == excluded for rendering in command.renderings)]
-                if contributors:
-                    # A shared job can remain, but none of its variants comes from the excluded command.
-                    tool = next(tool for tool in await client.list_tools() if tool.name == excluded)
-                    kinds = {branch["properties"]["kind"]["const"]
-                             for branch in tool.input_schema["properties"]["operation"]["oneOf"]}
-                    assert kinds == {variant.kind for command in contributors for rendering in command.renderings
-                                     if rendering.name == excluded for variant in rendering.variants}
-                else:
-                    assert excluded not in discovered
-                    assert await mcp.get_tool(excluded) is None
+            if cloud:
+                # The cell has no upload bridge here, so both file transfers stay withheld.
+                assert discovered == (_LISTED - {"upload_files", "download_files"}) | _CLOUD_TRANSFERS
+            else:
+                assert discovered == _LISTED
             for command in commands.product_commands_for("mcp", cloud=cloud):
-                if command.renderings:
-                    # Discovered as its renderings; the grouped name stays callable but unlisted.
-                    assert {r.name for r in command.renderings} <= discovered
-                    assert command.name not in discovered or command.name in {r.name for r in command.renderings}
-                    assert await mcp.get_tool(command.name) is not None
-                    continue
-                assert command.public_name in discovered
-                if command.public_name != command.name:
-                    assert command.name not in discovered
-                    compatible = await mcp.get_tool(command.name)
-                    preferred = await mcp.get_tool(command.public_name)
-                    assert compatible.parameters == preferred.parameters
-            for name in ("ask_memory", "search_memory"):
-                result = await client.call_tool(name, {"query": "metabolism", "mode": "keyword"})
-                assert result.data
-            for name in ("activate_context", "recall_context"):
-                result = await client.call_tool(name, {"turn": ""})
-                assert result.data["abstained"] is True
-            for name in ("compile_source", "prepare_note"):
-                result = await client.call_tool(name, {"sources": ["Knowledge Base/Sources/Books/2026-05-03-elimination-diet.md"]})
-                assert result.data
-            for name in ("remember", "create_note", "replace_memory", "supersede_note"):
+                # A grouped command stays registered for REST and the CLI, and no host lists it.
+                assert await mcp.get_tool(command.name) is not None
+                if command.name not in discovered:
+                    refused = await client.call_tool(command.name, {}, raise_on_error=False)
+                    assert refused.is_error
+            result = await client.call_tool(*public_call("search_memory", {"query": "metabolism", "mode": "keyword"}))
+            assert result.data
+            result = await client.call_tool(*public_call("recall_context", {"turn": ""}))
+            assert result.data["abstained"] is True
+            result = await client.call_tool(*public_call("compile_source", {"sources": ["Knowledge Base/Sources/Books/2026-05-03-elimination-diet.md"]}))
+            assert result.data
+            for name in ("create_note", "supersede_note"):
                 arguments = {
                     "title": "Public spelling proof",
                     "content": "## Observations\n\n- [constraint] Keep mutation receipts stable.\n",
-                    "validate_only": True,
+                    "preview": True,
                 }
-                if resolve_command(name, commands.PRODUCT_COMMANDS).name == "replace_memory":
-                    arguments["old_path"] = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+                if name == "supersede_note":
+                    arguments |= {
+                        "note": "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md",
+                        "why": "prove the guard",
+                    }
                 result = await client.call_tool(name, arguments)
                 assert result.data["mutated"] is False
                 assert result.data["draft_id"]
-            for name in ("edit_memory", "edit_note"):
-                result = await client.call_tool(name, {"path": "missing.md", "operation": {"kind": "replace_string", "old_string": "old", "new_string": "new"}}, raise_on_error=False)
-                assert result.is_error
-                assert "Unknown tool" not in str(result.content)
+            result = await client.call_tool(
+                "edit_note",
+                {"note": "missing.md", "why": "prove the guard", "action": "replace_text", "old_text": "old", "new_text": "new"},
+                raise_on_error=False,
+            )
+            assert result.is_error or "error" in (result.structured_content or {})
+            assert "Unknown tool" not in str(result.content)
 
     try:
         asyncio.run(exercise())
@@ -187,7 +187,7 @@ def test_policy_withholds_both_product_spellings(vault, monkeypatch, policy) -> 
         writer_lease.reset_managers_for_tests()
 
 
-def test_search_spellings_keep_the_same_restricted_disclosure(vault, monkeypatch) -> None:
+def test_search_memory_keeps_the_restricted_disclosure(vault, monkeypatch) -> None:
     from test_restricted_refusal_floor import EXTERNAL, _restrict_external, _write_page
 
     from exomem import freshness, lexstore, memory_refs
@@ -207,12 +207,9 @@ def test_search_spellings_keep_the_same_restricted_disclosure(vault, monkeypatch
 
     async def exercise():
         async with Client(mcp) as client:
-            results = [
-                (await client.call_tool(name, {"query": "Example", "mode": "keyword"})).data
-                for name in ("ask_memory", "search_memory")
-            ]
-            assert results[0] == results[1]
-            assert relative not in json.dumps(results)
+            result = (await client.call_tool("search_memory", {"query": "Example", "options": {"mode": "keyword"}})).data
+            assert "error" not in result
+            assert relative not in json.dumps(result)
 
     try:
         asyncio.run(exercise())
@@ -220,7 +217,7 @@ def test_search_spellings_keep_the_same_restricted_disclosure(vault, monkeypatch
         writer_lease.reset_managers_for_tests()
 
 
-def test_standalone_hooks_keep_both_spellings_in_step_with_the_registry() -> None:
+def test_standalone_hooks_keep_the_public_names_in_step_with_the_registry() -> None:
     from exomem._hooks import exomem_capture_nudge as capture
     from exomem._hooks import exomem_retrieve_nudge as retrieve
 
@@ -230,13 +227,10 @@ def test_standalone_hooks_keep_both_spellings_in_step_with_the_registry() -> Non
     for name in activation.callable_names:
         assert retrieve._tool_refs(f"mcp__exomem__{name}", {"anchor": "visible-ref"}) == ["visible-ref"]
         assert retrieve._refresh_activation_cost(metadata, name, {"max_chars": 6000}) == 6000
-    for name in resolve_command("edit_note", commands.PRODUCT_COMMANDS).callable_names:
-        tool = {"name": f"mcp__exomem__{name}", "input": {"validate_only": True}}
-        assert capture._successful_kb_write(tool) is False
-        tool["input"]["validate_only"] = False
-        assert capture._successful_kb_write(tool) is True
-    preparation = resolve_command("prepare_note", commands.PRODUCT_COMMANDS)
-    assert preparation.read_only is True
-    assert capture._PREPARATION_TOOL_SUFFIXES == (preparation.name, preparation.public_name)
-    for name in preparation.callable_names:
-        assert capture._successful_kb_write({"name": f"mcp__exomem__{name}"}) is False
+    tool = {"name": "mcp__exomem__edit_note", "input": {"preview": True}}
+    assert capture._successful_kb_write(tool) is False
+    tool["input"]["preview"] = False
+    assert capture._successful_kb_write(tool) is True
+    # A read door and a preparation that writes nothing never count as a saved write.
+    assert capture._successful_kb_write({"name": "mcp__exomem__inspect_memory", "input": {"operation": "sources.compile"}}) is False
+    assert capture._successful_kb_write({"name": "mcp__exomem__manage_memory", "input": {"operation": "files.create"}}) is True

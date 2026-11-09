@@ -1147,7 +1147,7 @@ def kind_required(vault_root: Path, *, supplied: str | None) -> cli_ops.OpError:
     taxonomy = source_taxonomy.load_taxonomy(vault_root)
     known = known_kind_counts(vault_root, taxonomy)
     if supplied is None:
-        message = "capture_source needs source_kind: what this material IS"
+        message = "a captured source needs source_kind: what this material IS"
     else:
         message = f"source_kind {supplied!r} records no choice; name what this material IS"
     return cli_ops.OpError(
@@ -1254,7 +1254,7 @@ def _episode_frontmatter_lines(
             missing=["extra_frontmatter"],
             reason=(
                 f"the {source_taxonomy.EPISODE_KIND!r} kind is reserved for "
-                "conversation recaps; record one with record_episode"
+                "conversation recaps; save one as an episode"
             ),
         )
     allowed = {name for name, _required in EPISODE_FRONTMATTER_FIELDS}

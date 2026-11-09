@@ -262,14 +262,25 @@ class _TooLarge(Exception):
         self.smaller_helps = smaller_helps
 
 
+def _call_text(command: str, arguments: dict[str, object]) -> str:
+    """A call written the way the serving surface spells it, so the refusal names a tool the caller has."""
+    from . import capabilities
+
+    return capabilities.active_call_text(command, arguments)
+
+
+def _download_call(path: str) -> str:
+    return _call_text("transfer_artifact", {"operation": "download", "artifact": path})
+
+
 def _download_instead(path: str, *, smaller_helps: bool = False) -> str:
     """The refusal text, naming a smaller request only where one can be shown."""
     if smaller_helps:
         return (
             f"{path} is too large to show at this size; ask for a smaller max_side or a region, "
-            "or download the original with transfer_artifact operation=download"
+            f"or download the original with {_download_call(path)}"
         )
-    return f"{path} is too large to show; download the original with transfer_artifact operation=download"
+    return f"{path} is too large to show; download the original with {_download_call(path)}"
 
 
 def _read_original(vault_root: Path, path: str, who) -> tuple[str, str, str, bytes]:
@@ -280,12 +291,14 @@ def _read_original(vault_root: Path, path: str, who) -> tuple[str, str, str, byt
         suffix = Path(original_path).suffix.lower()
         kind = media_types.media_type_for(original_path)
         if kind == "video":
-            raise ImageViewError("NOT_AN_IMAGE", f"{path} is a video; read it with read_media kind=video")
+            raise ImageViewError(
+                "NOT_AN_IMAGE", f"{path} is a video; read it with {_call_text('read_media', {'media': 'video', 'path': path})}"
+            )
         if kind != "image":
             raise ImageViewError(
                 "IMAGE_FORMAT_UNSUPPORTED",
                 f"{path} ({suffix or 'no extension'}) cannot be shown as an image; "
-                "download the original with transfer_artifact operation=download",
+                f"download the original with {_download_call(path)}",
             )
         if copied.size > MAX_ORIGINAL_BYTES:
             raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path))

@@ -1930,7 +1930,7 @@ def op_bootstrap(
                 ),
                 "structure_suggestion_handling": (
                     "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
-                    + call_text("triage_memory", {"ref": "<ref>", "action": "dismiss", "expected_fingerprint": "<fingerprint>", "why": "intentional: <the one question>"})
+                    + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the one question>"})
                     + "; it stays quiet until the next size step. Several: propose a split with "
                     + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
                     + " and apply it only after the user confirms the previewed plan. A hub by design: add a hub or snapshot tag with a governed edit. source_classification_debt: say it in the user's words, agree a real kind, then "
@@ -1996,7 +1996,7 @@ def op_bootstrap(
                     f"{tools_text('review_memory', 'read')} takes no fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
                     f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, "
                     "resolves the item and clears the finding without extra triage. "
-                    f"One {call_text('triage_memory', {'ref': '<ref>', 'action': 'dismiss', 'why': '<code>: ...'})} "
+                    f"One {call_text('triage_memory', {'item_id': '<id>', 'action': 'dismiss', 'why': '<code>: ...'})} "
                     "records presentation disposition, not authored resolution. "
                     "Preserve existing mutation authority."
                     if public
@@ -2012,7 +2012,7 @@ def op_bootstrap(
                     f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, resolves with the real unit "
                     "fingerprint and parent hash. Its delta clears the finding without extra triage; "
                     "a due fingerprint is not a unit fingerprint. "
-                    f"One {call_text('triage_memory', {'ref': '<ref>', 'action': 'dismiss', 'expected_fingerprint': '<fingerprint>', 'why': '<code>: ...'})} "
+                    f"One {call_text('triage_memory', {'item_id': '<id>', 'action': 'dismiss', 'why': '<code>: ...'})} "
                     "records presentation disposition, not authored resolution. "
                     "Preserve existing mutation authority."
                 ),
@@ -8384,7 +8384,7 @@ def op_browse_memory(
             limit=min(max(page, 1), _BROWSE_LIST_MAX_LIMIT),
             cursor=cursor,
         )
-    raise ValueError("INVALID_MODE: browse_memory mode must be 'overview' or 'list'")
+    raise ValueError("INVALID_MODE: mode must be 'overview' or 'list'")
 
 
 def op_remember(
@@ -9487,7 +9487,7 @@ def op_transfer_artifact(
 
         return artifact_recovery.prepare(vault_root, artifact, expected_sha256=expected_sha256)
     if operation not in ("upload", "download"):
-        raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+        raise ValueError("INVALID_MODE: operation must be 'upload' or 'download'")
     if lane not in upload_tokens.UPLOAD_LANES:
         raise ValueError(
             f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
@@ -9860,7 +9860,7 @@ def _selected_media_paths(
     if paths is None:
         return None
     if not isinstance(paths, list) or not 1 <= len(paths) <= 32:
-        raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain 1 to 32 paths")
+        raise OpError("INVALID_MEDIA_PATHS", "media paths must contain 1 to 32 paths")
     values = paths
 
     root = Path(vault_root).resolve()
@@ -9869,7 +9869,7 @@ def _selected_media_paths(
     seen: set[str] = set()
     for value in values:
         if not isinstance(value, str) or not value:
-            raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain only non-empty paths")
+            raise OpError("INVALID_MEDIA_PATHS", "media paths must contain only non-empty paths")
         binary = Path(value)
         if not binary.is_absolute():
             binary = root / binary
@@ -9884,7 +9884,7 @@ def _selected_media_paths(
             ) from error
         relative = canonical_vault_rel(root, relative)
         if relative in seen:
-            raise OpError("DUPLICATE_MEDIA_PATH", "process_media paths must be unique after normalization")
+            raise OpError("DUPLICATE_MEDIA_PATH", "media paths must be unique after normalization")
         seen.add(relative)
         selected.append((root / relative, relative))
     return selected
@@ -10834,7 +10834,7 @@ def op_triage_memory(
         ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
         source_path = bound.get("source_path")
     if ref is None:
-        raise ValueError("INVALID_REVIEW_ACTION: triage_memory requires `ref` or `item_id`")
+        raise ValueError("INVALID_REVIEW_ACTION: a triage decision requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()
     vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
     if normalized_action == "decide-vocabulary":
@@ -14305,7 +14305,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "review": {
         "intent": "Review stale, contradictory, disconnected, or unprocessed knowledge before acting.",
         "route": {"tool": "review_memory", "args": {"mode": "attention"}},
-        "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
+        "audit_route": {"tool": "maintain_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; triage state changes are explicit through triage_memory",
         "advanced": [
             "review_item_context",

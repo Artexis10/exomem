@@ -357,9 +357,45 @@ def _unwrap_result(value: Any) -> Any:
     return value
 
 
+#: The tools a local server lists, the contract this journey proves from the client side.
+PUBLIC_TOOLS = frozenset({
+    "recall_context", "search_memory", "read_page", "read_instructions",
+    "create_note", "add_observation", "edit_note", "supersede_note",
+    "save_source", "save_evidence", "save_episode", "upload_files", "download_files",
+    "query_records", "add_record", "edit_record",
+    "query_plan_items", "add_plan_item", "edit_plan_item",
+    "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
+})
+
+
 async def _call(client, name: str, arguments: dict[str, Any], timeout: float) -> Any:
     result = await asyncio.wait_for(client.call_tool(name, arguments), timeout=timeout)
     return _result_data(result)
+
+
+async def _refused(client, name: str, arguments: dict[str, Any], timeout: float) -> str:
+    """The refusal text of a call that the server must refuse.
+
+    An unknown tool name is a protocol error. A refusal of a known tool's call is a reply
+    whose `error` carries the code and message.
+    """
+    from fastmcp.exceptions import ToolError
+
+    try:
+        data = _result_data(await asyncio.wait_for(client.call_tool(name, arguments), timeout))
+    except ToolError as error:
+        return str(error)
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        raise RuntimeError(f"{name} was not refused: {data!r}")
+    return f"{error.get('code')}: {error.get('message')}"
+
+
+async def _inspect(client, operation: str, timeout: float, **arguments: Any) -> Any:
+    """Read through the `inspect_memory` door."""
+    return await _call(
+        client, "inspect_memory", {"operation": operation, "arguments": arguments}, timeout
+    )
 
 
 def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
@@ -411,7 +447,7 @@ def _remote_maintenance_preview(handle: Any, job: Any) -> dict[str, Any]:
         or handle.get("preview") is not True
         or handle.get("state") not in {"running", "completed"}
     ):
-        raise RuntimeError(f"maintain_memory did not start a preview job: {handle!r}")
+        raise RuntimeError(f"maintenance.reconcile did not start a preview job: {handle!r}")
     # `_call` unwraps every `result` field, so this receipt is already the preview's report.
     report = job.get("receipt") if isinstance(job, dict) else None
     if (
@@ -433,7 +469,7 @@ def _remote_maintenance_job(handle: Any, job: Any, *, plan_id: str) -> dict[str,
         or handle.get("state") not in {"running", "completed"}
         or handle.get("plan_id") != plan_id
     ):
-        raise RuntimeError(f"maintain_memory did not start the reviewed job: {handle!r}")
+        raise RuntimeError(f"maintenance.reconcile did not start the reviewed job: {handle!r}")
     if (
         not isinstance(job, dict)
         or job.get("run_id") != handle["run_id"]
@@ -538,29 +574,33 @@ async def _call_mutation(
     timeout: float,
 ) -> Any:
     """Call a mutation with full detail while proving its decisive envelope."""
-    result = await _call(
-        client,
-        name,
-        {**arguments, "response_detail": "full"},
-        timeout,
-    )
+    result = await _call(client, name, {**arguments, "detail": "full"}, timeout)
     return _mutation_diagnostics(result, operation=name)
 
 
-async def _call_maintenance(
-    client,
-    name: str,
-    arguments: dict[str, Any],
-    timeout: float,
-) -> Any:
-    """Call maintenance with full detail across no-op and tracked-commit paths."""
+async def _manage(client, operation: str, timeout: float, **arguments: Any) -> Any:
+    """Write through the `manage_memory` door and prove its committed terminal."""
+    return await _call_mutation(
+        client, "manage_memory", {"operation": operation, "arguments": arguments}, timeout
+    )
+
+
+async def _preview_maintenance(client, operation: str, timeout: float, **arguments: Any) -> Any:
+    """Start a read-only maintenance preview through `inspect_memory`."""
+    return _maintenance_diagnostics(
+        await _inspect(client, operation, timeout, **arguments), operation=operation
+    )
+
+
+async def _manage_maintenance(client, operation: str, timeout: float, **arguments: Any) -> Any:
+    """Write maintenance with full detail across no-op and tracked-commit paths."""
     result = await _call(
         client,
-        name,
-        {**arguments, "response_detail": "full"},
+        "manage_memory",
+        {"operation": operation, "arguments": arguments, "detail": "full"},
         timeout,
     )
-    return _maintenance_diagnostics(result, operation=name)
+    return _maintenance_diagnostics(result, operation=operation)
 
 
 #: How long the graph may take to converge after a write before the product is
@@ -578,9 +618,7 @@ async def _await_maintenance_job(client, run_id: str, timeout: float) -> Any:
     """Read the job until it leaves `running`, within the graph convergence window."""
     deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
     while True:
-        job = await _call(
-            client, "maintain_memory", {"mode": "maintenance-job", "run_id": run_id}, timeout
-        )
+        job = await _inspect(client, "maintenance.job", timeout, run_id=run_id)
         if not isinstance(job, dict) or job.get("state") != "running":
             return job
         if time.monotonic() >= deadline:
@@ -594,7 +632,7 @@ def _server_side_graph_state() -> str:
     """Read the graph's own state from disk for a convergence failure report.
 
     Necessary because the failure is otherwise undiagnosable from the artifact
-    it produces. `connect_memory` answers `available: false` with a `reason`
+    it produces. `connections.context` answers `available: false` with a `reason`
     string and nothing behind it, so a CI failure could not distinguish "the
     rebuild is still running" from "the graph is fenced and nothing will
     retry before this deadline" -- which are different bugs with different
@@ -674,16 +712,13 @@ async def _await_graph_convergence(
     """
     deadline = time.monotonic() + _GRAPH_CONVERGENCE_SECONDS
     while True:
-        context = await _call(
+        context = await _inspect(
             client,
-            "connect_memory",
-            {
-                "operation": "context",
-                "path": relation_ref,
-                "depth": 1,
-                "traversal_profile": traversal_profile,
-            },
+            "connections.context",
             timeout,
+            path=relation_ref,
+            depth=1,
+            traversal_profile=traversal_profile,
         )
         graph = context.get("graph")
         if isinstance(graph, dict) and graph.get("available") is True:
@@ -739,13 +774,6 @@ async def _assert_relation_contexts(
             raise RuntimeError(f"installed edge {canonical} was not registry-resolved")
         if edge.get("raw_relation") != canonical:
             raise RuntimeError(f"installed edge {canonical} lost raw observation identity")
-
-
-def _record_snapshot(result: dict[str, Any]) -> str:
-    snapshot = result.get("snapshot")
-    if not isinstance(snapshot, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot):
-        raise RuntimeError(f"record query omitted exact snapshot hash: {result!r}")
-    return snapshot
 
 
 def _assert_records_rebaseline(inspection: dict[str, Any], history: dict[str, Any]) -> None:
@@ -815,119 +843,106 @@ def _assert_records_presentation_rows(
         )
 
 
+async def _plan_rows(client, collection: str, timeout: float) -> dict[str, dict[str, Any]]:
+    """The collection's plan items by title: each row carries its `plan_id` and its short `id`."""
+    reply = await _call(
+        client,
+        "query_plan_items",
+        {"collection": collection, "limit": 50, "options": {"lifecycle": "all"}},
+        timeout,
+    )
+    return {row["title"]: row for row in reply.get("rows", []) if isinstance(row, dict)}
+
+
 async def _planning_first_session(client, state: dict[str, Any], timeout: float) -> None:
     fixtures = state["planning"]
     software = fixtures["software"]
     nonsoftware = fixtures["nonsoftware"]
     for fixture in (software, nonsoftware):
-        created = await _call_mutation(
+        created = await _manage(
             client,
-            "plan_memory",
-            {
-                "action": "create",
-                "manifest_path": fixture["collection"],
-                "manifest_text": fixture["manifest_text"],
-                "why": "create installed Planning product collection",
-            },
+            "plans.create",
             timeout,
+            manifest_path=fixture["collection"],
+            manifest_text=fixture["manifest_text"],
+            why="create installed Planning product collection",
         )
         if created.get("operation") != "create":
             raise RuntimeError(f"installed Planning create returned unexpected data: {created!r}")
 
     software_collection = software["collection"]
-    outcome_id = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
-    initiative_id = "3f578f1c-49ba-4c37-a2e7-90a5114e4e23"
-    work_item_id = "d8d3f3c1-1601-4b1d-9a5d-694dc9dc2ed3"
-    bug_id = "95a51c93-7873-4262-a9ba-bc3ae7ed362b"
-    await _call_mutation(
-        client,
-        "plan_memory",
+    software_id = "6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5"
+
+    async def add_item(collection: str, item: dict[str, Any], why: str) -> Any:
+        return await _call_mutation(
+            client,
+            "add_plan_item",
+            {"collection": collection, "item": item, "why": why},
+            timeout,
+        )
+
+    async def plan_id_of(collection: str, title: str) -> str:
+        row = (await _plan_rows(client, collection, timeout)).get(title)
+        if not isinstance(row, dict) or not isinstance(row.get("plan_id"), str):
+            raise RuntimeError(f"installed Planning query did not return {title!r}")
+        return row["plan_id"]
+
+    await add_item(
+        software_collection,
         {
-            "action": "add",
-            "collection": software_collection,
-            "plan_id": outcome_id,
-            "item": {
-                "title": "Reliable Planning delivery",
-                "kind": "outcome",
-                "status": "planned",
-                "priority": "high",
-                "commitment": "considering",
-                "horizon": "year",
-            },
-            "why": "capture software delivery outcome",
+            "title": "Reliable Planning delivery",
+            "kind": "outcome",
+            "status": "planned",
+            "priority": "high",
+            "commitment": "considering",
+            "horizon": "year",
         },
-        timeout,
+        "capture software delivery outcome",
     )
-    await _call_mutation(
-        client,
-        "plan_memory",
+    outcome_id = await plan_id_of(software_collection, "Reliable Planning delivery")
+    await add_item(
+        software_collection,
         {
-            "action": "add",
-            "collection": software_collection,
-            "plan_id": initiative_id,
-            "item": {
-                "title": "Planning v1 initiative",
-                "kind": "initiative",
-                "status": "planned",
-                "priority": "high",
-                "commitment": "considering",
-                "horizon": "quarter",
-                "parent": f"exomem://plan/6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5/{outcome_id}",
-            },
-            "why": "capture software Planning initiative",
+            "title": "Planning v1 initiative",
+            "kind": "initiative",
+            "status": "planned",
+            "priority": "high",
+            "commitment": "considering",
+            "horizon": "quarter",
+            "parent": f"exomem://plan/{software_id}/{outcome_id}",
         },
-        timeout,
+        "capture software Planning initiative",
     )
-    await _call_mutation(
-        client,
-        "plan_memory",
+    initiative_id = await plan_id_of(software_collection, "Planning v1 initiative")
+    await add_item(
+        software_collection,
+        {"title": "Investigate planning query edge case", "tags": ["bug"]},
+        "capture software bug candidate",
+    )
+    work_item_added = await add_item(
+        software_collection,
         {
-            "action": "add",
-            "collection": software_collection,
-            "plan_id": bug_id,
-            "item": {"title": "Investigate planning query edge case", "tags": ["bug"]},
-            "why": "capture software bug candidate",
+            "title": "Ship Planning query surface",
+            "status": "planned",
+            "priority": "high",
+            "commitment": "considering",
+            "horizon": "quarter",
+            "parent": f"exomem://plan/{software_id}/{initiative_id}",
+            "tags": ["feature"],
         },
-        timeout,
+        "capture software feature candidate",
     )
-    work_item_added = await _call_mutation(
-        client,
-        "plan_memory",
-        {
-            "action": "add",
-            "collection": software_collection,
-            "plan_id": work_item_id,
-            "item": {
-                "title": "Ship Planning query surface",
-                "status": "planned",
-                "priority": "high",
-                "commitment": "considering",
-                "horizon": "quarter",
-                "parent": f"exomem://plan/6dd5763e-cabe-4aed-9b9b-fcb0a372e4c5/{initiative_id}",
-                "tags": ["feature"],
-            },
-            "why": "capture software feature candidate",
-        },
-        timeout,
-    )
-    snapshot = await _call(
-        client,
-        "plan_memory",
-        {"action": "query", "collection": software_collection, "limit": 20, "lifecycle": "all"},
-        timeout,
-    )
-    item = next(
-        (row for row in snapshot.get("rows", []) if row.get("plan_id") == work_item_id), None
-    )
-    if not isinstance(item, dict) or not isinstance(item.get("item_version"), str):
-        raise RuntimeError("installed Planning query did not return the feature item version")
+    rows = await _plan_rows(client, software_collection, timeout)
+    item = rows.get("Ship Planning query surface")
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+        raise RuntimeError("installed Planning query did not return the feature item id")
+    work_item_id = item["plan_id"]
     updated = await _call_mutation(
         client,
-        "plan_memory",
+        "edit_plan_item",
         {
-            "action": "update",
             "collection": software_collection,
-            "plan_id": work_item_id,
+            "plan_item": item["id"],
             "changes": {
                 "execution": [
                     {
@@ -938,83 +953,76 @@ async def _planning_first_session(client, state: dict[str, Any], timeout: float)
                     {"kind": "repository", "ref": "exomem"},
                 ]
             },
-            "expected_container_hash": snapshot["snapshot"],
-            "expected_item_version": item["item_version"],
             "why": "link thin software execution pointers",
         },
         timeout,
     )
     if updated.get("operation") != "update":
         raise RuntimeError("installed Planning update did not commit")
+    stale = await _refused(
+        client,
+        "edit_plan_item",
+        {
+            "collection": software_collection,
+            "plan_item": item["id"],
+            "changes": {"tags": ["feature", "stale"]},
+            "why": "a retry with the id read before the update",
+        },
+        timeout,
+    )
+    if "STALE_ITEM" not in stale:
+        raise RuntimeError(f"installed Planning did not name the stale item id: {stale!r}")
     quarter = await _call(
         client,
-        "plan_memory",
-        {
-            "action": "query",
-            "collection": software_collection,
-            "view": "quarter",
-        },
+        "query_plan_items",
+        {"collection": software_collection, "options": {"view": "quarter"}},
         timeout,
     )
     if not any(row.get("plan_id") == work_item_id for row in quarter.get("rows", [])):
         raise RuntimeError("installed Planning quarter view omitted the feature item")
 
     home_collection = nonsoftware["collection"]
-    home_outcome_id = "aeab0d41-bbfe-4f40-9b04-cd7ab79d1a6c"
-    home_initiative_id = "d6e67537-1ea4-4733-b4eb-4ae26f770eee"
-    await _call_mutation(
-        client,
-        "plan_memory",
+    home_id = "1b2d04d7-0748-41da-b4f3-cb5313f38cbe"
+    await add_item(
+        home_collection,
         {
-            "action": "add",
-            "collection": home_collection,
-            "plan_id": home_outcome_id,
-            "item": {
-                "title": "Resilient home over five years",
-                "kind": "outcome",
-                "status": "planned",
-                "priority": "medium",
-                "commitment": "considering",
-                "horizon": "multi-year",
-                "domain": "home",
-                "progress_evidence": [nonsoftware["records_view"]],
-            },
-            "why": "capture non-software multi-year outcome",
+            "title": "Resilient home over five years",
+            "kind": "outcome",
+            "status": "planned",
+            "priority": "medium",
+            "commitment": "considering",
+            "horizon": "multi-year",
+            "domain": "home",
+            "progress_evidence": [nonsoftware["records_view"]],
         },
-        timeout,
+        "capture non-software multi-year outcome",
     )
-    await _call_mutation(
-        client,
-        "plan_memory",
+    home_outcome_id = await plan_id_of(home_collection, "Resilient home over five years")
+    await add_item(
+        home_collection,
         {
-            "action": "add",
-            "collection": home_collection,
-            "plan_id": home_initiative_id,
-            "item": {
-                "title": "Improve home exercise space",
-                "kind": "initiative",
-                "status": "planned",
-                "priority": "medium",
-                "commitment": "considering",
-                "horizon": "year",
-                "domain": "home",
-                "parent": f"exomem://plan/1b2d04d7-0748-41da-b4f3-cb5313f38cbe/{home_outcome_id}",
-            },
-            "why": "capture non-software initiative",
+            "title": "Improve home exercise space",
+            "kind": "initiative",
+            "status": "planned",
+            "priority": "medium",
+            "commitment": "considering",
+            "horizon": "year",
+            "domain": "home",
+            "parent": f"exomem://plan/{home_id}/{home_outcome_id}",
         },
-        timeout,
+        "capture non-software initiative",
     )
     home = await _call(
         client,
-        "plan_memory",
-        {"action": "query", "collection": home_collection, "view": "multi-year"},
+        "query_plan_items",
+        {"collection": home_collection, "options": {"view": "multi-year"}},
         timeout,
     )
     if not any(row.get("plan_id") == home_outcome_id for row in home.get("rows", [])):
         raise RuntimeError("installed Planning multi-year view omitted the home outcome")
     software["work_item_id"] = work_item_id
     software["work_item_path"] = _single_affected_path(
-        work_item_added, operation="plan_memory add"
+        work_item_added, operation="add_plan_item"
     )
 
 
@@ -1022,8 +1030,8 @@ async def _planning_restart_session(client, state: dict[str, Any], timeout: floa
     software = state["planning"]["software"]
     query = await _call(
         client,
-        "plan_memory",
-        {"action": "query", "collection": software["collection"], "limit": 20},
+        "query_plan_items",
+        {"collection": software["collection"], "limit": 20},
         timeout,
     )
     item = next(
@@ -1035,57 +1043,54 @@ async def _planning_restart_session(client, state: dict[str, Any], timeout: floa
         or item.get("title") != "Ship Planning query surface (human edit)"
     ):
         raise RuntimeError("direct Planning edit was not visible after restart")
-    inspection = await _call(
-        client,
-        "plan_memory",
-        {"action": "inspect", "collection": software["collection"]},
-        timeout,
+    inspection = await _inspect(
+        client, "plans.inspect", timeout, collection=software["collection"]
     )
     if inspection.get("audit", {}).get("status") != "gap":
         raise RuntimeError("direct Planning edit did not retain a positive audit gap")
 
 
+def _row_with_key(result: Any, key: str) -> dict[str, Any] | None:
+    """The record row whose `record_id` is `key`."""
+    rows = result.get("rows", []) if isinstance(result, dict) else []
+    return next((row for row in rows if isinstance(row, dict) and row.get("record_id") == key), None)
+
+
 async def _records_first_session(client, state: dict[str, Any], timeout: float) -> None:
     fixture = state["records"]
     collection = fixture["collection"]
-    described = await _call(client, "record_memory", {"action": "describe"}, timeout)
+    described = await _inspect(client, "records.describe", timeout)
     if not isinstance(described, dict):
         raise RuntimeError("installed Records describe did not return a contract")
-    validated = await _call(
+    validated = await _inspect(
         client,
-        "record_memory",
-        {
-            "action": "validate",
-            "manifest_path": collection,
-            "manifest_text": fixture["manifest_text"],
-        },
+        "records.validate",
         timeout,
+        manifest_path=collection,
+        manifest_text=fixture["manifest_text"],
     )
     if not isinstance(validated, dict) or validated.get("valid") is not True:
         raise RuntimeError("installed Records create-mode validation failed")
-    created = await _call_mutation(
+    created = await _manage(
         client,
-        "record_memory",
-        {
-            "action": "create",
-            "manifest_path": collection,
-            "manifest_text": fixture["manifest_text"],
-            "why": "author installed Records collection",
-        },
+        "records.create",
         timeout,
+        manifest_path=collection,
+        manifest_text=fixture["manifest_text"],
+        why="author installed Records collection",
     )
     if created.get("operation") != "create":
         raise RuntimeError("installed Records create did not commit")
-    inspected = await _call(
-        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
-    )
+    inspected = await _inspect(client, "records.inspect", timeout, collection=collection)
     if not isinstance(inspected.get("contract"), dict):
         raise RuntimeError("installed Records inspect did not return the created contract")
+    listed = await _call(client, "query_records", {}, timeout)
+    if not isinstance(listed, dict) or not listed.get("collections"):
+        raise RuntimeError("installed Records list did not name the created collection")
     before = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": collection,
             "columns": ["occurred_on", "title", "status", "movements"],
             "limit": 20,
@@ -1094,12 +1099,10 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     )
     if before.get("rows"):
         raise RuntimeError("installed Records fixture bypassed collection authoring")
-    item_key = "77777777-7777-4777-8777-777777777777"
     appended = await _call_mutation(
         client,
-        "record_memory",
+        "add_record",
         {
-            "action": "append",
             "collection": collection,
             "item": {
                 "occurred_on": "2026-08-04",
@@ -1118,8 +1121,6 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
                 "note": "Stopped exactly at the recorded count.",
                 "provenance": "Captured by the installed-wheel Records journey.",
             },
-            "item_key": item_key,
-            "expected_container_hash": _record_snapshot(before),
             "body": "e2e record row-only sentinel",
             "why": "record installed product session",
         },
@@ -1133,41 +1134,35 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     fixture["item_path"] = affected_paths[0]
     after_append = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": collection,
             "columns": ["occurred_on", "title", "movements"],
             "limit": 20,
         },
         timeout,
     )
-    item = next(
-        (row for row in after_append.get("rows", []) if row.get("record_id") == item_key),
-        None,
-    )
-    if not isinstance(item, dict) or not isinstance(item.get("item_version"), str):
-        raise RuntimeError("installed Records query did not return the appended item version")
+    rows = after_append.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("installed Records query did not return the one appended row")
+    item = rows[0]
+    item_key = item.get("record_id")
+    if not isinstance(item_key, str) or not isinstance(item.get("id"), str):
+        raise RuntimeError("installed Records query did not return the appended row id")
     first_children = await _call(
         client,
-        "record_memory",
-        {
-            "action": "query",
-            "collection": collection,
-            "expand_child": "movements",
-            "limit": 2,
-        },
+        "query_records",
+        {"collection": collection, "limit": 2, "options": {"expand_child": "movements"}},
         timeout,
     )
     second_children = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": collection,
-            "expand_child": "movements",
             "limit": 2,
-            "continuation": first_children.get("continuation"),
+            "options": {"expand_child": "movements"},
+            "more": first_children.get("continuation"),
         },
         timeout,
     )
@@ -1186,75 +1181,73 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         )
     updated = await _call_mutation(
         client,
-        "record_memory",
+        "edit_record",
         {
-            "action": "update",
             "collection": collection,
-            "item_key": item_key,
+            "record": item["id"],
             "changes": {"title": "Push corrected"},
-            "expected_container_hash": _record_snapshot(after_append),
-            "expected_item_version": item["item_version"],
             "why": "correct installed product session",
         },
         timeout,
     )
     if updated.get("operation") != "update":
         raise RuntimeError(f"installed Records update returned unexpected data: {updated!r}")
+    stale = await _refused(
+        client,
+        "edit_record",
+        {
+            "collection": collection,
+            "record": item["id"],
+            "changes": {"title": "Pull again"},
+            "why": "a retry with the id read before the update",
+        },
+        timeout,
+    )
+    if "STALE_ITEM" not in stale:
+        raise RuntimeError(f"installed Records did not name the stale row id: {stale!r}")
     updated_item_text = (Path(state["vault"]) / fixture["item_path"]).read_text(encoding="utf-8")
     if "**Session:** Push corrected" not in updated_item_text:
         raise RuntimeError("installed Records value update did not refresh managed presentation")
     derived = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": collection,
-            "view": "completed-sessions",
-            "output_format": "markdown",
+            "options": {"view": "completed-sessions", "output_format": "markdown"},
         },
         timeout,
     )
     if derived.get("derived") is not True or "| occurred_on" not in derived.get("rendered", ""):
         raise RuntimeError("installed Records query did not return a bounded derived Markdown view")
-    await _call(
-        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
-    )
-    revision = await _call(
+    await _inspect(client, "records.inspect", timeout, collection=collection)
+    revision = await _inspect(
         client,
-        "record_memory",
-        {
-            "action": "validate",
-            "collection": collection,
-            "manifest_text": fixture["revised_manifest_text"],
-        },
+        "records.validate",
         timeout,
+        collection=collection,
+        manifest_text=fixture["revised_manifest_text"],
     )
     guards = revision.get("lifecycle_guards") if isinstance(revision, dict) else None
     if not isinstance(guards, dict):
         raise RuntimeError("installed Records revision validation did not return guards")
-    revised = await _call_mutation(
+    revised = await _manage(
         client,
-        "record_memory",
-        {
-            "action": "revise",
-            "collection": collection,
-            "manifest_text": fixture["revised_manifest_text"],
-            **guards,
-            "why": "confirm installed Records lifecycle",
-        },
+        "records.revise",
         timeout,
+        collection=collection,
+        manifest_text=fixture["revised_manifest_text"],
+        **guards,
+        why="confirm installed Records lifecycle",
     )
     if revised.get("operation") != "revise":
         raise RuntimeError("installed Records revise did not commit")
-    revised_inspection = await _call(
-        client, "record_memory", {"action": "inspect", "collection": collection}, timeout
-    )
+    revised_inspection = await _inspect(client, "records.inspect", timeout, collection=collection)
     if revised_inspection.get("contract", {}).get("title") != "X3 training sessions (revised)":
         raise RuntimeError("installed Records inspection did not retain the revised manifest")
     revised_view = await _call(
         client,
-        "record_memory",
-        {"action": "query", "collection": collection, "view": "completed-sessions"},
+        "query_records",
+        {"collection": collection, "options": {"view": "completed-sessions"}},
         timeout,
     )
     if not any(
@@ -1265,9 +1258,9 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
         raise RuntimeError("installed Records saved view lost revised manifest/item parity")
     recalled = await _call(
         client,
-        "ask_memory",
+        "search_memory",
         # `detail="full"` keeps each hit's vault path, which the raw-log check below compares.
-        {"query": "e2e record row-only sentinel", "mode": "keyword", "detail": "full"},
+        {"query": "e2e record row-only sentinel", "options": {"mode": "keyword"}, "detail": "full"},
         timeout,
     )
     hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
@@ -1280,9 +1273,8 @@ async def _manual_records_session(client, state: dict[str, Any], timeout: float)
     fixture = state["manual_records"]
     queried = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": fixture["collection"],
             "columns": ["occurred_on", "title", "movements"],
             "limit": 20,
@@ -1291,9 +1283,7 @@ async def _manual_records_session(client, state: dict[str, Any], timeout: float)
     )
     if not any(row.get("occurred_on") == "2026-08-03" for row in queried.get("rows", [])):
         raise RuntimeError("installed Records query did not return the manual template session")
-    inspection = await _call(
-        client, "record_memory", {"action": "inspect", "collection": fixture["collection"]}, timeout
-    )
+    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
     expected_plan = {
         "reference": "exomem://memory/81947000-4c22-46e4-9874-23fed028314b",
         "query": {"filters": {"status": "completed"}, "limit": 24},
@@ -1308,9 +1298,8 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
     fixture = state["records"]
     result = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": fixture["collection"],
             "columns": ["occurred_on", "title", "movements"],
             "limit": 30,
@@ -1324,29 +1313,16 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
         row.get("record_id") == fixture["item_key"]
         and row.get("title") == "Push corrected (human edit)"
         for row in rows
-    ):
-        raise RuntimeError("guarded Records mutation did not survive restart")
-    if not any(
-        row.get("record_id") == fixture["item_key"]
-        and row.get("title") == "Push corrected (human edit)"
-        for row in rows
         if isinstance(row, dict)
     ):
         raise RuntimeError("direct Records edit was not visible after restart")
-    inspection = await _call(
-        client,
-        "record_memory",
-        {"action": "inspect", "collection": fixture["collection"]},
-        timeout,
-    )
+    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
     history = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": fixture["collection"],
-            "view": "completed-sessions",
-            "include_agent_history": True,
+            "options": {"view": "completed-sessions", "include_agent_history": True},
         },
         timeout,
     )
@@ -1355,12 +1331,7 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
 
 async def _records_rebaseline_session(client, state: dict[str, Any], timeout: float) -> None:
     fixture = state["records"]
-    inspection = await _call(
-        client,
-        "record_memory",
-        {"action": "inspect", "collection": fixture["collection"]},
-        timeout,
-    )
+    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
     audit = inspection.get("audit")
     guards = inspection.get("lifecycle_guards")
     if (
@@ -1378,53 +1349,33 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         or presentation.get("items", [{}])[0].get("remedy") != "rebaseline_then_refresh"
     ):
         raise RuntimeError("direct Records edit did not produce one actionable stale presentation")
-    rebaselined = await _call_mutation(
+    rebaselined = await _manage(
         client,
-        "record_memory",
-        {
-            "action": "rebaseline",
-            "collection": fixture["collection"],
-            **guards,
-            "acknowledged_gap_codes": audit["gaps"],
-            "why": "acknowledge direct installed edit",
-        },
+        "records.rebaseline",
         timeout,
+        collection=fixture["collection"],
+        **guards,
+        acknowledged_gap_codes=audit["gaps"],
+        why="acknowledge direct installed edit",
     )
     if rebaselined.get("operation") != "rebaseline":
         raise RuntimeError("installed Records rebaseline did not commit")
-    repair_inspection = await _call(
-        client,
-        "record_memory",
-        {"action": "inspect", "collection": fixture["collection"]},
-        timeout,
-    )
     repair_read = await _call(
         client,
-        "record_memory",
-        {"action": "query", "collection": fixture["collection"], "limit": 20},
+        "query_records",
+        {"collection": fixture["collection"], "limit": 20},
         timeout,
     )
-    repair_item = next(
-        (
-            row
-            for row in repair_read.get("rows", [])
-            if isinstance(row, dict) and row.get("record_id") == fixture["item_key"]
-        ),
-        None,
-    )
-    repair_guards = repair_inspection.get("lifecycle_guards")
-    if not isinstance(repair_item, dict) or not isinstance(repair_guards, dict):
-        raise RuntimeError("installed Records repair did not reacquire exact guards")
+    repair_item = _row_with_key(repair_read, fixture["item_key"])
+    if not isinstance(repair_item, dict) or not isinstance(repair_item.get("id"), str):
+        raise RuntimeError("installed Records repair did not reacquire the row id")
     refreshed = await _call_mutation(
         client,
-        "record_memory",
+        "edit_record",
         {
-            "action": "update",
             "collection": fixture["collection"],
-            "item_key": fixture["item_key"],
+            "record": repair_item["id"],
             "changes": {},
-            "expected_container_hash": repair_guards["expected_container_hash"],
-            "expected_item_version": repair_item["item_version"],
             "refresh_presentation": True,
             "why": "refresh installed managed presentation after rebaseline",
         },
@@ -1434,12 +1385,10 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         raise RuntimeError("installed Records presentation refresh did not commit")
     readback = await _call(
         client,
-        "record_memory",
+        "query_records",
         {
-            "action": "query",
             "collection": fixture["collection"],
-            "view": "completed-sessions",
-            "include_agent_history": True,
+            "options": {"view": "completed-sessions", "include_agent_history": True},
         },
         timeout,
     )
@@ -1450,11 +1399,8 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
         if isinstance(row, dict)
     ):
         raise RuntimeError("installed Records rebaseline readback lost the governed item")
-    rebaselined_inspection = await _call(
-        client,
-        "record_memory",
-        {"action": "inspect", "collection": fixture["collection"]},
-        timeout,
+    rebaselined_inspection = await _inspect(
+        client, "records.inspect", timeout, collection=fixture["collection"]
     )
     _assert_records_rebaseline(rebaselined_inspection, readback.get("agent_history", {}))
     if rebaselined_inspection.get("presentation", {}).get("items") != []:
@@ -1462,14 +1408,14 @@ async def _records_rebaseline_session(client, state: dict[str, Any], timeout: fl
 
 
 async def _maps_consumption_session(
-    client, state: dict[str, Any], *, activation_tool: str, timeout: float,
+    client, state: dict[str, Any], *, timeout: float,
 ) -> None:
     """Follow installed map and profile references to a persisted synthetic fact."""
     async def current_view(reference: str) -> dict[str, Any]:
         # Read views can warm their catalogue after the first installed request.
         async with asyncio.timeout(timeout):
             while True:
-                view = await _call(client, "read_memory", {"path": reference}, timeout)
+                view = await _call(client, "read_page", {"page": reference}, timeout)
                 if view.get("state") == "ready" and not view.get("stale"):
                     return view
                 if view.get("state") not in ("ready", "index_warming"):
@@ -1477,7 +1423,7 @@ async def _maps_consumption_session(
                 await asyncio.sleep(0.1)
 
     packet = await _call(
-        client, activation_tool,
+        client, "recall_context",
         {"turn": "What must Project Alpha retain after a release?", "max_chars": 8000},
         timeout,
     )
@@ -1502,10 +1448,10 @@ async def _maps_consumption_session(
     if fact is None:
         raise RuntimeError("installed profile supplied no reference to the stored fact")
     reference = fact.get("provenance", {}).get("path") or fact["ref"]
-    read = await _call(client, "read_memory", {"path": reference}, timeout)
+    read = await _call(client, "read_page", {"page": reference}, timeout)
     if read.get("ref") != fixture["ref"] or fixture["expected_fact"] not in read.get("body", ""):
         raise RuntimeError("following the installed profile did not recover its stored fact")
-    fixture.update({"activation_tool": activation_tool, "profile_ref": profile["ref"]})
+    fixture.update({"activation_tool": "recall_context", "profile_ref": profile["ref"]})
 
 
 async def _stdio_session(
@@ -1534,39 +1480,14 @@ async def _stdio_session(
     async with asyncio.timeout(timeout * 12):
         async with client:
             tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
-            from exomem.command_surface import find_rendering, resolve_command
-            from exomem.commands import PRODUCT_COMMANDS
-
-            def _command_name(name: str) -> str:
-                # A listed rendering (read_records, change_plans, ...) exposes its grouped command.
-                if (command := resolve_command(name, PRODUCT_COMMANDS)) is not None:
-                    return command.name
-                found = find_rendering(name, PRODUCT_COMMANDS)
-                return found[0].name if found is not None else name
-
-            activation_tool = next(
-                (name for name in tools if _command_name(name) == "activate_context"), "",
-            )
-            tools = {_command_name(name) for name in tools}
-            required = {
-                "activate_context",
-                "capture_source",
-                "remember",
-                "ask_memory",
-                "read_memory",
-                "preserve_evidence",
-                "replace_memory",
-                "edit_memory",
-                "connect_memory",
-                "review_memory",
-                "maintain_memory",
-                "schema_memory",
-                "record_memory",
-                "plan_memory",
-            }
-            missing = required - tools
-            if missing:
-                raise RuntimeError(f"installed stdio server missing tools: {sorted(missing)}")
+            if tools != PUBLIC_TOOLS:
+                raise RuntimeError(
+                    "installed stdio server lists the wrong tools: "
+                    f"missing {sorted(PUBLIC_TOOLS - tools)}, extra {sorted(tools - PUBLIC_TOOLS)}"
+                )
+            retired = await _refused(client, "remember", {"title": "x", "content": "x"}, timeout)
+            if "remember" not in retired:
+                raise RuntimeError(f"installed server did not refuse a retired name: {retired!r}")
 
             if first_run:
                 relation_proposal = {
@@ -1586,23 +1507,16 @@ async def _stdio_session(
                         },
                     },
                 }
-                registry_before = await _call(
-                    client,
-                    "schema_memory",
-                    {"operation": "infer", "subject": "relations"},
-                    timeout,
+                registry_before = await _inspect(
+                    client, "schema.infer", timeout, subject="relations"
                 )
-                registry_result = await _call_mutation(
+                registry_result = await _manage(
                     client,
-                    "schema_memory",
-                    {
-                        "operation": "infer",
-                        "subject": "relations",
-                        "save": True,
-                        "expected_hash": registry_before["content_hash"],
-                        "proposal": relation_proposal,
-                    },
+                    "schema.infer_and_save",
                     timeout,
+                    subject="relations",
+                    expected_hash=registry_before["content_hash"],
+                    proposal=relation_proposal,
                 )
                 if (
                     registry_result.get("saved", {}).get("previous_hash")
@@ -1614,13 +1528,13 @@ async def _stdio_session(
                 expected_fact = "Retain the signed release manifest for thirty days."
                 source = await _call_mutation(
                     client,
-                    "capture_source",
+                    "save_source",
                     {
                         "content": (
                             "Project Lantern uses governed references across restarts.\n"
                             f"{expected_fact}"
                         ),
-                        "source_type": "article",
+                        "source_kind": "article",
                         "title": "Lantern architecture source",
                         "url": "https://example.com/lantern",
                     },
@@ -1629,62 +1543,67 @@ async def _stdio_session(
                 if isinstance(source, dict) and isinstance(source.get("source"), dict):
                     source = source["source"]
                 if not isinstance(source, dict) or "path" not in source:
-                    raise RuntimeError(f"capture_source returned unexpected data: {source!r}")
+                    raise RuntimeError(f"save_source returned unexpected data: {source!r}")
                 memory = await _call_mutation(
                     client,
-                    "remember",
+                    "create_note",
                     {
                         "content": (
                             "# Lantern identity\n\n## Claim\n\n"
                             "Project Lantern requires stable governed identity.\n"
                         ),
                         "title": "Lantern identity",
-                        "note_type": "insight",
+                        "type": "insight",
                         "sources": [source["path"]],
                     },
                     timeout,
                 )
                 recalled = await _call(
                     client,
-                    "ask_memory",
-                    {"query": "Lantern stable governed identity", "mode": "keyword"},
+                    "search_memory",
+                    {
+                        "query": "Lantern stable governed identity",
+                        "options": {"mode": "keyword"},
+                    },
                     timeout,
                 )
                 recalled_hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
                 if memory["ref"] not in {hit.get("ref") for hit in recalled_hits}:
-                    raise RuntimeError("fresh memory was not recalled through stdio MCP")
+                    raise RuntimeError(
+                        f"fresh memory was not recalled through stdio MCP: {recalled!r}"
+                    )
                 read = await _call(
                     client,
-                    "read_memory",
-                    {"path": memory["ref"], "include_history": True},
+                    "read_page",
+                    {"page": memory["ref"], "part": "history"},
                     timeout,
                 )
                 if read.get("ref") != memory["ref"]:
                     raise RuntimeError("canonical memory reference did not round-trip")
                 evidence = await _call_mutation(
                     client,
-                    "preserve_evidence",
+                    "save_evidence",
                     {
                         "scope": "Lantern",
                         "category": "verification",
-                        "filename": "restart-proof.txt",
-                        "content": "restart persistence verified by the product E2E",
+                        "name": "restart-proof.txt",
+                        "text": "restart persistence verified by the product E2E",
                         "description": "Evidence used by the Lantern conclusion.",
                     },
                     timeout,
                 )
                 replacement = await _call_mutation(
                     client,
-                    "replace_memory",
+                    "supersede_note",
                     {
-                        "old_path": memory["ref"],
+                        "note": memory["ref"],
                         "content": (
                             "# Lantern identity v2\n\n## Claim\n\n"
                             "Project Lantern uses stable references plus governed evidence.\n"
                         ),
                         "title": "Lantern identity v2",
-                        "note_type": "insight",
-                        "reason": "add verified evidence and restart persistence",
+                        "type": "insight",
+                        "why": "add verified evidence and restart persistence",
                         "sources": [source["path"]],
                     },
                     timeout,
@@ -1694,15 +1613,12 @@ async def _stdio_session(
                     raise RuntimeError("replacement did not return a canonical new_ref")
                 await _call_mutation(
                     client,
-                    "edit_memory",
+                    "edit_note",
                     {
-                        "path": new_ref,
+                        "note": new_ref,
                         "why": "attach proof to the active conclusion",
-                        "operation": {
-                            "kind": "patch_frontmatter",
-                            "field": "evidence",
-                            "value": [f"[[{evidence['sidecar_path']}]]"],
-                        },
+                        "action": "set_fields",
+                        "fields": {"evidence": [f"[[{evidence['sidecar_path']}]]"]},
                     },
                     timeout,
                 )
@@ -1714,7 +1630,7 @@ async def _stdio_session(
                 ):
                     targets[key] = await _call_mutation(
                         client,
-                        "remember",
+                        "create_note",
                         {
                             "content": (
                                 f"# {title}\n\n## Record\n\nCross-file graph target.\n\n"
@@ -1722,13 +1638,13 @@ async def _stdio_session(
                                 f"- supports [[{replacement['new_path'].removesuffix('.md')}]]\n"
                             ),
                             "title": title,
-                            "note_type": "insight",
+                            "type": "insight",
                         },
                         timeout,
                     )
                 relation_memory = await _call_mutation(
                     client,
-                    "remember",
+                    "create_note",
                     {
                         "content": (
                             "# Lantern governed relations\n\n"
@@ -1739,48 +1655,36 @@ async def _stdio_session(
                             f"- systems.triggers: [[{targets['event']['path']}]]\n"
                         ),
                         "title": "Lantern governed relations",
-                        "note_type": "insight",
+                        "type": "insight",
                     },
                     timeout,
                 )
-                context = await _call(
-                    client,
-                    "connect_memory",
-                    {"operation": "context", "path": new_ref, "depth": 2},
-                    timeout,
+                context = await _inspect(
+                    client, "connections.context", timeout, path=new_ref, depth=2
                 )
                 provenance = context["provenance"][0]
                 if not provenance["sources"] or not provenance["evidence"]:
                     raise RuntimeError("unified context lost source/evidence provenance")
-                evolution = await _call(
-                    client,
-                    "review_memory",
-                    {"mode": "evolution", "query": "Lantern identity", "limit": 10},
-                    timeout,
+                evolution = await _inspect(
+                    client, "review.evolution", timeout, query="Lantern identity", limit=10
                 )
                 if not evolution:
                     raise RuntimeError("evolution review returned no lifecycle data")
-                preview_handle = await _call_maintenance(
-                    client,
-                    "maintain_memory",
-                    {"mode": "reconcile", "dry_run": True},
-                    timeout,
+                preview_handle = await _preview_maintenance(
+                    client, "maintenance.reconcile", timeout, dry_run=True
                 )
                 reconcile_preview = _remote_maintenance_preview(
                     preview_handle,
                     await _await_maintenance_job(client, preview_handle["run_id"], timeout),
                 )
                 plan_id = reconcile_preview["plan_id"]
-                job_handle = await _call_maintenance(
+                job_handle = await _manage_maintenance(
                     client,
-                    "maintain_memory",
-                    {
-                        "mode": "reconcile",
-                        "dry_run": False,
-                        "plan_id": plan_id,
-                        "why": "product e2e: prove the remote job route",
-                    },
+                    "maintenance.reconcile",
                     timeout,
+                    dry_run=False,
+                    plan_id=plan_id,
+                    why="product e2e: prove the remote job route",
                 )
                 _remote_maintenance_job(
                     job_handle,
@@ -1806,10 +1710,10 @@ async def _stdio_session(
                     }
                 )
                 maps_memory = await _call_mutation(
-                    client, "remember",
+                    client, "create_note",
                     {
                         "title": "Project Alpha release retention",
-                        "note_type": "insight",
+                        "type": "insight",
                         "projects": ["project-alpha"],
                         "sources": [source["path"]],
                         "content": (
@@ -1833,21 +1737,18 @@ async def _stdio_session(
                     raise RuntimeError("restart session is missing host operator reconcile proof")
                 active = await _call(
                     client,
-                    "read_memory",
-                    {"path": state["new_ref"], "include_history": True},
+                    "read_page",
+                    {"page": state["new_ref"], "part": "history"},
                     timeout,
                 )
                 old = await _call(
                     client,
-                    "read_memory",
-                    {"path": state["old_ref"], "include_history": True},
+                    "read_page",
+                    {"page": state["old_ref"], "part": "history"},
                     timeout,
                 )
-                context = await _call(
-                    client,
-                    "connect_memory",
-                    {"operation": "context", "path": state["new_ref"], "depth": 2},
-                    timeout,
+                context = await _inspect(
+                    client, "connections.context", timeout, path=state["new_ref"], depth=2
                 )
                 if active["path"] != state["new_path"]:
                     raise RuntimeError("active reference resolved to the wrong path after restart")
@@ -1886,9 +1787,7 @@ async def _stdio_session(
                     relation_ref=state["relation_ref"],
                     timeout=timeout,
                 )
-            await _maps_consumption_session(
-                client, state, activation_tool=activation_tool, timeout=timeout,
-            )
+            await _maps_consumption_session(client, state, timeout=timeout)
     return state
 
 
@@ -2231,8 +2130,8 @@ async def _initialize_http_mcp(base_url: str, timeout: float) -> None:
     async with asyncio.timeout(timeout * 3):
         async with client:
             tools = await asyncio.wait_for(client.list_tools(), timeout)
-            if not any(tool.name == "bootstrap" for tool in tools):
-                raise RuntimeError("HTTP MCP initialization omitted bootstrap")
+            if not any(tool.name == "read_instructions" for tool in tools):
+                raise RuntimeError("HTTP MCP initialization omitted read_instructions")
 
 
 def _assert_unauthenticated_records_refusal(base_url: str, timeout: float) -> None:
@@ -2245,9 +2144,8 @@ def _assert_unauthenticated_records_refusal(base_url: str, timeout: float) -> No
             "id": "records-auth-refusal",
             "method": "tools/call",
             "params": {
-                "name": "record_memory",
+                "name": "query_records",
                 "arguments": {
-                    "action": "inspect",
                     "collection": "Knowledge Base/Records/Health/X3/_collection.md",
                 },
             },
@@ -2279,9 +2177,8 @@ def _assert_unauthenticated_planning_refusal(base_url: str, timeout: float) -> N
             "id": "planning-auth-refusal",
             "method": "tools/call",
             "params": {
-                "name": "plan_memory",
+                "name": "query_plan_items",
                 "arguments": {
-                    "action": "inspect",
                     "collection": "Knowledge Base/Planning/Software/_collection.md",
                 },
             },

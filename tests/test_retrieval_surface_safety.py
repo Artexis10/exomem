@@ -74,11 +74,8 @@ def test_product_mcp_retrieval_schemas_are_safe(
     assert "find" not in tools
     assert "get" not in tools
 
-    assert "explain" in tools["search_memory"]["inputSchema"]["properties"]
-    operation = tools["read_memory"]["inputSchema"]["properties"]["operation"]
-    page = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "page")
-    read_inputs = {**page["properties"], **operation.get("properties", {})}
-    assert {"path", "unit_ref"} <= set(read_inputs)
+    assert {"options", "deep"} <= set(tools["search_memory"]["inputSchema"]["properties"])
+    assert {"page", "part", "options"} <= set(tools["read_page"]["inputSchema"]["properties"])
 
     with principal_module.request_scope(
         principal_module.owner_principal(surface="mcp")
@@ -88,13 +85,12 @@ def test_product_mcp_retrieval_schemas_are_safe(
                 "search_memory",
                 {
                     "query": "metabolism",
-                    "mode": "keyword",
-                    "scope": "kb-only",
-                    "explain": True,
+                    "options": {"mode": "keyword", "scope": "kb-only", "explain": True},
                 },
                 run_middleware=True,
             )
-        ).structured_content["result"]
+        ).structured_content
+    result = result.get("result", result)
     assert result["retrieval_profile"]["effective_mode"] == "keyword"
     assert result["hits"][0]["ranking_explanation"]["final_rank"] == 1
 
@@ -121,23 +117,10 @@ def test_retrieval_return_annotation_models_page_unit_mixed_and_explanation() ->
     )
 
 
-def test_legacy_mcp_leaf_names_are_opt_in(
+def test_the_retired_compatibility_switch_lists_no_old_name(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("EXOMEM_MCP_LEGACY_COMPAT", raising=False)
+    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     tools = _mcp_tools(_build_server(monkeypatch, vault))
 
-    assert "note" not in tools
-    assert "create_file" not in tools
-
-    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
-    compat_tools = _mcp_tools(_build_server(monkeypatch, vault))
-
-    assert "create_note" in compat_tools
-    assert "change_files" in compat_tools
-    assert "manage_memory_file" not in compat_tools
-    assert "note" in compat_tools
-    assert "create_file" in compat_tools
-    assert compat_tools["note"]["description"].startswith(
-        "[Deprecated compatibility alias; prefer product commands.]"
-    )
+    assert not {"note", "create_file", "change_files", "manage_memory_file"} & tools.keys()

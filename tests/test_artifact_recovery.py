@@ -206,10 +206,8 @@ def test_native_resource_is_consumed_over_mcp_and_rejects_a_foreign_client(
 
     async def consume():
         async with Client(mcp) as client:
-            handoff = await client.call_tool(
-                "transfer_artifact", {"operation": "download", "artifact": stored["path"]}
-            )
-            payload = handoff.structured_content
+            handoff = await client.call_tool("download_files", {"pages": [stored["path"]]})
+            payload = handoff.structured_content["artifacts"][0]
             assert payload["artifact"]["sha256"] == hashlib.sha256(original).hexdigest()
             uri = payload["deliveries"]["native_resource"]["uri"]
             content = await client.read_resource(uri)

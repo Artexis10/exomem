@@ -2226,7 +2226,7 @@ def test_the_referent_line_follows_what_actually_supplied_the_referent(
 
 
 # --------------------------------------------------------------------------- #
-# Episode recaps: a raw-material line, so `read_memory` is the follow-up
+# Episode recaps: a raw-material line, so `read_page` is the follow-up
 # --------------------------------------------------------------------------- #
 
 
@@ -2265,9 +2265,9 @@ def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
     lines = hook._recent_lines(packet)
 
     assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
-    # The header still routes a session line to `read_memory` (reworded when
+    # The header still routes a session line to `read_page` (reworded when
     # it gained the already-activated sentence, round-2 ruling Q1).
-    assert "`read_memory` a `unit`, `pointer`, `state` or `session` line" in hook._WORKING_SET_HEADER
+    assert "`read_page` a `unit`, `pointer`, `state` or `session` line" in hook._WORKING_SET_HEADER
 
 
 def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:

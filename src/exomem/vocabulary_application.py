@@ -277,6 +277,30 @@ def _curation_binding(vault_root, kwargs: Mapping[str, Any], item: WorkItem, cho
     return run_id, plan_id, fingerprint
 
 
+def _by_item_id(vault_root, command: str, kwargs: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`kwargs` with the ref, page and fingerprint that a short review id stands for.
+
+    An accept names its suggestion by id, and the leaf binds that id after admission. The application
+    compares the reviewed choice with the exact candidate, so it reads the same id here, once, and only
+    when a vocabulary decision is bound.
+    """
+    if command != "connect_memory" or kwargs.get("item_id") is None:
+        return kwargs
+    from . import commands, review_ids
+
+    bound = review_ids.bind(
+        lambda **kw: commands.op_review_memory(vault_root, **kw),
+        item=str(kwargs["item_id"]),
+        modes=review_ids.RELATION_QUEUE_MODES,
+    )
+    return {
+        **kwargs,
+        "ref": bound["ref"],
+        "expected_fingerprint": bound["expected_fingerprint"],
+        "path": bound.get("source_path"),
+    }
+
+
 def bind(
     vault_root,
     *,
@@ -398,7 +422,7 @@ def bind(
             store.observe(current_item)
             raise ValueError("VOCABULARY_DECISION_STALE: refresh vocabulary review before application")
     if curation is None and not _matches(
-        vault_root, command, kwargs, item, choice, str(decision.get("outcome"))
+        vault_root, command, _by_item_id(vault_root, command, kwargs), item, choice, str(decision.get("outcome"))
     ):
         mismatch = _registry_definition_mismatch(command, kwargs, item, choice)
         if mismatch is not None:

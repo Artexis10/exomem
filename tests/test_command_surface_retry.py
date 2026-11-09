@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _public_call import public_call
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware.middleware import MiddlewareContext
@@ -1495,9 +1496,9 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     assert message.endswith(" Nothing was saved.")
     remediation = full["diagnostics"]["error"]["remediation"]
     assert "maintain_memory(mode='backfill-ids')" in remediation
-    assert "confirmation" in remediation
+    assert "confirm" in remediation
     assert "plan_id" in remediation
-    assert remediation.index("identity issues") < remediation.index("confirmation")
+    assert remediation.index("identity issues") < remediation.index("confirm")
     assert "re-read and validate" in remediation
 
 
@@ -1519,8 +1520,8 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     async def scenario(client):
         listed = {tool.name for tool in await client.list_tools()}
         missing = await client.call_tool(
-            "read_memory",
-            {"operation": {"kind": "page", "path": "Knowledge Base/Notes/absent.md"}},
+            *public_call("read_memory",
+            {"operation": {"kind": "page", "path": "Knowledge Base/Notes/absent.md"}}),
             raise_on_error=False,
         )
         monkeypatch.setattr(
@@ -1532,8 +1533,8 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
         )
         legacy = await client.call_tool(
             "edit_note",
-            {"path": "Knowledge Base/Notes/legacy.md", "why": "test", "response_detail": "full",
-             "operation": {"kind": "replace_tags", "tags": ["a"]}},
+            {"note": "Knowledge Base/Notes/legacy.md", "why": "test", "detail": "full",
+             "action": "set_tags", "tags": ["a"]},
             raise_on_error=False,
         )
         return listed, missing.structured_content, legacy.structured_content
@@ -1547,13 +1548,13 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     finally:
         writer_lease.reset_managers_for_tests()
 
-    assert {"search_memory", "check_memory", "repair_memory"} <= listed
+    assert {"search_memory", "inspect_memory", "manage_memory"} <= listed
     assert {"ask_memory", "maintain_memory"}.isdisjoint(listed)
     assert missing["error"]["code"] == "NOT_FOUND"
     remediation = legacy["diagnostics"]["error"]["remediation"]
     assert legacy["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
-    assert "check_memory(operation={'kind': 'backfill-ids'})" in remediation
-    assert "run repair_memory with dry_run=false, its plan_id" in remediation
+    assert "inspect_memory(operation='maintenance.backfill_ids')" in remediation
+    assert "run manage_memory with dry_run=false, its plan_id" in remediation
     assert "maintain_memory" not in remediation
     # The semantic finding prefixes this text and shares a 224-byte budget; the typed
     # spelling is the longer one.
@@ -1585,8 +1586,8 @@ def test_the_entity_observation_remediation_names_the_edit_tool_the_client_lists
         async with Client(server) as client:
             listed = {tool.name for tool in await client.list_tools()}
             refused = await client.call_tool(
-                "change_observations",
-                {"operation": {"kind": "add", "path": entity, "category": "rule", "content": "Opens at nine."}},
+                *public_call("change_observations",
+                {"operation": {"kind": "add", "path": entity, "category": "rule", "content": "Opens at nine."}}),
                 raise_on_error=False,
             )
             return listed, refused.structured_content

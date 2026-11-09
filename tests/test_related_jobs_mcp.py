@@ -1,4 +1,4 @@
-"""Shared discovery reaches each original MCP execution boundary."""
+"""A door operation reaches the grouped command's own execution boundary: credential rule, lease, egress."""
 
 import dataclasses
 
@@ -6,7 +6,6 @@ import pytest
 import test_single_purpose_tools_mcp as pilot_mcp
 import yaml
 from fastmcp.tools import ToolResult
-from jsonschema import Draft202012Validator, ValidationError
 from mcp.types import ImageContent
 from test_single_purpose_tools_mcp import _call, _session
 
@@ -32,7 +31,7 @@ def test_writer_status_does_not_build_bootstrap_during_an_outage(build, monkeypa
     ))
 
     async def scenario(client):
-        return await _call(client, "bootstrap", {"operation": {"kind": "writer-status"}})
+        return await _call(client, "inspect_memory", {"operation": "writer.status"})
 
     mcp = build()
     assert _session(mcp, scenario) == status
@@ -44,9 +43,7 @@ def test_dataset_filters_keep_the_omitted_operator_and_do_not_contact_a_writer(v
     arguments = {"path": "metrics.csv", "filters": [{"column": "value", "value": "2"}]}
 
     async def scenario(client):
-        nested = await _call(client, "read_memory", {"operation": {"kind": "dataset", **arguments}})
-        legacy = await _call(client, "query_dataset", arguments)
-        return nested, legacy
+        return await _call(client, "inspect_memory", {"operation": "dataset.query", "arguments": arguments})
 
     mcp = build()
 
@@ -54,9 +51,8 @@ def test_dataset_filters_keep_the_omitted_operator_and_do_not_contact_a_writer(v
         raise AssertionError("a dataset read must not acquire writer authority")
 
     monkeypatch.setattr(writer_lease.LeaseManager, "ensure_writer", ensure_writer)
-    nested, legacy = _session(mcp, scenario)
-    assert nested == legacy
-    assert nested["rows"] == [{"value": "2", "label": "second"}]
+    result = _session(mcp, scenario)
+    assert result["rows"] == [{"value": "2", "label": "second"}]
     assert all(name == "query_dataset" for name, *_ in seams.rules)
 
 
@@ -86,27 +82,23 @@ def test_registry_preview_checks_the_live_overlay_without_replacing_it(vault, bu
     monkeypatch.setattr(writer_lease.LeaseManager, "ensure_writer", ensure_writer)
 
     async def scenario(client):
-        tools = {tool.name: tool for tool in await client.list_tools()}
-        schema = Draft202012Validator(tools["read_schema"].input_schema)
-        arguments = {"operation": {"kind": "preview", "subject": "categories", "proposal": delta}}
-        schema.validate(arguments)
-        for malformed in ({"upsert": [{"key": "proposed_category", **entry}]},
-                          {"schema_version": 1, "categories": {"proposed_category": entry}}):
-            with pytest.raises(ValidationError):
-                schema.validate({"operation": {**arguments["operation"], "proposal": malformed}})
-        document = await _call(client, "read_schema", {"operation": {
-            "kind": "validate-document", "subject": "categories",
+        document = await _call(client, "inspect_memory", {"operation": "schema.validate_document", "arguments": {
+            "subject": "categories",
             "proposal": {"schema_version": 1, "categories": {"proposed_category": entry}},
         }})
-        compact = await _call(client, "read_schema", arguments)
-        grouped = await _call(client, "schema_memory", {
-            "operation": "propose", "subject": "categories", "proposal": delta,
-        })
-        return document, compact, grouped
+        malformed = await _call(client, "inspect_memory", {"operation": "schema.preview", "arguments": {
+            "subject": "categories", "proposal": {"upsert": [{"key": "proposed_category", **entry}]},
+        }})
+        preview = await _call(client, "inspect_memory", {"operation": "schema.preview", "arguments": {
+            "subject": "categories", "proposal": delta,
+        }})
+        return document, malformed, preview
 
-    document, compact, grouped = _session(build(), scenario)
+    document, malformed, compact = _session(build(), scenario)
     assert document["valid"] is True
-    assert compact == grouped
+    # The door's arguments are an open object, so the leaf rejects the malformed delta shape.
+    assert malformed["valid"] is False
+    assert "INVALID_REGISTRY_DELTA" in {finding["code"] for finding in malformed["findings"]}
     assert compact["expected_hash"] != "none"
     if condition == "cap":
         assert compact["valid"] is False
@@ -120,20 +112,15 @@ def test_registry_preview_checks_the_live_overlay_without_replacing_it(vault, bu
     assert {call["command"] for call in seams.dispatched} == {"schema_memory"}
 
 
-def test_import_run_remains_readable_through_the_deprecated_spelling(build, seams):
+def test_an_import_run_started_by_one_door_is_readable_through_the_other(build, seams):
     async def scenario(client):
-        tools = {tool.name for tool in await client.list_tools()}
-        assert {"import_memory", "read_import"} <= tools
-        assert "adoption_studio" not in tools
-        run = await _call(client, "import_memory", {"operation": {"kind": "start", "path": "."}})
+        run = await _call(client, "manage_memory", {"operation": "imports.start", "arguments": {"path": "."}})
         run_id = run["run_id"]
-        current = await _call(client, "read_import", {"operation": {"kind": "status", "run_id": run_id}})
-        alias = await _call(client, "import_memory", {"action": "status", "run_id": run_id})
-        legacy = await _call(client, "adoption_studio", {"action": "status", "run_id": run_id})
-        return run_id, current, alias, legacy
+        status = await _call(client, "inspect_memory", {"operation": "imports.status", "arguments": {"run_id": run_id}})
+        return run_id, status
 
-    run_id, current, alias, legacy = _session(build(), scenario)
-    assert [result["run_id"] for result in (current, alias, legacy)] == [run_id] * 3
+    run_id, status = _session(build(), scenario)
+    assert status["run_id"] == run_id
     assert {call["command"] for call in seams.dispatched} == {"adoption_studio"}
 
 
@@ -151,7 +138,9 @@ def test_video_variant_retains_native_image_content(build, monkeypatch):
     ))
 
     async def scenario(client):
-        return await client.call_tool("read_media", {"operation": {"kind": "video", "path": "clip.mp4"}})
+        return await client.call_tool(
+            "inspect_memory", {"operation": "media.video", "arguments": {"path": "clip.mp4"}}
+        )
 
     result = _session(build(), scenario)
     assert result.content == [native]
@@ -166,21 +155,19 @@ def test_cloud_discovery_keeps_media_status_and_original_file_metadata(build, mo
         return {tool.name: tool for tool in await client.list_tools()}
 
     tools = _session(build(), scenario)
-    kinds = {branch["properties"]["kind"]["const"]
-             for branch in tools["read_media"].input_schema["properties"]["operation"]["oneOf"]}
-    assert kinds == {"status"}
-    assert "transfer_artifact" not in tools
+    inspect_operations = set(tools["inspect_memory"].input_schema["properties"]["operation"]["enum"])
+    assert {"media.status"} <= inspect_operations
+    assert not {"media.video", "media.image"} & inspect_operations
+    assert not {"upload_files", "download_files"} & tools.keys()
     assert {"observe_transfer", "transfer_memory"} <= tools.keys()
-    evidence = tools["preserve_artifacts"]
-    assert "files" in evidence.input_schema["required"]
+    evidence = tools["save_evidence"]
+    assert "files" in evidence.input_schema["properties"]
     assert evidence.meta["openai/fileParams"] == ["files"]
 
 
 def test_selected_session_refusal_reaches_the_original_credential_rule(build, seams):
     async def scenario(client):
-        return await _call(client, "manage_authorization_session", {"operation": {
-            "kind": "status", "documents": {},
-        }})
+        return await _call(client, "manage_memory", {"operation": "session.status"})
 
     result = _session(build(), scenario)
     assert "authorization session is unavailable" in result["text"]
@@ -191,12 +178,12 @@ def test_selected_session_refusal_reaches_the_original_credential_rule(build, se
     assert seams.dispatched == []
 
 
-@pytest.mark.parametrize("tool,code", [("read_media", "INVALID_OPERATION"), ("read_records", "INVALID_RECORD_ARGUMENTS")])
-def test_unknown_kind_is_a_public_refusal_without_an_authentication_target(build, seams, tool, code):
+@pytest.mark.parametrize("door", ["inspect_memory", "manage_memory"])
+def test_unknown_operation_is_a_public_refusal_without_an_authentication_target(build, seams, door):
     async def scenario(client):
-        return await _call(client, tool, {"operation": {"kind": "unknown"}})
+        return await _call(client, door, {"operation": "media.unknown"})
 
     result = _session(build(), scenario)
-    assert result["error"]["code"] == code
+    assert result["error"]["code"] == "INVALID_OPERATION"
     assert seams.rules == []
     assert seams.dispatched == []

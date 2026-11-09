@@ -12,7 +12,7 @@ The identity is local to the vault. Revisions remain separate Sources; capture d
   "id": 17,
   "method": "tools/call",
   "params": {
-    "name": "capture_source",
+    "name": "save_source",
     "arguments": {
       "title": "Captured record",
       "content": "Original text",

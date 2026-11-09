@@ -13,12 +13,13 @@ added to a leaf needs no change here.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from .query_compat import public_filter_annotation
 
@@ -102,13 +103,11 @@ class WireTool:
                 continue
             wire = dict(route.add)
             bag: dict[str, Any] = {}
-            if (
-                arguments.get("relation_disposition") == "reviewed_none"
-                and "unlinked_reason" in self.model.model_fields
-            ):
+            decides = "unlinked_reason" in self.model.model_fields
+            if decides and arguments.get("relation_disposition") == "reviewed_none":
                 wire["unlinked_reason"] = arguments.get("relation_review_reason")
             for key, value in arguments.items():
-                if value is None or key in route.when or key in route.derived:
+                if value is None or key in route.when or key in route.derived or (decides and key in _RELATION_DECISION):
                     continue
                 if key in route.inverse:
                     wire[route.inverse[key]] = value
@@ -116,14 +115,29 @@ class WireTool:
                     wire[key] = value
                 elif route.bag is not None:
                     bag[key] = value
-            if bag:
-                wire[route.bag] = bag  # type: ignore[index]
-            return wire
+                else:
+                    # A call that this tool would send without the field is another operation's call.
+                    break
+            else:
+                if bag:
+                    wire[route.bag] = bag  # type: ignore[index]
+                return wire
+            continue
         return None
+
+
+#: The leaf fields of one reviewed-none decision. `unlinked_reason` carries it; the server derives the hash.
+_RELATION_DECISION = frozenset({"relation_disposition", "relation_review_reason", "relation_review_hash"})
 
 
 def _given(values: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
+
+
+def _with_detail(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The wire fields as leaf fields: `detail` is the leaf's `response_detail`."""
+    return _given({**{key: value for key, value in wire.items() if key != "detail"},
+                   "response_detail": wire.get("detail")})
 
 
 def _bag(
@@ -190,7 +204,9 @@ class SearchMemory(Wire):
     types: list[str] | None = Field(default=None, description="Page types.")
     projects: list[str] | None = None
     tags: list[str] | None = None
-    filters: Filters = None
+    filters: dict[str, Any] | None = Field(
+        default=None, description='Structured page or unit metadata filter, such as {"page.status": "active"}.'
+    )
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: mode, rerank, scope, relations, categories, kinds. read_instructions lists them."
     )
@@ -262,15 +278,31 @@ def _read_instructions(wire: dict[str, Any], ctx: Context) -> Translated:
 # --- Notes ----------------------------------------------------------------------------------
 
 
+class VocabularyDecision(Wire):
+    """The answer to a `vocabulary_preparation` that a write returned instead of saving."""
+
+    evidence_fingerprint: str = Field(description="The fingerprint in the vocabulary_preparation.")
+    outcome: Literal["reuse", "create", "defer"]
+    canonical: str | None = Field(default=None, description="The value to use; none for defer.")
+
+
+def _vocabulary(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The leaf `vocabulary_decision`, which names `canonical` even when it is none."""
+    decision = wire.get("vocabulary_decision")
+    return {} if decision is None else {"vocabulary_decision": {"canonical": None, **decision}}
+
+
 class CreateNote(Wire):
     title: str
-    content: str = Field(description="Markdown body. Link another page with [[Title]].")
+    content: str = Field(description="Markdown body with a `## Observations` section of `- [category] text` lines. Link another page with [[Title]].")
     type: str | None = Field(default=None, description="Note type.")
-    project: str | None = None
+    project: str | None = Field(default=None, description="The one project key of a research note. Any slug is legal; a new key registers itself.")
+    projects: list[str] | None = Field(default=None, description="Project keys of any other note. Any slug is legal; a new key registers itself.")
     sources: list[str] | None = Field(default=None, description="Titles of the pages this draws from.")
     tags: list[str] | None = None
     fields: dict[str, Any] | None = Field(default=None, description="Type-specific metadata, such as severity or hypothesis.")
     unlinked_reason: str | None = _UNLINKED
+    vocabulary_decision: VocabularyDecision | None = None
     suggest_links: bool | None = Field(default=None, description="Also return pages to link.")
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
@@ -287,9 +319,9 @@ def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
     extra = _bag(wire, "fields", ctx, "remember", _CREATE_HANDLED, "create_note")
     leaf = _given({
         "title": wire["title"], "content": wire["content"], "note_type": wire.get("type"),
-        "project": wire.get("project"), "sources": wire.get("sources"), "tags": wire.get("tags"),
-        "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
-        "response_detail": wire.get("detail"), **_unlinked(wire),
+        "project": wire.get("project"), "projects": wire.get("projects"), "sources": wire.get("sources"),
+        "tags": wire.get("tags"), "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
+        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire),
     })
     return "remember", {**extra, **leaf}
 
@@ -332,6 +364,20 @@ class TextEdit(Wire):
     replace_all: bool | None = None
 
 
+def _decoded_object(item: Any) -> Any:
+    """Decode an object that a connector sent as a JSON string, so the model checks the object itself."""
+    if isinstance(item, str):
+        try:
+            decoded = json.loads(item)
+        except json.JSONDecodeError:
+            return item
+        return decoded if isinstance(decoded, dict) else item
+    return item
+
+
+EncodedTextEdit = Annotated[TextEdit, BeforeValidator(_decoded_object, json_schema_input_type=TextEdit)]
+
+
 class EditNote(Wire):
     note: Page = Field(description="Page title, or the page id for replace_body.")
     why: Why
@@ -342,7 +388,7 @@ class EditNote(Wire):
     old_text: str | None = Field(default=None, description="replace_text: the exact text to find.")
     new_text: str | None = Field(default=None, description="replace_text and replace_section: the new text.")
     replace_all: bool | None = Field(default=None, description="replace_text: change every match.")
-    edits: list[TextEdit] | None = Field(default=None, description="replace_text: several changes in one commit.")
+    edits: list[EncodedTextEdit] | None = Field(default=None, description="replace_text: several changes in one commit.")
     heading: str | None = Field(default=None, description="replace_section: the heading to change.")
     position: Literal["append", "prepend", "replace"] | None = Field(default=None, description="replace_section: where the text goes; append by default.")
     create_missing: bool | None = Field(default=None, description="replace_section: add the heading when absent.")
@@ -504,10 +550,12 @@ class SupersedeNote(Wire):
     why: Why
     type: str | None = None
     project: str | None = None
+    projects: list[str] | None = None
     sources: list[str] | None = None
     tags: list[str] | None = None
     fields: dict[str, Any] | None = Field(default=None, description="Type-specific metadata.")
     unlinked_reason: str | None = _UNLINKED
+    vocabulary_decision: VocabularyDecision | None = None
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
 
@@ -520,8 +568,8 @@ def _supersede_note(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = _given({
         "old_path": wire["note"], "title": wire["title"], "content": wire["content"],
         "reason": wire["why"], "note_type": wire.get("type"), "project": wire.get("project"),
-        "sources": wire.get("sources"), "tags": wire.get("tags"), "validate_only": wire.get("preview"),
-        "response_detail": wire.get("detail"), **_unlinked(wire),
+        "projects": wire.get("projects"), "sources": wire.get("sources"), "tags": wire.get("tags"), "validate_only": wire.get("preview"),
+        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire),
     })
     return "replace_memory", {**extra, **leaf}
 
@@ -600,7 +648,7 @@ class SaveEpisode(Wire):
 
 
 def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
-    leaf = _given({**wire, "response_detail": wire.pop("detail", None)})
+    leaf = _with_detail(wire)
     return "episode_memory", {"action": "record", **leaf}
 
 
@@ -627,13 +675,24 @@ def _download_files(wire: dict[str, Any], ctx: Context) -> Translated:
                                  **_given({"response_detail": wire.get("detail")})}
 
 
+def _spell_download(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The pages of a download call: the leaf's one `artifact` is a list of one.
+
+    A call that names no page is a route in guidance, which leaves the pages to the tool schema.
+    """
+    if set(arguments) - {"operation", "artifact", "artifacts", "response_detail"}:
+        return None
+    pages = arguments.get("artifacts") or ([arguments["artifact"]] if arguments.get("artifact") else None)
+    return _given({"pages": pages, "detail": arguments.get("response_detail")})
+
+
 # --- Records and Planning -------------------------------------------------------------------
 
 
 class QueryRecords(Wire):
     collection: str | None = Field(default=None, description="Omit to list the collections and their fields.")
     filters: Filters = None
-    columns: list[str] | None = None
+    columns: list[str] | None = Field(default=None, description="Rows keep the `id` that edit_record takes only if you also name `record_id` and `item_version`.")
     sort_by: str | None = None
     descending: bool | None = None
     limit: int | None = None
@@ -644,15 +703,19 @@ class QueryRecords(Wire):
 _QUERY_HANDLED = frozenset({"collection", "filters", "columns", "sort_by", "descending", "limit", "continuation", "action"})
 
 
-def _query_collection(command: str, tool: str, key: str):
-    """`key` is the column that names a row: it and the row version make the row id the reply carries."""
+def _query_collection(command: str, tool: str, key: str | None):
+    """`key` is the column that names a row: it and the row version make the row id the reply carries.
+
+    A call that restricts `columns` gets those two added when `key` is given. A Records collection
+    can be a dataset that has no row key, so a Records call gets only the columns it asked for.
+    """
 
     def translate(wire: dict[str, Any], ctx: Context) -> Translated:
         options = _bag(wire, "options", ctx, command, _QUERY_HANDLED, tool)
         if wire.get("collection") is None:
             return command, {"action": "inspect"}
         columns = wire.get("columns")
-        if columns is not None:
+        if columns is not None and key is not None:
             columns = [*columns, *(name for name in (key, "item_version") if name not in columns)]
         leaf = _given({
             "collection": wire["collection"], "filters": wire.get("filters"), "columns": columns,
@@ -663,6 +726,11 @@ def _query_collection(command: str, tool: str, key: str):
     return translate
 
 
+def _spell_collection_list(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The list of collections is the query tool's; the inspection of one collection is a door operation."""
+    return None if arguments.get("collection") is not None else {}
+
+
 class AddRecord(Wire):
     collection: str
     item: dict[str, Any] = Field(description="The row's fields, by column name.")
@@ -670,20 +738,28 @@ class AddRecord(Wire):
     body: str | None = Field(default=None, description="Free text kept with the row.")
     hold: bool | None = Field(default=None, description="Hold a row that fails validation instead of refusing it.")
     held: str | None = Field(default=None, description="The id of a held row to resume.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
 
 
+_ADD_RECORD_HANDLED = frozenset({"action", "collection", "item", "why", "body", "hold", "held", "response_detail"})
+
+
 def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
-    return "record_memory", {"action": "append", **_given({**wire, "response_detail": wire.pop("detail", None)})}
+    options = _bag(wire, "options", ctx, "record_memory", _ADD_RECORD_HANDLED, "add_record")
+    return "record_memory", {"action": "append", **options, **_with_detail(wire)}
 
 
 class EditRecord(Wire):
     collection: str
-    record: str = Field(description="The row id that query_records returned.")
+    record: str = Field(description="The row `id` that query_records returned, or `row_id` where the collection has its own `id` field.")
     changes: dict[str, Any] = Field(description="Columns to change, by name.")
     why: Why
     body: str | None = None
     held: str | None = None
+    refresh_presentation: bool | None = Field(
+        default=None, description="Rebuild the row's managed Markdown view; `changes` may then be empty."
+    )
     detail: Detail | None = _DETAIL
 
 
@@ -691,6 +767,7 @@ def _edit_record(wire: dict[str, Any], ctx: Context) -> Translated:
     return "record_memory", {"action": "update", **_given({
         "collection": wire["collection"], "item_id": wire["record"], "changes": wire["changes"],
         "why": wire["why"], "body": wire.get("body"), "held": wire.get("held"),
+        "refresh_presentation": wire.get("refresh_presentation"),
         "response_detail": wire.get("detail")})}
 
 
@@ -714,7 +791,7 @@ class AddPlanItem(Wire):
 
 
 def _add_plan_item(wire: dict[str, Any], ctx: Context) -> Translated:
-    return "plan_memory", {"action": "add", **_given({**wire, "response_detail": wire.pop("detail", None)})}
+    return "plan_memory", {"action": "add", **_with_detail(wire)}
 
 
 class EditPlanItem(Wire):
@@ -737,6 +814,23 @@ def _edit_plan_item(wire: dict[str, Any], ctx: Context) -> Translated:
     return "plan_memory", {"action": "update", **common, **_given({"changes": wire.get("changes"), "body": wire.get("body")})}
 
 
+#: The leaf fields of one status move; the server derives the rest.
+_STATUS_MOVE = frozenset({"action", "collection", "item_id", "why", "response_detail", "transition",
+                          "plan_id", "expected_item_version", "expected_container_hash"})
+
+
+def _spell_status_move(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A triage call is `edit_plan_item` with `status`, when its transition moves only the status or names none."""
+    transition = arguments.get("transition")
+    if transition is not None and (not isinstance(transition, Mapping) or set(transition) != {"status"}):
+        return None
+    if set(arguments) - _STATUS_MOVE:
+        return None
+    return _given({"collection": arguments.get("collection"), "plan_item": arguments.get("item_id"),
+                   "why": arguments.get("why"), "status": None if transition is None else transition["status"],
+                   "detail": arguments.get("response_detail")})
+
+
 # --- Review ---------------------------------------------------------------------------------
 
 #: The queues of list_review_items, which the review reader names by mode. A closed pair of API
@@ -757,6 +851,15 @@ class ListReviewItems(Wire):
     limit: int | None = None
 
 
+def _spell_review_queue(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The wire call of one review mode: the mode's queue name, and the limits the wire takes."""
+    queue = next((name for name, mode in REVIEW_QUEUES.items() if mode == arguments.get("mode")), None)
+    if queue is None or set(arguments) - {"mode", "categories", "limit"}:
+        return None  # Another field means another operation: a meaning question names a path and a family.
+    return _given({"queue": None if queue == "due" else queue, "categories": arguments.get("categories"),
+                   "limit": arguments.get("limit")})
+
+
 def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
     return "review_memory", {"mode": REVIEW_QUEUES[wire.get("queue") or "due"],
                              **_given({"categories": wire.get("categories"), "limit": wire.get("limit")})}
@@ -768,6 +871,8 @@ class DecideReviewItem(Wire):
     until: str | None = Field(default=None, description="snooze: YYYY-MM-DD.")
     why: str | None = None
     relation: str | None = Field(default=None, description="accept: the relation to record, when the suggestion offers several.")
+    vocabulary_ref: str | None = Field(default=None, description="accept: the recorded vocabulary decision that names a relation the suggestion does not offer.")
+    vocabulary_fingerprint: str | None = Field(default=None, description="accept: the fingerprint of that decision.")
     detail: Detail | None = _DETAIL
 
 
@@ -783,9 +888,11 @@ def _decide_review_item(wire: dict[str, Any], ctx: Context) -> Translated:
     detail = _given({"response_detail": wire.get("detail")})
     if wire["decision"] == "accept":
         return "connect_memory", {"operation": "accept-relation", "item_id": wire["review_item"],
-                                  **_given({"why": wire.get("why"), "requested_relation": wire.get("relation")}), **detail}
-    if wire.get("relation") is not None:
-        raise Refusal("INVALID_ARGUMENT", "relation applies to accept only.")
+                                  **_given({"why": wire.get("why"), "requested_relation": wire.get("relation"),
+                                            "vocabulary_ref": wire.get("vocabulary_ref"),
+                                            "vocabulary_fingerprint": wire.get("vocabulary_fingerprint")}), **detail}
+    if any(wire.get(key) is not None for key in ("relation", "vocabulary_ref", "vocabulary_fingerprint")):
+        raise Refusal("INVALID_ARGUMENT", "relation and the vocabulary decision apply to accept only.")
     return "triage_memory", {"action": wire["decision"], "item_id": wire["review_item"],
                              **_given({"until": wire.get("until"), "why": wire.get("why")}), **detail}
 
@@ -818,8 +925,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           "Save a lasting conclusion as a new note. Put raw material in save_source and proof in save_evidence. Link another page with [[Title]], or give unlinked_reason.",
           CreateNote, "write", _create_note,
           [Route("remember", inverse={"note_type": "type", "suggestions": "suggest_links", **_NOTE_INVERSE},
-                 bag="fields", derived=frozenset({"relation_disposition", "relation_review_reason", "relation_review_hash",
-                                                   "draft_id", "draft_hash", "draft_token"}))],
+                 bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],
           example={"title": "Weekly releases beat batch releases", "type": "insight", "content": "Weekly releases cut rollback size.\n\n## Observations\n- [finding] Weekly releases halved rollback size #release\n\n## Relations\n- supports [[Release cadence]]"},
           captures=True),
     _tool("add_observation", "Add observation",
@@ -848,8 +954,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           "Replace a note whose conclusion changed. The old note stays readable and points to the new one.",
           SupersedeNote, "write", _supersede_note,
           [Route("replace_memory", inverse={"old_path": "note", "reason": "why", "note_type": "type", **_NOTE_INVERSE},
-                 bag="fields", derived=frozenset({"relation_disposition", "relation_review_reason", "relation_review_hash",
-                                                   "draft_id", "draft_hash", "draft_token"}))],
+                 bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],
           destructive=True,
           captures=True),
     _tool("save_source", "Save source",
@@ -878,19 +983,18 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("download_files", "Download files",
           "Get the original files of one or more pages back out of memory. The reply gives a link or a command that saves each.",
           DownloadFiles, "write", _download_files,
-          [Route("transfer_artifact", when={"operation": "download"},
-                 inverse={"artifacts": "pages", "artifact": "pages", "response_detail": "detail"})]),
+          [Route("transfer_artifact", when={"operation": "download"}, reverse=_spell_download)]),
     _tool("query_records", "Query records",
           "Read the person's Records. Without `collection`, list the collections and their fields; with one, filter and sort its rows.",
-          QueryRecords, "read", _query_collection("record_memory", "query_records", "record_id"),
+          QueryRecords, "read", _query_collection("record_memory", "query_records", None),
           [Route("record_memory", when={"action": "query"}, inverse={"continuation": "more"}, bag="options"),
-           Route("record_memory", when={"action": "inspect"})], idempotent=True,
+           Route("record_memory", when={"action": "inspect"}, reverse=_spell_collection_list)], idempotent=True,
           example={"collection": "Workouts", "filters": [{"column": "type", "op": "eq", "value": "run"}], "sort_by": "date", "descending": True, "limit": 20},
-          claims=(("record_memory", "query"), ("record_memory", "inspect"))),
+          claims=(("record_memory", "query"),)),
     _tool("add_record", "Add record",
           "Add a row to a Records collection the person owns. Outcomes go here; intentions go to Planning.",
           AddRecord, "write", _add_record,
-          [Route("record_memory", when={"action": "append"}, inverse={"response_detail": "detail"})],
+          [Route("record_memory", when={"action": "append"}, inverse={"response_detail": "detail"}, bag="options")],
           claims=(("record_memory", "append"),),
           captures=True),
     _tool("edit_record", "Edit record",
@@ -906,8 +1010,8 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           "Read the person's Planning. Without `collection`, list the plan collections; with one, filter its items.",
           QueryPlanItems, "read", _query_collection("plan_memory", "query_plan_items", "plan_id"),
           [Route("plan_memory", when={"action": "query"}, inverse={"continuation": "more"}, bag="options"),
-           Route("plan_memory", when={"action": "inspect"})], idempotent=True,
-          claims=(("plan_memory", "query"), ("plan_memory", "inspect"))),
+           Route("plan_memory", when={"action": "inspect"}, reverse=_spell_collection_list)], idempotent=True,
+          claims=(("plan_memory", "query"),)),
     _tool("add_plan_item", "Add plan item", "Add an item to a plan the person owns.",
           AddPlanItem, "write", _add_plan_item,
           [Route("plan_memory", when={"action": "add"}, inverse={"response_detail": "detail"})],
@@ -918,8 +1022,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           EditPlanItem, "write", _edit_plan_item,
           [Route("plan_memory", when={"action": "update"}, inverse={"item_id": "plan_item", "response_detail": "detail"},
                  derived=frozenset({"plan_id", "expected_item_version", "expected_container_hash"})),
-           Route("plan_memory", when={"action": "triage"}, inverse={"item_id": "plan_item", "response_detail": "detail"},
-                 derived=frozenset({"plan_id", "expected_item_version", "expected_container_hash", "transition"}))],
+           Route("plan_memory", when={"action": "triage"}, reverse=_spell_status_move)],
           destructive=True,
           example={"collection": "Launch plan", "plan_item": "p3x9t2k.7mna", "why": "Draft finished", "status": "done"},
           claims=(("plan_memory", "update"), ("plan_memory", "triage")),
@@ -927,7 +1030,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("list_review_items", "List review items",
           "List what needs the person's review: due items by default, or one queue.",
           ListReviewItems, "read", _list_review_items,
-          [Route("review_memory", inverse={"mode": "queue"})], idempotent=True,
+          [Route("review_memory", reverse=_spell_review_queue)], idempotent=True,
           claims=(("review_memory", "attention"), ("review_memory", "activation"), ("review_memory", "stale"), ("review_memory", "contradiction"), ("review_memory", "unprocessed-sources"), ("review_memory", "relation-debt"), ("review_memory", "relation-queue"), ("review_memory", "adoption"), ("review_memory", "upkeep"), ("review_memory", "plan-progress"), ("review_memory", "vocabulary"), ("review_memory", "procedure_approvals"),)),
     _tool("decide_review_item", "Decide review item",
           "Record the person's decision on one review item. accept applies to a relation suggestion.",

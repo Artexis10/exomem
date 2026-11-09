@@ -65,7 +65,7 @@ def test_it_fires_at_the_eighth_activation_without_a_record(
         "activations": episode_nudge.EPISODE_NUDGE_ACTIVATIONS,
     }
     # The client sees the public tool name; the leaf name is not a tool it can call.
-    assert "record_episode" in episode_nudge.EPISODE_RULE and "episode_memory" not in episode_nudge.EPISODE_RULE
+    assert "save_episode" in episode_nudge.EPISODE_RULE and "episode_memory" not in episode_nudge.EPISODE_RULE
     assert episode_nudge.EPISODE_NUDGE_ACTIVATIONS == 8
 
 

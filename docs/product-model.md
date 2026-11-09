@@ -17,14 +17,14 @@ Users and agents should think in verbs first. Exomem's internal page types still
 
 | User action | What it means | Backed by |
 | --- | --- | --- |
-| Save | Keep raw material or a durable conclusion | `capture_source` for raw material; `create_note` for compiled conclusions; `preserve_evidence` for proof |
+| Save | Keep raw material or a durable conclusion | `save_source` for raw material; `create_note` for compiled conclusions; `save_evidence` for proof |
 | Adopt/import | Understand an existing vault safely before changing anything | `adopt_vault(mode="scan-only")`, then explicit copy/manifest/compile modes |
-| Ask | Retrieve what the vault already knows with citations | `search_memory`, then `read_memory`; `search_memory(deep=true)` for bounded context |
-| Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `preserve_evidence`, `transfer_artifact`, `review_memory(mode="provenance")` |
-| Review | Surface stale, unprocessed, disconnected, or contradictory areas; explicitly snooze/dismiss reviewed signals | `review_memory`; `triage_memory` for state changes |
-| Update | Correct, edit, or supersede knowledge while preserving history | `edit_note`, `supersede_note`, `maintain_memory` |
-| Connect | Link related notes, entities, decisions, and sources | `connect_memory` |
-| Record | Log or correct an observed event, measurement, transaction, session, or current state | `record_memory(action="inspect"|"create"|"query"|"append"|"update")` |
+| Ask | Retrieve what the vault already knows with citations | `search_memory`, then `read_page`; `search_memory(deep=true)` for bounded context |
+| Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `save_evidence`, `upload_files`, `list_review_items(queue="provenance")` |
+| Review | Surface stale, unprocessed, disconnected, or contradictory areas; explicitly snooze/dismiss reviewed signals | `list_review_items`; `decide_review_item` for state changes |
+| Update | Correct, edit, or supersede knowledge while preserving history | `edit_note`, `supersede_note`, `manage_memory` |
+| Connect | Link related notes, entities, decisions, and sources | `manage_memory` |
+| Record | Log or correct an observed event, measurement, transaction, session, or current state | `query_records`, `add_record`, `edit_record` |
 
 ## Eight governed layers
 

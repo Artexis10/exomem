@@ -21,6 +21,7 @@ from exomem import (
     mutation_terminal,
     note_cohesion,
     operation_entries,
+    review_ids,
     review_state,
     writer_lease,
 )
@@ -103,16 +104,14 @@ def test_a_write_that_reaches_the_base_step_asks_the_one_question(
     assert result["diagnostics"]["operational"]["status"] == "committed"
     suggestion = result["structure_suggestion"]
     assert set(suggestion) == {
-        "kind", "units", "step_units", "next_step_units", "ref", "fingerprint", "question",
+        "kind", "units", "step_units", "next_step_units", "ref", "fingerprint", "id", "question",
     }
     assert (suggestion["kind"], suggestion["units"]) == ("note_cohesion", 9)
     assert (suggestion["step_units"], suggestion["next_step_units"]) == (9, 14)
     assert suggestion["question"].startswith(note_cohesion.QUESTION)
-    # The keep-whole answer is spelled out with this item's identity, so an agent can act on it.
-    assert suggestion["ref"] in suggestion["question"]
-    assert suggestion["fingerprint"] in suggestion["question"]
+    # The keep-whole answer is spelled out with this item's id, so an agent can act on it.
+    assert suggestion["id"] in suggestion["question"]
     assert suggestion["ref"].startswith("exomem://review/")
-    assert ("operation=" in suggestion["question"]) == (tool_shape == "nested")
 
 
 def test_a_write_below_the_base_step_asks_nothing(vault: Path) -> None:
@@ -297,6 +296,9 @@ _VALID = {
     "next_step_units": 21,
     "ref": "exomem://review/0123456789abcdef01234567",
     "fingerprint": "0123456789abcdef01234567",
+    "id": review_ids.item_id(
+        {"ref": "exomem://review/0123456789abcdef01234567", "fingerprint": "0123456789abcdef01234567"}
+    ),
     "question": note_cohesion.QUESTION,
 }
 

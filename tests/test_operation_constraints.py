@@ -76,15 +76,12 @@ def family(monkeypatch):
 @pytest.mark.parametrize("extra", [{}, {"dry_run": True}, {"subject": None}])
 def test_constraints_and_alias_preserve_explicit_values_and_omission(family, extra):
     grouped = {"action": "run", "request": {"mode": "check", "payload": 7}, "kind": "fact", **extra}
+    aliased = {"file_kind" if key == "subject" else key: value for key, value in extra.items()}
+    wire = {"operation": {"kind": "run", "request": {"mode": "check", "payload": 7}, "unit_kind": "fact", **aliased}}
 
-    tool, wire = entries.spell_call(family.name, grouped, "nested")
-    command, flat = resolve_invocation(tool, wire, [family])
+    command, flat = resolve_invocation("synthetic_read", wire, [family])
 
-    assert tool == "synthetic_read"
-    assert wire["operation"]["kind"] == "run"
-    assert wire["operation"]["unit_kind"] == "fact"
     assert (command.name, flat) == (family.name, grouped)
-    assert entries.unspell_call(tool, wire, "nested") == (family.name, grouped)
     assert entries.unspell_call(family.name, grouped, "grouped") == (family.name, grouped)
 
 
@@ -104,7 +101,6 @@ def test_wrong_missing_or_malformed_constraint_never_resolves_to_read(family, ch
 
     with pytest.raises(ValueError):
         resolve_invocation("synthetic_read", wire, [family], strict=False)
-    assert entries.unspell_call("synthetic_read", wire, "nested") is None
 
 
 def test_opposite_effect_call_names_the_write_rendering(family):
@@ -120,15 +116,6 @@ def test_opposite_effect_call_names_the_write_rendering(family):
 
 
 def test_alias_collision_refuses_instead_of_losing_a_grouped_argument(family):
-    grouped = {
-        "action": "run",
-        "request": {"mode": "check"},
-        "kind": "fact",
-        "unit_kind": "different",
-    }
-
-    with pytest.raises(ValueError, match="conflict"):
-        entries.spell_call(family.name, grouped, "nested")
     wire = {
         "operation": {
             "kind": "run",
@@ -139,7 +126,6 @@ def test_alias_collision_refuses_instead_of_losing_a_grouped_argument(family):
     }
     with pytest.raises(ValueError, match="conflict"):
         resolve_invocation("synthetic_read", wire, [family])
-    assert entries.unspell_call("synthetic_read", wire, "nested") is None
 
 
 def test_schema_and_dispatch_agree_on_multiple_constraints_and_alias(family):

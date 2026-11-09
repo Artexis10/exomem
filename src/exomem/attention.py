@@ -91,10 +91,9 @@ _RRF_K: int = 60  # the conventional default `fusion` and `find` use
 
 _PROPOSED_FIX: str = (
     "Surfaced for REVIEW only — this ranking is a deterministic measurement, not a "
-    "judgment that anything conflicts or is wrong. You decide per reason: keep / "
-    "`replace` (supersede) / `reconcile` / `propose_compilation` / "
-    "`connect_memory` / archive. Nothing is "
-    "auto-acted; `find` ordering is unchanged."
+    "judgment that anything conflicts or is wrong. You decide per reason: keep, "
+    "supersede with `supersede_note`, reconcile, compile the sources, connect the pages "
+    "or archive. Nothing is auto-acted; search order is unchanged."
 )
 
 _ACTIVATION_FIX: str = (

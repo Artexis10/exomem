@@ -27,6 +27,7 @@ from exomem import (
     epistemic_graph,
     find,
     freshness,
+    review_ids,
     semantic_contract,
 )
 
@@ -92,17 +93,12 @@ def _person_and_organization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _accept(call, group: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     return call(
-        "change_connections",
+        "decide_review_item",
         {
-            "operation": {
-                "kind": "accept-relation",
-                "ref": item["ref"],
-                "path": group["path"],
-                "expected_hash": group["content_hash"],
-                "expected_fingerprint": item["fingerprint"],
-                "why": "Reviewed the shared source.",
-            },
-            "response_detail": "full",
+            "review_item": item["id"],
+            "decision": "accept",
+            "why": "Reviewed the shared source.",
+            "detail": "full",
         },
     )
 
@@ -192,22 +188,17 @@ def _accept_as(
 ) -> dict[str, Any]:
     """Accept with a chosen relation. A vocabulary-bound write needs an explicit idempotency key."""
     arguments = {
-        "operation": {
-            "kind": "accept-relation",
-            "ref": item["ref"],
-            "path": group["path"],
-            "expected_hash": group["content_hash"],
-            "expected_fingerprint": item["fingerprint"],
-            "why": "Reviewed the shared source.",
-            "requested_relation": relation,
-            **binding,
-        }
+        "review_item": item["id"],
+        "decision": "accept",
+        "why": "Reviewed the shared source.",
+        "relation": relation,
+        **binding,
     }
 
     async def keyed() -> dict[str, Any]:
         async with Client(call.mcp) as client:
             result = await client.call_tool(
-                "change_connections",
+                "decide_review_item",
                 arguments,
                 raise_on_error=False,
                 meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "accept-owns-1"},
@@ -266,20 +257,14 @@ def _accept_suggested(
     call, page: str, candidate: dict[str, Any], relation: str
 ) -> dict[str, Any]:
     """Accept from the candidate's `review` fields, naming `relation`, with no recorded choice."""
-    review = candidate["review"]
     return call(
-        "change_connections",
+        "decide_review_item",
         {
-            "operation": {
-                "kind": "accept-relation",
-                "ref": review["ref"],
-                "path": page,
-                "expected_hash": review["source_content_hash"],
-                "expected_fingerprint": review["fingerprint"],
-                "why": "The user confirmed that exact relation.",
-                "requested_relation": relation,
-            },
-            "response_detail": "full",
+            "review_item": review_ids.item_id(candidate["review"]),
+            "decision": "accept",
+            "why": "The user confirmed that exact relation.",
+            "relation": relation,
+            "detail": "full",
         },
     )
 
@@ -332,16 +317,11 @@ def test_suggest_relations_carries_no_review_for_a_candidate_the_queue_has_dismi
     group, item = _shared_source_item(call, person, organization)
     assert "review" in _suggested_candidate(call, person, organization)
     dismissed = call(
-        "triage_memory",
+        "decide_review_item",
         {
-            "operation": {
-                "kind": "decision",
-                "ref": item["ref"],
-                "action": "dismiss",
-                "source_path": group["path"],
-                "why": "false_positive: the pair is only incidental.",
-                "expected_fingerprint": item["fingerprint"],
-            }
+            "review_item": item["id"],
+            "decision": "dismiss",
+            "why": "false_positive: the pair is only incidental.",
         },
     )
     assert dismissed["state"] == "dismissed", dismissed
@@ -523,17 +503,14 @@ def _two_plain_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _accept_requesting(call, group: dict[str, Any], item: dict[str, Any], relation: str | None):
-    operation = {
-        "kind": "accept-relation",
-        "ref": item["ref"],
-        "path": group["path"],
-        "expected_hash": group["content_hash"],
-        "expected_fingerprint": item["fingerprint"],
+    arguments = {
+        "review_item": item["id"],
+        "decision": "accept",
         "why": "Reviewed the shared source.",
     }
     if relation is not None:
-        operation["requested_relation"] = relation
-    return call("change_connections", {"operation": operation})
+        arguments["relation"] = relation
+    return call("decide_review_item", arguments)
 
 
 def test_a_candidate_between_two_plain_notes_offers_relations_and_the_plain_link(

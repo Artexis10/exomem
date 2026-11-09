@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from test_connector_boundary import SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_connector_boundary import public_matter_writer as public_matter_writer
@@ -81,7 +82,7 @@ def test_full_restricted_mcp_edit_ignores_denied_lifecycle_overflow(
 
         async def invoke(mcp=mcp):
             async with Client(mcp) as client:
-                response = await client.call_tool("edit_memory", {
+                response = await client.call_tool(*public_call("edit_memory", {
                     "path": PAGE,
                     "why": "Record the completed round",
                     "operation": {
@@ -89,7 +90,7 @@ def test_full_restricted_mcp_edit_ignores_denied_lifecycle_overflow(
                         "old_string": "An earlier round.",
                         "new_string": "The completed round.",
                     },
-                })
+                }))
                 return response.data
 
         response = asyncio.run(invoke())

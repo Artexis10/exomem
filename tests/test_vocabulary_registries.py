@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _public_call import public_call
 from test_collection_store_writer import store as store
 
 from exomem import commands, entity_types, graph_sync, registry_history
@@ -50,7 +51,7 @@ def _served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     def call(tool: str, arguments: dict) -> dict:
         content = asyncio.run(
-            mcp.call_tool(tool, arguments, run_middleware=True)
+            mcp.call_tool(*public_call(tool, arguments), run_middleware=True)
         ).structured_content
         # A tool whose output schema is not an object wraps its result.
         return content["result"] if set(content) == {"result"} else content

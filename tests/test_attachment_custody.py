@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 import pytest
+from _public_call import public_call
 
 # The real-worker harness of the local-ingress threat tests, reused so the
 # end-to-end case runs through the same manager doors production uses.
@@ -822,6 +823,12 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
     app = real_worker.app
 
     async def call(client: httpx.AsyncClient, handle: dict, request_id: int) -> dict:
+        name, arguments = public_call("preserve_artifacts", {
+            "scope": "Clinic",
+            "category": "Appointments",
+            "files": [handle],
+            "transcriptions": [{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
+        })
         response = await client.post(
             "/mcp",
             headers={
@@ -830,7 +837,7 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
                 "content-type": "application/json",
                 "mcp-protocol-version": PROTOCOL_VERSION,
                 "mcp-method": "tools/call",
-                "mcp-name": "preserve_artifacts",
+                "mcp-name": name,
             },
             json={
                 "jsonrpc": "2.0",
@@ -845,15 +852,8 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
                             "version": "1",
                         },
                     },
-                    "name": "preserve_artifacts",
-                    "arguments": {
-                        "scope": "Clinic",
-                        "category": "Appointments",
-                        "files": [handle],
-                        "transcriptions": [
-                            {"file_id": handle["file_id"], "text": TRANSCRIPTION}
-                        ],
-                    },
+                    "name": name,
+                    "arguments": arguments,
                 },
             },
         )

@@ -165,15 +165,21 @@ def active_tools_text(command: str, effect: operation_entries.Effect | None = No
     return "/".join(active_tools(command, effect))
 
 
-def project_call_routes(value: Any) -> Any:
-    """Spell authored structured routes for the serving surface using operation entries."""
+def project_call_routes(value: Any, *, strict: bool = True) -> Any:
+    """Spell authored structured routes for the serving surface using operation entries.
+
+    An authored route that no public tool carries raises ValueError, because guidance that names a
+    tool the surface cannot call must fail where it is written. A runtime result passes
+    `strict=False` instead: a route that cannot be spelled stays as authored, since a finished
+    call must not become a failure for the sake of a hint.
+    """
     if current_tool_shape() == "grouped":
         return value
     if isinstance(value, list | tuple):
-        return [project_call_routes(item) for item in value]
+        return [project_call_routes(item, strict=strict) for item in value]
     if not isinstance(value, dict):
         return value
-    result = {key: project_call_routes(item) for key, item in value.items()}
+    result = {key: project_call_routes(item, strict=strict) for key, item in value.items()}
     tool = result.get("tool")
     if not isinstance(tool, str):
         return result
@@ -192,6 +198,11 @@ def project_call_routes(value: Any) -> Any:
         result.pop("tool")
         result["tools"] = list(active_tools(tool))
         return result
-    name, arguments = active_spell_call(tool, arguments)
+    try:
+        name, arguments = active_spell_call(tool, arguments)
+    except ValueError:
+        if strict:
+            raise
+        return value
     result.update(tool=name, **({argument_key: arguments} if arguments or argument_key in result else {}))
     return result

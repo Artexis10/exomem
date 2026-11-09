@@ -10,7 +10,7 @@ authorize a live rollout.
 
 ## What a configured cell does
 
-- It publishes `transfer_artifact`: `hold=true` uploads, and `download` of a preserved original.
+- It publishes `upload_files`: `hold=true` uploads, and `download` of a preserved original.
   A download returns the descriptor and a `next_step` command, never a link or blob.
 - It serves one private `POST /upload` route. The route requires the cell bearer,
   then a gateway proof bound to the exact ticket, before it claims the ticket.
@@ -76,10 +76,10 @@ download stream with an idle bound (default 60 seconds) and a total cap (default
 
 ## Check a selected cell
 
-1. Call `tools/list` through the gateway; expect `transfer_artifact` and `read_media` with status, with video decoding excluded.
+1. Call `tools/list` through the gateway; expect `upload_files` and `inspect_memory` with status, with video decoding excluded.
 2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
 3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
-4. Call `capture_source` with the returned file and the same digest; expect a stored receipt with that hash.
+4. Call `save_source` with the returned file and the same digest; expect a stored receipt with that hash.
 5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`exomem cloud download -- '<path>'`, which writes to the current folder and refuses to replace an existing file unless given `--overwrite`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
 
 ## Accepted risk: the read timeout covers every edge route
@@ -96,7 +96,7 @@ gateway change, because the gateway must build `upload_url` on another origin.
 ## Undo
 
 1. Remove the cell from `cloudGateway.uploadCellIds` and upgrade the chart; the gateway stops selecting it, so new uploads to it fail.
-2. Wait for cellctl to restart the cell; `transfer_artifact` is withdrawn.
+2. Wait for cellctl to restart the cell; `upload_files` is withdrawn.
 3. Empty `cloudGateway.uploadCellIds` to withdraw the handoff everywhere; the chart then renders as it did before.
 4. Emptying the list does not revert the 900 s read timeout. Remove `traefik.ports.websecure.transport.respondingTimeouts.readTimeout` from the private values, or set the earlier value, and upgrade the chart. The Traefik pod restarts, which causes a short edge outage.
 

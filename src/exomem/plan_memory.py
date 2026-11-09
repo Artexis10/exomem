@@ -110,10 +110,9 @@ def plan_memory(
     values.update(guards)
     plan_id = values["plan_id"]
     _validate_arguments(action, values)
-    if action in {"update", "triage"} and None in (
-        values["plan_id"], values["expected_container_hash"], values["expected_item_version"]
-    ):
-        _invalid_arguments("update and triage need item_id, or plan_id with expected_container_hash and expected_item_version")
+    absent = [name for name in ("plan_id", "expected_container_hash", "expected_item_version") if values[name] is None]
+    if action in {"update", "triage"} and absent:
+        _invalid_arguments("update and triage need item_id, or plan_id with both guards; missing: " + ", ".join(absent))
     try:
         # nosemgrep: ep-word-membership -- plan_memory's closed write actions (see ACTIONS).
         if action in {"add", "update", "triage"}:
@@ -126,7 +125,7 @@ def plan_memory(
 
         selected, result = preview.dispatch(vault_root, "planning", action, values)
         if selected:
-            return collection_refs.mark_rows(result, profile="planning") if action == "query" else result
+            return result
         if action == "inspect":
             assert collection is not None
             return planning.inspect(vault_root, collection)
@@ -172,7 +171,7 @@ def plan_memory(
             )
         if action == "query":
             assert collection is not None
-            return collection_refs.mark_rows(planning.query(
+            return planning.query(
                 vault_root,
                 collection,
                 view=view,
@@ -194,7 +193,7 @@ def plan_memory(
                 include_agent_history=(
                     False if include_agent_history is None else include_agent_history
                 ),
-            ), profile="planning")
+            )
         if action == "revise":
             assert collection is not None and manifest_text is not None
             assert expected_manifest_hash is not None and expected_container_hash is not None

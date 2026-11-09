@@ -83,13 +83,15 @@ class PublicCommandNameMiddleware(Middleware):
     the egress filter and the ledger see the grouped call. A door operation that its
     rendering does not carry also rewrites, but its refusal travels with it to
     `RenderedRefusalMiddleware`, after authorization and before any lease. A name that this
-    server does not list is refused before authorization: old names are not aliases.
+    server does not list is refused before authorization: old names are not aliases. A call that
+    presents a credential has it verified before either of those refusals.
     """
 
-    def __init__(self, commands) -> None:
+    def __init__(self, commands, vault_root) -> None:
         from .public_surface import PASSTHROUGH_COMMANDS, public_surface
 
         self.commands = commands
+        self.vault_root = vault_root
         self.surface = public_surface()
         self.listed = self.surface.listed_names(commands)
         available = {command.name for command in commands}
@@ -106,13 +108,14 @@ class PublicCommandNameMiddleware(Middleware):
             rendering_scope,
             resolve_command,
         )
-        from .governance.authorization_transport import MCP_CREDENTIAL_PARAMETER
+        from .governance.authorization_transport import MCP_CREDENTIAL_PARAMETER, refuse_unverified_credential
 
         name = context.message.name
         if name in self.passthrough:
             command = resolve_command(self.passthrough[name], self.commands)
             return await call_next(context.copy(message=context.message.model_copy(update={"name": command.name})))
         if name not in self.listed:
+            await refuse_unverified_credential(self.vault_root, context)
             # NotFoundError would reach the client as the framework's fixed "Unknown tool" text,
             # which cannot name the tools that exist; a ToolError carries this message through.
             raise ToolError(f"Unknown tool: {name!r}. This server lists: {', '.join(self.listed)}.")
@@ -129,6 +132,7 @@ class PublicCommandNameMiddleware(Middleware):
             command = getattr(error, "command", None)
             if command is None:
                 # A call that no operation owns has no authorization route or egress projector.
+                await refuse_unverified_credential(self.vault_root, context)
                 log.info("public operation refused: tool=%s code=%s", name, error.code)
                 from fastmcp.tools import ToolResult
 
@@ -925,7 +929,7 @@ def build_server(
     from .public_surface import PASSTHROUGH_COMMANDS, build_tools, public_surface
 
     surface = public_surface()
-    mcp.add_middleware(PublicCommandNameMiddleware(product_commands))
+    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
     mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
     # Cloud traces retain their content-free form after name normalization.
     mcp.add_middleware(CallTraceMiddleware(hosted=cloud))

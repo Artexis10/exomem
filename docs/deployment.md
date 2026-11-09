@@ -897,7 +897,7 @@ The owner creates a vault's first summary collection offline, which enrols the
 vault's store with the coordinator: stop the service, then run
 `exomem collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
 with the service's lease environment and `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`
-set. Later summary collections are created through `record_memory` on the
+set. Later summary collections are created through `manage_memory` with `records.create` on the
 running service.
 
 To turn summary collections off for one vault, stop the service and run
@@ -987,7 +987,7 @@ To upgrade a vault with a collection store to a release that changes its schema:
 
 1. With the release that you run now, back up the store: `exomem collections backup --vault <vault> --to <file outside the vault>`.
 2. Upgrade the service.
-3. Read a store collection, for example with `record_memory` and `action: inspect`.
+3. Read a store collection, for example with `query_records`.
 
 The read answers with the collection.
 
@@ -1330,7 +1330,7 @@ resident.
 
 ## The activation packet mode
 
-`recall_context` (the `activate_context` command) serves one of two packet
+`recall_context` serves one of two packet
 modes. `maps` is the default: the packet carries a map, an index of what the
 vault holds, and the client pulls the entries that bear on the turn by ref
 before it answers. `anchors` is the earlier packet, which resolves the turn to
@@ -1772,8 +1772,8 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   bytes to the local `/upload` and prints the handle the service returns. It
   reads `EXOMEM_LOCAL_TOKEN_FILE` and `EXOMEM_LOCAL_PORT`, or `--token-file` and
   `--port`. Without `--scope` and `--category` the service holds the bytes
-  outside the vault and prints a `file` handle for `preserve_artifacts` (or,
-  with `--lane source`, `capture_source`). A held handle is redeemable once,
+  outside the vault and prints a `file` handle for `save_evidence` (or,
+  with `--lane source`, `save_source`). A held handle is redeemable once,
   within an hour, and only by a request using the same local token, so point
   the client's MCP connection at the local listener with that token.
   `--raw-protection` keeps a directly preserved original owner-only until you
@@ -1781,7 +1781,7 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   redeems it. A direct preserve on the local listener never crosses the proxy
   edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
   public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
-  file stays within what `preserve_artifacts` can fetch, which on this server is
+  file stays within what `save_evidence` can fetch, which on this server is
   the session maximum below. The held files of one local session together stay
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with

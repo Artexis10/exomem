@@ -28,7 +28,7 @@ which makes it suitable for fresh or empty vaults.
 
 Built-in packs live in `src/exomem/packs/*.json`. The runtime loads them with
 `importlib.resources`, validates them strictly, and exposes the schema in
-`adopt_vault` reports through `pack_schema`.
+The `imports` operations report through `pack_schema`.
 
 Each pack is a JSON object with these required fields:
 
@@ -122,19 +122,19 @@ Packs do not bypass governance. They help agents choose product commands:
 
 | Simple action | Product command |
 | --- | --- |
-| `capture` raw material | `capture_source`; use `preserve_evidence` or `transfer_artifact` for Evidence |
+| `capture` raw material | `save_source`; use `save_evidence` or `upload_files` for Evidence |
 | `create_note` durable conclusion | `create_note`; use `supersede_note` for supersession |
-| `ask` | `search_memory`, optionally `read_memory` or `search_memory(deep=true)` |
-| `review` | `review_memory` |
-| `connect` | `connect_memory` |
+| `ask` | `search_memory`, optionally `read_page` or `search_memory(deep=true)` |
+| `review` | `list_review_items` |
+| `connect` | `inspect_memory` with the `connections` operations |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
-| `maintain` | `maintain_memory` audit and dry-run; a remote `fix`, `backfill-ids` or `reconcile` write starts as a maintenance job from a dry run's `plan_id` and a `why`; the local CLI is `exomem maintain --fix` / `--reconcile` |
-| `record` observed state | `record_memory`: `inspect`, `create`, `query`, `append`, or `update` |
+| `maintain` | `inspect_memory` with `maintenance.audit` for audit and dry-run; a remote `fix`, `backfill-ids` or `reconcile` write starts as a maintenance job from a dry run's `plan_id` and a `why`; the local CLI is `exomem maintain --fix` / `--reconcile` |
+| `record` observed state | `query_records`, `add_record` or `edit_record`; `records.create` on `manage_memory` |
 
 Agents should speak in product language. The user can say "save this warranty
 receipt"; the agent chooses the evidence/proof route and reports the saved path.
 They can say "log this training session" or "update the car mileage"; the agent
-uses `record_memory` for a configured Record collection, without exposing a
+uses `add_record` for a configured Record collection, without exposing a
 storage-specific tool. Packs may recommend folders, fields, templates, views,
 and review rhythms, but those recommendations never fork core behavior or make a
 taxonomy mandatory. Machine-readable collection blueprints and pack activation

@@ -275,11 +275,11 @@ class Tap:
             probes += 1
             self._probe_id = f"switch-eval-ready-{probes}"
             probe_params = {
-                "name": "ask_memory",
+                "name": "search_memory",
                 # A nonempty, case-independent query exercises ranked recall.
                 # No reranker or case ref is needed to prove its admission.
                 # Timings keep the raw `warming` components; the agent reply folds them into a `notice`.
-                "arguments": {"query": "readiness probe", "limit": 1, "rerank": False, "include_timings": True},
+                "arguments": {"query": "readiness probe", "limit": 1, "options": {"rerank": False, "include_timings": True}},
             }
             if "_meta" in params:
                 probe_params["_meta"] = params["_meta"]
@@ -337,7 +337,7 @@ class Tap:
                     probes += 1
                     searched = self._probe(
                         f"switch-eval-search-{probes}",
-                        {"name": "search_memory", "arguments": {"query": "log", "scope": "vault"}},
+                        {"name": "search_memory", "arguments": {"query": "log", "options": {"scope": "vault"}}},
                         params,
                         deadline,
                     )

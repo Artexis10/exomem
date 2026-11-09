@@ -234,14 +234,13 @@ def _keep_whole_call(ref: str, fingerprint: str) -> str:
     Agents follow a call written out in a response far more reliably than a described
     one; the outcome check showed agents ignoring the described form.
     """
-    from . import capabilities
+    from . import capabilities, review_ids
 
     return capabilities.active_call_text(
         "triage_memory",
         {
-            "ref": ref,
+            "item_id": review_ids.item_id({"ref": ref, "fingerprint": fingerprint}),
             "action": "dismiss",
-            "expected_fingerprint": fingerprint,
             "why": "intentional: <the one question this page answers>",
         },
     )

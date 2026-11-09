@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from _public_call import public_call
+
 from exomem import server
 
 
@@ -26,7 +28,7 @@ def test_edit_refusal_over_mcp_carries_its_code(
 
     result = asyncio.run(
         mcp.call_tool(
-            "edit_memory",
+            *public_call("edit_memory",
             {
                 "path": rel,
                 "why": "fix a typo",
@@ -35,7 +37,7 @@ def test_edit_refusal_over_mcp_carries_its_code(
                     "old_string": "text that is not on the page",
                     "new_string": "x",
                 },
-            },
+            }),
             run_middleware=True,
         )
     )
@@ -55,13 +57,14 @@ def test_unknown_filter_field_over_mcp_is_a_refusal_naming_its_path(
 
     result = asyncio.run(
         mcp.call_tool(
-            "ask_memory",
+            "search_memory",
             {"query": "anything", "filters": {"scope": "kb"}},
             run_middleware=True,
         )
     )
 
-    error = result.structured_content["result"]["error"]
+    content = result.structured_content
+    error = content.get("result", content)["error"]
     assert error["code"] == "INVALID_FILTER_FIELD"
     assert "'scope'" in error["message"]
 
@@ -83,7 +86,7 @@ def _serve(tmp_path: Path, monkeypatch):
     mcp = server.build_server(require_auth=False)
 
     def call(tool: str, arguments: dict) -> dict:
-        content = asyncio.run(mcp.call_tool(tool, arguments, run_middleware=True)).structured_content
+        content = asyncio.run(mcp.call_tool(*public_call(tool, arguments), run_middleware=True)).structured_content
         return content["result"] if set(content) == {"result"} else content
 
     return vault, call
@@ -105,50 +108,43 @@ def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
 ) -> None:
     """The retry names the tool and places its arguments where that tool takes them.
 
-    `change_observations` takes one `operation` object and nothing else, so the reviewed-none
-    decision belongs inside it; a retry that put it beside `operation` was refused again.
+    `add_observation` takes the reviewed-none decision as `unlinked_reason`, so the retry
+    spells that field and following it as written commits the observation.
     """
     _, call = _serve(tmp_path, monkeypatch)
 
     def note(title: str, **extra) -> dict:
-        source = call(
-            "capture_source",
+        call(
+            "save_source",
             {
                 "title": f"{title} source",
                 "source_kind": "session",
                 "content": f"{title} was discussed.",
-                "response_detail": "full",
             },
         )
         return call(
             "create_note",
             {
                 "title": title,
-                "note_type": "insight",
+                "type": "insight",
                 "content": "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n",
-                "sources": [f"{source['diagnostics']['operational']['path']}#Capture"],
-                "response_detail": "full",
+                "sources": [f"{title} source"],
+                "detail": "full",
                 **extra,
             },
         )
 
     first = note("First")
-    note(
-        "Second",
-        relation_disposition="reviewed_none",
-        relation_review_reason="Nothing in the vault fits the second page.",
-    )
-    operation = {
-        "kind": "add", "path": first["id"], "category": "rule", "content": "Opens at nine.",
-    }
+    note("Second", unlinked_reason="Nothing in the vault fits the second page.")
+    arguments = {"note": "First", "category": "rule", "text": "Opens at nine."}
 
-    refused = call("change_observations", {"operation": operation})["error"]
+    refused = call("add_observation", arguments)["error"]
 
     assert refused["code"] == "RELATION_DISPOSITION_STALE"
     retry = refused["retry"]
-    assert retry["tool"] == "change_observations"
-    followed = _merge_retry({"operation": operation}, retry["arguments"])
-    followed["operation"]["relation_review_reason"] = "The page stands alone: no other page covers its opening hours."
+    assert retry["tool"] == "add_observation"
+    followed = _merge_retry(arguments, retry["arguments"])
+    followed["unlinked_reason"] = "The page stands alone: no other page covers its opening hours."
     result = call(retry["tool"], followed)
     assert "error" not in result, result
     written = tmp_path / "vault" / first["diagnostics"]["operational"]["path"]
@@ -163,22 +159,21 @@ def test_a_refused_record_append_names_its_fields_and_resumes_the_held_candidate
 
     vault, call = _serve(tmp_path, monkeypatch)
     setup_ledger_collection(vault)
-    operation = {
-        "kind": "append",
+    arguments = {
         "collection": LEDGER_COLLECTION_PATH,
         "item": ledger_item(unlisted_channel="digest"),
         "why": "record a published entry",
     }
 
-    refused = call("change_records", {"operation": operation})["error"]
+    refused = call("add_record", arguments)["error"]
 
     assert refused["code"] == "SCHEMA_UNKNOWN_FIELD"
     assert "unlisted_channel" in refused["message"]
     assert "Nothing was saved" not in refused["message"]
     assert "held candidate" in refused["message"]
     retry = refused["retry"]
-    assert retry["tool"] == "change_records"
-    resumed = call(retry["tool"], _merge_retry({"operation": operation}, retry["arguments"]))
+    assert retry["tool"] == "add_record"
+    resumed = call(retry["tool"], _merge_retry(arguments, retry["arguments"]))
     assert "error" not in resumed, resumed
 
 

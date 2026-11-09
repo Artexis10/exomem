@@ -224,7 +224,7 @@ def record_memory(
 
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
-            return collection_refs.mark_rows(result, profile="records") if action == "query" else result
+            return result
         if action == "import" or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal

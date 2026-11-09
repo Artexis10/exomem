@@ -34,11 +34,11 @@ still resolves nothing — validation checks the record side against this
 manifest's own schema and leaves the plan side as opaque text. Its only consumer
 is the Epistemic Inbox's `unreflected_outcomes` family, which reports an open
 Planning item that recorded events already join to. Nothing transitions the item:
-the decider moves it with `plan_memory(action="triage")`, and the finding clears
+the decider moves it with `edit_plan_item`, and the finding clears
 when the item leaves the open state, the binding is removed, or the joined
 records are gone.
 
-The comparison itself lives in `review_memory(mode="plan-progress")`, which
+The comparison itself lives in `list_review_items(queue="plan_progress")`, which
 reaches Records only as an ordinary governed reader — released manifest,
 authorized saved view, default-deny envelope — and takes counts rather than
 rows. A view read as plan evidence is exactly the same neutral view it is when
@@ -51,7 +51,7 @@ Outcomes and reusable lessons can then become governed Notes.
 
 ## One public action surface
 
-Use `record_memory` for collection actions:
+Use `query_records`, `add_record` and `edit_record`, and the `records` operations of `inspect_memory` and `manage_memory`, for collection actions:
 
 | Action | Use it for |
 | --- | --- |
@@ -147,7 +147,7 @@ These forms remain ordinary files that a person can open and change without an A
 For collections with file authority, indexes, audit state, and generated views
 are rebuildable from the declared source files. A generated dataset from a log is
 derived until a person explicitly promotes it through a provenance-preserving
-migration. `record_memory` does not automatically promote, migrate, or persist a
+migration. The Records tools do not automatically promote, migrate, or persist a
 summary/chart/export as canonical data. Every derived query response identifies
 its source collection, exact query or saved-view definition, source snapshot,
 generation time, and derived status. Persistent summary materialisation is
@@ -229,5 +229,5 @@ The Health / athletic and Personal records packs can recommend Record use,
 folders, fields, templates, views, and review workflows. They remain
 declarative suggestions: selecting a pack neither creates collections nor
 folders, migrates data, activates a schema, or introduces a domain-specific
-storage engine. Pack guidance helps route a simple request to `record_memory`;
+storage engine. Pack guidance helps route a simple request to the Records tools;
 the collection contract remains explicit and human-owned.

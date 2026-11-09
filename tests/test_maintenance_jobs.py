@@ -66,8 +66,25 @@ def _session(server, scenario):
     return asyncio.run(run())
 
 
+#: The door operation that carries each maintenance kind, on the read door and on the write door.
+_DOOR_OPERATIONS = {
+    "backfill-ids": "maintenance.backfill_ids",
+    "fix": "maintenance.fix",
+    "reconcile": "maintenance.reconcile",
+    "maintenance-job": "maintenance.job",
+    "maintenance-job-cancel": "maintenance.cancel_job",
+}
+_DOORS = {"check_memory": "inspect_memory", "repair_memory": "manage_memory"}
+
+
 async def _call(client, tool, operation):
-    result = await client.call_tool(tool, {"operation": operation}, raise_on_error=False)
+    """Call one maintenance kind through the door that carries it, as an agent does."""
+    kind, arguments = operation["kind"], {key: value for key, value in operation.items() if key != "kind"}
+    if tool == "check_memory" and kind != "reconcile":
+        # A read of fix or backfill-ids implies the preview, so it never sends `dry_run`.
+        arguments.pop("dry_run", None)
+    wire = {"operation": _DOOR_OPERATIONS[kind], **({"arguments": arguments} if arguments else {})}
+    result = await client.call_tool(_DOORS[tool], wire, raise_on_error=False)
     return result.structured_content
 
 
@@ -498,8 +515,8 @@ def test_a_page_edited_while_the_job_waits_for_the_boundary_keeps_its_edit(serve
 def _read_job_retry(run_id: str) -> dict:
     """The call that reads the running job: the refusal's only carrier of its run id."""
     return {
-        "tool": "check_memory",
-        "arguments": {"operation": {"kind": "maintenance-job", "run_id": run_id}},
+        "tool": "inspect_memory",
+        "arguments": {"operation": "maintenance.job", "arguments": {"run_id": run_id}},
     }
 
 

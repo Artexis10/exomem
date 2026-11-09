@@ -133,7 +133,7 @@ def _door_ops(renderings: Iterable[tuple[str, Rendering]]) -> dict[str, dict[str
 def _params(command: str) -> frozenset[str]:
     from . import commands as commands_module
 
-    return next((frozenset(p.name for p in c.params) for c in commands_module.COMMANDS if c.name == command), frozenset())
+    return next((frozenset(p.name for p in c.params) for c in commands_module.PRODUCT_COMMANDS if c.name == command), frozenset())
 
 
 _CONTEXT = Context(_params)
@@ -185,8 +185,15 @@ class PublicSurface:
         return all(route.command in available for route in tool.routes)
 
     def door_operations(self, door: str, commands: Iterable[object]) -> tuple[DoorOp, ...]:
-        available = {command.name for command in commands}
-        return tuple(op for op in self.doors[door].values() if op.command in available)
+        # A served command can carry fewer variants than the registry holds (Cloud and remote
+        # admission withhold some), so an operation stays only while its variant is served.
+        served = {
+            command.name: {(rendering.name, kind) for rendering in command.renderings for kind in rendering.kinds}
+            for command in commands
+        }
+        return tuple(
+            op for op in self.doors[door].values() if (op.rendering, op.kind) in served.get(op.command, ())
+        )
 
     # --- Calls ------------------------------------------------------------------------------
 
@@ -230,7 +237,9 @@ class PublicSurface:
         nested = {"operation": {"kind": op.kind, **fields}, **tool_fields}
         wire = {**nested, **carried}
         try:
-            return resolve_invocation(op.rendering, wire, commands, passthrough=passthrough, strict=strict)
+            return resolve_invocation(
+                op.rendering, wire, commands, passthrough=passthrough, strict=strict, subject=f"{name} {operation}"
+            )
         except OpError as error:
             if getattr(error, "command", None) is None:
                 error.writes = op.effect == "write"
@@ -292,6 +301,9 @@ class PublicSurface:
             if op is None:
                 continue
             tool_fields = rendering.take_tool_arguments(fields)
+            if op.door == DOORS["write"] and "response_detail" in fields:
+                # The write door carries the reply detail beside `operation`, not inside `arguments`.
+                tool_fields["response_detail"] = fields.pop("response_detail")
             wire = {"operation": op.name, **({"arguments": rendering.wire_fields(fields)} if fields else {})}
             if "response_detail" in tool_fields:
                 wire["detail"] = tool_fields["response_detail"]

@@ -10,12 +10,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 from test_adoption_collection import TODAY, _import, _vault
 from test_adoption_own_notes import JOURNAL_RULE, _notes
 
-from exomem import adoption_run, command_surface, server, writer_lease
-from exomem import indexes, vault as vault_module
+from exomem import adoption_run, command_surface, indexes, server, writer_lease
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 
 
@@ -372,16 +373,16 @@ def test_replan_after_prepublication_refusal_has_no_phantom_interruption(vault, 
 
     async def journey():
         async with Client(server.build_server(require_auth=False)) as client:
-            refused = await client.call_tool("import_memory", {"operation": {
+            refused = await client.call_tool(*public_call("import_memory", {"operation": {
                 "kind": "apply", "run_id": run_id, "plan_id": planned["plan"]["plan_id"]},
-                "response_detail": "full"}, raise_on_error=False,
+                "response_detail": "full"}), raise_on_error=False,
                 meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "refused-plan"})
             assert "ADOPTION_SOURCE_CHANGED" in json.dumps(refused.structured_content)
             assert adoption_run.status(vault, run_id=run_id, view="summary")["interrupted"] is False
             refreshed = adoption_run.plan(vault, run_id=run_id)
-            result = await client.call_tool("import_memory", {"operation": {
+            result = await client.call_tool(*public_call("import_memory", {"operation": {
                 "kind": "apply", "run_id": run_id, "plan_id": refreshed["plan"]["plan_id"]},
-                "response_detail": "full"}, raise_on_error=False,
+                "response_detail": "full"}), raise_on_error=False,
                 meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "refreshed-plan"})
             assert not result.is_error and "error" not in result.structured_content, result
             summary = adoption_run.status(vault, run_id=run_id, view="summary")
@@ -459,7 +460,7 @@ def test_large_run_status_is_bounded_and_pages_one_revision(vault, monkeypatch):
     async def journey():
         async with Client(server.build_server(require_auth=False)) as client:
             result = await client.call_tool(
-                "read_import", {"operation": {"kind": "status", "run_id": run["run_id"]}})
+                *public_call("read_import", {"operation": {"kind": "status", "run_id": run["run_id"]}}))
             summary = result.structured_content
             assert len(json.dumps(summary).encode()) < 16 * 1024
             assert summary["counts"]["inventory"] == 5000
@@ -474,9 +475,9 @@ def test_large_run_status_is_bounded_and_pages_one_revision(vault, monkeypatch):
             seen = []
             offset = 0
             while offset is not None:
-                result = await client.call_tool("read_import", {"operation": {
+                result = await client.call_tool(*public_call("read_import", {"operation": {
                     "kind": "status", "run_id": run["run_id"], "view": "inventory",
-                    "offset": offset, "limit": 100, "revision": revision}})
+                    "offset": offset, "limit": 100, "revision": revision}}))
                 page = result.structured_content
                 assert page["total"] == 5000
                 assert len(page["items"]) <= 100
@@ -488,8 +489,8 @@ def test_large_run_status_is_bounded_and_pages_one_revision(vault, monkeypatch):
             changed = store.load(run["run_id"])
             changed["phase"] = "partial"
             store.save(changed)
-            stale = await client.call_tool("read_import", {"operation": {
-                "kind": "status", "run_id": run["run_id"], "view": "outcomes", "revision": revision}},
+            stale = await client.call_tool(*public_call("read_import", {"operation": {
+                "kind": "status", "run_id": run["run_id"], "view": "outcomes", "revision": revision}}),
                 raise_on_error=False)
             assert "IMPORT_STATUS_CHANGED" in json.dumps(stale.structured_content)
 
@@ -591,18 +592,18 @@ def test_crashed_apply_resumes_same_mcp_identity_without_duplicate_sources(vault
                         ).encode("utf-8")).hexdigest()
 
                     patch.setattr(writer_lease, "_command_digest", legacy_digest)
-                first = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+                first = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             landed = adoption_run.AdoptionRunStore(vault).load(run["run_id"])
             assert len(landed["outcomes"]) == 2
             if checkpoint_format.startswith("legacy"):
                 assert "apply_invocations" not in landed
             assert first.structured_content["error"]["code"] == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
-            recovered = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+            recovered = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             assert not recovered.is_error, recovered
             assert "MUTATION_OUTCOME_UNKNOWN" not in json.dumps(recovered.structured_content)
             assert "error" not in recovered.structured_content
             run_bytes = adoption_run.AdoptionRunStore(vault)._run_file(run["run_id"]).read_bytes()
-            replayed = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+            replayed = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             assert not replayed.is_error
             assert adoption_run.AdoptionRunStore(vault)._run_file(run["run_id"]).read_bytes() == run_bytes
             return recovered
@@ -683,13 +684,13 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
     async def journey():
         async with Client(server.build_server(require_auth=False)) as client:
             meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: "note-terminal-crash"}
-            first = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+            first = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             assert fired and "error" in first.structured_content
             assert first.structured_content["error"]["code"] == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
             new_notes = set(_notes(vault)) - initial_notes
             assert len(new_notes) == 1
             note_bytes = {path: path.read_bytes() for path in new_notes}
-            recovered = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+            recovered = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             assert not recovered.is_error, recovered
             assert "error" not in recovered.structured_content, recovered
             persisted = store.load(run_id)
@@ -699,7 +700,7 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
             assert set(_notes(vault)) - initial_notes == new_notes
             assert {path: path.read_bytes() for path in note_bytes} == note_bytes
             before = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*") if path.is_file()}
-            replay = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
+            replay = await client.call_tool(*public_call("import_memory", arguments), raise_on_error=False, meta=meta)
             assert not replay.is_error
             assert {path: path.read_bytes() for path in before} == before
 

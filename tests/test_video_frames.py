@@ -272,7 +272,8 @@ def test_frames_past_the_call_byte_limit_are_listed_not_shown(video_vault, monke
     monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_CALL_BYTES", str(int(2.5 * 4 * len(one.jpeg) / 3)))
     mcp = _build_server(monkeypatch)
     result = asyncio.run(mcp.call_tool(
-        "read_media", {"operation": {"kind": "video", "path": VIDEO, "max_frames": 4, "max_side": "original"}},
+        "inspect_memory",
+        {"operation": "media.video", "arguments": {"path": VIDEO, "max_frames": 4, "max_side": "original"}},
         run_middleware=True))
     meta = result.structured_content
     assert meta["frame_count"] == 2 and len(result.content) == 3
@@ -381,7 +382,9 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     )
     mcp = _build_server(monkeypatch)
     result = asyncio.run(
-        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=True)
+        mcp.call_tool(
+            "inspect_memory", {"operation": "media.video", "arguments": {"path": VIDEO}}, run_middleware=True
+        )
     )
     meta = result.structured_content
     assert meta["path"] == VIDEO
@@ -432,7 +435,11 @@ def test_unresolved_video_is_missing_before_decoder_loads(video_vault, monkeypat
 def test_mcp_path_refusal_answers_with_its_code(video_vault, monkeypatch) -> None:
     mcp = _build_server(monkeypatch)
     result = asyncio.run(
-        mcp.call_tool("read_media", {"path": "../escape.mp4"}, run_middleware=True)
+        mcp.call_tool(
+            "inspect_memory",
+            {"operation": "media.video", "arguments": {"path": "../escape.mp4"}},
+            run_middleware=True,
+        )
     )
     assert result.structured_content["error"]["code"] == "INVALID_PATH"
 

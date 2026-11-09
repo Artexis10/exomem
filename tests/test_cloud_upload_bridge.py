@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import httpx
 import jwt
 import pytest
+from _public_call import public_call
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator
@@ -145,6 +146,7 @@ def _run(app, scenario):
 
 
 async def _tool(client, name, arguments, origin):
+    name, arguments = public_call(name, arguments)
     response = await client.post(
         "/mcp",
         headers={"accept": "application/json, text/event-stream", "content-type": "application/json",
@@ -159,8 +161,7 @@ async def _tool(client, name, arguments, origin):
 
 
 def _prepare_arguments(lane="source"):
-    return {"operation": "upload", "lane": lane, "hold": True,
-            "expected_sha256": hashlib.sha256(ORIGINAL).hexdigest()}
+    return {"lane": lane, "hold": True, "expected_sha256": hashlib.sha256(ORIGINAL).hexdigest()}
 
 
 async def _hold(client, origin, ticket):
@@ -211,11 +212,11 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         )
         tools = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
-        assert "transfer_artifact" in tools
-        media = Draft202012Validator(tools["read_media"]["inputSchema"])
-        assert media.is_valid({"operation": {"kind": "status"}})
-        assert not media.is_valid({"operation": {"kind": "video", "path": "sample.mp4"}})
-        return await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A))
+        assert "upload_files" in tools
+        media = Draft202012Validator(tools["inspect_memory"]["inputSchema"])
+        assert media.is_valid({"operation": "media.status", "arguments": {}})
+        assert not media.is_valid({"operation": "media.video", "arguments": {"path": "sample.mp4"}})
+        return await _tool(client, "upload_files", _prepare_arguments(), _mcp_origin(key, LOGIN_A))
 
     # The descriptor the agent saves has passed the cell's real output filter.
     descriptor = _run(app, prepare)
@@ -260,7 +261,7 @@ _ADOPTING = {
 def _hold_through_the_cli(key, app, tmp_path, capsys, lane):
     """The agent's `exomem attach`: a held handle for the original, issued to LOGIN_A."""
     descriptor = _run(app, lambda client: _tool(
-        client, "transfer_artifact", _prepare_arguments(lane), _mcp_origin(key, LOGIN_A)))
+        client, "upload_files", _prepare_arguments(lane), _mcp_origin(key, LOGIN_A)))
     (tmp_path / "handoff.json").write_text(json.dumps(descriptor))
     (tmp_path / "original.bin").write_bytes(ORIGINAL)
     assert _attach_main(
@@ -307,7 +308,7 @@ def test_another_logins_proof_cannot_spend_a_ticket(cell):
     key, app, _ = cell
 
     async def scenario(client):
-        ticket = _ticket(await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A)))
+        ticket = _ticket(await _tool(client, "upload_files", _prepare_arguments(), _mcp_origin(key, LOGIN_A)))
         crossed = await _hold(client, _upload_origin(key, LOGIN_B, ticket), ticket)
         owned = await _hold(client, _upload_origin(key, LOGIN_A, ticket), ticket)
         replayed = await _hold(client, _upload_origin(key, LOGIN_A, ticket), ticket)
@@ -325,7 +326,7 @@ def test_receiver_refuses_before_claiming_the_ticket(cell, monkeypatch, refusal)
     key, app, _ = cell
 
     async def scenario(client):
-        ticket = _ticket(await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A)))
+        ticket = _ticket(await _tool(client, "upload_files", _prepare_arguments(), _mcp_origin(key, LOGIN_A)))
         headers = _upload_origin(key, LOGIN_A, ticket)
         if refusal == "cell_bearer":
             headers["authorization"] = "Bearer exomem-upload:" + ticket.split(":")[1]
@@ -352,8 +353,8 @@ def test_handoff_needs_the_route_capsule_for_the_same_login(cell):
                "x-exomem-cloud-upload-route": _mcp_origin(key, LOGIN_B)["x-exomem-cloud-upload-route"]}
 
     async def scenario(client):
-        return (await _tool(client, "transfer_artifact", _prepare_arguments(), crossed),
-                await _tool(client, "transfer_artifact", {"operation": "download", "artifact": "x.pdf"},
+        return (await _tool(client, "upload_files", _prepare_arguments(), crossed),
+                await _tool(client, "download_files", {"pages": ["x.pdf"]},
                             _mcp_origin(key, LOGIN_A)))
 
     unverified, download = _run(app, scenario)
@@ -370,7 +371,7 @@ def test_a_proof_without_a_route_capsule_binds_the_login_and_publishes_no_handof
 
     async def scenario(client):
         listed = await _list_tools(client, headers=proof_only)
-        return listed, await _tool(client, "transfer_artifact", _prepare_arguments(), proof_only)
+        return listed, await _tool(client, "upload_files", _prepare_arguments(), proof_only)
 
     listed, handoff = _run(app, scenario)
 
@@ -404,7 +405,7 @@ def test_a_cell_with_only_the_proof_key_verifies_proofs_and_serves_no_upload_rou
 def test_an_upload_cell_with_both_keys_publishes_a_handoff_and_serves_the_upload_route(vault, monkeypatch):
     with _cell_with_keys(monkeypatch, upload_key=True, proof_key=True) as (key, app):
         async def scenario(client):
-            return (await _tool(client, "transfer_artifact", _prepare_arguments(), _mcp_origin(key, LOGIN_A)),
+            return (await _tool(client, "upload_files", _prepare_arguments(), _mcp_origin(key, LOGIN_A)),
                     await client.post("/upload"))
 
         descriptor, upload = _run(app, scenario)

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import activation_conventions as ac
@@ -443,7 +444,7 @@ def test_validate_matches_across_mcp_cli_and_rest(
 
     direct = commands.op_schema_memory(bare, **request_kwargs)
     mcp = server_module.build_server(require_auth=False)
-    mcp_result = asyncio.run(mcp.call_tool("schema_memory", request_kwargs, run_middleware=True))
+    mcp_result = asyncio.run(mcp.call_tool(*public_call("schema_memory", request_kwargs), run_middleware=True))
     rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=request_kwargs,

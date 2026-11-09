@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import (
@@ -782,7 +783,7 @@ def test_question_variant_reaches_same_leaf_over_mcp_rest_and_cli(
 
     direct = commands.op_review_memory(vault, **request)
     mcp = server_module.build_server(require_auth=False)
-    mcp_result = asyncio.run(mcp.call_tool("review_memory", request, run_middleware=True))
+    mcp_result = asyncio.run(mcp.call_tool(*public_call("review_memory", request), run_middleware=True))
     rest = TestClient(mcp.http_app()).post(
         "/api/review_memory",
         json=request,
