@@ -29,7 +29,7 @@ from test_collection_store_legacy import _event, _rewrite
 from test_collection_store_legacy_import import _held
 from test_collection_store_preflight import ledger
 from test_collection_store_s1_gate import OLDER, _older, coordinator
-from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service, call
+from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service, call, operational
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
 from exomem import __main__ as cli
@@ -336,13 +336,14 @@ def test_an_owner_on_a_connection_the_connector_boundary_limits_hears_why_its_co
     try:
         receipts = [call(root, "plan_memory", action="add", collection=PLANNING,
                          item={"title": title, "kind": "outcome", "status": "planned",
-                               "commitment": "committed", "horizon": "quarter"}, why="state the plan")
+                               "commitment": "committed", "horizon": "quarter"}, why="state the plan",
+                         response_detail="full")
                     for title in ("Visible plan", "Withheld plan")]
     finally:
         service.stop()
     # The host withholds one plan and the whole Publications collection from every connection it does not
     # map, the owner's local client included.
-    withheld = [receipts[1]["affected_paths"][0].removeprefix("Knowledge Base/"), "Records/Publications/**"]
+    withheld = [operational(receipts[1])["affected_paths"][0].removeprefix("Knowledge Base/"), "Records/Publications/**"]
     scope = root / "Knowledge Base/_Governance/scopes/withheld.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: {json.dumps(withheld)}\n")
