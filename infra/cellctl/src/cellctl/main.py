@@ -220,9 +220,10 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
 
 def build_media_listing() -> B2ObjectStorage | None:
     """add-cloud-media-store D7, D10: the list-only key for the media bucket, which cellctl uses for the
-    physical meter and for nothing else. None while the media edge is off, and None with one log line
-    while the key is missing: the meter is a report, not a gate, so a release that reaches the cluster
-    before its list-key Secret must still start."""
+    physical meter and for the deletion grant relay (automate-cell-storage-deletion D1). None while the
+    media edge is off, and None with one log line while the key is missing: the meter is a report, not a
+    gate, and the relay then keeps every grant, so a release that reaches the cluster before its list-key
+    Secret must still start."""
 
     if not os.environ.get("CELLCTL_MEDIA_EDGE_URL"):
         return None

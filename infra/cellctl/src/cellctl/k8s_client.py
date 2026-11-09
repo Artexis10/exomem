@@ -34,6 +34,7 @@ from .capacity import (
     quantity,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
+from .deletion_grant import DELETIONS_CONFIGMAP
 from .manifests import (
     BACKUP_FAMILY_ANNOTATION,
     BACKUP_JOB_NAME,
@@ -307,6 +308,25 @@ class ClusterClient:
         metadata = manifest["metadata"]
         if manifest["kind"] != "ConfigMap" or (metadata["namespace"], metadata["name"]) != (GATEWAY_NAMESPACE, ACTIVE_SET_NAME):
             raise ValueError("cellctl publishes only the media edge active set")
+        self.apply(manifest)
+
+    def read_cell_deletions(self) -> dict[str, str] | None:
+        """automate-cell-storage-deletion D1: the relayed grants' ConfigMap data, None before the first grant.
+        The chart grants `get` on that ConfigMap alone."""
+
+        try:
+            return dict(self._core.read_namespaced_config_map(DELETIONS_CONFIGMAP, GATEWAY_NAMESPACE).data or {})
+        except ApiException as error:
+            if _not_found(error):
+                return None
+            raise
+
+    def apply_cell_deletions(self, manifest: dict) -> None:
+        """Relay the grants. Admission confines cellctl to this ConfigMap and its one key."""
+
+        metadata = manifest["metadata"]
+        if manifest["kind"] != "ConfigMap" or (metadata["namespace"], metadata["name"]) != (GATEWAY_NAMESPACE, DELETIONS_CONFIGMAP):
+            raise ValueError("cellctl relays grants only into its deletions ConfigMap")
         self.apply(manifest)
 
     def media_edge_evidence(self, url: str) -> EdgeEvidence:
