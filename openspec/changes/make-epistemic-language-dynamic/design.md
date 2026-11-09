@@ -203,7 +203,6 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | Wikilink producers and their authored-match checks | semantic_contract 4645; epistemic_graph 9046, 9312, 12361, 14135, 14923; relation_queue 661; governance/graph_producer 79 | Producer constants. `origins: [wikilink]` already states the fact. Convert them through one `origin_relation()` accessor when a second core relation lists that origin. |
 | K21 pointer readers | find_types 202, 209; working_set 480, 1163, 2671; stance 77; delete_file 230; replace 436; context_pack 365, 673; memory_context 135; audit 6229, 6370; semantic_contract 4805; working_set_currency 34 | Naming the field tokens is sound. The repeated rule "a successor pointer means not current" is debt. Fold it into one lifecycle predicate that reads the reverse field from the `supersedes` binding. |
 | K22 field-name lists | lexstore 584; episode_capture 54; review_context 37; entity_types 76; governance/bridges 60; governance/egress 812, 856, 5138; working_set_conversation 143; memory_context 136 | Transport and allow-lists. They carry no behaviour. |
-| K24 teaching copy | commands 1600-1608; relation_vocabulary 84 | Prose. Slice 6 teaches from the pack. |
 | C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
@@ -211,7 +210,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 | Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_source` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |
 
-Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, and projection_runtime 1837 (a core-or-extension test).
+Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, projection_runtime 1837 (a core-or-extension test), and K24. Bootstrap now teaches its kinds and relations from each shipped entry's `teach` line, and the `relation_vocabulary` plain-link sentence reads its key from the registry.
 
 ## Intended behaviour changes
 
