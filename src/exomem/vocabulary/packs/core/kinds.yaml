@@ -9,6 +9,8 @@
 # the closed set in `exomem.semantic_kinds.KIND_TRAITS`; a pack that names another trait fails the
 # build, and a vault kind declares its own traits from the same set in
 # `_Schema/semantic-language-registry.yaml`.
+# `teach` is the one line that bootstrap teaches for the kind. Only a shipped entry sets it, and
+# bootstrap lists the kinds that carry one; a vault entry that sets it is an unknown field.
 # The kind `question` is no entry: only `open_question` carries the `question` trait.
 schema_version: 1
 kinds:
@@ -20,9 +22,9 @@ kinds:
   inference: {description: Portable inference semantic block, labels: {en: Inference}, heading_aliases: [inferences], traits: [assertion]}
   constraint: {description: Portable constraint semantic block, labels: {en: Constraint}, heading_aliases: [constraints]}
   risk: {description: Portable risk semantic block, labels: {en: Risk}, heading_aliases: [risks]}
-  open_question: {description: Portable open question semantic block, labels: {en: Open question}, heading_aliases: [open_questions, questions], traits: [question]}
-  hypothesis: {description: Portable hypothesis semantic block, labels: {en: Hypothesis}, heading_aliases: [hypotheses], traits: [assertion]}
-  prediction: {description: Portable prediction semantic block, labels: {en: Prediction}, heading_aliases: [predictions]}
+  open_question: {description: Portable open question semantic block, labels: {en: Open question}, heading_aliases: [open_questions, questions], traits: [question], teach: "a question this store has not answered yet"}
+  hypothesis: {description: Portable hypothesis semantic block, labels: {en: Hypothesis}, heading_aliases: [hypotheses], traits: [assertion], teach: "a proposed explanation still under test"}
+  prediction: {description: Portable prediction semantic block, labels: {en: Prediction}, heading_aliases: [predictions], teach: "a checkable claim about a future observation"}
   result: {description: Portable result semantic block, labels: {en: Result}, heading_aliases: [results, outcome, outcomes], traits: [assertion, outcome]}
   metric: {description: Portable metric semantic block, labels: {en: Metric}, heading_aliases: [metrics]}
   failure: {description: Portable failure semantic block, labels: {en: Failure}, heading_aliases: [failures]}
@@ -39,7 +41,7 @@ kinds:
   entity: {description: Portable entity semantic block, labels: {en: Entity}, heading_aliases: [entities]}
   project: {description: Portable project semantic block, labels: {en: Project}, heading_aliases: [projects]}
   media_segment: {description: Portable media segment semantic block, labels: {en: Media segment}, heading_aliases: [media_segments, segments]}
-  belief: {description: Portable belief semantic block, labels: {en: Belief}, heading_aliases: [beliefs], traits: [credence]}
+  belief: {description: Portable belief semantic block, labels: {en: Belief}, heading_aliases: [beliefs], traits: [credence], teach: "one holder's level, or sourced probability, for a claim"}
 # A compact kind has no heading: it is the kind of a unit written as one line, so no `##`
 # heading resolves to it.
 compact_kinds:

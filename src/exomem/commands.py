@@ -141,6 +141,7 @@ from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
+from . import semantic_kinds as semantic_kinds_module
 from . import semantic_labels as semantic_labels_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
@@ -1612,16 +1613,17 @@ def op_bootstrap(
                 "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
                 "an edit to unit text."
             ),
-            # The bootstrap spec names these four kinds; task 6.2 reads their teaching from the pack.
+            # The shipped entries that carry a `teach` line. A vault's own kinds and relations
+            # never appear here: the pack states the line, and a vault entry may not set one.
             "kinds": {
-                "open_question": "a question this store has not answered yet",
-                "hypothesis": "a proposed explanation still under test",
-                "prediction": "a checkable claim about a future observation",
-                "belief": "one holder's level, or sourced probability, for a claim",
+                key: kind.teach
+                for key, kind in semantic_kinds_module.pack().items()
+                if kind.teach
             },
             "relations": {
-                "contradicts": "edge to material conflicting with this claim",
-                "supersedes": "edge to the page whose current view this replaces",
+                key: definition.teach
+                for key, definition in relation_registry_module.core_registry().core.items()
+                if definition.teach
             },
         },
         "capture_nudge": (

@@ -1,10 +1,13 @@
+# `teach` is the one line that bootstrap teaches for the relation. Only a shipped entry sets it,
+# and bootstrap lists the relations that carry one; a vault extension that sets it is an unknown
+# field.
 schema_version: 2
 relations:
   supports: {description: Provides support for, family: support, direction: directed, origins: [semantic_relation], presentation_role: support, behaviours: [lifts, bears_on, corrects]}
-  contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation], presentation_role: conflict, behaviours: [lifts, bears_on, corrects, opposes]}
+  contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation], presentation_role: conflict, behaviours: [lifts, bears_on, corrects, opposes], teach: "edge to material conflicting with this claim"}
   refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation], presentation_role: refinement, behaviours: [lifts, corrects]}
   duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation], behaviours: [lifts]}
-  supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation], presentation_role: replacement, behaviours: [replaces, corrects], frontmatter_fields: {supersedes: forward, superseded_by: reverse}}
+  supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation], presentation_role: replacement, behaviours: [replaces, corrects], frontmatter_fields: {supersedes: forward, superseded_by: reverse}, teach: "edge to the page whose current view this replaces"}
   derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit], behaviours: [sources, associative], frontmatter_fields: {sources: forward}}
   evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation], behaviours: [lifts, bears_on, sources, associative], frontmatter_fields: {evidence: forward, evidences: forward, evidence_paths: forward}}
   depends_on: {description: Depends on, family: dependency, direction: directed, origins: [semantic_relation]}

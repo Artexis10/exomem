@@ -44,7 +44,7 @@ def require_trait(trait: str) -> str:
 
 
 _PACK = "kinds.yaml"
-_PACK_FIELDS = frozenset({"description", "labels", "heading_aliases", "traits"})
+_PACK_FIELDS = frozenset({"description", "labels", "heading_aliases", "traits", "teach"})
 _COMPACT_FIELDS = frozenset({"description", "labels"})
 # The shape a pack spelling already has: lower-case letters, digits and underscores.
 _SPELLING_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -61,6 +61,8 @@ class PackKind:
     heading_aliases: tuple[str, ...] = ()
     traits: frozenset[str] = frozenset()
     compact: bool = False
+    # The one line bootstrap teaches for this kind; absent for a kind bootstrap does not name.
+    teach: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -115,6 +117,7 @@ def _from_pack(text: str) -> dict[str, PackKind]:
                 heading_aliases=aliases,
                 traits=frozenset(raw_traits),
                 compact=compact,
+                teach=vocabulary_registry.pack_teach("kinds", key, value.get("teach")),
             )
     return kinds
 

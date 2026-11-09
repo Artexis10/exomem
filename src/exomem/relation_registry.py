@@ -113,7 +113,7 @@ _DEFINITION_FIELDS = {
 _CORE_FIELDS = frozenset(
     {
         "description", "family", "direction", "inverse", "origins", "presentation_role", "generic",
-        "endpoints", "behaviours", "frontmatter_fields",
+        "endpoints", "behaviours", "frontmatter_fields", "teach",
     }
 )
 #: Core-only fields. An extension inherits their meaning through its parent and cannot set them.
@@ -159,6 +159,8 @@ class RelationDefinition:
     behaviours: frozenset[str] = frozenset()
     # Page frontmatter fields that state this relation, as (field, direction) pairs. Core only.
     frontmatter_fields: tuple[tuple[str, str], ...] = ()
+    # The one line bootstrap teaches for this relation. Core only, so it is never in `as_dict`.
+    teach: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -521,6 +523,7 @@ def _core_from_pack(text: str) -> RelationRegistry:
             core=True,
             behaviours=behaviours,
             frontmatter_fields=frontmatter_fields,
+            teach=vocabulary_registry.pack_teach("relations", key, value.get("teach")),
         )
     generic = sorted(key for key, definition in definitions.items() if definition.generic)
     if len(generic) != 1:
