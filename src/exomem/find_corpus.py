@@ -48,7 +48,9 @@ EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 
 
 def is_excluded_dir_name(name: str) -> bool:
-    """Whether a Knowledge Base walk skips the folder with this name: the one rule of every walk and of the store corpus."""
+    """Whether a Knowledge Base walk skips the folder with this name: the one rule of every walk and
+    of the store corpus.
+    """
     return name in EXCLUDED_DIR_NAMES or name.startswith(EXCLUDED_DIR_PREFIXES)
 
 
@@ -112,10 +114,11 @@ class FrontmatterCache:
     """Per-process cache invalidated by file identity or content changes."""
 
     entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
-    #: A file's stat-and-hash signature, or ``("store", page revision, sha256)`` for a page that the store serves.
+    #: A file's stat-and-hash signature, or ``("store", page revision, sha256)`` for a page that the
+    #: store serves.
     _signatures: dict[Path, tuple] = field(default_factory=dict, repr=False)
-    #: The store revision at which each stored page's signature was last checked: while the store stays at
-    #: that revision no page of it changed, so a hit needs no per-page query.
+    #: The store revision at which each stored page's signature was last checked: while the store
+    #: stays at that revision no page of it changed, so a hit needs no per-page query.
     _validated_at: dict[Path, int] = field(default_factory=dict, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     _weights: dict[Path, int] = field(default_factory=dict, repr=False)
@@ -270,11 +273,13 @@ class FrontmatterCache:
         )
 
     def _get_stored(self, path: Path, vault_root: Path, rel: str) -> ParsedPage | None:
-        """``get`` for a page that the store serves: the store's revision and hash decide, not a file's stat.
+        """``get`` for a page that the store serves: the store's revision and hash decide, not a
+        file's stat.
 
         One snapshot gives the store revision and the page. A page last checked at this revision is
-        current, so it costs no query. Otherwise the page's revision and hash decide, and only a changed
-        page reads its body. ``rel`` names the page, so a link at ``path`` never names its target.
+        current, so it costs no query. Otherwise the page's revision and hash decide, and only a
+        changed page reads its body. ``rel`` names the page, so a link at ``path`` never names its
+        target.
         """
         from .vault_store import read
 
@@ -315,7 +320,9 @@ class FrontmatterCache:
             return cached
 
     def _resident(self, path: Path, signature: tuple) -> ParsedPage | None:
-        """The cached page when its signature is ``signature``, counted as a hit and kept most recent."""
+        """The cached page when its signature is ``signature``, counted as a hit and kept most
+        recent.
+        """
         with self._lock:
             if len(self._signatures) != len(self.entries):
                 self._signatures = {
@@ -340,7 +347,9 @@ class FrontmatterCache:
         return None
 
     def _admit(self, path: Path, signature: tuple, parsed: ParsedPage | None) -> ParsedPage | None:
-        """Replace the row for ``path`` by ``parsed`` under ``signature``, within the cache's limits."""
+        """Replace the row for ``path`` by ``parsed`` under ``signature``, within the cache's
+        limits.
+        """
         byte_limit = _page_cache_bytes()
         weight = _page_retained_bytes(parsed) if parsed is not None and byte_limit is not None else 0
         with self._lock:
@@ -357,9 +366,11 @@ class FrontmatterCache:
 
 
 def _stored_relative(path: Path, vault_root: Path) -> str | None:
-    """The vault-relative path of ``path`` when the store serves that page, else None: read the file.
+    """The vault-relative path of ``path`` when the store serves that page, else None: read the
+    file.
 
-    The mode comes first: it is one stat for a file-mode vault, and the path rule then runs only in store mode.
+    The mode comes first: it is one stat for a file-mode vault, and the path rule then runs only in
+    store mode.
     """
     from .vault_store import ownership
 
@@ -446,7 +457,8 @@ def walk_freshness_key(paths, signature=None) -> tuple[int, int, str]:
 
 @dataclass(frozen=True)
 class StoreCorpus:
-    """The pages of one scope in a store-mode vault, read from the store and not from a walk of the disk.
+    """The pages of one scope in a store-mode vault, read from the store and not from a walk of the
+    disk.
 
     It lists the pages that the store serves, then the Markdown files that the store does not own (a
     Records or Planning layer, a page outside the Knowledge Base folder), which a walk of the disk
@@ -481,13 +493,19 @@ class StoreCorpus:
                 yield path
 
     def signature_lookup(self) -> Callable[[Path], freshness.FileSignature]:
-        """The change signature of each page: the store's row for a stored page, the stat of any other file.
+        """The change signature of each page: the store's row for a stored page, the stat of any
+        other file.
 
         A stored page's signature is its mtime, its page revision and its size, so a rewrite of the
-        page changes it. The lookup raises ``OSError`` for a file that cannot be stat'ed, as a stat does.
+        page changes it. The lookup raises ``OSError`` for a file that cannot be stat'ed, as a stat
+        does.
         """
         stored = {
-            self.vault_root.joinpath(*meta.path.split("/")): (meta.mtime_ns, meta.revision, meta.size)
+            self.vault_root.joinpath(*meta.path.split("/")): (
+                meta.mtime_ns,
+                meta.revision,
+                meta.size,
+            )
             for meta in self.pages
         }
         return lambda path: stored.get(path) or freshness.stat_signature(path)
@@ -498,19 +516,22 @@ class StoreCorpus:
 
 
 def signature_lookup(paths) -> Callable[[Path], freshness.FileSignature]:
-    """The change signature of one page path of ``paths``: a stat in file mode, see ``StoreCorpus``."""
+    """The change signature of one page of ``paths``: a file stat, or a stored page's row."""
     return paths.signature_lookup() if isinstance(paths, StoreCorpus) else freshness.stat_signature
 
 
 def store_serves(vault_root: Path) -> bool:
-    """Whether this vault is in store mode, so its pages come from the store and its files are a projection."""
+    """Whether this vault is in store mode, so its pages come from the store and its files are a
+    projection.
+    """
     from .vault_store import mode
 
     return mode.store_mode_for_reads(vault_root)
 
 
 def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[[], Iterable[Path]]):
-    """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a ``StoreCorpus`` in store mode.
+    """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a
+    ``StoreCorpus`` in store mode.
 
     A caller hands over its own walk of the disk, as a function, so that a file-mode vault pays only
     a read of the mode records and calls the walk it always called.
@@ -527,11 +548,12 @@ def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[[], Iterable[
 
 
 def kb_walk_member(rel: str) -> bool:
-    """Whether ``walk_md`` over the Knowledge Base folder reaches the file at this vault-relative path, by path alone.
+    """Whether ``walk_md`` over the Knowledge Base folder reaches the file at this vault-relative
+    path, by path alone.
 
-    The walk's entry rule (`_classify_walk_entry`) also lstat's each entry, and a stored page may have
-    no file yet, so it cannot judge a page. That is the gap: this keeps the rule's path tests (the
-    reserved registry, the excluded folders, the Markdown suffix, the conflict copy).
+    The walk's entry rule (`_classify_walk_entry`) also lstat's each entry, and a stored page may
+    have no file yet, so it cannot judge a page. That is the gap: this keeps the rule's path tests
+    (the reserved registry, the excluded folders, the Markdown suffix, the conflict copy).
     """
     from .kbdir import kb_dirname
     from .reserved_paths import classify_logical

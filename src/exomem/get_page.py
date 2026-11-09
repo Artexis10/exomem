@@ -145,7 +145,11 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if len(named) > 1 and not read.page_exists(vault_root, rel) and read.page_exists(vault_root, named[1]):
+        if (
+            len(named) > 1
+            and not read.page_exists(vault_root, rel)
+            and read.page_exists(vault_root, named[1])
+        ):
             rel = named[1]
 
         try:

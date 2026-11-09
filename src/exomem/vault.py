@@ -8525,7 +8525,9 @@ class WikilinkResolver:
                 _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
     def _current_title(self, vault_root: Path, rel_path: str) -> tuple[bool, str | None]:
-        """Whether the page exists now, and its title key: from the store when it serves the page, else the file."""
+        """Whether the page exists now, and its title key: from the store when it serves the page,
+        else the file.
+        """
         from .vault_store import read
 
         try:

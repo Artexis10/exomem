@@ -191,7 +191,8 @@ class ExomemBackend:
 
         if store_mode.store_mode_for_reads(self._vault):
             # The warm-up builds the lexical catalogue, the graph and the drain queues from files; a
-            # store-mode vault has no such files to build from, so the session reads the store and runs none.
+            # store-mode vault has no such files to build from, so the session reads the store and
+            # runs none.
             return
         try:
             from .. import warmup
@@ -475,7 +476,8 @@ class ExomemBackend:
         """
         if self._vault is None:
             return {"notes": 0, "sources": 0, "known": False}
-        from ..vault_store import mode as store_mode, read
+        from ..vault_store import mode as store_mode
+        from ..vault_store import read
 
         if store_mode.store_mode_for_reads(Path(self._vault)):
             # The store's pages are the notes; their files are only a projection and may lag.

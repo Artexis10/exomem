@@ -574,7 +574,8 @@ class FreshnessSnapshot:
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
             # A store-mode vault's pages have no files to stat, so its key comes from the store.
-            live = None if find_corpus.store_serves(self._root) else freshness.triple(self._root, "kb")
+            stored = find_corpus.store_serves(self._root)
+            live = None if stored else freshness.triple(self._root, "kb")
             if live is not None:
                 self._kb = live
             else:
@@ -583,7 +584,8 @@ class FreshnessSnapshot:
 
     def vault(self) -> tuple[int, int, str]:
         if self._vault is None:
-            live = None if find_corpus.store_serves(self._root) else freshness.triple(self._root, "vault")
+            stored = find_corpus.store_serves(self._root)
+            live = None if stored else freshness.triple(self._root, "vault")
             if live is not None:
                 self._vault = live
             else:
@@ -1010,7 +1012,8 @@ def _vault_rel(vault_root: Path, path: Path) -> str | None:
 
 
 def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
-    """The candidate page paths of one scope: a walk of the disk, or the store's pages in a store-mode vault.
+    """The candidate page paths of one scope: a walk of the disk, or the store's pages in a
+    store-mode vault.
 
     The walk of the disk is looked up when it runs, so a test that replaces `_walk_md` or
     `vault.walk_vault_md` still reaches it.
@@ -1028,7 +1031,9 @@ def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
 
 
 def _kb_missing(vault_root: Path) -> bool:
-    """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the store, so it needs no folder."""
+    """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the
+    store, so it needs no folder.
+    """
     return not (vault_root / kb_dirname()).is_dir() and not find_corpus.store_serves(vault_root)
 
 
@@ -7897,7 +7902,8 @@ def recall_resolver_snapshot(
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        # A store-mode vault builds from its pages: the catalogue is a derived copy of rows that the store holds.
+        # A store-mode vault builds from its pages: the catalogue is a derived copy of rows that the
+        # store holds.
         entries = (
             None
             if find_corpus.store_serves(root)

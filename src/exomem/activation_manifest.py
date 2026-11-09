@@ -308,7 +308,8 @@ def load_manifest(vault_root: Path) -> ActivationManifest | None:
     from .vault_store import read
 
     try:
-        # A store-mode vault keeps the manifest in its store: one snapshot read is stable, and the file may lag.
+        # A store-mode vault keeps the manifest in its store: one snapshot read is stable, and the
+        # file may lag.
         stored = read.owned_bytes(vault_root, path.relative_to(vault_root).as_posix())
     except FileNotFoundError:
         _cache_manifest(key, None, None)

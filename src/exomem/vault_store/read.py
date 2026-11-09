@@ -155,7 +155,8 @@ class StoreSnapshot:
 
 
 def corpus_member(rel: str, scope: str) -> bool:
-    """Whether the corpus of ``scope`` ("kb" or "vault") holds this stored page, as a walk of the disk would.
+    """Whether the corpus of ``scope`` ("kb" or "vault") holds this stored page, as a walk of the
+    disk would.
 
     The Knowledge Base corpus is ``find_corpus.walk_md`` over that folder; the vault corpus is
     ``vault.walk_vault_md``. The two differ in their anchor and in the folders they skip.
@@ -253,7 +254,9 @@ def owned_meta(vault_root: Path, rel: str) -> PageMeta | None:
 
 
 def page_exists(vault_root: Path, rel: str) -> bool:
-    """Whether a page is at ``rel``: the store's page when the store serves that path, else the file."""
+    """Whether a page is at ``rel``: the store's page when the store serves that path, else the
+    file.
+    """
     root = _as_path(vault_root)
     try:
         if owned_meta(root, rel) is not None:
@@ -273,11 +276,11 @@ def owned_page_at(vault_root: Path, path: Path) -> StoredPage | None:
     """``owned_page`` for the file at ``path``, which a caller names by its location, not its vault path.
 
     A path that does not lie below the root is no page of it, and that lexical test runs first and
-    costs no read of the mode records. In store mode only, the parent folder is resolved: a symlinked
-    folder or a ``..`` spelling that leads into the vault names the page it reaches, and one that
-    leads out names none. The file's own name is never resolved, so a symlink at a stored page's path
-    does not name its target: the store key decides at the leaf. A file-mode read never pays that
-    resolution.
+    costs no read of the mode records. In store mode only, the parent folder is resolved: a
+    symlinked folder or a ``..`` spelling that leads into the vault names the page it reaches, and
+    one that leads out names none. The file's own name is never resolved, so a symlink at a stored
+    page's path does not name its target: the store key decides at the leaf. A file-mode read never
+    pays that resolution.
     """
     root = _as_path(vault_root)
     try:

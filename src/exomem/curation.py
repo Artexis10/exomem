@@ -918,9 +918,11 @@ def _instance_identity(vault_root: Path, scope: str) -> str:
 
 
 def _stored_schema_rows(vault_root: Path) -> list[dict[str, str]] | None:
-    """The registry and contract files that a store-mode vault's store holds, as ``_schema_rows`` lists them.
+    """The registry and contract files that a store-mode vault's store holds, as ``_schema_rows``
+    lists them.
 
-    None when the vault is not in store mode. The store's own hash is the hash of the bytes it holds.
+    None when the vault is not in store mode. The store's own hash is the hash of the bytes it
+    holds.
     """
     from .vault_store import mode, read
 
@@ -931,7 +933,8 @@ def _stored_schema_rows(vault_root: Path) -> list[dict[str, str]] | None:
     contracts = f"{schema}contracts/"
     with read.snapshot(Path(vault_root)) as view:
         metas = [view.page_meta(registry)]
-        # ``*.yaml`` directly below ``contracts``: a file extension is a closed set that the format fixes.
+        # ``*.yaml`` directly below ``contracts``: a file extension is a closed set that the format
+        # fixes.
         metas.extend(
             meta for meta in view.pages(contracts)
             if meta.path.endswith(".yaml") and "/" not in meta.path[len(contracts):]

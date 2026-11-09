@@ -240,7 +240,9 @@ def list_directory(
     #: Every name that the walk of the disk offered, and the page's names that only the store has.
     disk_names: set[str] = set()
     stored_only: list[str] = []
-    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None if limit is None else page
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = (
+        None if limit is None else page
+    )
 
     if stored is not None and limit is not None:
 
@@ -297,7 +299,9 @@ def list_directory(
 
 
 def _resolve_folder(vault_root: Path, path: str, **options):
-    """``resolve_under_vault`` for a folder that must exist: the store's folders exist as well as the disk's."""
+    """``resolve_under_vault`` for a folder that must exist: the store's folders exist as well as
+    the disk's.
+    """
     try:
         return resolve_under_vault(vault_root, path, must_exist=True, **options)
     except VaultPathError as error:
@@ -324,12 +328,15 @@ def _store_holds_folder(vault_root: Path, rel: str) -> bool:
 class _StoredListing:
     """What the store lists below one folder of a store-mode vault."""
 
-    #: ``(name relative to the folder, "file" or "directory")``, for the pages and the folders that hold them.
+    #: ``(name relative to the folder, "file" or "directory")``, for the pages and the folders that
+    #: hold them.
     candidates: list[tuple[str, str]]
     metas: dict[str, PageMeta]
 
     def projects(self, vault_rel: str, kind: str) -> bool:
-        """Whether a file of the disk lies at a path that the store owns: its projection, or a stray."""
+        """Whether a file of the disk lies at a path that the store owns: its projection, or a
+        stray.
+        """
         from .vault_store import ownership
 
         return kind != "directory" and ownership.classify(vault_rel) is ownership.Ownership.PAGE
@@ -353,7 +360,8 @@ class _StoredListing:
 
 
 def _stored_listing(vault_root: Path, folder: str, recursive: bool) -> _StoredListing | None:
-    """The store's pages and folders below ``folder`` ("" for the vault root), or None in a file-mode vault.
+    """The store's pages and folders below ``folder`` ("" for the vault root), or None in a
+    file-mode vault.
 
     A page under a reserved path is left out, as the walk of the disk leaves out its file.
     """
@@ -391,7 +399,9 @@ def _stored_listing(vault_root: Path, folder: str, recursive: bool) -> _StoredLi
 def _names_with_stored(
     vault_root: Path, folder: str, held: tuple[tuple[str, str], ...]
 ) -> tuple[tuple[str, str], ...]:
-    """The disk's ``(path, kind)`` names below ``folder``, with the store's pages in place of their files."""
+    """The disk's ``(path, kind)`` names below ``folder``, with the store's pages in place of their
+    files.
+    """
     stored = _stored_listing(vault_root, folder, recursive=True)
     if stored is None:
         return held

@@ -189,9 +189,9 @@ def test_the_text_reader_bounds_a_stored_page_by_its_stored_size_not_its_files(s
 def test_a_dotdot_spelling_reads_the_stored_page_and_a_symlink_never_names_a_page_by_its_target(
     stored, writer, tmp_path
 ):
-    """A reader that judges containment by the spelling: a `..` path to a page reads the stale file in
-    store mode, a link that leads out of the vault is taken for a page, and a link that stands at a
-    stored page's path returns the link target's bytes in place of the page's."""
+    """A reader that judges containment by the spelling: a `..` path to a page reads the stale file
+    in store mode, a link that leads out of the vault is taken for a page, and a link that stands at
+    a stored page's path returns the link target's bytes in place of the page's."""
     write.commit(writer, put(ALPHA, EDITED))
     notes = stored / "Knowledge Base/Notes"
     outside = tmp_path / "Outside.md"
@@ -207,7 +207,8 @@ def test_a_dotdot_spelling_reads_the_stored_page_and_a_symlink_never_names_a_pag
     with pytest.raises(FileNotFoundError):
         read_bytes(notes / "Out.md", stored)
     # A folder link that leads out of the vault holds no page of it: the disk answers.
-    assert read_bytes(stored / "Knowledge Base/Elsewhere/Outside.md", stored) == outside.read_bytes()
+    leaving = stored / "Knowledge Base/Elsewhere/Outside.md"
+    assert read_bytes(leaving, stored) == outside.read_bytes()
     # A link at a stored page's path: the store key decides at the leaf.
     (notes / "Alpha.md").unlink()
     (notes / "Alpha.md").symlink_to(outside)

@@ -67,7 +67,8 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
     texts = []
     for doc in (frontmatter_doc, page_types_doc):
         try:
-            # A store-mode vault keeps a legacy schema document in its store; the file is only a projection.
+            # A store-mode vault keeps a legacy schema document in its store; the file is only a
+            # projection.
             raw = read_bytes_without_pinning(doc, vault_path).decode("utf-8")
             texts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))  # as read_text read it
         except FileNotFoundError:

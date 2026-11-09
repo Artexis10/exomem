@@ -72,10 +72,13 @@ def reference_companion(vault: Path, binary_path: str) -> tuple[str, reserved_pa
     return path, snapshot
 
 
-def remove_unchanged(vault: Path, path: str, identity: held_fs.StableIdentity | None, data: bytes) -> None:
+def remove_unchanged(
+    vault: Path, path: str, identity: held_fs.StableIdentity | None, data: bytes
+) -> None:
     """Retire only the acquired metadata bytes, retaining any replacement or edit.
 
-    ``identity`` is None for a companion that the vault's store holds; a stored page has no file to retire.
+    ``identity`` is None for a companion that the vault's store holds; a stored page has no file to
+    retire.
     """
     try:
         current = reserved_paths.read_generic_bytes(vault, path)
@@ -86,7 +89,8 @@ def remove_unchanged(vault: Path, path: str, identity: held_fs.StableIdentity | 
     if current.identity != identity or current.data != data:
         raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
     if identity is None:
-        # Retiring a stored companion is a store delete (the write path); an unlink here would drop only its projection.
+        # Retiring a stored companion is a store delete (the write path); an unlink here would drop
+        # only its projection.
         raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
     reserved_paths.unlink_generic_file(vault, path, expected_identity=identity)
 
