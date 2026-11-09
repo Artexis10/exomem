@@ -472,3 +472,31 @@ def test_context_presents_each_holders_belief_about_one_claim(vault: Path) -> No
         assert (provenance["credence_holder"], provenance["credence"]) == (holder, level)
         assert holder in lines[f"{POLICY_REF}#{anchor}"]
         assert level in lines[f"{POLICY_REF}#{anchor}"]
+
+
+def test_a_find_pack_shows_each_units_attribution_and_modality(vault: Path) -> None:
+    """Catches a context pack that serves a vendor's figure, a holder's belief or a norm bare."""
+    path = vault / POLICY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: resource\nstatus: active\nupdated: 2026-10-01\n"
+        f"exomem_id: {POLICY_ID}\n---\n\n# Deploy policy\n\nHow deploys are approved.\n\n"
+        "## Claim\n- id: vendor\n- asserted_by: Acme Hosting\n\nThe deploy service has 99.99% uptime.\n\n"
+        "## Belief\n- id: platform\n- credence_holder: Platform team\n- credence: likely\n"
+        "- relations: assesses: [[Deploy policy#vendor]]\n\nThe deploy service uptime figure is right.\n\n"
+        "## Claim\n- id: norm\n- modality: should\n\nDeploys need two approvals.\n",
+        encoding="utf-8",
+    )
+    lexstore.ensure_fresh(vault)
+
+    result = commands.op_find(vault, query="deploy service uptime approvals", mode="keyword", pack=True)
+
+    units = {
+        unit["source_anchor"]: unit for unit in result["pack"]["semantic_units"][POLICY]["units"]
+    }
+    assert units["vendor"]["asserted_by"] == "Acme Hosting"
+    assert (units["platform"]["credence_holder"], units["platform"]["credence"]) == (
+        "Platform team", "likely",
+    )
+    assert units["norm"]["modality"] == "should"
+    assert "asserted_by" not in units["norm"] and "credence" not in units["vendor"]

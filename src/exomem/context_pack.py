@@ -431,6 +431,13 @@ def _pack_unit(
             "fingerprint": unit.fingerprint,
             "verdict": unit.verdict,
             "check_by": unit.check_by,
+            # Whose claim or belief the unit is, its modality and its other governed rows, as
+            # compiled context shows them; a row the unit lacks is omitted.
+            **{
+                key: getattr(unit, key)
+                for key in semantic_units.UNIT_ROW_KEYS
+                if getattr(unit, key) is not None
+            },
             "form": unit.form,
             "category_raw": unit.category_raw,
             "category_key": unit.category_key,
