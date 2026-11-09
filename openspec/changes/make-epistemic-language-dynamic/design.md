@@ -37,10 +37,11 @@ Table rows cite the 2026-11-08 language inventory by ID: F for a branch on a fam
 | `plain_link` | The edge is a plain link. It ranks after typed edges, never counts as typed, and the census skips it. | F10, F11, K16 readers (projection_runtime 1825, vocabulary_projection 164, relation_census 64/902/1542) | links_to |
 | `opposes` | Source and target are rivals. Stance reads the pair as declared, the census flags it inside one supersession chain, and the audit raises it as an asserted contradiction. | K17 `CONTRADICTS`, K9 | contradicts |
 | `names_subject` | The edge names the entity a unit is about. Restricted working-set admission matches it against the turn's subject. | K20 | about_entity |
+| `names_assessed_claim` | The edge names the claim a belief unit assesses. A unit with the `credence` trait needs one. | new | assesses |
 | `earlier_than_target` | The source comes before the target in time. | new | precedes |
 | `later_than_target` | The source comes after the target in time. | new | follows |
 
-An extension's behaviours resolve through its core parent, never through a saved family. `assesses`, `precedes` and `follows` carry no behaviour beyond the order pair. Relation review counts all three as typed edges, because none is `associative`.
+An extension's behaviours resolve through its core parent, never through a saved family. `assesses` carries only `names_assessed_claim`, and `precedes` and `follows` only the order pair. Relation review counts all three as typed edges, because none is `associative`.
 
 `presentation_role` stays renderer metadata: it tells a viewer how to draw an edge. Behaviours decide what code does with the edge. `supersedes` carries both, for those two different reasons. `presentation_role` cannot carry a promise, because an extension may set and later change it.
 
@@ -152,7 +153,7 @@ The generic families mention, link and relation belong to no dimension.
 The owner chose this shape on 2026-11-08: belief levels, plus numbers only with a source. The owner added that Exomem must not arbitrate belief.
 
 1. A belief is a unit of the new kind `belief`. It states the belief in prose, so it is never an empty unit. Its governed keys are `credence_holder` (a plain name or a link to an entity page), `credence` (the value) and `credence_basis` (free text).
-2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`.
+2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`. Validation finds that edge through its behaviour `names_assessed_claim`, so a vault extension of `assesses` serves too. A belief unit without it warns in the first release.
 3. The value is a key or label of the belief-level registry (speculative, plausible, likely and near-certain by default), or a probability from 0 to 1.
 4. Every belief names a holder. A probability also needs a basis, and the basis can be anything the holder gives, including intuition.
 5. Exomem keeps the stated value as written. A label resolves to its level key for matching, but the stored text is unchanged, and a probability is never rounded.

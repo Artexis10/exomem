@@ -36,8 +36,8 @@ def _codes(diagnostics) -> list[str]:
 
 def test_a_belief_heading_with_its_holder_and_level() -> None:
     document = _parse(
-        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: Likely\n\n"
-        "The release will slip a week.\n"
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: Likely\n"
+        "- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     assert [unit.kind for unit in document.units] == ["belief"]  # FLIPS slice4: was [] (no belief kind)
@@ -157,8 +157,8 @@ def test_a_percentage_is_refused_with_the_probability_to_write_instead() -> None
 def test_a_belief_level_needs_no_basis_and_keeps_its_stated_label() -> None:
     """Catches a level that demands a basis, or a label that the parser rewrites in the page."""
     document = _parse(
-        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: Likely\n\n"
-        "The release will slip a week.\n"
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: Likely\n"
+        "- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     (belief,) = document.units
@@ -176,6 +176,19 @@ def test_a_number_on_a_claim_is_refused_with_the_belief_form() -> None:
     assert "## Belief" in error.remediation
     assert "credence_holder" in error.remediation
     assert "credence_basis" in error.remediation
+
+
+def test_a_belief_that_names_no_claim_warns_with_the_relation_to_add() -> None:
+    """Catches a belief with no claim to assess, which context cannot place beside that claim."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n\n"
+        "The release will slip a week.\n"
+    )
+
+    (warning,) = document.warnings
+    assert document.errors == ()
+    assert warning.code == "missing_rich_assessed_claim"
+    assert "- relations: assesses:" in warning.remediation
 
 
 def test_a_belief_with_a_credence_but_no_holder_is_refused() -> None:
@@ -198,7 +211,8 @@ def test_a_vault_kind_with_the_credence_trait_holds_a_sourced_probability() -> N
     """Catches a vault's own belief kind refused because the parser names `belief` itself."""
     document = semantic_units.parse_semantic_units(
         "# Release outlook\n\n## Forecast\n- credence_holder: Platform team\n- credence: 0.7\n"
-        "- credence_basis: Four of the last six releases slipped.\n\nThe release slips a week.\n",
+        "- credence_basis: Four of the last six releases slipped.\n"
+        "- relations: assesses: [[Release date]]\n\nThe release slips a week.\n",
         path=PATH, language_registry=_vault_kind(["credence"]),
     )
 

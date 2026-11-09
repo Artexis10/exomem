@@ -1057,6 +1057,7 @@ def parse_semantic_units(
             path=source_path,
             line_by_number=line_by_number,
             language=language_registry,
+            relations=relation_registry,
         )
         if validate:
             if lenient(block.type, block.metadata):
@@ -1150,10 +1151,12 @@ def _rich_unit(
     path: str,
     line_by_number: dict[int, _SourceLine],
     language: semantic_language_registry.LanguageRegistryView | None = None,
+    relations: RelationRegistry | None = None,
 ) -> tuple[SemanticUnit, list[SemanticUnitDiagnostic]]:
     """One rich unit from a recognized block; parsing and summaries share it.
 
     `language` resolves the verdict; selection-free callers omit it and read the shipped verdicts.
+    `relations` resolves the relations a belief unit needs; callers without one read the core.
     """
     category_raw, category_key, category_error = _rich_category(
         block, path=path, line_by_number=line_by_number,
@@ -1171,6 +1174,10 @@ def _rich_unit(
         block.metadata, kind=block.type,
         language=language or semantic_language_registry.core_registry(),
     )
+    row_problems.extend(_assessment_problems(
+        block, language=language or semantic_language_registry.core_registry(),
+        relations=relations or _core_relations(),
+    ))
     order_error = None
     if rich_as_of and rich_until and dt.date.fromisoformat(rich_until) < dt.date.fromisoformat(rich_as_of):
         order_error = replace(_invalid_rich_metadata(
@@ -1880,9 +1887,9 @@ def _belief_rows(
         problems.append(_RowProblem(
             "credence_holder", "incomplete_rich_belief",
             "belief unit names no credence_holder and no credence",
-            "Add `- credence_holder: <whose belief>` and `- credence: <a belief level, or a "
-            "probability from 0 to 1>`, or rename the heading if the section is not one "
-            "holder's belief.",
+            "Add `- credence_holder: <whose belief>`, `- credence: <a belief level, or a "
+            "probability from 0 to 1>` and `- relations: assesses: <the claim>`, or rename the "
+            "heading if the section is not one holder's belief.",
             severity=_FIRST_RELEASE_SEVERITY,
         ))
         return values, problems
@@ -1900,6 +1907,27 @@ def _belief_rows(
         problems.append(problem)
     values.update(credence=credence, credence_holder=holder, credence_basis=basis)
     return values, problems
+
+
+def _assessment_problems(
+    block: semantic_blocks.SemanticBlock,
+    *,
+    language: semantic_language_registry.LanguageRegistryView,
+    relations: RelationRegistry,
+) -> list[_RowProblem]:
+    """A belief unit names the claim it assesses. A placeholder belief already warns for its rows."""
+    if not language.has(block.type, "credence") or not any(
+        key in block.metadata for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS
+    ):
+        return []
+    if any("names_assessed_claim" in relations.behaviours_of_label(relation.kind) for relation in block.relations):
+        return []
+    return [_RowProblem(
+        "relations", "missing_rich_assessed_claim",
+        "belief unit names no claim it assesses",
+        "Add `- relations: assesses: <the claim>`, a link to the claim this belief is about.",
+        severity=_FIRST_RELEASE_SEVERITY,
+    )]
 
 
 def _statement_rows(
