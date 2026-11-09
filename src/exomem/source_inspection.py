@@ -27,14 +27,19 @@ MAX_FIELDS = 64
 MAX_FIELD_CHARS = 256
 MAX_JSON_DEPTH = 64
 MAX_TABLE_CELLS = 100_000
+#: Inspection statuses that `_inspect_dataset` emits for a dataset that parsed.
+STATUS_READY = "ready"
+STATUS_LIMITED = "limited"
 #: Largest original whose values are searchable, and the largest rendering of them.
 VALUE_DATASET_BYTES = TEXT_PREVIEW_BYTES
 VALUE_RENDERING_BYTES = 64 * 1024
 #: A longer value is cut to this many characters and ends in an ellipsis.
 VALUE_MAX_CHARS = 256
 #: Card inspection statuses whose original is searchable: it parsed within the shape budgets.
-#: A closed set that `_inspect_dataset` itself emits, not a vocabulary that a vault defines.
-VALUE_STATUSES = frozenset({"ready", "limited"})
+VALUE_STATUSES = frozenset({STATUS_READY, STATUS_LIMITED})
+#: Moves whenever `render_values` changes how it lays out records, so a stored record number
+#: is never read against a different layout.
+RENDERING_VERSION = "2"
 VALUE_TRUNCATION_LINE = (
     f"[Value rendering truncated at {VALUE_RENDERING_BYTES // 1024} KiB; query_dataset reads every row.]"
 )
@@ -120,7 +125,7 @@ def _inspect_dataset(data: bytes, suffix: str) -> Inspection:
 
     if fmt in {"csv", "tsv"}:
         return Inspection(
-            "ready",
+            STATUS_READY,
             f"Parsed records: {len(rows)}.\n\nObserved columns: {len(columns)}.\n\n"
             "The first record is assumed to be a header by the tabular query parser. "
             "Header labels are omitted here because a headerless first record can contain data. "
@@ -146,14 +151,24 @@ def _inspect_dataset(data: bytes, suffix: str) -> Inspection:
         body.extend(["", "Field listing is limited or sampled; use an exact query to inspect records."])
     body.extend(["", "Use query_dataset with data_file for exact rows, filters and aggregates. "
                  "Row values are not copied into this card."])
-    return Inspection("limited" if limited else "ready", "\n".join(body), fmt, len(rows))
+    return Inspection(STATUS_LIMITED if limited else STATUS_READY, "\n".join(body), fmt, len(rows))
+
+
+@dataclass(frozen=True)
+class ValueRecord:
+    """One record of a dataset as `(dotted field path, value text)` pairs."""
+
+    fields: tuple[tuple[str, str], ...]
+
+    def lines(self) -> list[str]:
+        return [f"{path}: {value}" for path, value in self.fields]
 
 
 @dataclass(frozen=True)
 class ValueRendering:
-    """A small dataset's values as one block of `field.path: value` lines per record."""
+    """A small dataset's values, one record per row of the dataset."""
 
-    records: tuple[str, ...]
+    records: tuple[ValueRecord, ...]
     #: True when the rendering stopped at `VALUE_RENDERING_BYTES`, so later records are absent.
     truncated: bool
 
@@ -170,20 +185,20 @@ def render_values(data: bytes, suffix: str) -> ValueRendering | None:
     parsed = _parse_dataset(data, suffix.lower())
     if isinstance(parsed, str):
         return None
-    records: list[str] = []
+    records: list[ValueRecord] = []
     used = 0
     for row in parsed[1]:
-        lines: list[str] = []
+        fields: list[tuple[str, str]] = []
         for path, value in _scalars(row, ""):
-            line = f"{path}: {_value_text(value)}"
-            used += len(line.encode("utf-8")) + 1
+            text = _value_text(value)
+            used += len(f"{path}: {text}".encode()) + 1
             if used > VALUE_RENDERING_BYTES:
-                if lines:
-                    records.append("\n".join(lines))
+                if fields:
+                    records.append(ValueRecord(tuple(fields)))
                 return ValueRendering(tuple(records), True)
-            lines.append(line)
-        if lines:
-            records.append("\n".join(lines))
+            fields.append((path, text))
+        if fields:
+            records.append(ValueRecord(tuple(fields)))
     return ValueRendering(tuple(records), False)
 
 

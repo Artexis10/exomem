@@ -8,7 +8,8 @@ The exclusion was deliberate: raw dataset reads stay behind owner-reviewed class
 
 - A derived search index holds a bounded text rendering of a small dataset's values. The vault original and its card stay unchanged.
 - That rendering is indexed under the dataset original's own path. Search therefore releases a value hit only to a reader whom the existing release plane allows to read the original at full level, the same rule `query_dataset` applies. Every other reader gets no hit.
-- A value hit names the dataset original, carries a bounded passage around the match, and points to `query_dataset` for exact rows.
+- A value hit names the dataset original, carries a bounded passage around the matching line, and points to `query_dataset` for exact rows. A field name alone never produces a hit.
+- A value hit that the reader may not read leaves no trace: the reader's other results are the same as without value search.
 - Large datasets, malformed datasets, and Records and Planning collections stay excluded.
 
 ## Capabilities

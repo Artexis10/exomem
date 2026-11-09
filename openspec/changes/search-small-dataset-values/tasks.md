@@ -14,4 +14,4 @@
 
 - [x] 3.1 Drop a value hit in `annotate_hits` below the full release level, with no excerpt and no notice
 - [x] 3.2 End-to-end test: preserve a small JSON, then find a value as a full-access reader; with membership unresolved or below full level, get no value hit while the card stays findable; a dataset over 64 KiB gets no value hit
-- [ ] 3.3 After release, confirm on the personal service that a search for the 7 November account number returns the supplier-profile original
+- [ ] 3.3 After release, count the live dataset cards read-only, then confirm on the personal service that searches for the 7 November account number return the supplier-profile original: the bare number, a supplier name with "IBAN", and the same name with "bank account". Record which phrasings find it and which do not

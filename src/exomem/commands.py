@@ -3014,23 +3014,34 @@ def op_find(
             query.strip()
             and mode != "vector"
             and result_level in ("auto", "page")
-            and retrieval_trace is None
             and not any(
                 (types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds,
                  source_kinds, domains, relations, relation_of, filters)
             )
             and all(isinstance(hit, find_module.Hit) for hit in hits)
         ):
-            with find_module._span(timings, "dataset_values"):
-                value_lane = dataset_values_module.search(
-                    vault_root, query=query, scope=scope, admit_path=admit_path, limit=retrieval_limit
-                )
-            if value_lane.hits:
-                hits = dataset_values_module.fuse(
-                    hits, value_lane.hits, limit=retrieval_limit, rrf_k=find_module._active_ranking().rrf_k
-                )
-            degraded.extend(value_lane.warming)
-            failed.extend(value_lane.failed)
+            if retrieval_trace is not None:
+                # A value hit has no ranking evidence, which `explain` requires of every hit.
+                retrieval_trace.lane_profiles[dataset_values_module.LANE] = {
+                    "status": "disabled",
+                    "reason": "explain_does_not_trace_dataset_values",
+                }
+            else:
+                with find_module._span(timings, "dataset_values"):
+                    value_lane = dataset_values_module.search(
+                        vault_root, query=query, scope=scope, admit_path=admit_path, limit=retrieval_limit
+                    )
+                if value_lane.hits:
+                    # Room for every value hit, so one that egress drops displaces no page hit.
+                    hits = dataset_values_module.fuse(
+                        hits,
+                        value_lane.hits,
+                        limit=retrieval_limit + len(value_lane.hits),
+                        rrf_k=find_module._active_ranking().rrf_k,
+                    )
+                if not restricted:  # indexing activity is not for a caller held to content floors
+                    degraded.extend(value_lane.warming)
+                failed.extend(value_lane.failed)
         # Recheck the selected snapshots before assembly. RAW-admitted searches
         # bypass both shared caches; ordinary policy retains its final gate.
         with find_module._span(timings, "release_gate"):
