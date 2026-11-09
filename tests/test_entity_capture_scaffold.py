@@ -60,7 +60,7 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
         assert "native-script alias" in text
     section = writing.split("## Entity resolution", 1)[1].split("\n## ", 1)[0]
     assert "manage_memory(operation=\"connections.create_entity\", arguments={'aliases':" in section
-    assert '"field": "aliases"' in section or "field: aliases" in section
+    assert 'edit_note(action="set_fields", fields={"aliases":' in section
 
 
 def test_capture_workflow_puts_contact_details_in_a_contact_section_of_the_entity() -> None:
