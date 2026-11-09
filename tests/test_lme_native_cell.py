@@ -148,10 +148,11 @@ def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path, mo
                     "title": "Native cell fixture",
                     "content": "The native-cell test sentinel is sapphire.",
                     "source_type": "conversation",
+                    "response_detail": "full",
                 },
             )
             assert captured["isError"] is False
-            source_path = _product_result(captured)["path"]
+            source_path = _product_result(captured)["diagnostics"]["operational"]["path"]
             read = await cell.call("read_memory", {"path": source_path})
             assert read["isError"] is False
             assert "sapphire" in _product_result(read)["body"]
@@ -297,14 +298,24 @@ def test_native_cells_with_conflicting_paths_do_not_share_state(tmp_path: Path) 
         ):
             first_write = await first.call(
                 "capture_source",
-                {"title": "Same title", "content": "only-first", "source_type": "conversation"},
+                {
+                    "title": "Same title",
+                    "content": "only-first",
+                    "source_type": "conversation",
+                    "response_detail": "full",
+                },
             )
             second_write = await second.call(
                 "capture_source",
-                {"title": "Same title", "content": "only-second", "source_type": "conversation"},
+                {
+                    "title": "Same title",
+                    "content": "only-second",
+                    "source_type": "conversation",
+                    "response_detail": "full",
+                },
             )
-            first_path = _product_result(first_write)["path"]
-            second_path = _product_result(second_write)["path"]
+            first_path = _product_result(first_write)["diagnostics"]["operational"]["path"]
+            second_path = _product_result(second_write)["diagnostics"]["operational"]["path"]
             assert first_path == second_path
             first_read = _product_result(await first.call("read_memory", {"path": first_path}))
             second_read = _product_result(await second.call("read_memory", {"path": second_path}))

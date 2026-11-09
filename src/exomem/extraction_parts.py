@@ -261,15 +261,46 @@ def plan(
     return Plan(tuple(writes), surplus)
 
 
-def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
-    """Remove part pages that no extraction owns any more, and the folder once it is empty."""
+def _store_owned_part_rels(vault_root: Path, rels: list[str]) -> list[str]:
+    """The part pages among `rels` that the store owns by path, whether it holds them yet or not.
+
+    The test is ownership: none of these has a file-side removal.
+    """
+    from .vault_store import targets as store_targets
+
+    return [rel for rel in rels if store_targets.owns_any(vault_root, files=(rel,))]
+
+
+def kept_note(kept: tuple[str, ...]) -> str:
+    """The one sentence that a caller of `retire` logs for the part pages it kept."""
+    return (
+        f"kept {len(kept)} surplus part page(s) that the store holds, because only the file side "
+        f"of a part page can be unlinked: {', '.join(kept)}"
+    )
+
+
+def retire(vault_root: Path, pages: tuple[Path, ...]) -> tuple[str, ...]:
+    """Remove part pages that no extraction owns any more, and the folder once it is empty.
+
+    Returns the part pages it kept, as vault-relative paths. A part page that the store holds (the
+    folder of a raw-marked page is not a dot folder) has no file-side removal: the unlink would
+    leave the store's page in place. It stays, and the caller logs it with `kept_note`. A refusal
+    would report a failed write for a parent that already committed, and the job would retry it.
+    `sweep` lists such a part as unowned. A part page in a dot folder is on disk and is removed.
+    """
     if not pages:
-        return
+        return ()
     from . import file_watcher, index_sync
+
+    rels = {page: page.relative_to(vault_root).as_posix() for page in pages}
+    kept = tuple(_store_owned_part_rels(vault_root, list(rels.values())))
+    pages = tuple(page for page in pages if rels[page] not in kept)
+    if not pages:
+        return kept
 
     # The removal is ours, so the watcher need not report it again (as `delete_file` does for frames).
     try:
-        file_watcher.register_self_delete(vault_root, [page.relative_to(vault_root).as_posix() for page in pages])
+        file_watcher.register_self_delete(vault_root, [rels[page] for page in pages])
     except Exception:  # noqa: BLE001 — suppression is best-effort
         pass
     removed: list[str] = []
@@ -278,12 +309,13 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
             page.unlink()
         except OSError:
             continue
-        removed.append(page.relative_to(vault_root).as_posix())
+        removed.append(rels[page])
     index_sync.delete_after_remove(vault_root, removed)
     try:
         pages[0].parent.rmdir()
     except OSError:
         pass
+    return kept
 
 
 def carry(vault_root: Path, page_rel: str, new_page_rel: str) -> list[tuple[str, str]]:
@@ -550,7 +582,8 @@ class Sweep:
     #: Source pages with a part that is missing and could not be rebuilt.
     missing: list[str] = field(default_factory=list)
     #: Pages at a part's path that the sweep leaves alone: their Source page is gone or holds no
-    #: extraction, or the page is not a part written for it. A person decides about these.
+    #: extraction, the page is not a part written for it, or the store holds it in a store-mode
+    #: vault. A person decides about these.
     unowned: list[str] = field(default_factory=list)
 
 
@@ -644,7 +677,11 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
                 surplus.append(entry)
             else:
                 result.unowned.append(entry.relative_to(root).as_posix())
-        result.removed += [entry.relative_to(root).as_posix() for entry in surplus]
+        removable = [entry.relative_to(root).as_posix() for entry in surplus]
+        # The same split `retire` makes, so a dry run and a real run name the same parts.
+        held = _store_owned_part_rels(root, removable)
+        result.unowned += held
+        result.removed += [rel for rel in removable if rel not in held]
         if not dry_run:
             retire(root, tuple(surplus))
         missing = [number for number in range(2, count + 1) if number not in present]
