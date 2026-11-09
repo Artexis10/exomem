@@ -137,6 +137,7 @@ from . import request_budget as request_budget_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
+from . import review_ids as review_ids_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
@@ -9928,6 +9929,7 @@ def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
     return path is not None or bool(query) or family is not None
 
 
+@review_ids_module.marks_items
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -10698,13 +10700,14 @@ def _effect_block(
 
 def op_triage_memory(
     vault_root: Path,
-    ref: str,
-    action: str,
+    ref: str | None = None,
+    action: str | None = None,
     until: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
     source_path: _OptionalRelationText = None,
     decision: _VocabularyDecisionArgument = None,
+    item_id: str | None = None,
 ) -> dict:
     """Save review decisions or attention settings; use returned refs and fingerprints.
 
@@ -10718,7 +10721,21 @@ def op_triage_memory(
         expected_fingerprint: Reviewed fingerprint; mismatch refuses.
         source_path: Source page; required for newly returned relation items.
         decision: Payload for decide-vocabulary.
+        item_id: The id a review reply gives one item; replaces `ref`, `expected_fingerprint` and
+            `source_path`. A stale id refuses with the current one.
     """
+    if item_id is not None:
+        if ref is not None or expected_fingerprint is not None or source_path is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
+            )
+        bound = review_ids_module.bind(
+            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+        )
+        ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+        source_path = bound.get("source_path")
+    if ref is None:
+        raise ValueError("INVALID_REVIEW_ACTION: triage_memory requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()
     vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
     if normalized_action == "decide-vocabulary":
@@ -10984,6 +11001,7 @@ def op_connect_memory(
     entity_family: str | None = None,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    item_id: str | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities.
 
@@ -11006,6 +11024,8 @@ def op_connect_memory(
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
         relations: create-entity only. {kind, target} edges; a specific relation key.
+        item_id: accept-relation only. The id the relation queue gives one suggestion; replaces `ref`,
+            `expected_hash` and `expected_fingerprint`, and a stale id refuses with the current one.
     """
     if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
         raise ValueError(
@@ -11104,6 +11124,16 @@ def op_connect_memory(
         result["context"] = {"path": path, "target": target}
         return result
     if operation == "accept-relation":
+        if item_id is not None:
+            if any(given is not None for given in (ref, expected_hash, expected_fingerprint)):
+                raise ValueError(
+                    "INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint"
+                )
+            bound = review_ids_module.bind(
+                lambda **kw: op_review_memory(vault_root, **kw), item=item_id, modes=review_ids_module.RELATION_QUEUE_MODES
+            )
+            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+            path = path or bound.get("source_path")
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
 
@@ -11134,6 +11164,7 @@ def op_connect_memory(
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
+            bind_page_hash=item_id is not None,
         )
     if operation == "suggest-relations":
         # Relation proposals are owner work (see `op_suggest_relations`);

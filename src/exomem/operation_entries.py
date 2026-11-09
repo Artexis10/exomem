@@ -661,7 +661,7 @@ _REMAINING = {
         _row("resolve-entity", "read_connections", ("name", "entity_type", "entity_family", "limit"), ("name",)),
         _row("resolve-relation", "read_connections", ("path", "target", "query", "requested_relation", "limit", "continuation")),
         _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations", "ref"), ("name",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb and the `ref` field changed.
-        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint", "item_id"), ("why",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "observe_memory": ("operation", (
         _row("validate", "prepare_note", None, ("path",), kind="observation"),

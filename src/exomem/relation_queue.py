@@ -1330,8 +1330,13 @@ def accept(
     requested_relation: str | None = None,
     bound: bool = False,
     edit_memory: Callable[..., dict[str, Any]],
+    bind_page_hash: bool = False,
 ) -> dict[str, Any]:
     """Governed server-side accept: validate signal + hash, then author the bullet.
+
+    ``bind_page_hash`` takes the source page's hash at accept time in place of ``expected_hash``.
+    The candidate's fingerprint already carries the page signal that the caller saw, so a caller
+    that names the suggestion by its id has no page hash to send.
 
     ``edit_memory`` is injected (the registry's ``op_edit_memory``) so the write
     is byte-identical in effect to the Studio single-proposal path.
@@ -1350,7 +1355,7 @@ def accept(
         raise ValueError(
             "INVALID_ACCEPT: accept-relation requires an audit reason (`why`)"
         )
-    if not expected_hash:
+    if not expected_hash and not bind_page_hash:
         raise ValueError(
             "INVALID_ACCEPT: accept-relation requires `expected_hash` from the target page"
         )
@@ -1375,6 +1380,8 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
+    if bind_page_hash:
+        expected_hash = _page_content_hash(page)
     store = review_state_module.ReviewStateStore(vault_root)
     fit = RelationFit(vault_root)
     reason, _enriched = _classify_current(

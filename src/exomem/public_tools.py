@@ -691,7 +691,6 @@ REVIEW_QUEUES: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed queue
     "plan_progress": "plan-progress", "vocabulary": "vocabulary", "procedure_approvals": "procedure_approvals",
 }
 
-
 class ListReviewItems(Wire):
     queue: Literal[
         "due", "activation", "stale", "contradiction", "unprocessed_sources", "unlinked",
@@ -720,7 +719,7 @@ def _decide_review_item(wire: dict[str, Any], ctx: Context) -> Translated:
                                   **_given({"why": wire.get("why"), "requested_relation": wire.get("relation")}), **detail}
     if wire.get("relation") is not None:
         raise Refusal("INVALID_ARGUMENT", "relation applies to accept only.")
-    return "triage_memory", {"action": wire["decision"], "ref": wire["review_item"],
+    return "triage_memory", {"action": wire["decision"], "item_id": wire["review_item"],
                              **_given({"until": wire.get("until"), "why": wire.get("why")}), **detail}
 
 
@@ -864,7 +863,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("decide_review_item", "Decide review item",
           "Record the person's decision on one review item. accept applies to a relation suggestion.",
           DecideReviewItem, "write", _decide_review_item,
-          [Route("triage_memory", inverse={"ref": "review_item", "action": "decision", "response_detail": "detail"}),
+          [Route("triage_memory", inverse={"item_id": "review_item", "action": "decision", "response_detail": "detail"}),
            Route("connect_memory", when={"operation": "accept-relation"},
                  inverse={"item_id": "review_item", "requested_relation": "relation", "response_detail": "detail"},
                  add={"decision": "accept"})],
