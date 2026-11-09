@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import threading
@@ -205,9 +206,14 @@ def _reference_key(reference: StoredObject) -> str:
     return json.dumps(reference.fields(), sort_keys=True, separators=(",", ":"))
 
 
+def _identity_text(device: int, inode: int, change_time_ns: int, mtime_ns: int, size: int) -> str:
+    """The cache identity that a row records: the file's device, inode, change time, modification time and size."""
+    return json.dumps((device, inode, change_time_ns, mtime_ns, size), separators=(",", ":"))
+
+
 def _version_identity(version: held_fs.FileVersion) -> str:
-    return json.dumps((version.identity.device, version.identity.inode, version.change_time_ns,
-                       version.mtime_ns, version.size), separators=(",", ":"))
+    return _identity_text(version.identity.device, version.identity.inode, version.change_time_ns,
+                          version.mtime_ns, version.size)
 
 
 def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
@@ -1628,46 +1634,34 @@ def cached_bytes(vault: Path) -> int:
     ledger = MediaJobStore(vault, create=False)
     if not ledger.path.exists():
         return 0
-    acquired = held_fs.acquire(vault)
-    if not acquired.ok:
-        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"the volume cannot be read: {acquired.error}")
     total = 0
     try:
-        with acquired.require() as filesystem, closing(ledger._connect(readonly=True)) as conn:
+        with closing(ledger._connect(readonly=True)) as conn:
             for relative, identity in conn.execute("SELECT binary_rel, identity FROM media_cache WHERE evicted = 0"):
-                total += _cached_allocation(vault, filesystem, relative, identity)
+                total += _cached_allocation(vault / relative, identity)
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return total
 
 
-def _cached_allocation(vault: Path, filesystem: held_fs.HeldFilesystem, relative: str, identity: str) -> int:
+def _cached_allocation(path: Path, identity: str) -> int:
     """The bytes that the volume allocates to one cached row's file, or 0 when the file there is not the recorded one."""
-    # Status shows this text, so it names no path: a held refusal is content-free, an OSError is not.
-    unreadable = "a cached original cannot be read"
-    leaf = PurePosixPath(relative)
-    found = filesystem.parent(leaf.parent.as_posix())
-    if not found.ok:
-        if found.error is not None and found.error.code == "MISSING":
-            return 0  # A moved or deleted original holds no byte on the volume.
-        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {found.error}")
-    with found.require() as parent:
-        held = filesystem.file(parent, leaf.name, access="identity")
-        if not held.ok:
-            if held.error is not None and held.error.code == "MISSING":
-                return 0
-            raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {held.error}")
-        with held.require() as file:
-            try:
-                version = file.version()
-                info = os.lstat(vault / relative)
-            except OSError as error:
-                raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {errno.errorcode.get(error.errno, 'OSError')}") from None
-    if _version_identity(version) != identity or (info.st_dev, info.st_ino) != (version.identity.device, version.identity.inode):
-        return 0  # Rewritten or replaced since the row was recorded: these are the vault's own bytes now.
+    try:
+        # A symlink leaf is not followed. A symlinked parent is, which is acceptable: the identity match still decides.
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return 0  # A moved or deleted original holds no byte on the volume.
+    except OSError as error:
+        # Status shows this text, so it names no path.
+        raise MediaStoreError("MEDIA_CACHE_UNREADABLE",
+                              f"a cached original cannot be read: {errno.errorcode.get(error.errno, 'OSError')}") from None
+    if not stat.S_ISREG(info.st_mode):
+        return 0  # A symlink, folder or device at the path is no cached original.
     blocks = getattr(info, "st_blocks", None)  # POSIX reports allocation in 512-byte units; Windows reports none.
     if blocks is None:
         raise MediaStoreError("MEDIA_CACHE_UNREADABLE", "this platform reports no allocated size for a file")
+    if _identity_text(info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size) != identity:
+        return 0  # Rewritten or replaced since the row was recorded: these are the vault's own bytes now.
     return blocks * 512
 
 
