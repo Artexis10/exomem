@@ -1,5 +1,8 @@
-# Explicit release intent supplies evidence and refreshes checks. Only the
-# guarded local merge command merges; long-lived auto-merge is not release intent.
+# Explicit release intent supplies evidence and refreshes checks. An intent that
+# names the reviewed release head also lands it: once evidence and every required
+# check pass, the guarded merge runs for that exact source and head. An intent
+# without a head, a Full run no intent named, or RELEASE_AUTO_MERGE=off leaves the
+# merge to the release session. Long-lived GitHub auto-merge is not release intent.
 name: release evidence automation
 
 on:
@@ -11,6 +14,10 @@ on:
         type: string
       expected_base:
         description: Exact main source commit selected for the release PR
+        required: false
+        type: string
+      expected_head:
+        description: Reviewed release PR head; with it, the release merges itself once its checks pass
         required: false
         type: string
       evidence_run:
@@ -29,6 +36,8 @@ permissions:
 
 env:
   GH_REPO: ${{ github.repository }}
+  # The repository variable RELEASE_AUTO_MERGE=off turns landing off without a code change.
+  LAND: ${{ vars.RELEASE_AUTO_MERGE != 'off' && secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
 
 # Duplicate intent for one PR must not dispatch concurrent Full fallback runs.
 concurrency:
@@ -39,23 +48,49 @@ jobs:
     name: dispatch evidence run on release intent
     if: ${{ inputs.release_pr != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
       - name: Reuse complete evidence or dispatch the Full fallback
+        id: intent
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.release_pr }}
           BASE_SHA: ${{ inputs.expected_base }}
-        run: python3 scripts/release_evidence.py intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA"
+          HEAD_SHA: ${{ inputs.expected_head }}
+        run: |
+          args=(intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA")
+          if [ -n "$HEAD_SHA" ]; then args+=(--expected-head "$HEAD_SHA" --output release-intent.json); fi
+          python3 scripts/release_evidence.py "${args[@]}"
+      - name: Keep the release intent for the evidence run
+        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-intent
+          path: release-intent.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Mint the release App token
+        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+      - name: Land the intended release on reused evidence
+        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 scripts/release_evidence.py land --intent release-intent.json
 
   rerun-evidence-check:
     name: re-run release checks when evidence lands
     if: ${{ inputs.evidence_run != '' && inputs.release_pr == '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,3 +101,16 @@ jobs:
           EVIDENCE_RUN: ${{ inputs.evidence_run }}
           EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
         run: python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"
+      - name: Mint the release App token
+        if: ${{ env.LAND == 'true' }}
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+      - name: Land the release PR if an intent named its source and head
+        if: ${{ env.LAND == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 scripts/release_evidence.py land

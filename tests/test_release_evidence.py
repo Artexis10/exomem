@@ -363,3 +363,119 @@ def test_merge_cli_stops_when_current_main_moved(tmp_path):
     assert "main moved" in result.stderr
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls == [["api", "repos/example/project/commits/main"]]
+
+
+def _intent_archive(record: dict) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as files:
+        files.writestr(evidence.INTENT_FILE, json.dumps(record))
+    return archive.getvalue()
+
+
+@pytest.mark.parametrize(
+    "intent_head,merged",
+    [("c" * 40, True), ("d" * 40, False), (None, False)],
+    ids=["intent-names-this-head", "head-changed-after-intent", "no-intent-nightly-full"],
+)
+def test_land_merges_only_the_head_a_release_intent_named(monkeypatch, intent_head, merged):
+    """A nightly Full or a stale intent must never release; the named head merges with the App token."""
+    base, head = "a" * 40, "c" * 40
+    pr = {
+        "number": 42,
+        "state": "open",
+        "base": {"ref": "main", "sha": base},
+        "head": {
+            "ref": evidence.RELEASE_BRANCH,
+            "sha": head,
+            "repo": {"full_name": "example/project"},
+        },
+    }
+    intent_runs = (
+        [
+            {
+                "id": 7,
+                "path": evidence.AUTOMATION,
+                "head_repository": {"full_name": "example/project"},
+            }
+        ]
+        if intent_head
+        else []
+    )
+
+    def api(path, *, pages=False):
+        if path.startswith("pulls?state=open"):
+            return [pr]
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": intent_runs}
+        if path == "actions/runs/7/artifacts?name=release-intent":
+            return {"artifacts": [{"id": 70, "expired": False}]}
+        if path == "commits/main":
+            return {"sha": base}
+        if path == "pulls/42":
+            return pr
+        raise AssertionError(path)
+
+    calls = []
+
+    def command(*args, env=None):
+        calls.append((args, (env or {}).get("GH_TOKEN")))
+        if args[:3] == ("gh", "api", "repos/example/project/actions/artifacts/70/zip"):
+            return _intent_archive({"pr": 42, "expected_base": base, "expected_head": intent_head})
+        return b""
+
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(evidence, "api", api)
+    monkeypatch.setattr(evidence, "command", command)
+    monkeypatch.setattr(
+        evidence, "required_checks", lambda number: [{"name": "required CI gate", "bucket": "pass"}]
+    )
+    monkeypatch.setattr(evidence, "check_release_files", lambda number: None)
+    monkeypatch.setattr(
+        evidence, "require_evidence", lambda source, repository: {"tested_commit": source}
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    evidence.land("example/project", None, "app-token")
+
+    merges = [(args, token) for args, token in calls if args[:3] == ("gh", "pr", "merge")]
+    if merged:
+        assert merges == [
+            (("gh", "pr", "merge", "42", "--squash", "--match-head-commit", head), "app-token")
+        ]
+    else:
+        assert merges == []
+
+
+def test_land_leaves_the_release_unmerged_when_a_required_check_fails(tmp_path, monkeypatch):
+    """A failed release check must stop the automated merge and turn its run red."""
+    base, head = "a" * 40, "c" * 40
+    pr = {
+        "number": 42,
+        "state": "open",
+        "base": {"ref": "main", "sha": base},
+        "head": {
+            "ref": evidence.RELEASE_BRANCH,
+            "sha": head,
+            "repo": {"full_name": "example/project"},
+        },
+    }
+    intent = tmp_path / "release-intent.json"
+    intent.write_text(json.dumps({"pr": 42, "expected_base": base, "expected_head": head}))
+    calls = []
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(evidence, "api", lambda path, *, pages=False: [pr])
+    monkeypatch.setattr(evidence, "command", lambda *args, env=None: calls.append(args) or b"")
+    monkeypatch.setattr(
+        evidence,
+        "required_checks",
+        lambda number: [
+            {"name": "Conventional Commit title", "bucket": "pass"},
+            {"name": "required CI gate", "bucket": "fail"},
+        ],
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    with pytest.raises(ValueError, match="required CI gate"):
+        evidence.land("example/project", intent, "app-token")
+
+    assert not any(args[:3] == ("gh", "pr", "merge") for args in calls)

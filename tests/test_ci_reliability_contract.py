@@ -990,7 +990,7 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
     ]
 
 
-def test_release_evidence_automation_supplies_proof_without_merging() -> None:
+def test_release_evidence_automation_merges_only_through_land_with_the_app_token() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/release-evidence-automation.yml").read_text())
     assert set(_triggers(workflow)) == {"workflow_dispatch"}
     jobs = workflow["jobs"]
@@ -998,14 +998,15 @@ def test_release_evidence_automation_supplies_proof_without_merging() -> None:
     refresh = jobs["rerun-evidence-check"]
     assert intent["if"] == "${{ inputs.release_pr != '' }}"
     assert refresh["if"] == "${{ inputs.evidence_run != '' && inputs.release_pr == '' }}"
-    assert intent["steps"][-1]["run"] == (
-        'python3 scripts/release_evidence.py intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA"'
-    )
-    assert refresh["steps"][-1]["run"] == (
-        'python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"'
-    )
+    assert "scripts/release_evidence.py" in intent["steps"][1]["run"]
+    assert "scripts/release_evidence.py refresh" in refresh["steps"][1]["run"]
     for job in (intent, refresh):
         assert job["steps"][0]["with"]["ref"] == "main"
+        # A merge made with the workflow token starts no Release Please run, so no tag would follow.
+        for step in job["steps"]:
+            if "release_evidence.py land" in step.get("run", ""):
+                assert step["env"]["RELEASE_MERGE_TOKEN"] == "${{ steps.app-token.outputs.token }}"
+    # The workflow token itself can read pull requests but never merge one.
     assert workflow["permissions"] == {
         "actions": "write", "contents": "read", "pull-requests": "read",
     }
