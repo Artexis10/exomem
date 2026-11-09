@@ -84,8 +84,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The held listing kind on read_review (133 B) and the held-resolve kind on repair_memory (442 B)
 # let an agent settle an outside edit that raced an Exomem change: read_review measures 7,724 B
 # and repair_memory 6,487 B, so their ceilings round to 7,750 B and 6,500 B. The complete local
-# wire measures 171,400 B, so the budget is 171,400 B.
-TOTAL_BUDGET = 171_400
+# wire measured 171,400 B with these two kinds alone.
+# The `archive` field on preserve_artifacts keeps a held zip as members that a collection import
+# reads: preserve_artifacts measures 2,405 B and its ceiling rounds to 2,450 B. The complete local
+# wire measured 170,945 B with that field alone.
+# With the held kinds and the archive field together, the complete local wire measures 171,520 B,
+# so the budget is 171,550 B.
+TOTAL_BUDGET = 171_550
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -121,7 +126,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "observe_memory": 5050,
     "plan_memory": 2700,
     "prepare_note": 5200,
-    "preserve_artifacts": 2300,
+    "preserve_artifacts": 2450,
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
