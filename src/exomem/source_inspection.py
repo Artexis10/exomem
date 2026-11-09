@@ -1,7 +1,8 @@
 """Bounded, local inspection of privately staged evidence bytes.
 
 These projections describe content; they neither classify its policy nor
-evaluate document syntax. Dataset values stay in the exact-query path.
+evaluate document syntax. Dataset cards copy no values; `render_values` is the one
+bounded rendering of a small dataset's values, for readers who may read its rows.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import io
 import itertools
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -25,6 +27,17 @@ MAX_FIELDS = 64
 MAX_FIELD_CHARS = 256
 MAX_JSON_DEPTH = 64
 MAX_TABLE_CELLS = 100_000
+#: Largest original whose values are searchable, and the largest rendering of them.
+VALUE_DATASET_BYTES = TEXT_PREVIEW_BYTES
+VALUE_RENDERING_BYTES = 64 * 1024
+#: A longer value is cut to this many characters and ends in an ellipsis.
+VALUE_MAX_CHARS = 256
+#: Card inspection statuses whose original is searchable: it parsed within the shape budgets.
+#: A closed set that `_inspect_dataset` itself emits, not a vocabulary that a vault defines.
+VALUE_STATUSES = frozenset({"ready", "limited"})
+VALUE_TRUNCATION_LINE = (
+    f"[Value rendering truncated at {VALUE_RENDERING_BYTES // 1024} KiB; query_dataset reads every row.]"
+)
 LITERAL_SUFFIXES = frozenset({".yaml", ".yml", ".jsonl", ".ndjson", ".xml", ".toml"})
 
 
@@ -80,22 +93,30 @@ def _literal_field(value: str) -> str:
     return f"`{encoded}`"
 
 
-def _inspect_dataset(data: bytes, suffix: str) -> Inspection:
+def _parse_dataset(data: bytes, suffix: str) -> tuple[str, list[dict], list[str]] | str:
+    """`(format, rows, columns)` within the shape budgets, or the failure status as a string."""
     try:
         data.decode("utf-8")  # distinguish encoding from format, including JSON
     except UnicodeDecodeError:
-        return _dataset_unavailable(suffix, "invalid_encoding")
+        return "invalid_encoding"
     if suffix == ".json" and _json_too_deep(data):
-        return _dataset_unavailable(suffix, "invalid_data")
+        return "invalid_data"
     try:
         if suffix in {".csv", ".tsv"} and _table_shape_exceeds_budget(data, suffix):
-            return _dataset_unavailable(suffix, "shape_limit")
+            return "shape_limit"
         fmt, rows, columns, _warnings = query_data.load_rows_bytes(data, suffix)
     except query_data.QueryDataError as error:
-        status = "row_limit" if error.code == "TOO_MANY_ROWS" else "invalid_data"
-        return _dataset_unavailable(suffix, status)
+        return "row_limit" if error.code == "TOO_MANY_ROWS" else "invalid_data"
     except (csv.Error, RecursionError, ValueError):
-        return _dataset_unavailable(suffix, "invalid_data")
+        return "invalid_data"
+    return fmt, rows, columns
+
+
+def _inspect_dataset(data: bytes, suffix: str) -> Inspection:
+    parsed = _parse_dataset(data, suffix)
+    if isinstance(parsed, str):
+        return _dataset_unavailable(suffix, parsed)
+    fmt, rows, columns = parsed
 
     if fmt in {"csv", "tsv"}:
         return Inspection(
@@ -126,6 +147,61 @@ def _inspect_dataset(data: bytes, suffix: str) -> Inspection:
     body.extend(["", "Use query_dataset with data_file for exact rows, filters and aggregates. "
                  "Row values are not copied into this card."])
     return Inspection("limited" if limited else "ready", "\n".join(body), fmt, len(rows))
+
+
+@dataclass(frozen=True)
+class ValueRendering:
+    """A small dataset's values as one block of `field.path: value` lines per record."""
+
+    records: tuple[str, ...]
+    #: True when the rendering stopped at `VALUE_RENDERING_BYTES`, so later records are absent.
+    truncated: bool
+
+
+def render_values(data: bytes, suffix: str) -> ValueRendering | None:
+    """The bounded value rendering of a dataset original, or None when it has none to give.
+
+    Reuses the parser `query_dataset` reads rows with, so a CSV or TSV keeps that parser's
+    first-record-header assumption. JSON nesting becomes dotted paths with list indices kept.
+    None means the bytes are over the size bound or do not parse within the shape budgets.
+    """
+    if len(data) > VALUE_DATASET_BYTES:
+        return None
+    parsed = _parse_dataset(data, suffix.lower())
+    if isinstance(parsed, str):
+        return None
+    records: list[str] = []
+    used = 0
+    for row in parsed[1]:
+        lines: list[str] = []
+        for path, value in _scalars(row, ""):
+            line = f"{path}: {_value_text(value)}"
+            used += len(line.encode("utf-8")) + 1
+            if used > VALUE_RENDERING_BYTES:
+                if lines:
+                    records.append("\n".join(lines))
+                return ValueRendering(tuple(records), True)
+            lines.append(line)
+        if lines:
+            records.append("\n".join(lines))
+    return ValueRendering(tuple(records), False)
+
+
+def _scalars(value: object, path: str) -> Iterator[tuple[str, object]]:
+    """Each non-null scalar under `value` with its dotted path; list members use their index."""
+    if isinstance(value, dict):
+        for key, member in value.items():
+            yield from _scalars(member, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, member in enumerate(value):
+            yield from _scalars(member, f"{path}.{index}" if path else str(index))
+    elif value is not None and _value_text(value):
+        yield path, value
+
+
+def _value_text(value: object) -> str:
+    text = json.dumps(value) if isinstance(value, bool) else " ".join(str(value).split())
+    return text if len(text) <= VALUE_MAX_CHARS else text[:VALUE_MAX_CHARS] + "\u2026"
 
 
 def _table_shape_exceeds_budget(data: bytes, suffix: str) -> bool:

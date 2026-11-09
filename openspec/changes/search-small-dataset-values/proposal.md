@@ -6,7 +6,7 @@ The exclusion was deliberate: raw dataset reads stay behind owner-reviewed class
 
 ## What Changes
 
-- The derived search indexes hold a bounded text rendering of a small dataset's values. The vault original and its card stay unchanged.
+- A derived search index holds a bounded text rendering of a small dataset's values. The vault original and its card stay unchanged.
 - That rendering is indexed under the dataset original's own path. Search therefore releases a value hit only to a reader whom the existing release plane allows to read the original at full level, the same rule `query_dataset` applies. Every other reader gets no hit.
 - A value hit names the dataset original, carries a bounded passage around the match, and points to `query_dataset` for exact rows.
 - Large datasets, malformed datasets, and Records and Planning collections stay excluded.
@@ -23,6 +23,6 @@ None.
 
 ## Impact
 
-- `src/exomem/lexstore.py` (page rows), `src/exomem/embeddings.py` (chunks), `src/exomem/find_parts.py` (passages), and one new rendering function beside `src/exomem/source_inspection.py`.
-- No vault writes, no new MCP parameter, no migration: a reindex picks up existing small datasets.
+- One new module, `src/exomem/dataset_values.py`, for the derived sidecar and its lane; one rendering function beside `src/exomem/source_inspection.py`; one marker on `Hit` and one drop rule in `governance/egress.py`; one call in `commands.op_find`.
+- No vault writes, no new MCP parameter, no migration: the first search after release indexes existing small datasets.
 - Search results may now include dataset originals for full-access readers.
