@@ -184,7 +184,7 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
     from exomem.tui.backend import ExomemBackend
 
     started = []
-    monkeypatch.setattr(warmup, "start_background", lambda vault: started.append(vault))
+    monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))
