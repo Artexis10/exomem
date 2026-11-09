@@ -242,6 +242,8 @@ class Question:
     vector_names: tuple[str, ...] = ("ab", "ba")
 
 
+# Debt (C10): the scope of the frozen `units-v1` instrument; a registry read would let vault data
+# change which units it compares, and so invalidate its fixtures.
 UNITS_V1 = UnitScope(
     version="units-v1",
     compact_categories=frozenset(

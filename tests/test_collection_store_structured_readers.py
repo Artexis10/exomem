@@ -444,7 +444,7 @@ def test_current_plan_state_uses_the_committed_row_and_withholds_its_stale_view(
                   "commitment": "committed", "horizon": "quarter"},
             plan_id=KEY, why="plan", response_detail="full",
         )
-    assert response["status"] == "committed"
+    assert response["diagnostics"]["operational"]["status"] == "committed"
     made = response["diagnostics"]
     item_path = made["affected_paths"][0]
     view = store.root / item_path
@@ -461,7 +461,7 @@ def test_current_plan_state_uses_the_committed_row_and_withholds_its_stale_view(
             expected_container_hash=made["after_container_hash"],
             expected_item_version=made["after_item_hash"], response_detail="full",
         )
-        assert response["status"] == "committed"
+        assert response["diagnostics"]["operational"]["status"] == "committed"
         current = working_set_state.current_state_for(store.root, anchors=[anchor])
     assert len(current) == 1
     assert current[0]["statement"] == "status: completed"

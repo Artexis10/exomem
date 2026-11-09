@@ -1183,7 +1183,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
         "tool": "read_memory",
         "args": {"path": page_path, "include_raw": True},
     }]
-    assert payload["state"] == "committed"
+    assert "error" not in payload, payload
     assert "outline_markdown" not in str(semantic)
 
     with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
@@ -1197,7 +1197,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
             "sources": [f"{page_path}#Capture" if mode == "text" else page_path],
         }, run_middleware=False))
     written = result.structured_content
-    assert written["state"] == "committed", written
+    assert "error" not in written, written
     assert written["semantic_compilation"]["state"] == "unassessed"
     if mode == "text":
         guidance = written["semantic_compilation"]
@@ -1396,7 +1396,7 @@ def test_a_byte_identical_retry_replays_instead_of_capturing_twice(
         files=files, idempotency_key="retry-key",
     )
 
-    assert first == replay
+    assert replay == {**first, "replayed": True}
     assert staged == ["f1"], "the retry re-fetched the handle"
     stored = [
         path

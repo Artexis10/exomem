@@ -59,6 +59,7 @@ PACK_WORKFLOW_REQUIRED_FIELDS: frozenset[str] = frozenset(
     {"title", "intent", "route", "example"}
 )
 PACK_WORKFLOW_ALLOWED_FIELDS: frozenset[str] = PACK_WORKFLOW_REQUIRED_FIELDS
+# Debt (C13): a closed manifest schema that mixes page types and kinds, so no kind trait reaches it.
 PACK_ALLOWED_PRIMITIVES: frozenset[str] = frozenset(
     {
         "source",

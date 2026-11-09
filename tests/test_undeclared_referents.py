@@ -55,12 +55,12 @@ def _body(title: str, *names: str) -> str:
 def _committed(call, tool: str, arguments: dict, review_hash: str) -> dict:
     """Commit once; when the write needs a relation review, commit again with `reviewed_none`."""
     written = call(tool, arguments)
-    if written.get("error", {}).get("code") == "SEMANTIC_CONTRACT_BLOCKED":
+    if "retry" in written.get("error", {}):
         written = call(tool, {
             **arguments, "relation_disposition": "reviewed_none",
             "relation_review_hash": review_hash, "relation_review_reason": NO_RELATION,
         })
-    assert written.get("status") == "committed", written
+    assert "error" not in written, written
     return written
 
 
@@ -80,12 +80,12 @@ def _edit(call, path: str, old: str, new: str) -> dict:
     semantic = call("edit_note", {**arguments, "operation": {**operation, "validate_only": True}})["semantic"]
     operation["transition_token"] = semantic["transition_token"]
     edited = call("edit_note", {**arguments, "operation": operation})
-    if edited.get("error", {}).get("code") == "SEMANTIC_CONTRACT_BLOCKED":
+    if "retry" in edited.get("error", {}):
         edited = call("edit_note", {**arguments, "operation": {
             **operation, "relation_disposition": "reviewed_none",
             "relation_review_hash": semantic["transition_hash"], "relation_review_reason": NO_RELATION,
         }})
-    assert edited.get("status") == "committed", edited
+    assert "error" not in edited, edited
     return edited
 
 
@@ -93,11 +93,11 @@ def _listed(response: dict) -> list[str]:
     return [item["name"] for item in response.get("undeclared_referents", {}).get("names", [])]
 
 
-def _promote(call, item: dict, summary: str = "A synthetic concept.") -> dict:
+def _promote(call, item: dict, summary: str = "A synthetic concept.", **extra) -> dict:
     """Run the `create-entity` route a block names, choosing the type and summary as an agent does."""
     route = item["route"]
     operation = {**route["args"]["operation"], "entity_type": "concept", "summary": summary}
-    return call(route["tool"], {"operation": operation})
+    return call(route["tool"], {"operation": operation, **extra})
 
 
 def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no_entity(
@@ -109,7 +109,7 @@ def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no
         "operation": "create-entity", "entity_type": "concept", "name": "Tidal Ledger",
         "summary": "A synthetic concept named Tidal Ledger.",
     })
-    assert made["status"] == "committed", made
+    assert "error" not in made, made
 
     written = _note(call, "Harbour review", "Kestrel", "Tidal Ledger", "Salt Ledger", "Quiet Ferry", "Amber Gate")
 
@@ -182,7 +182,7 @@ def _quiet_the_family(call) -> None:
     quieted = call("triage_memory", {
         "ref": FAMILY_REF, "action": "quiet", "why": "too_frequent: names are linked on purpose here.",
     })
-    assert quieted.get("success") is not False, quieted
+    assert "error" not in quieted, quieted
 
 
 @pytest.mark.parametrize(
@@ -344,7 +344,7 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
                 "operation": "create-entity", "entity_type": entity_type, "name": "Kestrel",
                 "summary": "A synthetic entity the restricted caller may not see.",
             })
-            assert made["status"] == "committed", made
+            assert "error" not in made, made
         _withhold_from_external(vault, "Entities/**")
         with monkeypatch.context() as restricted:
             _as(restricted, "restricted-session")  # a later session: it would see a promotion notice that leaked
@@ -353,7 +353,7 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
             restricted.setattr(principal_module, "resolve_mcp_principal", lambda: writer)
             if entity_type is not None:
                 hidden = call("read_memory", {"path": made["path"]})
-                assert hidden.get("success") is False, "the entity is withheld from the restricted caller"
+                assert "error" in hidden, "the entity is withheld from the restricted caller"
             seen[variant] = {
                 "write": _note(call, "Harbour review", "Kestrel", "Salt Ledger"),
                 "notices": call("bootstrap", {}),
@@ -388,12 +388,12 @@ def test_an_entity_made_through_the_route_names_the_originating_write_path_and_o
     _as(monkeypatch, "session-a")
     written = _note(call, "Harbour review", "Kestrel")
 
-    created = _promote(call, written["undeclared_referents"]["names"][0])
+    created = _promote(call, written["undeclared_referents"]["names"][0], response_detail="full")
 
     entry = _log_entry(vault, created["path"])
     note_operation = _logged_operation_id(vault, written["path"])
     assert f"Origin: {written['path']}. Operation: {note_operation}." in entry
-    assert created["request_id"] not in entry, "the id is the note's write, not this creation's request"
+    assert created["diagnostics"]["operational"]["request_id"] not in entry, "the id is the note's write, not this creation's request"
 
 
 def test_a_withheld_origin_and_a_missing_one_give_a_restricted_caller_the_same_response(
@@ -415,7 +415,7 @@ def test_a_withheld_origin_and_a_missing_one_give_a_restricted_caller_the_same_r
                 "registry_scope": PUBLIC_INSTANCE,
                 "summary": "A synthetic concept used to compare origins.",
             }})
-            assert created["status"] == "committed", created
+            assert "error" not in created, created
             assert "Origin: unknown." in _log_entry(vault, created["path"])
             answers[name] = _same_bytes_but_for_ids(created).replace(name, "<name>").replace(
                 name.lower().replace(" ", "-"), "<slug>",

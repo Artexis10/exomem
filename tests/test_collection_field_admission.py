@@ -68,8 +68,8 @@ def govern(store, **arguments):
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "govern_memory")
     with request_scope(OWNER), preview_store(store.root, store.handle):
         result = invoke_command(command, store.root, **arguments)
-        assert result["ok"], result
-        return result["diagnostics"]
+        assert result["diagnostics"]["operational"]["ok"], result
+        return {name: value for name, value in result["diagnostics"].items() if name != "operational"}
 
 
 def release_document(basis, who=GUEST):

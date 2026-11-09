@@ -130,13 +130,14 @@ def test_custom_entity_type_is_registered_then_used_by_the_public_writer(tmp_pat
                 "why": "Register the reviewed venue entity type.",
                 "vocabulary_ref": type_item.ref,
                 "vocabulary_fingerprint": type_item.fingerprint,
+                "response_detail": "full",
             },
             idempotency_key="venue-type-registration",
             read_only=False,
         )
 
-    assert registered["state"] == "committed"
-    assert registered["receipt_id"]
+    assert registered["diagnostics"]["operational"]["state"] == "committed"
+    assert registered["diagnostics"]["operational"]["receipt_id"]
     assert VocabularyState(tmp_path).get(type_item.ref)["state"] == "applied"
     resolved_type = commands.op_schema_memory(
         tmp_path,
@@ -192,13 +193,14 @@ def test_custom_entity_type_is_registered_then_used_by_the_public_writer(tmp_pat
                 **entity_definition,
                 "vocabulary_ref": entity_item.ref,
                 "vocabulary_fingerprint": entity_item.fingerprint,
+                "response_detail": "full",
             },
             idempotency_key="cedar-hall-creation",
             read_only=False,
         )
 
-    assert created["state"] == "committed"
-    assert created["receipt_id"]
+    assert created["diagnostics"]["operational"]["state"] == "committed"
+    assert created["diagnostics"]["operational"]["receipt_id"]
     assert VocabularyState(tmp_path).get(entity_item.ref)["state"] == "applied"
     exact = commands.op_connect_memory(
         tmp_path, operation="resolve-entity", name="Cedar Hall", entity_type="venue"
@@ -318,6 +320,7 @@ def test_committed_registry_terminal_recovers_an_uncertain_application(tmp_path:
         "why": "Register the reviewed venue type.",
         "vocabulary_ref": item.ref,
         "vocabulary_fingerprint": item.fingerprint,
+        "response_detail": "full",
     }
     manager = _manager(tmp_path)
     real_commit = vocabulary_application.commit
@@ -330,14 +333,14 @@ def test_committed_registry_terminal_recovers_an_uncertain_application(tmp_path:
         first = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="uncertain-venue", read_only=False
         )
-    assert first["state"] == "committed"
+    assert first["diagnostics"]["operational"]["state"] == "committed"
     assert VocabularyState(tmp_path).get(item.ref)["decision"]["application"]["state"] == "uncertain"
     monkeypatch.setattr(vocabulary_application, "commit", real_commit)
     with library_scope():
         replay = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="uncertain-venue", read_only=False
         )
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -372,6 +375,7 @@ def test_completed_registry_terminal_recovers_when_outage_left_the_operation_bou
         "why": "Register the reviewed venue type.",
         "vocabulary_ref": item.ref,
         "vocabulary_fingerprint": item.fingerprint,
+        "response_detail": "full",
     }
     manager = _manager(tmp_path)
     real_commit = vocabulary_application.commit
@@ -390,7 +394,7 @@ def test_completed_registry_terminal_recovers_when_outage_left_the_operation_bou
         first = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="bound-venue", read_only=False
         )
-    assert first["state"] == "committed"
+    assert first["diagnostics"]["operational"]["state"] == "committed"
     assert VocabularyState(tmp_path).get(item.ref)["decision"]["application"].get("state") is None
     monkeypatch.setattr(vocabulary_application, "commit", real_commit)
     monkeypatch.setattr(VocabularyState, "record_application_uncertain", real_uncertain)
@@ -398,7 +402,7 @@ def test_completed_registry_terminal_recovers_when_outage_left_the_operation_bou
         replay = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="bound-venue", read_only=False
         )
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -449,12 +453,13 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
                 "why": "Register the reviewed venue-to-event meaning.",
                 "vocabulary_ref": relation_item.ref,
                 "vocabulary_fingerprint": relation_item.fingerprint,
+                "response_detail": "full",
             },
             idempotency_key="venue-hosts-registration",
             read_only=False,
         )
 
-    assert registered["state"] == "committed"
+    assert registered["diagnostics"]["operational"]["state"] == "committed"
     pending = VocabularyState(tmp_path).get(relation_item.ref)
     assert pending["state"] == "applying"
     assert pending["decision"]["application"]["operations"][0]["state"] == "committed"
@@ -504,6 +509,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
         "why": "Author the reviewed venue-to-event edge.",
         "vocabulary_ref": relation_item.ref,
         "vocabulary_fingerprint": relation_item.fingerprint,
+        "response_detail": "full",
     }
     with library_scope():
         accepted = manager.invoke(
@@ -514,7 +520,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
             read_only=False,
         )
 
-    assert accepted["state"] == "committed"
+    assert accepted["diagnostics"]["operational"]["state"] == "committed"
     applied = VocabularyState(tmp_path).get(relation_item.ref)
     assert applied["state"] == "applied"
     assert len(applied["receipts"]) == 2
@@ -529,7 +535,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
             idempotency_key="venue-event-edge",
             read_only=False,
         )
-    assert replay == accepted
+    assert replay == {**accepted, "replayed": True}
     assert (tmp_path / source).read_text(encoding="utf-8").count("- hosts [[") == 1
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
@@ -551,11 +557,12 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
                 "proposal": {"deprecate": {"venue.hosts": "relates_to"}},
                 "expected_hash": relation_registry.load_registry(tmp_path).extension_hash,
                 "why": "Retire the old name while retaining its history.",
+                "response_detail": "full",
             },
             idempotency_key="venue-hosts-deprecation",
             read_only=False,
         )
-    assert deprecated["state"] == "committed"
+    assert deprecated["diagnostics"]["operational"]["state"] == "committed"
     historical = commands.op_connect_memory(
         tmp_path, operation="resolve-relation", requested_relation="venue.hosts"
     )
@@ -681,6 +688,7 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
         "why": "Apply the first exact reviewed hydration step.",
         "vocabulary_ref": current["ref"],
         "vocabulary_fingerprint": current["fingerprint"],
+        "response_detail": "full",
     }
     with library_scope():
         first = manager.invoke(
@@ -691,8 +699,8 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
             read_only=False,
         )
 
-    assert first["state"] == "committed"
-    assert first.get("leaf_result", first)["phase"] == "executing"
+    assert first["diagnostics"]["operational"]["state"] == "committed"
+    assert first["phase"] == "executing"
     assert VocabularyState(tmp_path).get(current["ref"])["state"] == "applying"
     resume_arguments = {
         "mode": "curation",
@@ -701,6 +709,7 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
         "plan_id": proposed["plan_id"],
         "vocabulary_ref": current["ref"],
         "vocabulary_fingerprint": current["fingerprint"],
+        "response_detail": "full",
     }
     with library_scope():
         resumed = manager.invoke(
@@ -711,8 +720,8 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
             read_only=False,
         )
 
-    assert resumed["state"] == "committed"
-    assert resumed.get("leaf_result", resumed)["phase"] == "completed"
+    assert resumed["diagnostics"]["operational"]["state"] == "committed"
+    assert resumed["phase"] == "completed"
     assert VocabularyState(tmp_path).get(current["ref"])["state"] == "applied"
     with library_scope():
         replay = manager.invoke(
@@ -722,7 +731,7 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
             idempotency_key="hydration-resume",
             read_only=False,
         )
-    assert replay == resumed
+    assert replay == {**resumed, "replayed": True}
 
 
 def test_public_terminal_publishes_warming_then_current_vocabulary_work(
@@ -747,13 +756,15 @@ def test_public_terminal_publishes_warming_then_current_vocabulary_work(
                     ),
                     "expected_hash": content_hash(before),
                 },
+                "response_detail": "full",
             },
             idempotency_key="vocabulary-publication-warming",
             read_only=False,
         )
 
-    assert terminal["state"] == "committed"
-    assert terminal["vocabulary_sync"]["state"] == "unavailable"
+    operational = terminal["diagnostics"]["operational"]
+    assert operational["state"] == "committed"
+    assert operational["vocabulary_sync"]["state"] == "unavailable"
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
         warming = vocabulary_delivery.recover(tmp_path)

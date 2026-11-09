@@ -127,15 +127,24 @@ def _page_titles(value: object) -> dict[str, set[str]]:
     return titles
 
 
+def _saved(result: dict) -> bool:
+    """Whether a write reply says the change was saved.
+
+    An older reply carries `mutated`. A minimal reply leads with `user_summary`, which only a
+    committed or replayed write has, and keeps `mutated` under `diagnostics`.
+    """
+    mutated = result.get("mutated")
+    return mutated is True or (mutated is None and isinstance(result.get("user_summary"), str))
+
+
 def _committed(call: dict) -> bool:
     if not _ok(call.get("result")) or call["arguments"].get("validate_only"):
         return False
     if call["result"].get("mutated") is False:
         return False
     if call.get("name") == "observe_memory":
-        return (
-            call["arguments"].get("operation", "add") in {"add", "update"}
-            and call["result"].get("mutated") is True
+        return call["arguments"].get("operation", "add") in {"add", "update"} and _saved(
+            call["result"]
         )
     if call.get("name") == "episode_memory":
         return call["arguments"].get("action") == "record"

@@ -21,7 +21,7 @@ build = pilot_mcp.build  # the fixture that serves the tools, as test_adoption_j
 async def _import(client, kind: str, **fields) -> dict:
     """One `import_memory` call at the default detail; every call in these cases commits."""
     reply = await _call(client, "import_memory", {"operation": {"kind": kind, **fields}})
-    assert reply["ok"] is True, reply
+    assert "error" not in reply, reply
     return reply
 
 
@@ -57,7 +57,7 @@ def test_a_compact_apply_names_only_this_pages_committed_paths_and_replays_them(
     assert applied["paths"] == [saved_path]
     assert saved_path in applied["user_summary"]
     assert replay["apply_result"]["written"] == applied["paths"]
-    assert repeated["ok"] is True and repeated["paths"] == []
+    assert "error" not in repeated and repeated["paths"] == []
 
 
 def test_a_compact_apply_reply_at_a_space_stop_says_stop_and_marks_apply_blocked(

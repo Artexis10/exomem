@@ -320,24 +320,17 @@ def _append_through_the_dispatcher(
     )
 
 
-def test_the_append_that_opens_the_gap_carries_the_block(tmp_path: Path) -> None:
+def test_the_append_that_opens_the_gap_carries_no_block(tmp_path: Path) -> None:
     seed_vault(tmp_path)
     queue_item(tmp_path, "Batch 1")
     due_state_module.reconcile(tmp_path)
 
     receipt = _append_through_the_dispatcher(tmp_path, "Batch 1")
 
-    block = receipt["due_state"]
-    assert block["total"] == 1
-    assert block["categories"] == {FAMILY: 1}
-    assert block["top"][0]["ref"].startswith("exomem://review/")
-    assert "_vault" not in block, "the routing hint is server-internal"
-    assert "_vault" not in json.dumps(receipt)
-    # The projection stores the joined records and the binding component so a
-    # withheld one can be dropped at serve. None of it is the caller's business.
-    wire = json.dumps(receipt)
-    assert "component" not in wire and "joined" not in wire
-    assert set(block["top"][0]) == {"category", "ref", "fingerprint", "due_since"}
+    # The gap is still counted; a write reply no longer reports it. Bootstrap and recall do.
+    assert "due_state" not in receipt
+    assert "_vault" not in json.dumps(receipt), "the routing hint is server-internal"
+    assert len(_projection(tmp_path)) == 1
 
 
 def test_the_legacy_response_detail_carries_no_block(tmp_path: Path) -> None:
@@ -402,23 +395,17 @@ def test_a_plan_triage_carries_the_cleared_state(tmp_path: Path) -> None:
     assert _projection(tmp_path) == {}
 
 
-def test_twelve_appends_in_one_batch_scope_deliver_once(tmp_path: Path) -> None:
-    from exomem import mutation_terminal
-
+def test_twelve_appends_in_one_batch_scope_count_without_a_block(tmp_path: Path) -> None:
     seed_vault(tmp_path)
     for index in range(12):
         queue_item(tmp_path, f"Batch {index}")
     due_state_module.reconcile(tmp_path)
 
-    delivered = 0
     with due_state_module.batch_scope(tmp_path):
         for index in range(12):
-            receipt = report_event(tmp_path, f"Batch {index}", occurred_on="2026-08-01")
-            block, vault_hint = mutation_terminal._due_state_projection(receipt)
-            if block is not None and mutation_terminal._admit_due_state(block, vault_hint):
-                delivered += 1
+            receipt = _append_through_the_dispatcher(tmp_path, f"Batch {index}")
+            assert "due_state" not in receipt
 
-    assert delivered == 0, "inside the batch the terminal stays silent"
     assert len(_projection(tmp_path)) == 12, "the counts stay true inside the batch"
     block = due_state_module.served(tmp_path)
     assert due_state_module.would_emit(block, vault_root=tmp_path) is True

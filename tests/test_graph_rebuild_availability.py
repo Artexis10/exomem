@@ -2784,12 +2784,12 @@ def test_manager_maintain_memory_reconcile_projects_graph_repair_across_terminal
         )
 
     compact = reconcile_detail("compact")
-    assert compact["graph_sync"] == "completed"
+    assert "graph_sync" not in compact
     assert "diagnostics" not in compact
 
     full = reconcile_detail("full", "full")
 
-    assert full["graph_sync"] == "completed"
+    assert full["diagnostics"]["operational"]["graph_sync"] == "completed"
     assert full["diagnostics"]["graph_status"] == "refreshed"
     assert full["diagnostics"]["graph_refreshed"] == 1
     assert "_graph_reconcile_registered" not in full["diagnostics"]

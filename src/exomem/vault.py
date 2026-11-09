@@ -188,8 +188,18 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return None
 
 
-def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+def governed_frontmatter_reason(
+    field: str,
+    value: Any,
+    page_type: Any,
+    *,
+    page: tuple[Path, str, Mapping[str, Any]] | None = None,
+) -> str | None:
     """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    `page` is the vault root, vault-relative path and frontmatter of the page written. The
+    verdict registry of that page's instance checks an `outcome`, so a verdict the instance
+    added is accepted; without `page` only the shipped verdicts are.
 
     This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
     is refused by that function at every governed write boundary, and
@@ -200,9 +210,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     """
     if field.strip().casefold() != "outcome":
         return None
-    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
-    # imports this module. The vocabulary still has exactly one definition.
-    from .semantic_units import EPISTEMIC_OUTCOMES
+    # Deferred: `semantic_language_registry` imports this module. The vocabulary still has
+    # exactly one definition, the verdict registry.
+    from . import semantic_language_registry, semantic_units
 
     normalized_type = str(page_type or "").strip().casefold()
     if normalized_type != "experiment":
@@ -212,11 +222,16 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
             "conclusion turned out with a semantic unit's `verdict:` metadata "
             "instead."
         )
-    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+    keys = (
+        semantic_language_registry.load_for_page(*page)
+        if page is not None
+        else semantic_language_registry.core_registry()
+    ).verdict_keys()
+    # An outcome takes a key only; a unit verdict also takes a label.
+    if not isinstance(value, str) or value.strip().casefold() not in keys:
         return (
-            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
-            "It is categorical lifecycle state, not a confidence score, so a "
-            "number or a free-text hedge is never valid."
+            f"`outcome:` must be exactly one of {', '.join(keys)}. "
+            f"{semantic_units.NO_CONFIDENCE_RULE}"
         )
     return None
 
@@ -8762,6 +8777,7 @@ def normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -8783,11 +8799,17 @@ def normalize_wikilink(
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
+
+    `retired` answers the item path that a converted collection retired for
+    an unresolved path, or None; `None` checks each link on its own. A caller
+    that resolves many links passes one `collection_store.aliases.LinkTargets`,
+    which reads each collection once.
     """
     canonical, warning, _candidate = _normalize_wikilink(
         target, vault_root, resolver=resolver,
         targeted_namespace_contains=targeted_namespace_contains,
         resolver_factory=resolver_factory, strict=strict, visible=visible,
+        retired=retired,
     )
     return canonical, warning
 
@@ -8806,6 +8828,7 @@ def _normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None, WikilinkCandidate | None]:
     """Normalize a link and retain the physical owner for internal consumers."""
 
@@ -8874,10 +8897,14 @@ def _normalize_wikilink(
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.
     if not strict and "/" in cleaned:
-        from .collection_store import aliases
+        if retired is None:
+            from .collection_store import aliases
 
-        if (retired := aliases.link_target(vault_root, cleaned)) is not None:
-            return _wikilink_path_key(retired) + anchor, None, None
+            found = aliases.link_target(vault_root, cleaned)
+        else:
+            found = retired(cleaned)
+        if found is not None:
+            return _wikilink_path_key(found) + anchor, None, None
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result

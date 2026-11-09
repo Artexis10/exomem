@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 import yaml
 
-from . import semantic_blocks
+from . import semantic_kinds, semantic_verdicts
 from .kbdir import kb_dirname
 from .vocabulary import registry as vocabulary_registry
 
@@ -29,7 +29,7 @@ _SEPARATORS_RE = re.compile(r"[\s_-]+")
 _DEFINITION_FIELDS = frozenset(
     {"description", "aliases", "status", "replaced_by", "scope"}
 )
-_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases"}
+_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases", "traits"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +82,37 @@ class KindDefinition:
     status: str = "active"
     replaced_by: str | None = None
     core: bool = False
+    traits: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         out = _definition_dict(self)
         if self.heading_aliases:
             out["heading_aliases"] = sorted(self.heading_aliases)
+        if self.traits:
+            out["traits"] = sorted(self.traits)
+        if self.core:
+            out["core"] = True
+        return out
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictDefinition:
+    """A verdict: a key, its labels and what it says. No behaviour.
+
+    `labels` holds each (language tag, label) pair, sorted. A vault entry for a shipped key
+    holds only what the vault wrote: its own labels, and a description only when the vault
+    wrote one, which makes the registry ignore that entry.
+    """
+
+    key: str
+    labels: tuple[tuple[str, str], ...]
+    description: str
+    core: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "key": self.key, "labels": dict(self.labels), "description": self.description,
+        }
         if self.core:
             out["core"] = True
         return out
@@ -135,6 +161,10 @@ class LanguageRegistryView(Protocol):
         project: str | None = None,
         page_type: str | None = None,
     ) -> LabelResolution: ...
+
+    def resolve_verdict(self, raw: str) -> str | None: ...
+
+    def verdict_keys(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +290,8 @@ class SemanticLanguageRegistry:
     findings: tuple[RegistryFinding, ...] = ()
     core_categories: Mapping[str, CategoryDefinition] = field(default_factory=dict)
     core_category_aliases: Mapping[str, str] = field(default_factory=dict)
+    core_verdicts: Mapping[str, VerdictDefinition] = field(default_factory=dict)
+    verdicts: Mapping[str, VerdictDefinition] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in (
@@ -271,12 +303,70 @@ class SemanticLanguageRegistry:
             "heading_aliases",
             "core_categories",
             "core_category_aliases",
+            "core_verdicts",
+            "verdicts",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         object.__setattr__(self, "findings", tuple(self.findings))
 
     def _has_error_findings(self) -> bool:
         return any(finding["severity"] == "error" for finding in self.findings)
+
+    def traits_of(self, kind: str) -> frozenset[str]:
+        """The traits of the kind `kind`, a resolved key. An unregistered key has none.
+
+        Scope and status do not matter: a deprecated or scoped kind keeps its traits, because
+        its units still exist and still behave as the kind does.
+        """
+        definition = self.core_kinds.get(kind) or self.kinds.get(kind)
+        return definition.traits if definition is not None else frozenset()
+
+    def has(self, kind: str, trait: str) -> bool:
+        """Whether units of `kind` have `trait`; a name outside `KIND_TRAITS` raises."""
+        return semantic_kinds.require_trait(trait) in self.traits_of(kind)
+
+    def kinds_with(self, trait: str) -> frozenset[str]:
+        """Every core kind and every vault kind that has `trait`, whatever its status or scope.
+
+        A name outside `KIND_TRAITS` raises instead of answering with an empty set."""
+        semantic_kinds.require_trait(trait)
+        return frozenset(
+            key
+            for definitions in (self.core_kinds, self.kinds)
+            for key, definition in definitions.items()
+            if trait in definition.traits
+        )
+
+    def verdict_definitions(self) -> dict[str, VerdictDefinition]:
+        """The verdicts a reader may use, by key: the shipped ones, then the vault's.
+
+        A vault entry for a shipped key carries only labels; each replaces the shipped label in
+        its language. The vault's own entries are unavailable while the registry has an error
+        finding, as its kinds are; the shipped verdicts always resolve.
+        """
+        definitions = dict(self.core_verdicts)
+        if not self._has_error_findings():
+            for key, entry in self.verdicts.items():
+                effective = _effective_verdict(self.core_verdicts.get(key), entry)
+                if effective is not None:
+                    definitions[key] = effective
+        return dict(sorted(definitions.items()))
+
+    def verdict_keys(self) -> tuple[str, ...]:
+        """The keys a unit verdict or an experiment outcome may hold, sorted."""
+        return tuple(self.verdict_definitions())
+
+    def resolve_verdict(self, raw: str) -> str | None:
+        """The key of the verdict `raw` spells, as its key or as a label in any language, or None.
+
+        The comparison is NFKC-normalised and casefolded, so the stored value is always the key.
+        """
+        folded = semantic_verdicts.fold(raw)
+        for definition in self.verdict_definitions().values():
+            spellings = (definition.key, *(text for _language, text in definition.labels))
+            if folded in {semantic_verdicts.fold(spelling) for spelling in spellings}:
+                return definition.key
+        return None
 
     def as_dict(self) -> dict[str, Any]:
         """Return deterministic semantic content (the byte hash is transport metadata)."""
@@ -377,11 +467,11 @@ class SemanticLanguageRegistry:
         project: str | None = None,
         page_type: str | None = None,
     ) -> LabelResolution:
-        """Resolve rich headings; the compact-only ``observation`` stays inert."""
+        """Resolve rich headings; a compact kind, such as ``observation``, stays inert."""
         key = normalize_label(raw)
         core_canonical = _core_heading_aliases().get(key, key)
         core_definition = self.core_kinds.get(core_canonical)
-        if core_definition is not None and core_canonical != "observation":
+        if core_definition is not None and core_canonical not in semantic_kinds.compact_kinds():
             status = "alias" if core_canonical != key else "core"
             return LabelResolution(
                 str(raw), key, core_canonical, status, core_definition
@@ -464,6 +554,13 @@ class AttachedProjectsLanguageRegistry:
     ) -> LabelResolution:
         return self._resolve(self.registry.resolve_category, raw, page_type=page_type)
 
+    def resolve_verdict(self, raw: str) -> str | None:
+        """Verdicts have no project or page-type scope, so the shared registry answers."""
+        return self.registry.resolve_verdict(raw)
+
+    def verdict_keys(self) -> tuple[str, ...]:
+        return self.registry.verdict_keys()
+
     def _resolve(
         self,
         resolver: Callable[..., LabelResolution],
@@ -509,15 +606,9 @@ def registry_path(vault_root: Path) -> Path:
 def core_registry() -> SemanticLanguageRegistry:
     core_kinds: dict[str, KindDefinition] = {
         key: KindDefinition(
-            key=key,
-            description=(
-                "Compact semantic observation"
-                if key == "observation"
-                else f"Portable {key.replace('_', ' ')} semantic block"
-            ),
-            core=True,
+            key=key, description=kind.description, core=True, traits=kind.traits
         )
-        for key in sorted((*semantic_blocks.BLOCK_TYPES, "observation"))
+        for key, kind in sorted(semantic_kinds.pack().items())
     }
     return SemanticLanguageRegistry(
         SCHEMA_VERSION,
@@ -525,6 +616,7 @@ def core_registry() -> SemanticLanguageRegistry:
         core_kinds,
         core_categories=_core_categories(),
         core_category_aliases=_core_category_aliases(),
+        core_verdicts=_core_verdicts(),
     )
 
 
@@ -543,6 +635,40 @@ def load_registry(
     from .vocabulary import instances
 
     return vocabulary_registry.load(instances.select(Path(vault_root), CATEGORY_SPEC, registry_scope), Path(vault_root)).typed
+
+
+def load_admitted(
+    vault_root: Path, registry_scope: str | None = None
+) -> SemanticLanguageRegistry | None:
+    """The registry of one instance, or None when this caller cannot admit it.
+
+    As `relation_registry.load_admitted`, None is one answer for an instance that does not
+    exist, a binding that is ambiguous and an overlay the caller may not read.
+    """
+    from .vocabulary import contract, instances
+
+    root = Path(vault_root)
+    try:
+        selected = instances.select(root, CATEGORY_SPEC, registry_scope)
+        if contract.admission_refusal(root, selected) is not None:
+            return None
+        return vocabulary_registry.load(selected, root).typed
+    except vocabulary_registry.RegistryError:
+        return None
+
+
+def load_for_page(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> SemanticLanguageRegistry:
+    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+    from .vocabulary import instances
+
+    try:
+        scope = instances.page_scope(Path(vault_root), rel_path, dict(frontmatter))
+    except vocabulary_registry.RegistryError:
+        return core_registry()
+    registry = load_admitted(vault_root, scope)
+    return registry if registry is not None else core_registry()
 
 
 def clear_cache() -> None:
@@ -564,6 +690,7 @@ def _parse_overlay_text(raw: str | None, digest: str) -> SemanticLanguageRegistr
             findings=(_finding("invalid_yaml", "registry", str(exc)),),
             core_categories=core.core_categories,
             core_category_aliases=core.core_category_aliases,
+            core_verdicts=core.core_verdicts,
         )
     return _parse_registry_data(data, digest, core)
 
@@ -579,8 +706,12 @@ def empty_proposal() -> dict[str, Any]:
 
 
 def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
-    """Serialize the complete reviewed document without derived core metadata."""
-    return {
+    """Serialize the complete reviewed document without derived core metadata.
+
+    `verdicts` appears only when the vault has some, so a document without that section reads
+    and writes as it always did; an absent section and an empty one mean the same.
+    """
+    proposal: dict[str, Any] = {
         "schema_version": registry.schema_version,
         "categories": {
             key: _definition_proposal(registry.categories[key])
@@ -591,6 +722,42 @@ def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
             for key in sorted(registry.kinds)
         },
     }
+    if registry.verdicts:
+        proposal["verdicts"] = {
+            key: _verdict_proposal(definition)
+            for key, definition in sorted(registry.verdicts.items())
+        }
+    return proposal
+
+
+def _verdict_proposal(definition: VerdictDefinition) -> dict[str, Any]:
+    """A vault verdict entry as the vault wrote it."""
+    out: dict[str, Any] = {}
+    if definition.labels:
+        out["labels"] = dict(definition.labels)
+    if definition.description:
+        out["description"] = definition.description
+    return out
+
+
+def dropped_verdicts_finding(
+    current: SemanticLanguageRegistry, candidate: SemanticLanguageRegistry
+) -> RegistryFinding | None:
+    """An error when `candidate` loses a verdict key that `current` saved; else None.
+
+    A page that uses a saved verdict stops parsing once a save drops it. A save may still add
+    a verdict or change a label, so only a lost key is refused. Validation and the save both
+    read this one finding.
+    """
+    dropped = sorted(set(current.verdicts) - set(candidate.verdicts))
+    if not dropped:
+        return None
+    return _finding(
+        "verdicts_dropped",
+        "verdicts",
+        f"this save would drop the vault verdicts {', '.join(dropped)}; keep them in the "
+        "proposal's `verdicts` section",
+    )
 
 
 def save_registry(
@@ -679,8 +846,9 @@ def _parse_registry_data(
             findings=(_finding("invalid_registry", "registry", "must be an object"),),
             core_categories=core.core_categories,
             core_category_aliases=core.core_category_aliases,
+            core_verdicts=core.core_verdicts,
         )
-    unknown_root_fields = set(data) - {"schema_version", "categories", "kinds"}
+    unknown_root_fields = set(data) - {"schema_version", "categories", "kinds", "verdicts"}
     for key in sorted(unknown_root_fields, key=str):
         findings.append(_finding("unknown_field", str(key), "unknown registry field"))
     schema_version = data.get("schema_version")
@@ -698,9 +866,15 @@ def _parse_registry_data(
         findings.append(_finding("invalid_kinds", "kinds", "must be an object"))
         raw_kinds = {}
 
+    raw_verdicts = data.get("verdicts", {})
+    if not isinstance(raw_verdicts, dict):
+        findings.append(_finding("invalid_verdicts", "verdicts", "must be an object"))
+        raw_verdicts = {}
+
     categories = _parse_definitions(
         raw_categories, "categories", CategoryDefinition, _DEFINITION_FIELDS, findings
     )
+    verdicts = _parse_verdicts(raw_verdicts, core, findings)
     kinds = _parse_definitions(
         raw_kinds, "kinds", KindDefinition, _KIND_DEFINITION_FIELDS, findings
     )
@@ -742,7 +916,149 @@ def _parse_registry_data(
         sorted_findings,
         core_categories=core.core_categories,
         core_category_aliases=core.core_category_aliases,
+        core_verdicts=core.core_verdicts,
+        verdicts=verdicts,
     )
+
+
+# nosemgrep: ep-word-set -- the overlay's own field names, fixed by its schema
+_VERDICT_FIELDS = frozenset({"labels", "description"})
+
+
+def _parse_verdicts(
+    raw: dict[Any, Any], core: SemanticLanguageRegistry, findings: list[RegistryFinding]
+) -> dict[str, VerdictDefinition]:
+    """The vault's verdicts as it wrote them. A new key needs a description; a shipped key
+    takes labels only."""
+    verdicts: dict[str, VerdictDefinition] = {}
+    for raw_key, value in sorted(raw.items(), key=lambda item: str(item[0])):
+        key = str(raw_key)
+        span = f"verdicts.{key}"
+        shipped = core.core_verdicts.get(key)
+        if shipped is None and (
+            not semantic_verdicts.KEY_RE.match(key) or len(key) > semantic_verdicts.MAX_SPELLING
+        ):
+            findings.append(
+                _finding("invalid_key", span, "must be lower-case letters, digits and underscores")
+            )
+            continue
+        if not isinstance(value, dict):
+            findings.append(_finding("invalid_definition", span, "must be an object"))
+            continue
+        for unknown in sorted(set(value) - _VERDICT_FIELDS, key=str):
+            findings.append(
+                _finding("unknown_field", f"{span}.{unknown}", "unknown definition field")
+            )
+        labels = _verdict_labels(value.get("labels", {}), span, findings)
+        if shipped is not None:
+            # Kept as written, so a save preserves the entry; `_effective_verdict` ignores it.
+            raw_description = value.get("description")
+            description = "" if raw_description is None else str(raw_description).strip()
+            if description:
+                findings.append(
+                    _finding(
+                        "core_verdict_shadowed",
+                        f"{span}.description",
+                        f"{key!r} is a shipped verdict with a fixed description, so this entry is "
+                        "ignored; remove its description to use its labels",
+                        severity="warning",
+                    )
+                )
+        else:
+            description = value.get("description")
+            if not isinstance(description, str) or not description.strip():
+                findings.append(
+                    _finding("missing_description", f"{span}.description", "is required")
+                )
+                continue
+            description = description.strip()
+        verdicts[key] = VerdictDefinition(
+            key=key, labels=labels, description=description, core=shipped is not None
+        )
+    _check_verdict_spellings(core.core_verdicts, verdicts, findings)
+    return verdicts
+
+
+def _verdict_labels(
+    raw: object, span: str, findings: list[RegistryFinding]
+) -> tuple[tuple[str, str], ...]:
+    """The valid (language tag, label) pairs of one vault entry, sorted."""
+    if not isinstance(raw, dict):
+        findings.append(
+            _finding(
+                "invalid_labels",
+                f"{span}.labels",
+                "must map a language tag to a label, such as `en: Retracted`",
+            )
+        )
+        return ()
+    labels = []
+    for language, text in sorted(raw.items(), key=lambda item: str(item[0])):
+        problem = semantic_verdicts.label_problem(language, text)
+        if problem is not None:
+            findings.append(_finding("invalid_label", f"{span}.labels.{language}", problem))
+            continue
+        labels.append((language, text.strip()))
+    return tuple(labels)
+
+
+def _effective_verdict(
+    shipped: VerdictDefinition | None, entry: VerdictDefinition
+) -> VerdictDefinition | None:
+    """The verdict a vault entry gives: a new one as written, or a shipped one whose labels
+    the vault's replace, language by language.
+
+    An entry that rewrites a shipped verdict's description gives None: it is ignored, as a
+    category that shadows a shipped one is, and its warning says so.
+    """
+    if shipped is None:
+        return entry
+    if entry.description:
+        return None
+    labels = {**dict(shipped.labels), **dict(entry.labels)}
+    return VerdictDefinition(
+        key=entry.key,
+        labels=tuple(sorted(labels.items())),
+        description=shipped.description,
+        core=True,
+    )
+
+
+def _check_verdict_spellings(
+    shipped: Mapping[str, VerdictDefinition],
+    verdicts: Mapping[str, VerdictDefinition],
+    findings: list[RegistryFinding],
+) -> None:
+    """Refuse a vault key or label that another verdict answers to, in any language.
+
+    The shipped spellings the vault keeps own their verdict first, so a finding always points
+    at something the vault wrote.
+    """
+    effective = {
+        key: entry
+        for key, entry in verdicts.items()
+        if _effective_verdict(shipped.get(key), entry) is not None
+    }
+    owners: dict[str, str] = {}
+    for key, definition in shipped.items():
+        entry = effective.get(key)
+        replaced = {language for language, _text in entry.labels} if entry else set()
+        kept = (text for language, text in definition.labels if language not in replaced)
+        for spelling in (key, *kept):
+            owners[semantic_verdicts.fold(spelling)] = key
+    for key, entry in sorted(effective.items()):
+        written = [] if entry.core else [(f"verdicts.{key}", key)]
+        written += [(f"verdicts.{key}.labels.{language}", text) for language, text in entry.labels]
+        for span, spelling in written:
+            folded = semantic_verdicts.fold(spelling)
+            if owners.setdefault(folded, key) != key:
+                findings.append(
+                    _finding(
+                        "verdict_label_collision",
+                        span,
+                        f"{spelling!r} is already the key or label of {owners[folded]!r}",
+                    )
+                )
 
 
 def _parse_definitions(
@@ -878,6 +1194,7 @@ def _parse_definitions(
                     findings,
                 )
             )
+            common["traits"] = _kind_traits(value.get("traits", []), span, findings)
         definitions[key] = definition_type(**common)
     return definitions
 
@@ -1092,6 +1409,8 @@ def _definition_proposal(
         out["aliases"] = sorted(definition.aliases)
     if isinstance(definition, KindDefinition) and definition.heading_aliases:
         out["heading_aliases"] = sorted(definition.heading_aliases)
+    if isinstance(definition, KindDefinition) and definition.traits:
+        out["traits"] = sorted(definition.traits)
     if definition.status != "active":
         out["status"] = definition.status
     if definition.replaced_by is not None:
@@ -1104,6 +1423,21 @@ def _definition_proposal(
     if scope:
         out["scope"] = scope
     return out
+
+
+def _kind_traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozenset[str]:
+    """The traits a vault kind declares; one outside `KIND_TRAITS` is an error naming the rest."""
+    names = _strings(raw, f"{span}.traits", findings)
+    unknown = sorted(set(names) - semantic_kinds.KIND_TRAITS)
+    if unknown:
+        findings.append(
+            _finding(
+                "unknown_trait",
+                f"{span}.traits",
+                f"{unknown} are not kind traits; use any of {sorted(semantic_kinds.KIND_TRAITS)}",
+            )
+        )
+    return frozenset(names) - set(unknown)
 
 
 def _strings(value: Any, path: str, findings: list[RegistryFinding]) -> list[str]:
@@ -1151,6 +1485,16 @@ _CORE_CATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ("configs", "configuration", "configurations"),
     ),
 )
+
+
+@lru_cache(maxsize=1)
+def _core_verdicts() -> dict[str, VerdictDefinition]:
+    return {
+        key: VerdictDefinition(
+            key=key, labels=verdict.labels, description=verdict.description, core=True
+        )
+        for key, verdict in semantic_verdicts.pack().items()
+    }
 
 
 @lru_cache(maxsize=1)
@@ -1213,7 +1557,7 @@ def _core_category_shadow_findings(
 def _core_heading_aliases() -> dict[str, str]:
     return {
         normalize_label(alias): canonical
-        for alias, canonical in semantic_blocks._BLOCK_TYPE_ALIASES.items()
+        for alias, canonical in semantic_kinds.heading_aliases().items()
     }
 
 

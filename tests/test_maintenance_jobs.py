@@ -373,6 +373,47 @@ def test_a_job_lets_a_writer_in_after_the_page_it_is_writing_instead_of_after_it
     assert len(rewritten) == len(pages)
 
 
+def test_a_phase_that_grows_with_the_vault_lets_a_writer_in_and_still_applies_every_item(
+    vault, monkeypatch
+) -> None:
+    """A reconcile phase held the boundary through all of its items, 33 minutes on a large vault.
+
+    Every writer behind it was refused busy after its wait. The phase now runs in short holds that
+    end for a waiting writer, and it applies each item exactly once across them.
+    """
+    # Only a waiting writer ends a hold here: the time budget is out of reach.
+    monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 3600.0)
+    monkeypatch.setattr(maintenance_jobs, "current_run_id", lambda: "reconcile-run")
+    items = list(range(60))
+    applied: list[int] = []
+    entered: list[int] = []
+
+    def apply(chunk) -> None:
+        applied.extend(chunk)
+        time.sleep(0.05)
+
+    def writer() -> None:
+        with writer_lease.get_manager().mutation_guard(vault, request_id="writer", operation="edit"):
+            entered.append(len(applied))
+
+    job = threading.Thread(
+        target=lambda: maintenance_jobs.apply_in_holds(vault, "reconcile_units", items, apply, batch=1)
+    )
+    job.start()
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    while not applied:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    other = threading.Thread(target=writer)
+    other.start()
+    other.join(_DEADLINE_SECONDS)
+    job.join(_DEADLINE_SECONDS)
+
+    # The writer got in while the phase had most of its items left, not after the last one.
+    assert len(entered) == 1 and entered[0] < len(items) // 2, entered
+    assert applied == items
+
+
 def test_a_job_whose_time_budget_is_spent_still_writes_a_page_every_hold(server, vault, monkeypatch) -> None:
     monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 0.0)
     monkeypatch.setattr(maintenance_jobs, "BATCH_PAGES", 1)
@@ -394,7 +435,7 @@ def test_start_without_plan_and_reason_is_refused_and_leaves_no_job(server, vaul
     refused, listed = _session(server, scenario)
 
     assert refused["error"]["code"] == "MAINTENANCE_PLAN_REQUIRED"
-    assert refused["error"]["committed"] is False
+    assert refused["error"]["message"].endswith("Nothing was saved.")
     assert _jobs(listed) == []
     assert _page_ids(vault) == before
 
@@ -454,6 +495,14 @@ def test_a_page_edited_while_the_job_waits_for_the_boundary_keeps_its_edit(serve
     assert _page_ids(vault)[edited.relative_to(vault).as_posix()] is None
 
 
+def _read_job_retry(run_id: str) -> dict:
+    """The call that reads the running job: the refusal's only carrier of its run id."""
+    return {
+        "tool": "check_memory",
+        "arguments": {"operation": {"kind": "maintenance-job", "run_id": run_id}},
+    }
+
+
 def test_a_different_start_while_a_job_runs_is_refused_with_the_running_job(server, vault) -> None:
     async def scenario(client):
         preview = await _preview(client)
@@ -467,7 +516,7 @@ def test_a_different_start_while_a_job_runs_is_refused_with_the_running_job(serv
     running, refused, _ = _session(server, scenario)
 
     assert refused["error"]["code"] == "MAINTENANCE_JOB_ACTIVE"
-    assert refused["error"]["run_id"] == running["run_id"]
+    assert refused["error"]["retry"] == _read_job_retry(running["run_id"])
 
 
 def test_the_same_start_while_a_job_runs_returns_that_job(server, vault) -> None:
@@ -828,7 +877,6 @@ def test_remote_reconcile_heals_the_drift_and_removes_the_orphan_the_preview_nam
     assert summary["frame_orphans_removed"] == 1
     assert summary["indexes_updated"] == len(preview["indexes_updated"]) >= 1
     # The job releases the boundary before the graph join, as the CLI does, so the graph it started converges.
-    assert final["receipt"]["result"]["graph_sync"] == "completed"
     assert final["receipt"]["notes"]["graph"] == "completed"
 
 
@@ -988,7 +1036,7 @@ def _ordinary_write(vault: Path, rel: str):
         return {"status": "committed"}
 
     command = SimpleNamespace(name="canonical_mutation", read_only=False, leaf=leaf)
-    return lambda: writer_lease.get_manager().invoke(command, (vault,), {})
+    return lambda: writer_lease.get_manager().invoke(command, (vault,), {"response_detail": "full"})
 
 
 def test_an_ordinary_write_commits_between_two_holds_of_a_reconcile_job(server, vault, monkeypatch) -> None:
@@ -1000,7 +1048,7 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_reconcile_job(server, 
 
     # The write ran and returned while the job waited at the pause, between its two holds.
     assert isinstance(written, dict), written
-    assert written["status"] == "committed"
+    assert written["diagnostics"]["operational"]["status"] == "committed"
     assert (vault / rel).is_file()
     assert seen == (True, True)
     assert (final["state"], final["error_code"]) == ("completed", None)
@@ -1298,7 +1346,7 @@ def test_an_identical_running_preview_returns_its_handle_and_a_write_start_is_re
     assert again["run_id"] == first["run_id"]
     assert [job["run_id"] for job in _jobs(listed)] == [first["run_id"]]
     assert refused["error"]["code"] == "MAINTENANCE_JOB_ACTIVE"
-    assert refused["error"]["run_id"] == first["run_id"]
+    assert refused["error"]["retry"] == _read_job_retry(first["run_id"])
     assert final["state"] == "completed"
 
 

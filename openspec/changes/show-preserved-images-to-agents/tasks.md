@@ -19,7 +19,13 @@
 - [x] 3.2 Make the frame cap the `video_frames_tool_cap` setting, keep `EXOMEM_VIDEO_FRAMES_TOOL_CAP` as its override, and bound returned frames by the image view byte settings
 - [x] 3.3 Report `max_side_effective` and `not_shown`; keep Cloud at its worker's fixed edge and report it
 
-## 4. Acceptance
+## 4. Camera raw
 
-- [ ] 4.1 After release, show two stored photos through `read_media` in Claude and confirm the model describes them
-- [ ] 4.2 After the ChatGPT connector refresh, show the same two photos in ChatGPT
+- [x] 4.1 Decode `.dng` through LibRaw in `image_codecs`, full size and upright, refused before demosaic past the pixel ceiling, and list it in the image registry
+- [x] 4.2 Give the caption model the decoded image instead of the path
+- [x] 4.3 Add a synthetic portrait DNG to the media samples and the Cloud image gate
+
+## 5. Acceptance
+
+- [ ] 5.1 After release, show two stored photos through `read_media` in Claude and confirm the model describes them
+- [ ] 5.2 After the ChatGPT connector refresh, show the same two photos in ChatGPT

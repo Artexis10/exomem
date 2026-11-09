@@ -261,6 +261,7 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         for name in (
             "ocr-eng.png",
             "ocr-eng.heic",
+            "ocr-eng.dng",
             "ocr-est.png",
             "ocr-jpn-vert.png",
             "ocr-jpn.png",

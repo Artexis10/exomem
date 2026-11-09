@@ -208,7 +208,6 @@ def test_real_mcp_rest_cli_resolver_rejects_unbounded_and_cross_mode_inputs(
         mcp.call_tool("connect_memory", request, run_middleware=True)
     )
     mcp_refusal = json.loads(mcp_result.content[0].text)
-    assert mcp_refusal["success"] is False
     assert mcp_refusal["error"]["code"] == code
 
     rest_response = TestClient(mcp.http_app()).post(
