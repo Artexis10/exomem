@@ -89,7 +89,7 @@ def _anchored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A served vault whose first compiled note exists, so later notes face the full contract."""
     vault, call = _served(tmp_path, monkeypatch)
     anchor = _create(call, "Anchor", _source(call, "Anchor"))
-    assert anchor["state"] == "committed", anchor
+    assert "error" not in anchor, anchor
     return vault, call, anchor["path"].removesuffix(".md")
 
 
@@ -98,13 +98,18 @@ def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_thre
 ) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
 
-    refused = _create(call, "Crane", _source(call, "Crane"), f"relates_to [[{anchor}]]")
+    refused = _create(
+        call, "Crane", _source(call, "Crane"), f"relates_to [[{anchor}]]", response_detail="full"
+    )
 
-    error = refused["error"]
-    assert error["code"] == CODE
+    assert refused["error"]["code"] == CODE
+    assert refused["error"]["message"].endswith("Nothing was saved.")
+    error = refused["diagnostics"]["error"]
     assert 0 < len(error["options"]) <= 8
     assert all(set(option) == {"key", "label", "description", "parent"} for option in error["options"])
     assert "relates_to" not in [option["key"] for option in error["options"]]
+    # The agent reads the top of the ranked menu as `candidates`, capped at five.
+    assert refused["error"]["candidates"] == [option["key"] for option in error["options"][:5]]
     routes = error["routes"]
     assert set(routes) == {"specific", "propose", "plain_link"}
     assert f"- {error['options'][0]['key']} [[{anchor}]]" in routes["specific"]["do"]
@@ -142,23 +147,24 @@ def test_a_retry_with_the_menus_top_relation_commits(
 ) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
     source = _source(call, "Crane")
-    top = _create(call, "Crane", source, f"relates_to [[{anchor}]]")["error"]["options"][0]["key"]
+    top = _create(call, "Crane", source, f"relates_to [[{anchor}]]")["error"]["candidates"][0]
 
     committed = _create(call, "Crane", source, f"{top} [[{anchor}]]")
 
-    assert committed["state"] == "committed", committed
+    assert "error" not in committed, committed
     assert f"- {top} [[{anchor}]]" in _page(vault, committed["path"])
 
 
 def test_a_plain_link_bullet_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
     source = _source(call, "Crane")
-    plain = _create(call, "Crane", source, f"relates_to [[{anchor}]]")["error"]["routes"]["plain_link"]
+    refused = _create(call, "Crane", source, f"relates_to [[{anchor}]]", response_detail="full")
+    plain = refused["diagnostics"]["error"]["routes"]["plain_link"]
     bullet = re.search(r"`- (\S+ \[\[[^\]]+\]\])`", plain["do"]).group(1)
 
     committed = _create(call, "Crane", source, bullet)
 
-    assert committed["state"] == "committed", committed
+    assert "error" not in committed, committed
     assert f"- {bullet}" in _page(vault, committed["path"])
 
 
@@ -167,17 +173,17 @@ def test_a_relation_the_vault_already_authors_between_these_note_types_ranks_fir
 ) -> None:
     _vault, call, anchor = _anchored(tmp_path, monkeypatch)
     refused = _create(call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]")
-    unused = refused["error"]["options"]
+    unused = refused["error"]["candidates"]
     # Pick a relation the registry order would not rank first, and author it between two insights.
-    chosen = unused[-1]["key"]
-    assert chosen != unused[0]["key"]
+    chosen = unused[-1]
+    assert chosen != unused[0]
     for title in ("Crane", "Hoist"):
         committed = _create(call, title, _source(call, title), f"{chosen} [[{anchor}]]")
-        assert committed["state"] == "committed", committed
+        assert "error" not in committed, committed
 
     ranked = _create(call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]")
 
-    assert ranked["error"]["options"][0]["key"] == chosen
+    assert ranked["error"]["candidates"][0] == chosen
 
 
 def test_an_edit_adding_a_generic_edge_is_refused_and_leaves_the_page_unchanged(
@@ -201,7 +207,7 @@ def test_an_edit_adding_a_generic_edge_is_refused_and_leaves_the_page_unchanged(
     )
 
     assert refused["error"]["code"] == CODE
-    assert refused["error"]["options"]
+    assert refused["error"]["candidates"]
     assert _page(vault, page) == before
 
 
@@ -227,7 +233,7 @@ def test_an_edit_that_leaves_a_legacy_generic_edge_untouched_commits(
         },
     )
 
-    assert edited["state"] == "committed", edited
+    assert "error" not in edited, edited
     assert f"- relates_to [[{anchor}]]" in _page(vault, page)
 
 
@@ -265,7 +271,7 @@ def test_an_edit_that_leaves_a_legacy_generic_unit_relation_untouched_commits(
         },
     )
 
-    assert edited["state"] == "committed", edited
+    assert "error" not in edited, edited
     assert f"relates_to: [[{anchor}]]" in _page(vault, page)
 
 
@@ -277,7 +283,7 @@ def test_a_page_that_is_not_live_and_an_adoption_import_are_never_refused(
     row = f"relates_to [[{anchor}]]"
 
     draft = _create(call, "Draft crane", _source(call, "Draft crane"), row, status="draft")
-    assert draft["state"] == "committed", draft
+    assert "error" not in draft, draft
 
     # `adoption_compile` has no tool door; the same page is checked under both operations.
     def validate(operation: str):
@@ -325,7 +331,7 @@ def test_a_successor_is_refused_for_a_generic_edge_it_adds_but_not_for_one_it_ca
     assert added["error"]["code"] == CODE
 
     carried = supersede("Crane revised", f"relates_to [[{anchor}]]")
-    assert carried["state"] == "committed", carried
+    assert "error" not in carried, carried
 
 
 def test_a_withheld_target_never_shapes_the_menu_a_restricted_writer_gets(tmp_path: Path) -> None:
@@ -392,11 +398,11 @@ def test_create_entity_refuses_a_generic_item_and_commits_a_specific_one(
 
     refused = _entity(call, "person", "Cy Dock", relations=[{"kind": "relates_to", "target": works}])
     assert refused["error"]["code"] == CODE
-    assert "member_of" in [option["key"] for option in refused["error"]["options"]]
+    assert "member_of" in refused["error"]["candidates"]
     assert not (vault / "Knowledge Base/Entities/People/Cy Dock.md").exists()
 
     committed = _entity(call, "person", "Cy Dock", relations=[{"kind": "member_of", "target": works}])
-    assert committed["state"] == "committed", committed
+    assert "error" not in committed, committed
 
 
 def test_create_entity_no_longer_takes_a_reason_for_a_generic_item(
@@ -418,7 +424,7 @@ def test_bare_connections_render_as_plain_links(tmp_path: Path, monkeypatch: pyt
 
     committed = _entity(call, "person", "Cy Dock", connections=[f"[[{ben}]]"])
 
-    assert committed["state"] == "committed", committed
+    assert "error" not in committed, committed
     page = _page(vault, committed["path"])
     assert f"- links_to [[{ben}]]" in page
     assert "relates_to" not in page
@@ -431,10 +437,12 @@ def test_identical_bullets_to_one_page_count_as_one_refused_edge(
     ben = _target(_entity(call, "person", "Ben Quay"))
     twice = f"relates_to [[{anchor}]]"
 
-    refused = _create(call, "Crane", _source(call, "Crane"), twice, twice, f"relates_to [[{ben}]]")
+    refused = _create(
+        call, "Crane", _source(call, "Crane"), twice, twice, f"relates_to [[{ben}]]", response_detail="full"
+    )
 
     assert refused["error"]["code"] == CODE
-    assert refused["error"]["refused_edges"] == 2
+    assert refused["diagnostics"]["error"]["refused_edges"] == 2
 
 
 def _offered(call, source_type: str, target: str) -> list[str]:
@@ -442,7 +450,7 @@ def _offered(call, source_type: str, target: str) -> list[str]:
     refused = _entity(
         call, source_type, "Cy Dock", relations=[{"kind": "relates_to", "target": target}]
     )
-    return [option["key"] for option in refused["error"]["options"]]
+    return refused["error"]["candidates"]
 
 
 def test_relations_whose_endpoints_name_both_pages_come_before_those_that_name_neither(
@@ -458,7 +466,7 @@ def test_relations_whose_endpoints_name_both_pages_come_before_those_that_name_n
     assert person_to_organization[:4] == ["member_of", "affiliated_with", "operates", "supplies"]
     assert person_to_person[:2] == ["kin_of", "supplies"]
     assert "kin_of" not in person_to_organization
-    assert len(person_to_organization) <= 8
+    assert len(person_to_organization) <= 5
 
 
 def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_parent(
@@ -468,7 +476,7 @@ def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_pare
     works = _target(_entity(call, "organization", "Quay Works"))
     employed = {"subject": ["entity:person"], "object": ["entity:organization"]}
     saved = _save_extension(call, "vault.employed_by", _extension("affiliated_with", employed))
-    assert saved["state"] == "committed", saved
+    assert saved["diagnostics"]["operational"]["state"] == "committed", saved
 
     offered = _offered(call, "person", works)
 
@@ -482,7 +490,7 @@ def test_a_promoted_relation_that_only_inherits_its_parents_endpoints_ranks_behi
     _vault, call = _served(tmp_path, monkeypatch)
     works = _target(_entity(call, "organization", "Quay Works"))
     saved = _save_extension(call, "vault.works_with", _extension("affiliated_with"))
-    assert saved["state"] == "committed", saved
+    assert saved["diagnostics"]["operational"]["state"] == "committed", saved
 
     offered = _offered(call, "person", works)
 

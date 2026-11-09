@@ -6,7 +6,9 @@ keep that block. An MCP agent needs less: what happened to its data, and the exa
 succeed. This module turns the public block into that, once, for every tool.
 
 Compact result: `{"error": {"code", "message", "retry"?, "candidates"?}}`.
-`message` is one sentence, and a refused write ends it with what happened to the data.
+`message` says what was refused. When there is no `retry`, it carries the first sentence of the
+remediation next, because that sentence is the only fix the agent gets. A refused write ends it
+with what happened to the data.
 `retry.arguments` holds only the arguments to add or change; the rest of the call is unchanged.
 `retry` is absent when no retry can succeed. With `response_detail="full"` the old envelope
 (umbrella code, remediation prose, ids, `committed`, waits) rides beside it under `diagnostics`.
@@ -51,6 +53,36 @@ def _sentence(text: object) -> str:
         # An identifier such as a tool name keeps its spelling; only a plain word is capitalised.
         value = value[0].upper() + value[1:]
     return value if value[-1] in ".!?" else f"{value}."
+
+
+def _fix(refusal: Mapping[str, Any]) -> str:
+    """The first sentence of the remediation: the step that clears the refusal.
+
+    Two sentences meet at an end mark, a space and a capital letter. "e.g." is followed by a
+    lower-case word, so it does not split.
+    """
+    text = " ".join(str(refusal.get("remediation") or "").split())
+    for index in range(len(text) - 2):
+        if text[index] in ".!?" and text[index + 1] == " " and text[index + 2].isupper():
+            return text[: index + 1]
+    return _sentence(text)
+
+
+def _candidates(refusal: Mapping[str, Any]) -> list[str]:
+    """The values the agent can choose from, from the producer that knows them.
+
+    A producer that has `candidates` of its own names them first. `allowed` is the closed set of
+    values a refused argument accepts. A producer that only ranks `options` by `key` (the
+    generic-relation barrier) is read last.
+    """
+    for name in ("candidates", "allowed"):
+        value = refusal.get(name)
+        if isinstance(value, (list, tuple)) and value:
+            return [str(item) for item in value]
+    options = refusal.get("options")
+    if isinstance(options, (list, tuple)):
+        return [str(option["key"]) for option in options if isinstance(option, Mapping) and "key" in option]
+    return []
 
 
 def _located(message: str, refusal: Mapping[str, Any]) -> str:
@@ -140,6 +172,7 @@ def reply(
     message = _located(_sentence(refusal.get("message")), refusal)
     retry: dict[str, Any] | None = None
     fate = _fate(refusal, write=write)
+    fix = _fix(refusal)
     if code == _UMBRELLA_CODE and (finding := _blocking_finding(error)) is not None:
         code = str(finding.code)
         message = _sentence(finding.detail) or message
@@ -147,7 +180,7 @@ def reply(
             message = _RELATION_DECISION_MESSAGES[code]
             retry = _relation_retry(tool, parameters)
     if code == _BUSY_CODE:
-        message, fate = _busy_message(refusal), None
+        message, fate, fix = _busy_message(refusal), None, ""
     after = _after_seconds(refusal)
     if retry is None and (
         refusal.get("status") == "retryable" or refusal.get("retryable") is True or after is not None
@@ -158,14 +191,14 @@ def reply(
         retry = {"tool": tool}
         if after is not None:
             retry["after_s"] = after
-    body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, (message, fate)))}
+    if retry is not None or fix.casefold() in message.casefold():
+        # A structured retry is the fix; a repair that the message already carries is not said twice.
+        fix = ""
+    body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, (message, fix, fate)))}
     if retry is not None:
         body["retry"] = retry
-    # `allowed` is the closed set of values a refused argument accepts; a producer that has
-    # candidates of its own names them first.
-    candidates = refusal.get("candidates") or refusal.get("allowed")
-    if isinstance(candidates, (list, tuple)) and candidates:
-        body["candidates"] = [str(item) for item in candidates[:MAX_CANDIDATES]]
+    if candidates := _candidates(refusal):
+        body["candidates"] = candidates[:MAX_CANDIDATES]
     result: dict[str, Any] = {"error": body}
     if full:
         result["diagnostics"] = dict(envelope)

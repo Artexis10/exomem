@@ -76,11 +76,11 @@ Only the bootstrap payload SHALL carry the `due_state` block: per-category open 
 
 ### Requirement: An MCP refusal names what happened to the data and the exact retry
 
-A tool call that the MCP surface refuses, a rendered tool included, SHALL return `{"error": {"code", "message", "retry"?, "candidates"?}}` and nothing else at the top level, except `diagnostics` when the call asked for `response_detail="full"`. `code` SHALL be the specific code of the refusal. When the semantic contract blocks a write, the umbrella `SEMANTIC_CONTRACT_BLOCKED` SHALL NOT be the code: the code of the finding it blocked on SHALL be promoted. `message` SHALL be one sentence. A refused write's message SHALL end with what happened to the data: "Nothing was saved.", "The change was saved." or "Whether it was saved is not known.". A refusal that states its own outcome, such as `MUTATION_BUSY`, SHALL keep that one sentence.
+A tool call that the MCP surface refuses, a rendered tool included, SHALL return `{"error": {"code", "message", "retry"?, "candidates"?}}` and nothing else at the top level, except `diagnostics` when the call asked for `response_detail="full"`. `code` SHALL be the specific code of the refusal. When the semantic contract blocks a write, the umbrella `SEMANTIC_CONTRACT_BLOCKED` SHALL NOT be the code: the code of the finding it blocked on SHALL be promoted. `message` SHALL say what was refused. When the refusal has no `retry`, the next sentence SHALL be the first sentence of its remediation, because that sentence is the only fix the agent gets; a refusal with a `retry` SHALL keep its message short. A refused write's message SHALL end with what happened to the data: "Nothing was saved.", "The change was saved." or "Whether it was saved is not known.". A refusal that states its own outcome, such as `MUTATION_BUSY`, SHALL keep that one sentence.
 
 `retry` SHALL be the exact next call, and SHALL be absent when no retry can succeed. It holds `tool`, and `arguments` only for the arguments to add or change. `retry.arguments` SHALL be a delta that the agent merges key by key, nested objects included, into the arguments it sent; every other argument is unchanged. A value the agent must supply SHALL be a placeholder in angle brackets. `retry.after_s` SHALL give the whole seconds to wait when the refusal names a wait. The tool name in `retry` SHALL be the name of the tool the agent called, and an argument SHALL sit where that tool's own schema takes it.
 
-`candidates` SHALL hold at most five titles or valid registry values the agent can choose from, and SHALL be absent when there are none. A refusal that names the field it failed on SHALL keep that field and its repair in the message.
+`candidates` SHALL hold at most five titles or valid registry values the agent can choose from, and SHALL be absent when there are none. They come from the producer's own `candidates`, then its `allowed` set, then the `key` of each of its ranked `options`. A refusal that names the field it failed on SHALL keep that field and its repair in the message.
 
 The refusal's operational detail SHALL move under `diagnostics`, shown only with `response_detail="full"`: the umbrella code, the remediation prose, the duplicate `success`, `ok`, `error_code`, `status` and `committed` keys, and the coordinator, cause, waits, absorbed attempts and ids. The CLI and REST facades SHALL keep their `{success, data}` and public error blocks unchanged.
 
@@ -100,6 +100,18 @@ The refusal's operational detail SHALL move under `diagnostics`, shown only with
 
 - **WHEN** an edit is refused with `RELATION_DISPOSITION_STALE` because the page changed its connections after a reviewed-none decision
 - **THEN** `retry.arguments` holds the same `relation_disposition` and `relation_review_reason` placeholders, placed where the edit tool takes them
+
+#### Scenario: A refusal with no retry carries its fix
+
+- **WHEN** an approval is refused because the page changed since it was read
+- **THEN** the error reads "The page changed since it was read. Read the page again, then approve its current content_hash. Nothing was saved."
+- **AND** the error carries no `retry`
+
+#### Scenario: A ranked menu reaches the agent as candidates
+
+- **WHEN** a write is refused because it adds a generic relation, and the producer ranks specific relations as `options`
+- **THEN** `candidates` holds the keys of the first five options
+- **AND** the full ranked menu and its routes sit under `diagnostics` with `response_detail="full"`
 
 #### Scenario: Full detail keeps the old envelope
 

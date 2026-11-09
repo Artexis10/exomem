@@ -128,7 +128,11 @@ def test_accepting_without_naming_a_relation_is_refused_and_writes_nothing(
     refused = _accept(call, group, item)
 
     assert refused["error"]["code"] == "RELATION_CHOICE_REQUIRED", refused
-    assert refused["error"]["candidates"] == [o["key"] for o in item["options"]]
+    # The agent reads five names: the top four options, with the plain link in the last slot.
+    assert refused["error"]["candidates"] == [
+        *(o["key"] for o in item["options"][:4]),
+        item["plain_link"],
+    ]
     assert refused["error"]["message"].endswith("Nothing was saved.")
     assert (vault / person).read_bytes() == before
 

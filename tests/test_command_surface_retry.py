@@ -1487,7 +1487,10 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     full = bound(response_detail="full")
 
     assert result["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
-    assert result["error"]["message"] == f"{refusal.reason.capitalize()}. Nothing was saved."
+    # With no structured retry, the message carries the first sentence of the fix.
+    message = result["error"]["message"]
+    assert message.startswith(f"{refusal.reason.capitalize()}. Preview maintain_memory(mode='backfill-ids')")
+    assert message.endswith(" Nothing was saved.")
     remediation = full["diagnostics"]["error"]["remediation"]
     assert "maintain_memory(mode='backfill-ids')" in remediation
     assert "confirmation" in remediation
@@ -1798,7 +1801,10 @@ def test_bound_mcp_committed_failure_replays_sanitized_without_second_leaf_call(
 
     assert first["error"] == {
         "code": "BATCH_CLEANUP_INCOMPLETE",
-        "message": "The batch workspace cleanup is incomplete. The change was saved.",
+        "message": (
+            "The batch workspace cleanup is incomplete. "
+            "Do not retry the write; committed destinations are preserved. The change was saved."
+        ),
     }
     assert replay == first
     full = bound(response_detail="full")

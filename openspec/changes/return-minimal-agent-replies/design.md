@@ -41,13 +41,13 @@ The rule text becomes the `next` sentence, sent once per episode through the exi
 
 ### Refusals
 
-- `message` is one sentence. For a refused write it ends with what happened to the data: nothing saved, saved, or not known.
+- `message` says what was refused. A refusal with no `retry` carries the first sentence of its remediation next, because that sentence is the only fix the agent gets; a refusal with a `retry` keeps its message short. For a refused write the message ends with what happened to the data: nothing saved, saved, or not known.
 - `retry` holds the tool name, `arguments` and `after_s`. A refusal that advises a wait carries `retry` even when its status is not `retryable`, because warming recall advises a wait without that status.
 - `retry.arguments` is a delta. The agent merges it key by key, nested objects included, into the arguments it sent. The placement of `relation_disposition` (top level, or inside `operation`) is read from the tool's visible parameters.
-- `candidates` come from the producer that knows the valid values and are capped at five. A refusal that names the closed set a refused argument accepts (`allowed`) supplies them.
+- `candidates` come from the producer that knows the valid values and are capped at five. A refusal that names the closed set a refused argument accepts (`allowed`) supplies them next. A producer that only ranks `options` by `key`, such as the generic-relation barrier, supplies them last.
 - A refusal that names the field it failed on (`at`) and its repair keeps both in the message, because the agent cannot correct the call without them. A refusal that flags itself `retryable` carries `retry`.
 - The umbrella `SEMANTIC_CONTRACT_BLOCKED` moves to diagnostics. The code of the finding the contract blocked on becomes the code.
-- Remediation prose moves to diagnostics. Where a route is still named, it uses the called surface's `capabilities.active_call_text`.
+- Remediation prose moves to diagnostics, except its first sentence when the refusal has no `retry`. Where a route is still named, it uses the called surface's `capabilities.active_call_text`.
 - A refusal reaches `diagnostics` only on a tool that has the `response_detail` parameter. Read tools and rendered tools have none, so their refusals show the compact error only.
 
 ### Reuse check
@@ -56,7 +56,7 @@ The MCP spec has an `isError` flag on tool results. This change does not set it:
 
 ## Risks and debts
 
-- **Programs that read old keys.** The records live acceptance, the product end-to-end loop, the cell memory profile and the live write acceptance now ask for `response_detail=full` or read the new refusal shape. The graph value benchmark and the durable-closure common helpers still read `mutated` and `derived_sync` from compact replies. They need a live server and move to `response_detail=full` in a follow-up.
+- **Programs that read old keys.** The records live acceptance, the product end-to-end loop, the cell memory profile and the live write acceptance now ask for `response_detail=full` or read the new refusal shape. The benchmark and acceptance consumers that read the old search or write reply shapes read the object search reply and the compact write reply.
 - **Dead producers.** The write-side due-state producers still compute a block that the terminal now drops. Removing them touches the records and semantic-write leaves and is a separate change.
 - **A latency row without samples.** `governed-stage-due_state` in the request latency contract reads "not run" for search now that search runs no due-state stage.
 - **Multi-sentence legacy messages.** Refusals whose producer already writes a multi-sentence message keep it. Only the shared seam and the common codes were rewritten.

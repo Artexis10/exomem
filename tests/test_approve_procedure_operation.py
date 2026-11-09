@@ -113,7 +113,7 @@ def test_an_approve_leads_with_a_sentence_and_the_listing_then_reads_it_approved
 
     assert next(iter(answer)) == "user_summary"
     assert answer["user_summary"].startswith("Approved this version of the procedure.")
-    assert (answer["state"], answer["mutated"]) == ("committed", True)
+    assert "error" not in answer
     assert answer["changes"] == {"summary": "This is the first approval of this page."}
     assert answer["diagnostics"]["ref"] == REF
     assert answer["diagnostics"]["entry_id"] in entry_names(vault)
@@ -219,8 +219,12 @@ def test_a_stale_version_is_refused_and_names_the_fix(vault, mcp) -> None:
     refused = approve(mcp, REF, version)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_STALE_VERSION"
-    assert refused["error"]["message"] == "The page changed since it was read."
-    assert refused["error"]["remediation"] == "Read the page again, then approve its current content_hash."
+    # No `retry` can name the fix, so the message carries it between the cause and the fate.
+    assert refused["error"]["message"] == (
+        "The page changed since it was read. "
+        "Read the page again, then approve its current content_hash. Nothing was saved."
+    )
+    assert "retry" not in refused["error"]
     assert not ref_directory(vault).exists()
 
 
@@ -231,7 +235,7 @@ def test_an_approve_with_a_malformed_version_names_the_shape_and_not_a_page_chan
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INVALID"
     assert "64 lowercase hex characters" in refused["error"]["message"]
-    assert "pass its content_hash as expected_version" in refused["error"]["remediation"]
+    assert "pass its content_hash as expected_version" in refused["error"]["message"]
     assert not ref_directory(vault).exists()
 
 
@@ -256,7 +260,7 @@ def test_a_page_that_repeats_its_id_is_refused_with_the_fix_for_that_condition(v
     refused = approve(mcp, REF, facts_of(vault, first).version)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INELIGIBLE"
-    assert "Give the copy a new exomem_id" in refused["error"]["remediation"]
+    assert "Give the copy a new exomem_id" in refused["error"]["message"]
     assert not ref_directory(vault).exists()
 
 
@@ -264,7 +268,7 @@ def test_a_ref_that_no_page_holds_is_refused_and_writes_no_key(vault, mcp) -> No
     refused = approve(mcp, f"exomem://memory/{OTHER_ID}", "0" * 64)
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INELIGIBLE"
-    assert "Check the ref in the page's frontmatter" in refused["error"]["remediation"]
+    assert "Check the ref in the page's frontmatter" in refused["error"]["message"]
     assert not procedure_approval.key_path(vault).exists()
 
 
@@ -468,7 +472,7 @@ def test_the_listing_refuses_a_limit_outside_its_bounds(vault, mcp, limit) -> No
     refused = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": limit})
 
     assert refused["error"]["code"] == "APPROVE_PROCEDURE_INVALID"
-    assert "Pass a limit from 1 to 100" in refused["error"]["remediation"]
+    assert "Pass a limit from 1 to 100" in refused["error"]["message"]
 
 
 def test_quarantine_moves_a_damaged_entry_aside_and_the_listing_stops_reporting_it(vault, mcp) -> None:
