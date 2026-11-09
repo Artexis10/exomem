@@ -496,8 +496,8 @@ def observe_memory(
         ):
             if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
                 continue
-            if "corrects" not in semantic_contract.page_relation_behaviours(
-                preflight.after, preflight.after_corpus, fact.canonical_relation
+            if not semantic_contract.page_relation_has(
+                preflight.after, preflight.after_corpus, fact.canonical_relation, "corrects"
             ):
                 continue
             if fact.target_unit_status != "found" or fact.logical_target_ref is None:

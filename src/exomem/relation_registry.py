@@ -64,6 +64,20 @@ RELATION_BEHAVIOURS = frozenset(
         "later_than_target",
     )
 )
+
+
+def has_behaviour(behaviours: Container[str], behaviour: str) -> bool:
+    """Whether `behaviours`, what one relation does, holds `behaviour`.
+
+    A name outside `RELATION_BEHAVIOURS` is a defect in the caller, so it raises instead of
+    reading false for every relation. A reader that keeps a relation's behaviours uses this and a
+    reader that holds the registry uses `RelationRegistry.has`; both share this one guard.
+    """
+    if behaviour not in RELATION_BEHAVIOURS:
+        raise ValueError(f"{behaviour!r} is not a relation behaviour")
+    return behaviour in behaviours
+
+
 #: How a frontmatter field relates its page to the relation's other end: `forward` makes the page
 #: the edge's source, `reverse` its target.
 FRONTMATTER_DIRECTIONS = frozenset(  # nosemgrep: ep-word-set -- closed set of the binding schema
@@ -278,13 +292,15 @@ class RelationRegistry:
     def has(self, key: str, behaviour: str) -> bool:
         """Whether edges of `key` have `behaviour`. A name outside `RELATION_BEHAVIOURS` is a
         defect in the caller, so it raises instead of reading false for every key."""
-        if behaviour not in RELATION_BEHAVIOURS:
-            raise ValueError(f"{behaviour!r} is not a relation behaviour")
-        return behaviour in self.behaviours_of(key)
+        return has_behaviour(self.behaviours_of(key), behaviour)
 
     def behaviours_of_label(self, label: str) -> frozenset[str]:
         """`behaviours_of` for a relation as an author wrote it: a key, an alias or an extension."""
         return self.behaviours_of(self.resolve(label).canonical or "")
+
+    def has_label(self, label: str, behaviour: str) -> bool:
+        """`has` for a relation as an author wrote it: a key, an alias or an extension."""
+        return has_behaviour(self.behaviours_of_label(label), behaviour)
 
     def keys_with(self, behaviour: str) -> frozenset[str]:
         """Every core key and every extension, whatever its status, that has `behaviour`.

@@ -925,6 +925,10 @@ class _Row(NamedTuple):
     def touches_other(self) -> bool:
         return self.src_page != self.source_path or self.dst_page != self.source_path
 
+    def has(self, behaviour: str) -> bool:
+        """Whether the relation does `behaviour`; a name outside the closed set raises."""
+        return relation_registry.has_behaviour(self.behaviours, behaviour)
+
 
 # Edge rows are read whole and served through the census's graph view, so a
 # candidate row counts with the relation its authoring page selects.
@@ -1273,7 +1277,7 @@ def _census_payload(
         typed = (
             row.relation is not None
             and row.status != "unregistered"
-            and "plain_link" not in row.behaviours
+            and not row.has("plain_link")
             and row.origin != "wikilink"
         )
         if row.touches_other:
@@ -1499,7 +1503,7 @@ def _check_row(
         record("signature_mismatch", row.status == "scope_violation" or bool(outside))
     src_page, dst_page = row.src_page or "", row.dst_page or ""
     same_page = src_page == dst_page
-    if "replaces" in row.behaviours and not same_page:
+    if row.has("replaces") and not same_page:
         newer = _origin_date(reader.pages[src_page].origin_date)
         older = _origin_date(reader.pages[dst_page].origin_date)
         if newer is not None and older is not None:
@@ -1522,7 +1526,7 @@ def _check_row(
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
         record("same_page_epistemic", same_page)
-    if "opposes" in row.behaviours and not same_page:
+    if row.has("opposes") and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
 
 
@@ -1603,7 +1607,7 @@ def sample(
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
                 or row.relation in (None, generic_key)
-                or "plain_link" in row.behaviours
+                or row.has("plain_link")
                 or row.status == "unregistered"
             ):
                 continue
