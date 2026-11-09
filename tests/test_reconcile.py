@@ -1318,3 +1318,41 @@ def test_reconcile_preserves_deferred_work_after_embedding_failure(
     assert rep.embeddings_status == "deferred"
     assert rep.embeddings_refreshed == 0
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
+
+
+def test_reconcile_counts_the_pages_a_partial_embedding_refresh_reached(vault: Path, monkeypatch) -> None:
+    """A batch that fails ends the phase, and the report still counts the batches that were refreshed."""
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    from exomem import find, lexstore, maintenance_jobs, writer_lease
+
+    # A run under the writer lease takes its holds in batches; outside it, one call applies every page.
+    monkeypatch.setattr(writer_lease, "active_mutation_request_id", lambda: "reconcile-run")
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda root, paths: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda root, changed, deleted: None)
+    rels = []
+    for number in range(maintenance_jobs.BATCH_PAGES + 2):
+        rel = f"Knowledge Base/Notes/reconcile-partial-{number}.md"
+        (vault / rel).write_text(f"# reconcile partial {number}\n", encoding="utf-8", newline="\n")
+        rels.append(rel)
+    refreshes: list[list[Path]] = []
+
+    def refresh(root, paths):
+        refreshes.append(list(paths))
+        return None if len(refreshes) == 1 else False  # the second batch fails
+
+    monkeypatch.setattr("exomem.embeddings.upsert_after_write", refresh)
+    monkeypatch.setattr(
+        audit_module, "_check_embedding_drift", lambda root: [SimpleNamespace(path=rel) for rel in rels]
+    )
+    monkeypatch.setattr(audit_module, "audit", lambda root, categories: SimpleNamespace(findings=[]))
+    monkeypatch.setattr(
+        reconcile_module.indexes, "compute_subindex_writes", lambda root, top_index_text: ([], top_index_text)
+    )
+    monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
+
+    rep = reconcile_module.reconcile(vault)
+
+    assert len(refreshes) == 2
+    assert rep.embeddings_status == "deferred"
+    assert rep.embeddings_refreshed == maintenance_jobs.BATCH_PAGES

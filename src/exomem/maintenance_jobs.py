@@ -997,7 +997,9 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
     a stop between attempts and gives up only after ``BUSY_BUDGET_SECONDS``.
     ``stoppable=False`` is for settling work that a stop must not skip, such as
     rebuilding an index over chunks that already committed. Yields the boundary,
-    which says how many writers wait for it (``waiter_count``).
+    which says how many writers wait for it (``waiter_count``). A hold that ends while a writer
+    waits lets that writer take the boundary before this job asks again (``hand_over``), so a
+    writer in another process, which no foreground mark makes the job yield to, is not outrun.
     """
     from . import writer_lease
 
@@ -1023,6 +1025,58 @@ def chunk_hold(vault_root: Path, operation: str, *, stoppable: bool = True) -> I
         if stoppable:
             raise_if_stopped()
         yield boundary
+    # Released now; a failed hold raised past this point and hands nothing over.
+    boundary.hand_over()
+
+
+def hold_is_spent(boundary: Any, started: float, slowest: float) -> bool:
+    """Whether a hold that has run since `started` ends before its next batch of work.
+
+    A writer waits for the boundary, the job was told to stop, or the next batch, which takes as long as
+    the slowest so far, would run past ``HOLD_SECONDS``. A hold always runs one batch first, so a job
+    always progresses.
+    """
+    live = _JOB.get()
+    return (
+        boundary.waiter_count() > 0
+        or (live is not None and live.stop.is_set())
+        or time.monotonic() - started + slowest >= HOLD_SECONDS
+    )
+
+
+def apply_in_holds(
+    vault_root: Path,
+    operation: str,
+    items: Sequence[Any],
+    apply: Callable[[Sequence[Any]], bool | None],
+    *,
+    batch: int = BATCH_PAGES,
+) -> None:
+    """Run `apply` over `items`, `batch` at a time, in short holds of the mutation boundary.
+
+    For a phase whose work grows with the vault: one hold over every item kept the boundary for as long
+    as the whole phase ran, and a writer that waited gave up after its bound. Each hold ends by
+    `hold_is_spent`, and the job lets a waiting writer in before it takes the boundary again. `apply`
+    reads again under the hold what it applies, as a phase does, and returns False to end the phase.
+    """
+    from . import foreground_priority
+
+    position = 0
+    while position < len(items):
+        # A writer that queued behind the last hold takes its turn before this job takes the next.
+        foreground_priority.yield_to_foreground()
+        with chunk_hold(vault_root, operation) as boundary:
+            started = time.monotonic()
+            slowest = 0.0
+            while position < len(items):
+                chunk = items[position : position + batch]
+                began = time.monotonic()
+                position += len(chunk)
+                if apply(chunk) is False:
+                    return
+                slowest = max(slowest, time.monotonic() - began)
+                if hold_is_spent(boundary, started, slowest):
+                    break
 
 
 def commit_pages(
@@ -1095,12 +1149,7 @@ def _commit_chunk(
                 unknown = []
                 reached += len(batch)
                 slowest = max(slowest, time.monotonic() - began)
-                # The next batch could run past the budget, a writer waits, or the job was told to stop.
-                if (
-                    boundary.waiter_count() > 0
-                    or (live is not None and live.stop.is_set())
-                    or time.monotonic() - started + slowest >= HOLD_SECONDS
-                ):
+                if hold_is_spent(boundary, started, slowest):
                     break
     except BaseException as error:
         failure = error
