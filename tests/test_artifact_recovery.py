@@ -590,7 +590,7 @@ def test_raw_release_and_receipt_use_the_computed_copy_digest(vault, monkeypatch
                 "includes_location": True,
             },
         )
-    assert granted["ok"], granted
+    assert granted["diagnostics"]["operational"]["ok"], granted
     original = (vault / saved["path"]).read_bytes()
     private = tmp_path / "private"
     private.mkdir(mode=0o700)

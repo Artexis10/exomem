@@ -665,8 +665,8 @@ def test_after_the_cutover_writes_on_both_types_write_no_item_file(
         upserted = call(root, "record_memory", action="bulk_upsert", collection=LEDGER_COLLECTION_PATH,
                         source=EVIDENCE, why="a newer export", expected_container_hash=ledger["snapshot"],
                         rows=[{"item": ledger_item(slug="entry-0-0", word_count=50)},
-                              {"item": ledger_item(slug="entry-9-9")}])
-        assert upserted.get("state") == "committed", upserted.get("rows")
+                              {"item": ledger_item(slug="entry-9-9")}], response_detail="full")
+        assert upserted.get("diagnostics", {}).get("operational", {}).get("state") == "committed", upserted
         # The existing rows carry a multi-line text, which the converted collection keeps accepting.
         counts = {row["slug"]: row["word_count"] for row in call(
             root, "record_memory", action="query", collection=LEDGER_COLLECTION_PATH)["rows"]}

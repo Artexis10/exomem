@@ -2457,6 +2457,11 @@ class CollectionWriter:
             {
                 **error.details,
                 "held": {"held_id": reference, "path": path, "diagnostics": diagnostics},
+                # The same fate and resume call the file backend states (records._hold_refusal).
+                "fate": records.HELD_FATE,
+                "retry_with": records.resume_with(
+                    candidate["action"], reference, error.details.get("issues") or ()
+                ),
             },
         )
         self._publication.bind(result.details)

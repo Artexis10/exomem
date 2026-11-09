@@ -844,8 +844,8 @@ def until(predicate, seconds=20):
 def published_view(root, title, **values):
     """Append through the service and wait until the tick has confirmed its view current."""
     receipt = owner(root, "record_memory", action="append", collection=CID, item={"title": title, **values},
-                    why="capture")
-    relative = receipt["affected_paths"][0]
+                    why="capture", response_detail="full")
+    relative = receipt["diagnostics"]["operational"]["affected_paths"][0]
     until(lambda: store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("current",)])
     return relative, root / relative
 
@@ -1041,8 +1041,8 @@ def test_a_views_tick_publishes_under_the_policy_it_finds_at_the_write(served, m
     monkeypatch.setattr(runtime.StoreServer, "_views_tick", one_tick_per_release)
     run_one_tick()  # a tick under the allowing policy records its history release inputs
     receipt = owner(root, "record_memory", action="append", collection=CID,
-                    item={"title": "Withheld", "count": 1}, why="capture")
-    relative = receipt["affected_paths"][0]
+                    item={"title": "Withheld", "count": 1}, why="capture", response_detail="full")
+    relative = receipt["diagnostics"]["operational"]["affected_paths"][0]
     assert store_rows(root, "SELECT state FROM projection_state WHERE path=?", (relative,)) == [("pending",)]
     inputs, invalidate = history.release_inputs, CollectionWriter.invalidate_history_pages
     withheld, invalidations = threading.Event(), []

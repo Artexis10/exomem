@@ -1222,7 +1222,7 @@ def test_activation_failure_takes_precedence_over_the_observation(
         return packet
 
     if failure == "refusal":
-        assert _drive("activate_context", {}, dispatch)["success"] is False
+        assert _drive("activate_context", {}, dispatch)["error"]["code"] == "INVALID_ANCHOR"
     else:
         with pytest.raises((RuntimeError, TypeError)):
             _drive("activate_context", {}, dispatch)

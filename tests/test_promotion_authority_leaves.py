@@ -175,6 +175,7 @@ def test_an_upgraded_v1_vault_stays_v1_and_owner_registry_saves_commit(vault: Pa
             proposal={"upsert": {"venue": _PLACE_TYPE}},
             expected_hash="none",
             why="no registered type fits a recurring place",
+            response_detail="full",
         )
         saved_relation = _invoke(
             vault,
@@ -184,10 +185,11 @@ def test_an_upgraded_v1_vault_stays_v1_and_owner_registry_saves_commit(vault: Pa
             proposal={"upsert": {"vault.guides": _GUIDES}},
             expected_hash=relation_registry.load_registry(vault).extension_hash,
             why="no core relation says that one note guides another",
+            response_detail="full",
         )
 
-    assert saved_type["state"] == "committed"
+    assert saved_type["diagnostics"]["operational"]["state"] == "committed"
     assert entity_types.load_entity_types(vault).resolve("venue") is not None
-    assert saved_relation["state"] == "committed"
+    assert saved_relation["diagnostics"]["operational"]["state"] == "committed"
     assert relation_registry.load_registry(vault).definition("vault.guides") is not None
     assert vocabulary_authority.VocabularyAuthority(vault).runtime_status().mode == "v1"

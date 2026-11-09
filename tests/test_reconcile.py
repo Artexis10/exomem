@@ -1037,7 +1037,8 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile(
 
     def write() -> None:
         try:
-            outcomes.append(writer_lease.get_manager().invoke(ordinary_write, (vault,), {}))
+            manager = writer_lease.get_manager()
+            outcomes.append(manager.invoke(ordinary_write, (vault,), {"response_detail": "full"}))
         except Exception as error:  # noqa: BLE001 - the outcome is what the test reads
             outcomes.append(error)
 
@@ -1060,7 +1061,7 @@ def test_an_ordinary_write_commits_between_two_holds_of_a_cli_reconcile(
 
     # The write ran and returned while the run waited at the pause, between its two holds.
     assert len(outcomes) == 1 and isinstance(outcomes[0], dict), outcomes
-    assert outcomes[0]["status"] == "committed"
+    assert outcomes[0]["diagnostics"]["operational"]["state"] == "committed"
     assert seen_at_the_write == [(True, True)]
     assert written.is_file()
     assert code == 0

@@ -4,8 +4,7 @@
 
 Every newly created active governed compiled page SHALL have a current relation-review
 disposition satisfied by a qualifying typed inbound/outbound relation, a qualifying
-outbound connectivity signal, an explicit reviewed-none decision bound to current page
-identity/content, or an automatic no-candidates bootstrap disposition only for a genuinely
+outbound connectivity signal, an explicit reviewed-none decision bound to the page's stable identity, or an automatic no-candidates bootstrap disposition only for a genuinely
 empty governed corpus.
 
 A relation qualifies as a **typed edge** only when it is authored or explicitly
@@ -43,6 +42,23 @@ disposition SHALL carry any reviewed-none reason and reference it was satisfied 
 review decisions are observable rather than write-only. No minimum relation count SHALL be
 imposed in either lane.
 
+A reviewed-none decision SHALL bind the page's stable identity until an edit of the page
+removes its last connection, not its exact bytes. An edit of a page that held a reviewed-none
+decision before the edit SHALL carry that decision forward, and report the disposition
+with `review_renewed: true`, when the page's identity is unique in the identity census,
+the page is an eligible active compiled page before and after, and the operation is not
+a creation, replacement, adoption compile or tier-2 creation. A carried disposition SHALL
+keep the recorded reason and reference. An edit SHALL NOT carry a decision when the page
+held a qualifying relation or connectivity signal before the edit, so an edit that
+removes a page's last connection is refused as before. A bootstrap disposition SHALL NOT
+carry once a second eligible page exists. Audit and watcher evaluation SHALL carry a
+reviewed-none decision that the loader finds for the page and report it as carried, so
+audit and writes agree. A disconnection that no edit of the page made, whether an edit of
+another page or a change outside the server, SHALL NOT lapse the decision: the older
+decision carries and audit reports it as carried. A page whose only decision is a
+lifecycle decision that no committed slot names, because an edit connected the page or its
+bytes changed outside the writers, asks for relation review once more.
+
 #### Scenario: Superseded predecessor remains a qualifying target
 - **WHEN** an active successor canonically supersedes a governed predecessor and the predecessor is marked `superseded` with an exact backlink to that successor
 - **THEN** the supersession edge remains qualifying after commit and during exact prepared recovery
@@ -55,9 +71,27 @@ imposed in either lane.
 
 #### Scenario: Reviewed none is fingerprint-bound
 - **WHEN** a reviewer records that a page has no qualifying relation candidates
-- **THEN** the disposition is satisfied only while the page identity and relevant content fingerprint remain current
-- **AND** a material change resurfaces relation review
+- **THEN** the decision is recorded against the page identity and the fingerprint of the content reviewed, and that exact match satisfies the disposition on its own
 - **AND** the recorded reason is reported on the disposition rather than discarded
+
+#### Scenario: Reviewed none binds the page identity across edits
+- **WHEN** a page that holds a reviewed-none decision is edited and still has no qualifying connection
+- **THEN** the edit commits without asking for relation review again, writes no new decision and reports `review_renewed: true`
+- **AND** the decision's recorded reason and reference stay on the disposition
+
+#### Scenario: Removing the last connection is refused despite an old decision
+- **WHEN** an edit removes the last qualifying relation of a page that holds an older reviewed-none decision
+- **THEN** the old decision does not satisfy the edited page
+- **AND** the edit is refused with `RELATION_DISPOSITION_STALE` unless it records a fresh reviewed-none decision
+
+#### Scenario: A disconnection that no edit of the page made does not lapse the decision
+- **WHEN** a page with a reviewed-none decision gains a connection, and either an edit of another page or a change outside the server removes its last connection
+- **THEN** audit reports the older decision as carried, with `review_renewed: true` and its recorded reason
+- **AND** the next edit of the page commits without asking for relation review again
+
+#### Scenario: A contested identity does not carry a decision
+- **WHEN** a second path claims the identity of a page that holds a reviewed-none decision
+- **THEN** an edit of the page does not carry the decision and relation review is asked again
 
 #### Scenario: Empty vault bootstraps without fake edge
 - **WHEN** the first compiled page is created in a genuinely empty governed corpus and no target can exist

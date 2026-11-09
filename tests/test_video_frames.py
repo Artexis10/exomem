@@ -434,7 +434,6 @@ def test_mcp_path_refusal_answers_with_its_code(video_vault, monkeypatch) -> Non
     result = asyncio.run(
         mcp.call_tool("read_media", {"path": "../escape.mp4"}, run_middleware=True)
     )
-    assert result.structured_content["success"] is False
     assert result.structured_content["error"]["code"] == "INVALID_PATH"
 
 

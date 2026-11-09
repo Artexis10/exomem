@@ -472,7 +472,7 @@ def flow_search_recall(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Flo
         "5",
         "--json",
     )
-    hits = (payload or {}).get("data") or []
+    hits = ((payload or {}).get("data") or {}).get("hits") or []
     paths = [hit.get("path", "") for hit in hits if isinstance(hit, dict)]
     checks = [
         Check("ask_memory exits successfully", run.ok, f"exit={run.returncode}"),

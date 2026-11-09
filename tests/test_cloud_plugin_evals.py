@@ -168,6 +168,17 @@ def test_observe_add_requires_actual_mutation():
     assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
 
 
+def test_observe_add_is_a_capture_when_the_minimal_reply_leads_with_its_outcome():
+    value = capture_trace()
+    write = next(o for o in value["observations"] if o.get("name") == "remember")
+    write["name"] = "observe_memory"
+    write["arguments"]["operation"] = "add"
+    write["result"] = {"user_summary": "Saved sample.md (Personal)", "path": "exomem://memory/sample"}
+    assert checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+    write["result"] = {"path": "exomem://memory/sample"}
+    assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
+
+
 def test_recall_accepts_citation_to_the_marker_hit():
     value = trace()
     value["observations"][2]["result"] = {

@@ -132,8 +132,9 @@ def test_a_accepting_the_link_resolves_it_and_a_later_session_offers_hydration(
         **_chosen(item["route"]),
         why="both notes come from the same field report",
         expected_hash=context["subject"]["content_hash"],
+        response_detail="full",
     )
-    assert accepted["status"] in {"applied", "committed", "accepted"}, accepted
+    assert accepted["diagnostics"]["operational"]["status"] in {"applied", "committed", "accepted"}
     _observed(vault, fx.CAVITATION)
 
     # The next pass marks the pair resolved; nothing else is left to offer.
@@ -494,8 +495,11 @@ def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
             **_chosen(item["route"]),
             why="both notes come from the same field report",
             expected_hash=context["subject"]["content_hash"],
+            response_detail="full",
         )
-        assert accepted["status"] in {"applied", "committed", "accepted"}, accepted
+        assert accepted["diagnostics"]["operational"]["status"] in {
+            "applied", "committed", "accepted"
+        }
         _observed(vault, item["route"]["args"]["path"])
         _quiet(vault, start + 3 * HOUR)
         assert not [row for row in _open(vault) if row["family"] == dreamer_families.LINK_FAMILY]

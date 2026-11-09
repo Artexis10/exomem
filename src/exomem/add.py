@@ -1155,6 +1155,7 @@ def kind_required(vault_root: Path, *, supplied: str | None) -> cli_ops.OpError:
         message,
         f"{source_taxonomy.CAPTURE_KIND_RULE} {source_taxonomy.CAPTURE_KIND_MIGRATION}",
         details={
+            "candidates": [row["kind"] for row in known[:5]],
             "known_source_kinds": known[:KNOWN_KINDS_SHOWN],
             "known_source_kinds_total": len(known),
             "known_source_kinds_counted": KNOWN_KINDS_COUNTED,

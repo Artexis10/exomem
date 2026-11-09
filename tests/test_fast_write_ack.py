@@ -67,6 +67,14 @@ def _inject_statuses(
     fake.inject("component_status", *(callback for _ in range(count)))
 
 
+def _flat(terminal: dict) -> dict:
+    """The `full` reply with its operational fields lifted beside the agent's fields.
+
+    These tests read custody and sync state, which a reply carries under `diagnostics.operational`.
+    """
+    return {**terminal, **terminal["diagnostics"]["operational"]}
+
+
 def _invoke_batch(
     tmp_path: Path,
     *,
@@ -74,7 +82,7 @@ def _invoke_batch(
     target_name: str = "fast.md",
     content: str = "# Fast\n",
     idempotency_key: str | None = None,
-    response_detail: str = "compact",
+    response_detail: str = "full",
     declaration: str = "semantic_states",
     extra_target_names: tuple[str, ...] = (),
     undeclared_rel_paths: tuple[str, ...] = (),
@@ -144,7 +152,7 @@ def _invoke_batch(
         idempotency_key=idempotency_key,
         mutation_request_id="11111111-1111-4111-8111-111111111111",
     )
-    return result, target
+    return _flat(result), target
 
 
 @pytest.fixture(autouse=True)
@@ -594,12 +602,12 @@ def test_one_session_binds_exactly_one_advisory_result_ref(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
     command = SimpleNamespace(name="governed_batch", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         mutation_request_id="11111111-1111-4111-8111-111111111111",
-    )
+    ))
 
     prepares = [call[2] for call in fake.calls if call[0] == "prepare_batch"]
     assert len(prepares) == 2
@@ -663,12 +671,12 @@ def test_rolled_back_batch_does_not_burn_the_session_advisory_claim(
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
     )
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         SimpleNamespace(name="remember", leaf=leaf, read_only=False),
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         mutation_request_id="11111111-1111-4111-8111-111111111111",
-    )
+    ))
 
     prepares = _prepare_calls(fake)
     assert len(prepares) == 2
@@ -843,13 +851,13 @@ def _public_invoke(manager, vault_root: Path, name: str, leaf_call, key: str):
         result = leaf_call(root)
         return result.as_dict() if hasattr(result, "as_dict") else result
 
-    return manager.invoke(
+    return _flat(manager.invoke(
         SimpleNamespace(name=name, leaf=leaf, read_only=False),
         (vault_root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=key,
         mutation_request_id="11111111-1111-4111-8111-11111111111" + key[-1],
-    )
+    ))
 
 
 _PUBLIC_BODY = (

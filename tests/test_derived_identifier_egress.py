@@ -2804,7 +2804,7 @@ def test_owner_session_closure_rechecks_raw_admission_before_ranking(tmp_path: P
                     commands.op_ask_memory(root, **args)
             else:
                 result = commands.op_ask_memory(root, **args)
-                assert [hit["path"] for hit in result] == [f"{NOTES}/alpha.md"]
+                assert [hit["path"] for hit in result["hits"]] == [f"{NOTES}/alpha.md"]
             audit = commands.op_review_memory(root, mode="audit", detail="full")
             census = relation_census.census(root)
             assert "__exomem_raw_v1__" not in egress.redact_withheld_references(root, reference, purpose="recall")
@@ -2934,8 +2934,8 @@ def test_a_caller_raw_withholds_from_gets_no_lane_ranks_or_scores(
     local = _call(vault, None, "ask_memory", query="orchard", detail="full")
     guest = _call(vault, _principal("external"), "ask_memory", query="orchard", detail="full")
 
-    assert {"vector_score", "clip_score", "rerank_score"} <= set(local[0]["signals"]), local
-    assert guest[0]["path"] == hit.path and "signals" not in guest[0], guest
+    assert {"vector_score", "clip_score", "rerank_score"} <= set(local["hits"][0]["signals"]), local
+    assert guest["hits"][0]["path"] == hit.path and "signals" not in guest["hits"][0], guest
 
 
 def _relation_review_fixture() -> tuple[dict[str, str], dict[str, str]]:

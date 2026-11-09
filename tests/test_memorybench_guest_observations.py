@@ -42,14 +42,18 @@ def _write(directory: Path, sequence: int, event: str, data: dict) -> None:
     (directory / f"operation-{sequence:06d}-{digest}.json").write_text(payload, encoding="utf-8")
 
 
-def _search_pair(directory: Path, *, query: str, limit: int, paths: list[str], start: int = 1) -> None:
+def _search_pair(
+    directory: Path, *, query: str, limit: int, paths: list[str], start: int = 1, bare_list: bool = False
+) -> None:
     _write(directory, start, "request", {
         "path": "/api/ask_memory",
         "body": {"query": query, "limit": limit, "scope": "kb", "mode": "hybrid", "detail": "full"},
     })
+    hits = [{"path": item} for item in paths]
     _write(directory, start + 1, "response", {
         "path": "/api/ask_memory",
-        "response": [{"path": item} for item in paths],
+        # The reply is {user_summary, hits}; a recording from before that shape is a bare list.
+        "response": hits if bare_list else {"user_summary": f"Found {len(hits)} pages.", "hits": hits},
     })
 
 
@@ -71,6 +75,14 @@ def test_a_recorded_search_yields_the_transmitted_query_limit_and_hit_order(tmp_
         "normalized_hit_ids": ["b.md", "a.md"],
     }
     assert SEARCH_LABELS <= observed.resolved_labels()
+    assert not observed.problems
+
+
+def test_a_search_recorded_as_a_bare_list_projects_the_same_hit_order(tmp_path: Path) -> None:
+    _search_pair(tmp_path, query="which lantern?", limit=10, paths=["b.md", "a.md"], bare_list=True)
+    observed = _project(tmp_path)
+
+    assert observed.search["normalized_hit_ids"] == ["b.md", "a.md"]
     assert not observed.problems
 
 

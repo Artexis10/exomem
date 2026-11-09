@@ -24,8 +24,8 @@ once:
 2. **The non-waiting return is honest.** Returning fast while implying a fresh graph
    would be worse than returning slow. A write that leaves before the registered
    rebuild converges says so, in the same `graph_sync*` vocabulary a failure
-   already uses, and it says so in the *compact* projection, which is the
-   default response detail.
+   already uses. The agent reply stays minimal, so the operational block that
+   carries it is read here with `response_detail="full"`.
 3. **A rebuild invalidated by a moving projection re-targets.** Two stabilization
    attempts cannot converge against a corpus still being written to, and the
    Class C failure is exactly what strands the availability marker and forces the
@@ -134,7 +134,12 @@ def _invoke_with_registered_rebuild(
         return {"status": "committed", "mutated": True}
 
     command = SimpleNamespace(name=name, read_only=False, leaf=leaf)
-    return manager.invoke(command, (vault_root,), dict(kwargs or {}))
+    return manager.invoke(command, (vault_root,), {"response_detail": "full", **(kwargs or {})})
+
+
+def _operational(reply: dict[str, Any]) -> dict[str, Any]:
+    """The operational block a write reply carries only under `response_detail="full"`."""
+    return reply["diagnostics"]["operational"]
 
 
 # --- 1. The join is bounded --------------------------------------------------
@@ -171,7 +176,7 @@ def test_interactive_write_returns_while_a_registered_rebuild_is_still_running(
         assert elapsed < 15.0, (
             f"interactive write parked {elapsed:.1f}s on a registered rebuild"
         )
-        assert result["state"] == "committed"
+        assert _operational(result)["state"] == "committed"
     finally:
         release.set()
         outcome = graph_sync.await_active_rebuild(
@@ -586,11 +591,12 @@ def test_a_write_that_leaves_before_convergence_says_the_graph_is_catching_up(
     finally:
         release.set()
 
-    assert compact["graph_sync"] == "pending"
-    assert compact["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
-    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
-    assert isinstance(compact["graph_sync_remediation"], str)
-    assert compact["graph_sync_remediation"]
+    operational = _operational(compact)
+    assert operational["graph_sync"] == "pending"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
+    assert operational["graph_sync_checkpoint"] == required.checkpoint_sha256
+    assert isinstance(operational["graph_sync_remediation"], str)
+    assert operational["graph_sync_remediation"]
 
 
 def test_a_registered_external_owner_is_reported_as_pending_not_failed(
@@ -605,9 +611,10 @@ def test_a_registered_external_owner_is_reported_as_pending_not_failed(
 
     compact = _invoke_with_registered_rebuild(vault, build, checkpoint=required)
 
-    assert compact["graph_sync"] == "pending"
-    assert compact["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
-    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
+    operational = _operational(compact)
+    assert operational["graph_sync"] == "pending"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
+    assert operational["graph_sync_checkpoint"] == required.checkpoint_sha256
 
 
 def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
@@ -639,13 +646,14 @@ def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
         return {"status": "committed", "mutated": True}
 
     command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
-    compact = manager.invoke(command, (vault,), {})
+    compact = manager.invoke(command, (vault,), {"response_detail": "full"})
 
-    assert compact["graph_sync"] == "pending"
-    assert compact["graph_sync_code"] == "GRAPH_SYNC_REPAIR_QUEUED"
-    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
-    assert isinstance(compact["graph_sync_remediation"], str)
-    assert compact["graph_sync_remediation"]
+    operational = _operational(compact)
+    assert operational["graph_sync"] == "pending"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_REPAIR_QUEUED"
+    assert operational["graph_sync_checkpoint"] == required.checkpoint_sha256
+    assert isinstance(operational["graph_sync_remediation"], str)
+    assert operational["graph_sync_remediation"]
 
 
 @pytest.mark.parametrize("repair", ["settled", "queued", "withdrawn"])
@@ -677,12 +685,17 @@ def test_a_covering_acknowledgement_does_not_hide_outstanding_graph_repair(
             EpistemicGraphIndex(root).suspend_reads()
         return {"status": "committed", "mutated": True}
 
-    compact = manager.invoke(SimpleNamespace(name="remember", read_only=False, leaf=leaf), (vault,), {})
+    compact = manager.invoke(
+        SimpleNamespace(name="remember", read_only=False, leaf=leaf),
+        (vault,),
+        {"response_detail": "full"},
+    )
 
-    assert compact["status"] == "committed"
-    assert compact["graph_sync"] == ("completed" if repair == "settled" else "pending")
+    operational = _operational(compact)
+    assert operational["status"] == "committed"
+    assert operational["graph_sync"] == ("completed" if repair == "settled" else "pending")
     if repair != "settled":
-        assert compact["graph_sync_code"] == (
+        assert operational["graph_sync_code"] == (
             "GRAPH_SYNC_REPAIR_QUEUED" if repair == "queued" else "GRAPH_SYNC_UNAVAILABLE"
         )
 
@@ -716,13 +729,12 @@ def test_a_settled_outcome_is_reported_rather_than_downgraded_to_pending(
     assert graph_sync.join_registered_if_settled(vault, state_root=state_dir) is True
 
 
-def test_a_pending_graph_outcome_survives_the_compact_projection() -> None:
-    """`compact` is the default response detail, so the signal has to reach it.
+def test_a_pending_graph_outcome_is_kept_in_full_diagnostics_not_the_compact_reply() -> None:
+    """A pending graph outcome is operational: `full` keeps it, the agent reply does not.
 
-    `project_terminal` whitelists the `graph_sync` values a client may branch
-    on. A new value the projection silently drops is indistinguishable from
-    saying nothing, which is precisely the dishonest fast write this change
-    exists to avoid.
+    Nothing in it changes what the agent says or calls next, and a pending
+    catch-up is the normal state of a fast write. A failed outcome is the one
+    that reaches the reply, as a notice.
     """
     from exomem.mutation_terminal import committed_terminal, project_terminal
 
@@ -736,10 +748,13 @@ def test_a_pending_graph_outcome_survives_the_compact_projection() -> None:
     )
 
     compact = project_terminal({**terminal, **pending}, detail="compact")
+    full = project_terminal({**terminal, **pending}, detail="full")
 
-    assert compact["graph_sync"] == "pending"
-    assert compact["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
-    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
+    assert not [key for key in compact if key.startswith("graph_sync")]
+    operational = _operational(full)
+    assert operational["graph_sync"] == "pending"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
+    assert operational["graph_sync_checkpoint"] == required.checkpoint_sha256
 
 
 def test_a_caller_that_must_block_opts_in_rather_than_every_write_paying(
