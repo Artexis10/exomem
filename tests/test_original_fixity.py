@@ -32,6 +32,7 @@ from exomem import (
     original_fixity,
     preserve,
     reserved_paths,
+    runtime_readiness,
 )
 from exomem.governance.principal import library_scope
 
@@ -423,6 +424,9 @@ def test_a_note_the_walk_cannot_read_leaves_the_counts_unknown_with_the_failure_
         original_fixity.run_pass(vault)
         assert original_fixity.status(vault) == {"state": "unknown", "walk_error": "IO_REFUSED"}
         assert original_fixity.readiness(vault) == {"state": "unknown", "walk_error": "IO_REFUSED"}
+        assert original_fixity.attention_findings(vault) == ([], "unknown")
+        assert runtime_readiness._public_originals(original_fixity.readiness(vault)) == {
+            "state": "unknown", "walk_error": "IO_REFUSED"}
     finally:
         note.chmod(0o644)
 

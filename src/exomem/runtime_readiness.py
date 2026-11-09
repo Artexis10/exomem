@@ -534,7 +534,8 @@ def build_runtime_readiness(
 
 
 def _public_originals(value: Mapping[str, Any]) -> dict[str, Any]:
-    """The fixity block as a state, a count and a stale pass's time only, so no path, name or hash leaves the cell."""
+    """The fixity block as a state, a count, stale times and a walk failure code only, so no path, name or hash
+    leaves the cell."""
     from . import original_fixity
 
     state, unresolved = value.get("state"), value.get("unresolved")
@@ -542,8 +543,14 @@ def _public_originals(value: Mapping[str, Any]) -> dict[str, Any]:
         return {"state": state, "unresolved": unresolved}
     if state == original_fixity.SIGNAL_OFF:
         return {"state": state}
-    last = value.get("last_pass_at")
-    return {"state": original_fixity.SIGNAL_UNKNOWN, **({"last_pass_at": last} if isinstance(last, str) else {})}
+    unknown: dict[str, Any] = {"state": original_fixity.SIGNAL_UNKNOWN}
+    for key in ("last_pass_at", "last_walk_at"):
+        if isinstance(value.get(key), str):
+            unknown[key] = value[key]
+    failure = value.get("walk_error")
+    if isinstance(failure, str) and failure.isidentifier():  # a code or class name, never a message
+        unknown["walk_error"] = failure
+    return unknown
 
 
 # The published catalogue checkpoint pair this process first saw while it was

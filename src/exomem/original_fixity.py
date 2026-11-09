@@ -1043,8 +1043,8 @@ def _fix(state: str) -> str:
 def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
     """One finding for each restored, missing or damaged original; read-only.
 
-    Returns the findings and None when the last pass is current. Coverage is "unknown" when fixity
-    is off, before the first pass finishes, when the last pass is stale, or when the table cannot
+    Returns the findings and None when the last pass and walk are current. Coverage is "unknown" when
+    fixity is off, before the first pass and walk finish, when either is stale, or when the table cannot
     be read; the findings recorded so far still come back.
     """
     from .audit import AuditFinding
@@ -1062,7 +1062,7 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
                 f"SELECT {_ROW_COLUMNS} FROM originals WHERE state IN ({_marks(REPORTED)}) ORDER BY path", REPORTED)]
     except (sqlite3.Error, OSError, ValueError):
         return [], "unknown"
-    coverage = "unknown" if "pass_at" not in meta or _stale(meta) else None
+    coverage = "unknown" if _no_answer(meta) is not None else None
     # An outside path names the owner's own filesystem; another audience receives only the kind of copy.
     restricted = bool(rows) and egress.visible_page_filter(Path(vault)) is not None
 
