@@ -718,29 +718,51 @@ def _offload_admission(
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
-def upload_refusal(vault: Path, declared_bytes: int) -> str | None:
+def upload_refusal(vault: Path, declared_bytes: int, filename: str) -> str | None:
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
-    Ingress applies offload's admission rule to a census read now, before any byte arrives. A store that
-    does not offload never receives the upload, and a resident upload stays on the volume, so neither
-    charges the allowance. An unknown census or allowance admits the upload: its original stays local with
-    retryable offload demand, as the spec asks of an unknown meter. The declared size counts as a new
-    version, because nothing shows a duplicate of a stored version before the bytes arrive.
+    Only an upload that offload would store charges the allowance: a note or a dataset stays on the volume
+    (design D1), and so does an artifact too large to offload. The recorded census decides first. Only a
+    record that says the upload does not fit is confirmed by a census read now, and only the confirmed figure
+    refuses. No record, a stale record, an unknown figure, or a configuration, volume or ledger that cannot be
+    read admits the upload: its original stays local with retryable offload demand, and offload rechecks the
+    allowance before publication. The declared size counts as a new version, because nothing shows a
+    duplicate of a stored version before the bytes arrive.
     """
+    from . import source_inspection
+
     vault = Path(vault).resolve()
-    config = originals.configuration(vault)
-    if config is None or config.get("enabled") is not True:
+    try:
+        config = originals.configuration(vault)
+        if config is None or config.get("enabled") is not True:
+            return None
+        bounds = media_capacity.bounds_for(config, vault)
+        stays = originals.is_note_path(filename) or source_inspection.is_dataset_name(filename)
+        if stays or (bounds is not None and bounds.classify(declared_bytes) != media_capacity.OFFLOADABLE):
+            return None
+        # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
+        # upload: the per-item census cost that task 5.4.9 removed from offload. A record older than the demand
+        # lease is stale, as the window status judges it.
+        recorded = recorded_census(vault)
+        if recorded is None or recorded.older_than(DEMAND_LEASE_SECONDS):
+            return None
+        decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
+        if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
+            decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
+    except (OSError, ValueError, TypeError, MediaStoreError):  # An unreadable policy, volume or ledger: unknown.
         return None
-    bounds = media_capacity.bounds_for(config, vault)
-    if bounds is not None and bounds.classify(declared_bytes) == media_capacity.RESIDENT:
-        return None
-    upload = originals.BinaryBinding("", "", declared_bytes)  # A version not uploaded yet: only its size counts.
-    decision = media_allowance.admission(media_allowance.reference_usage(vault), upload, None,
-                                         config.get("allowance_bytes"))
     if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
         return None
-    return (f"the upload's {declared_bytes:,} bytes exceed the remaining media allowance: {decision.used_bytes:,} of "
-            f"{decision.allowance_bytes:,} bytes are in use; delete stored media and empty Trash, or raise the allowance")
+    # The owner's used total stays out: D10 withholds global usage from restricted principals.
+    return (f"the upload's {declared_bytes:,} bytes exceed what remains of the media allowance of "
+            f"{decision.allowance_bytes:,} bytes; delete stored media and empty Trash, or raise the allowance")
+
+
+def _upload_decision(
+    census: RecordedCensus, declared_bytes: int, allowance_bytes: object,
+) -> media_allowance.AllowanceDecision:
+    projected = None if census.used_bytes is None else census.used_bytes + declared_bytes
+    return media_allowance.decide(census.used_bytes, projected, allowance_bytes, census.observed_at)
 
 
 def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:

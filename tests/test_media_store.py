@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from test_agent_upload_handoff import _post, _prepare
+from test_agent_upload_handoff import upload_env as upload_env
 
 from exomem import held_fs, originals, reserved_paths
 from exomem.governance.principal import library_scope
@@ -1661,38 +1663,34 @@ def test_allowance_refusal_reports_the_current_unknown_or_exceeded_code(vault: P
     assert originals.original_state(vault, path).state == "cached"
 
 
-@pytest.mark.parametrize("route", ["session", "form"])
-def test_an_upload_above_the_remaining_allowance_is_refused_before_any_byte(vault: Path, selected_store, monkeypatch, route):
-    """Defect: ingress admits an upload that the allowance cannot hold, so its bytes land and only offload refuses."""
-    import base64
+def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_on_a_confirmed_figure(
+        vault: Path, selected_store, upload_env, monkeypatch):
+    """Defect: each upload walks every note under the consistency guard to admit it, or one the allowance cannot hold is kept.
 
-    from test_upload_sessions import TUS, _client
+    The refusal names the requested size and the allowance, never the owner's total in use (D10). A dataset stays
+    on the volume (D1), so the allowance never refuses it.
+    """
+    used = _recorded_by_a_batch(vault)
+    walks = _count_censuses(monkeypatch)
+    data = b"exact original\n"
 
-    from exomem import upload_sessions
-    from exomem.state_paths import vault_state_dir
+    admitted = _post(upload_env, _prepare(upload_env, data), data)
 
-    path = _preserved(vault)
-    _offload(vault, path)
+    assert admitted.status_code == 201, admitted.text
+    assert walks == []
     values, config = selected_store
-    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": path.stat().st_size + 4096}}}))
-    client = _client(vault, monkeypatch)
-    before = sorted(vault.rglob("*"))
-    if route == "session":
-        metadata = {"filename": "large.bin", "scope": "Device", "category": "Uploads", "sha256": "0" * 64}
-        refused = client.request("POST", upload_sessions.SESSIONS_PATH, headers={
-            **TUS, "Upload-Length": "4097",
-            "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
-        })
-    else:
-        # The form's least file size is its Content-Length less the 1 MiB that the route allows for framing.
-        refused = client.request("POST", "/upload", headers={"Authorization": "Bearer sekret"},
-                                 files={"file": ("large.bin", b"x" * (1024 * 1024 + 4097), "application/octet-stream")},
-                                 data={"scope": "Device", "category": "Uploads"})
+    allowance = used + len(data) - 1
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": allowance}}}))
+
+    refused = _post(upload_env, _prepare(upload_env, data), data)
+
     assert refused.status_code == 413, refused.text
     assert refused.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
-    assert f"of {path.stat().st_size + 4096:,} bytes are in use" in refused.json()["reason"]
-    assert sorted(vault.rglob("*")) == before
-    assert not (vault_state_dir(vault) / upload_sessions.STORE_DIRNAME).exists()
+    assert len(walks) == 1
+    reason = refused.json()["reason"]
+    assert f"{len(data):,} bytes" in reason and f"{allowance:,} bytes" in reason and f"{used:,}" not in reason
+    dataset = _post(upload_env, _prepare(upload_env, data), data, filename="table.csv")
+    assert dataset.status_code == 201, dataset.text
 
 
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
