@@ -141,9 +141,10 @@ and the judge's verdict). The actor model defaults to the one that the other sui
 `--model` (a full model id) when the incident happened on another. A session costs about $0.2 to $1 of notional
 subscription usage.
 
-Reading the result: with three repeats, a case regresses when the changed arm passes fewer runs than
-the base arm. Any other difference is "no change" at this size. When a count has unknown units, run
-again in a new run root before you read it.
+Reading the result: three repeats cannot prove a difference. When the changed arm passes fewer runs
+than the base arm, treat the case as suspect and rerun it with more repeats before you merge. Any
+other difference is "no change" at this size. When a count has unknown units, run again in a new run
+root before you read it.
 
 ## Where data and evidence live
 

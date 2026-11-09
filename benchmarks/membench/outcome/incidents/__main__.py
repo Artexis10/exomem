@@ -304,7 +304,7 @@ def main(argv: list[str] | None = None) -> None:
     for rep in range(1, args.repeats + 1):
         for case in cases:
             for name in list(arms) if rep % 2 else list(reversed(arms)):
-                # A neutral id: the arm appears in no path that the actor or the judge can see.
+                # A neutral id: no session or judge directory carries the arm's name.
                 unit = uuid.uuid4().hex[:12]
                 try:
                     record = run_unit(
