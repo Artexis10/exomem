@@ -39,7 +39,7 @@
 ## 6. Language and teaching
 
 - [ ] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases.
-- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, `judge_categorically`, the verdict-set comment and the `observe_memory` verdict docstring, and say that `credence` is a unit row, never frontmatter.
+- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, the verdict-set comment and the `observe_memory` verdict docstring, and say that `credence` is a unit row, never frontmatter.
 
 ## 7. Proof and delivery
 

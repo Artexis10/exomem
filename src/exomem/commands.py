@@ -1570,9 +1570,9 @@ def op_bootstrap(
                 "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
-                "Close a claim with one word from the outcome vocabulary below. This "
-                "substrate keeps no numeric confidence, credence, or probability: a "
-                "verdict is lifecycle state, never a score."
+                "Close a claim with one outcome word below, never a score. A claim has no "
+                "confidence score: put a degree of belief in a belief unit with its holder, "
+                "and a basis for a probability."
             ),
             "keep_the_negative_result": (
                 "Refuted is not superseded. A refuted claim keeps active standing and "

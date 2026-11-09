@@ -89,8 +89,9 @@ def test_commitments_teach_the_five_rules(vault: Path) -> None:
     assert "prediction" in expectation and "check_by" in expectation
 
     judge = commitments["judge_categorically"].lower()
-    assert "no numeric confidence" in judge
+    assert "no confidence score" in judge
     assert "never a score" in judge
+    assert "belief unit" in judge and "holder" in judge
 
     negative = commitments["keep_the_negative_result"].lower()
     assert "refuted is not superseded" in negative

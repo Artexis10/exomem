@@ -42,7 +42,7 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: to 5,200 for the line that names the schema read listing a vault's own verdicts (about 150
 #: bytes), which the verdict registry requires: the payload teaches the shipped verdicts only.
 #: It was raised again to 5,400 for the ten governed unit-metadata keys and the `belief` kind
-#: that the language added (5,080 to 5,312 bytes): the contract names every key the parser reads.
+#: that the language added (5,080 to 5,313 bytes): the contract names every key the parser reads.
 SECTION_BYTE_CEILINGS = {
     "authoring": 20_900,
     "vocabulary": 11_900,

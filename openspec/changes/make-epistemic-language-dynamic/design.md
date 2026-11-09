@@ -177,7 +177,7 @@ The rejected alternatives were levels only, which keeps the old rule but gives u
 
 Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `basis` and `mood` are common words in existing notes, and `credence`, `occurred_at` and `modality` are not.
 
-`credence` is a unit row on a belief unit, never a frontmatter field. The canonical rule that confidence is not a frontmatter field still holds. Today's teaching says Exomem keeps no credence or numeric confidence anywhere. Slice 6 rewrites those sites: the scaffold's frontmatter, skill and vault-care references, `judge_categorically` in `commands.py`, and the comment beside the verdict set in `semantic_units.py`.
+`credence` is a unit row on a belief unit, never a frontmatter field. The canonical rule that confidence is not a frontmatter field still holds. Today's teaching says Exomem keeps no credence or numeric confidence anywhere. Slice 4 rewrites `judge_categorically` in `commands.py`. Slice 6 rewrites the other sites: the scaffold's frontmatter, skill and vault-care references, and the comment beside the verdict set in `semantic_units.py`.
 
 Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
