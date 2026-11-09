@@ -6955,9 +6955,9 @@ def op_activate_context(
 
     Reuse held context; conversation gives excerpts. Agent focus is not human intent.
     Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
-    Read map/task_context refs and method scope/exclusions with read_memory.
+    Read map/task_context refs and method scope/exclusions with a page read.
     Discard held methods on methods.reset. Follow next_action.
-    epistemic_status: counts/completeness; read_memory: provenance.
+    epistemic_status: counts/completeness; a page read: provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -6965,15 +6965,11 @@ def op_activate_context(
         purpose: Visibility; never ranking.
         continuity: Prior token unchanged; drop on compaction/new session.
         anchor: Visible compiled ref for an established prior subject, ambiguity or correction.
-            Hidden and ineligible refs refuse alike.
-        include_timings: Stage timings.
         client: Lowercase client label; invalid labels ignored.
         session: Stable opaque conversation ID; max 256 chars.
         workspace: Thread project key; max 256 chars.
-        conversation: All optional: focus (one line/240 chars; current subjects and attachment names/objects),
-            refs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
-        trigger: user_turn: initial recall. task_refresh: keep turn; task in focus;
-            intent_resolution qualifies human intent separately.
+        conversation: Relevant excerpts and refs; never full history.
+        trigger: user_turn: initial recall. task_refresh: keep turn; task in focus.
         initiator: Caller label; no authority. Invalid labels ignored.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch

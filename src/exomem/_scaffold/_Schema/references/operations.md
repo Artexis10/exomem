@@ -46,10 +46,11 @@ does not write an Entity. A facet field that the entity type declares goes throu
 
 ## Planning
 
-`query_plan_items` and `add_plan_item` are the public tools for human-owned intended future
-state. `query_plan_items` carries the read-only operations `inspect`, `validate`, and `query`;
-`add_plan_item` carries the guarded `create`, `add`, `update`, `triage`, `revise`, and
-`rebaseline`. `query_plan_items`, `add_plan_item` and `edit_plan_item` take their own fields; `read_instructions(topic=<tool>)` shows them.
+`query_plan_items`, `add_plan_item` and `edit_plan_item` are the public tools for human-owned
+intended future state: read items, add one, and change one. The `plans` operations of
+`inspect_memory` (`plans.inspect`, `plans.validate`, `plans.history`) and `manage_memory`
+(`plans.create`, `plans.revise`, `plans.rebaseline`) cover a collection's contract. Each tool takes its
+own fields; `read_instructions(topic=<tool>)` shows them.
 Use `query_plan_items()` without `collection` to discover Planning
 collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
@@ -97,10 +98,11 @@ paths, or trash internals through curation.
 
 ## Records
 
-`query_records` and `add_record` are the public product tools for human-owned
-observed state. `query_records` carries `describe`, `validate`, `inspect`, and
-`query`; `add_record` carries `create`, `append`, `update`, `revise`, and
-`rebaseline`. Do not replace them with storage-specific tools. `describe` returns the complete contract;
+`query_records`, `add_record` and `edit_record` are the public product tools for human-owned
+observed state: `query` reads a collection, `append` adds an event, `update` changes one item. The
+`records` operations of `inspect_memory` (`records.describe`, `records.validate`, `records.inspect`,
+`records.history`) and `manage_memory` (`records.create`, `records.revise`, `records.rebaseline`) cover a
+collection's contract. Do not replace them with storage-specific tools. `describe` returns the complete contract;
 `validate` is read-only preflight; `inspect` is report-only; `query` returns a
 bounded current view; `create` explicitly creates a reviewed collection contract;
 `append` adds a new event; `update` changes one item with current stale-write

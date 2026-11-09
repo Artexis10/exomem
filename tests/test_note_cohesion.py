@@ -297,7 +297,10 @@ _VALID = {
     "ref": "exomem://review/0123456789abcdef01234567",
     "fingerprint": "0123456789abcdef01234567",
     "id": review_ids.item_id(
-        {"ref": "exomem://review/0123456789abcdef01234567", "fingerprint": "0123456789abcdef01234567"}
+        {
+            "ref": "exomem://review/0123456789abcdef01234567",
+            "fingerprint": "0123456789abcdef01234567",
+        }
     ),
     "question": note_cohesion.QUESTION,
 }

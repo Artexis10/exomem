@@ -8,17 +8,17 @@ a new entity after resolve-before-create follows `proactive_capture`.
 ## Entity resolution
 
 Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})` first. If one active page
+  Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` first. If one active page
   matches, use `edit_note` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
-  `change_connections(operation={'kind': 'create-entity'})` only when the identity is stable,
+  `manage_memory(operation="connections.create_entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
   Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
   `connections` writes plain links and states no meaning: use a `relations` item to
   name a specific relation. A write that adds the generic relation is refused.
-  An unregistered-type finding supplies `proposal` and `expected_hash`; save
+  An unregistered-type finding supplies `proposal` and a hash; save
   those exact values through the governed
-  `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
+  `manage_memory(operation="schema.save_entity_types")` leaf with `why`, never by
   editing frontmatter around the registry rule.
   Apply the entity eligibility rule in [engagement](engagement.md).
 
@@ -30,11 +30,9 @@ title. So when you write an entity's name in a script other than the one the
 user used for it (a Latin title for a name they wrote in Japanese, or the
 reverse), add a native-script alias: the user's own spelling.
 
-- At capture: `change_connections(operation={'kind': 'create-entity', 'aliases': [...]})`.
-- On an existing page: `edit_note` with `{"kind": "patch_frontmatter",
-  "field": "aliases", "value": [...current, "<the user's spelling>"],
-  "expected_hash": ...}` and a `why`; the list replaces the field, so keep the
-  current aliases.
+- At capture: `manage_memory(operation="connections.create_entity", arguments={'aliases': [...]})`.
+- On an existing page: `edit_note(action="set_fields", fields={"aliases": [...current, "<the user's spelling>"]}, why=...)`;
+  the list replaces the field, so keep the current aliases.
 
 Use only a spelling the user wrote or the source states; never a
 transliteration or translation you made up. An alias is a name the page
@@ -49,7 +47,7 @@ truthful outcomes when no useful distinction is supported; there is no quota for
 types or edges. A resolver returns definitions and evidence; its null selection
 or proposal fields leave the judgment to the active agent. When a useful recurring
 identity has no fitting type, author its definition and rationale, preserve the
-existing extension definitions, and use `change_schema(operation={'kind': 'save-entity-types'})`
+existing extension definitions, and use `manage_memory(operation="schema.save_entity_types")`
 with the reviewed registry document and current extension hash. An empty match
 does not require squeezing the identity into a core type or abandoning the type
 proposal. Record the reviewed fingerprint, family, registry hashes, target
@@ -73,14 +71,14 @@ Use this loop whenever a durable conclusion should enter Exomem:
    conclusion draws from. Those become `sources:` on the write call. Capture
    external material first: a URL, connector/message ID, remote file ID, working
    script, excerpt, or derivative summary is not itself a source citation. Use
-   `capture_source` or the Evidence lane for the original, then cite the returned
+   `save_source` or the Evidence lane for the original, then cite the returned
    path or stable ref. If the original cannot be recovered, remove the unsupported
    claim explicitly; never recreate an "original" from the derivative. If the
    conclusion came from live work with nothing external captured, `sources: []`
    is honest and valid.
-4. Draft the typed page at the right layer: `capture_source` for raw source, `create_note` for a compiled conclusion, `read_connections/change_connections` for entity/link work, `prepare_note/change_observations` or `edit_note` for guarded corrections, `supersede_note` for supersession.
+4. Draft the typed page at the right layer: `save_source` for raw source, `create_note` for a compiled conclusion, `inspect_memory` and `manage_memory` for entity/link work, `add_observation` or `edit_note` for guarded corrections, `supersede_note` for supersession.
 5. Reuse meaningful links established by the current search/read context. When
-   connections remain unknown, use `read_connections(operation={'kind': 'suggest-links'})`
+   connections remain unknown, use `inspect_memory(operation="connections.suggest_links")`
    on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
    that genuinely clarify provenance or context, and write accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
@@ -89,11 +87,11 @@ Use this loop whenever a durable conclusion should enter Exomem:
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
    `links.body_wikilinks`, and `relations.relation_debt` — lives under
-   `diagnostics` and needs `response_detail="full"`. Ask for it when provenance
+   `diagnostics` and needs `detail="full"`. Ask for it when provenance
    or connectivity is in doubt; if all three counts are zero and that is not
    honest, fix it before reporting. Corpus-aware `suggestions` are **off by
    default** because they cost a whole retrieval pass on the write path; pass
-   `suggestions=true` (with `response_detail="full"`) when you want them.
+   `suggest_links=true` (with `detail="full"`) when you want them.
    `write_feedback.suggestions.computed` tells you whether they ran.
 7. If a near-duplicate warning fires, prefer `edit_note` or `supersede_note` over a parallel page. If suggestions are useful, add them with a follow-up `edit_note`.
 8. If the write returned a `structure_suggestion`, handle it as below.
@@ -103,13 +101,13 @@ Use this loop whenever a durable conclusion should enter Exomem:
 
 Group work by dependencies, not by one tool call per reasoning turn. Read
 independent known pages together when the client supports parallel calls. Preserve
-several artifacts with one `preserve_artifacts` call, then use the discovered
-`change_media(operation={'kind': 'process', 'paths': [...]})` selector when available. Its ordered item results
+several artifacts with one `save_evidence` call, then use the discovered
+`manage_memory(operation="media.process", arguments={'paths': [...]})` selector when available. Its ordered item results
 acknowledge durable work; extraction finishes asynchronously. Do not claim to have
 read extracted content before public status/read proves it exists.
 
 Author related observations and accepted connections in the initial note where
-possible. On an existing page, `edit_note` with `operation.kind="batch_replace"`
+possible. On an existing page, `edit_note` with `action="replace_text"` and `edits=[...]`
 can combine known string changes into one guarded mutation. It is not an atomic
 multi-page transaction. Keep conflicting canonical edits ordered; run independent
 reads or artifact work concurrently only within the active client's capabilities.
@@ -119,9 +117,9 @@ source-independent tracker, background-note or unrelated capture work while it
 runs. Never bypass a source-version guard or reuse a stale staged backlink.
 
 Inspect each terminal and handle actionable warnings, but do not reread the page
-after every committed edit or poll until every projection is current. Chain a
-returned `after_hash` into the next supported `expected_hash`; use returned
-`unit_ref` for exact semantic edits. Finish with a bounded check of the requested
+after every committed edit or poll until every projection is current. Pass the
+returned page `id` as `note` only when the next `replace_body` must guard against a
+concurrent edit; use the returned unit id as `observation` for exact semantic edits. Finish with a bounded check of the requested
 state and citations. If the next operation explicitly needs current graph edges,
 honor its freshness refusal; optional graph lag does not invalidate a successful
 ordinary lookup.
@@ -134,13 +132,12 @@ answer its one question now: does this page answer more than one independent
 question? Name them.
 
 - **One question.** Keep the page whole however long it is. Dismiss the item with
-  `triage_memory(operation={'kind': 'decision', 'ref': <ref>, 'action': 'dismiss',
-  'expected_fingerprint': <fingerprint>, 'why': 'intentional: <the one question>'})`. The page stays quiet until it reaches its
+  `decide_review_item(review_item=<id>, decision='dismiss', why='intentional: <the one question>')`. The page stays quiet until it reaches its
   next size step.
 - **Several questions, each with its own material.** Propose a split through the
-  curation lane. Read the page's `check_memory` `curation-work-item` first: its
+  curation lane. Read the page's `inspect_memory(operation="curation.work_item")` first: its
   `step_schemas` give each step kind's required and allowed args. Then submit the
-  plan with `repair_memory` operation `curation-propose`. Preview the plan and
+  plan with `manage_memory` operation `curation-propose`. Preview the plan and
   ask the user for exact confirmation before applying it. After a split, a remainder
   or a new child that still reaches a size step gets its own item. Answer those in
   the same pass.
@@ -276,7 +273,7 @@ For **patterns** that apply across multiple projects, use `projects:` (plural
 list) instead of `project:` (singular), e.g. `projects: [project-alpha, project-beta]`.
 
 **Auto-registration of new project keys.** The `create_note`, `supersede_note`,
-`edit_note` (frontmatter-patch), and `read_connections/change_connections` (decision-entity)
+`edit_note` (frontmatter-patch), and `inspect_memory` and `manage_memory` (decision-entity)
 writers auto-append unknown
 slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
 `Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
@@ -298,7 +295,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
 ## Workflow: typical add-then-compile session
 
 1. **You paste raw material or ask to log something.**
-2. **Skill calls `capture_source` to create a source file.** Classify it on two
+2. **Skill calls `save_source` to create a source file.** Classify it on two
    independent axes and let the location follow: `source_kind` is what the
    artifact **is** (`article`, `session`, `research-report`, `invoice-receipt`,
    `field-notebook`, …) and `domain` is what it is **about** (`travel`, `health`,
@@ -320,7 +317,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
 3. **Compile under the live request and engagement policy.** Follow the
    [source compilation pass](#source-compilation-pass)
    for inventory, prior knowledge, central identities and semantic coverage.
-   An optional `prepare_note` scaffold prepares one note; adjacent pages are
+   An optional `create_note` scaffold prepares one note; adjacent pages are
    unreviewed candidates, and opening excerpts do not cover the full source.
 4. **Write reviewed outputs with `create_note`.** Carry original source references
    and grounded accepted relations in the first write. Follow the live confirmation
@@ -356,7 +353,7 @@ Raw capture remains valid without compilation.
 
 When the sources are a set of recordings and documents, such as a seminar series or a case file, run the pass above with these additions:
 
-1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability`, `asr_language_source` and `asr_language_mode` in the sidecar, and faults such as a wrong language or one line repeated. A `multilingual` mode means the engine read the recording in several languages, so `asr_language` is not a wrong-language fault. Reprocess a faulty extraction with `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})` before relying on it.
+1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability`, `asr_language_source` and `asr_language_mode` in the sidecar, and faults such as a wrong language or one line repeated. A `multilingual` mode means the engine read the recording in several languages, so `asr_language` is not a wrong-language fault. Reprocess a faulty extraction with `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})` before relying on it.
 2. Build a timeline. Order recordings by capture time, and mark recorder splits (one session in several files), overlaps and duplicates, so each session counts once.
 3. Read transcripts by time range and documents by page. Cite `[m:ss]` ranges and `[page N]` markers, not whole files.
 4. Give each claim one attribution class. The open observation category names the class, such as `source_asserted`, `verified`, `user_position` or `question`, and the `(context)` slot holds the citation, as in `- [verified] <claim> (<primary source and section>)`.
@@ -408,11 +405,11 @@ the label stays visible as review debt instead of being silently downgraded to a
 generic link.
 
 So the vocabulary is extensible, not fixed. Resolve before authoring with
-`read_connections(operation={'kind': 'resolve-relation'})`, and reuse a specific truthful
+`inspect_memory(operation="connections.resolve_relation")`, and reuse a specific truthful
 registered relation when one fits. A write that adds the generic relation is refused:
 when no relation fits, propose a new relation type, write a plain link as the last
 resort, or write no edge. No edge is better than invented meaning. For a durable recurring
-distinction, use `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})`,
+distinction, use `inspect_memory(operation="schema.propose_relation", arguments={'subject': 'relations'})`,
 review the complete delta and duplicate evidence, then persist that exact delta
 with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
 immutable: corrections create a new canonical key and deprecate the old one.
@@ -426,8 +423,8 @@ paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.
 
 If a wikilink target doesn't exist yet, prefer creating the entity stub via
-**read_connections/change_connections** rather than leaving a dangling link. Dangling links accumulate
-and surface in `read_review(operation={'kind': 'audit'})` as `broken_wikilink`.
+**inspect_memory** and **manage_memory** rather than leaving a dangling link. Dangling links accumulate
+and surface in `inspect_memory(operation="maintenance.audit")` as `broken_wikilink`.
 
 When creating an entity that points at a **currently-evolving external artifact**
 (a live spec, a code library, a service config), use **pointer-style** — summary
@@ -462,7 +459,7 @@ Read-only recall and review follow the live retrieval policy.
 - **Citations.** Every non-empty `sources` entry must resolve to authorized
   governed Source or Evidence material. A URL, connector or remote file ID,
   working script or derivative summary is not the original: capture it first
-  (`capture_source`, `preserve_evidence`, `preserve_artifacts`) and cite its
+  (`save_source`, `save_evidence`, `save_evidence`) and cite its
   governed path or stable ref. With no external source, pass an honest empty
   list. An unresolved citation returns `UNRESOLVED_SOURCE_CITATION` and writes
   nothing. Brackets and the leading `Knowledge Base/` are tolerated in paths.
@@ -474,26 +471,24 @@ Read-only recall and review follow the live retrieval policy.
 - **Edits.** A source-changing `edit_note` validates the complete final
   `sources` list and updates back-references atomically. An unrelated edit may
   leave a legacy unresolved citation; list that debt with
-  `read_review(operation={'kind': 'audit', 'categories': ['unresolved_source_citation']})`.
+  `inspect_memory(operation="maintenance.audit", arguments={'categories': ['unresolved_source_citation']})`.
 - **Frontmatterless pages.** Body and section edits work on ordinary Markdown
   without synthesizing YAML. Frontmatter and take-row operations still require
   frontmatter.
-- **Suggestions.** `create_note(suggestions=true)` adds a `suggestions` block of
+- **Suggestions.** `create_note(suggest_links=true)` adds a `suggestions` block of
   existing pages the note should probably link to (read it with
-  `response_detail="full"`). It costs one retrieval pass over the corpus, so it
+  `detail="full"`). It costs one retrieval pass over the corpus, so it
   is off by default; duplicate and overlap warnings run either way, and
   `write_feedback.suggestions.computed` says which happened.
 - **Relation recovery.** When `RELATION_DISPOSITION_STALE` or
   `RELATION_DISPOSITION_MISSING` blocks an `edit_note`, re-send the same
-  operation with `relation_disposition="reviewed_none"` and a
-  `relation_review_reason`; that one call commits. A validated edit
-  (`validate_only=true`) also sends its `transition_token` and
-  `relation_review_hash`, which is the relation review's, never the page content
-  hash. The decision then binds the page, not its bytes: later edits ask nothing
+  call with an `unlinked_reason`; that one call commits. A previewed edit
+  (`preview=true`) is committed by sending the same call again without `preview`; the
+  server binds the relation review itself. The decision then binds the page, not its bytes: later edits ask nothing
   while the page stays unconnected, and an edit that removes its last connection
   is still refused. The alternative is a typed `## Relations` entry
   (`- supports [[...]]`), or a plain link (`- links_to [[...]]`) when the page only
-  shares its subject with another page; use `reviewed_none` only when no page relates.
+  shares its subject with another page; use `unlinked_reason` only when no page relates.
   Dataview `supports:: [[...]]` is not relation syntax.
   A `GENERIC_RELATION_REFUSED` refusal takes no disposition: repeat the call with one of
   its listed specific relations, a proposed relation type, or a plain link
@@ -519,22 +514,22 @@ Contradiction and refutation do not imply supersession.
 Use replacement only when another page should become the current answer, under the active engagement policy.
 
 The semantic writer keeps prior Markdown in the correction's atomic transition.
-`read_memory(operation={'kind': 'page', 'include_history': true})` returns `revision_history` separately from the existing page operation log.
-Add `unit_ref` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
+`read_page(part="history")` returns `revision_history` separately from the existing page operation log.
+Add the unit id in `options` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
 A result with `lookup: stale` could not check linked names yet; repeat the same call shortly, not the continuation, before you treat history as absent.
 Entity and legacy corrections use their existing authorized edit owner.
-Records corrections use `change_records(operation={"kind": "update", ...})` and its retained row history.
+Records corrections use `edit_record(...)` and its retained row history.
 For observed-state corrections, follow the independent Records discovery route in
 `references/planning-records.md`; Note recall alone does not search structured items.
 A surface without the required edit owner reports that limit; it does not invent another home.
 
-### Updating one unit with `prepare_note/change_observations`
+### Updating one unit with `add_observation`
 
 An update rebuilds the whole unit. `verdict`, `check_by` and `id` are
 preserve-on-omit (pass an empty string to clear `verdict` or `check_by`), and
 metadata rows the tool does not own are carried through. `tags`, `context` and
 `relations` are replace-on-omit: omitting one clears it, so resend what should
 stay. `verdict` is a categorical epistemic outcome (abandoned, confirmed,
-inconclusive, qualified, refuted), never a confidence score. `update` and
-`remove` need `expected_fingerprint` and `expected_hash`; `after_hash` from the
-result is the next call's `expected_hash`.
+inconclusive, qualified, refuted), never a confidence score. `edit_note` with
+`action="edit_observation"` or `"remove_observation"` takes the unit id as `observation`;
+the server checks the unit version and refuses a stale id with the current one.

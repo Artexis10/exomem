@@ -502,7 +502,7 @@ def _tool_schema(name: str) -> str:
 
     tool = TOOLS[name]
     schema = _without_titles(inline_schema(tool.model.model_json_schema()))
-    schema["additionalProperties"] = False
+    schema.pop("additionalProperties", None)  # an unknown field is refused at the call; the schema need not say so
     return json.dumps(compact_input_schema(schema))
 
 
@@ -514,29 +514,45 @@ def door_schema(door: str, operations: Sequence[DoorOp]) -> dict[str, Any]:
     writes = door == DOORS["write"]
     properties: dict[str, Any] = {
         "operation": {"type": "string", "enum": [op.name for op in operations],
-                      "description": "area.action. read_instructions(topic=<operation>) lists its arguments."},
-        "arguments": {"type": "object", "description": "The operation's fields, as read_instructions lists them."},
+                      "description": "area.action; read_instructions(topic=<operation>) lists its fields."},
+        "arguments": {"type": "object", "description": "The operation's fields."},
     }
     if writes:
-        properties["detail"] = {"type": "string", "enum": ["compact", "full"], "description": "compact (default) or full."}
-    return {"type": "object", "properties": properties, "required": ["operation"], "additionalProperties": False}
+        properties["detail"] = {"type": "string", "enum": ["compact", "full"]}
+    return {"type": "object", "properties": properties, "required": ["operation"]}
 
 
 _DOOR_TEXT = {
     "read": ("Inspect memory",
-             "Read-only operations that no typed tool covers: files and folders, schema and governance, imports, "
-             "maintenance findings, connections, review context, episodes, media, and collection and plan details."),
+             "Read-only operations that no typed tool covers: files, schema, governance, imports, maintenance, "
+             "connections, review context, episodes, media, collection and plan details."),
     "write": ("Manage memory",
               "Operations that change memory and that no typed tool covers: files, schema, governance, imports, "
-              "maintenance repairs, connections, episodes, media and collection and plan structure. Preview a change "
-              "with the inspect_memory operation of the same name when it has one."),
+              "repairs, connections, episodes, media, collection and plan structure. Preview with the "
+              "inspect_memory operation of the same name, when it has one."),
 }
+
+
+@functools.cache
+def _published_tool_type() -> type:
+    from fastmcp.tools import FunctionTool
+
+    class PublishedTool(FunctionTool):
+        def get_meta(self):  # type: ignore[override]
+            # FastMCP stamps `_meta.fastmcp.tags: []` on every tool: 31 bytes that a client resends each turn.
+            meta = super().get_meta()
+            if meta.get("fastmcp") == {"tags": []}:
+                del meta["fastmcp"]
+            return meta or None
+
+    return PublishedTool
 
 
 def build_tools(commands: Sequence[Any]) -> dict[str, Any]:
     """The FunctionTools that discovery lists for typed tools and doors."""
-    from fastmcp.tools import FunctionTool
     from mcp.types import ToolAnnotations
+
+    from .command_surface import OPEN_WORLD_OPS
 
     surface = public_surface()
     listed = surface.listed_names(commands)
@@ -549,17 +565,18 @@ def build_tools(commands: Sequence[Any]) -> dict[str, Any]:
 
     def publish(name: str, title: str, description: str, schema: dict[str, Any], annotations, meta=None):
         function = replace_name(handler, name, description)
-        tool = FunctionTool.from_function(function, name=name, description=description, annotations=annotations,
-                                          meta=dict(meta) if meta else None, output_schema=None)
+        tool = _published_tool_type().from_function(function, name=name, title=title, description=description,
+                                                    annotations=annotations, meta=dict(meta) if meta else None,
+                                                    output_schema=None)
         tool.parameters = schema
         tools[name] = tool
 
     for name, wire in surface.tools.items():
         if name in listed:
             publish(name, wire.title, wire.description, tool_schema(wire),
-                    ToolAnnotations(title=wire.title, readOnlyHint=wire.effect == "read",
+                    ToolAnnotations(readOnlyHint=wire.effect == "read",
                                     destructiveHint=wire.destructive, idempotentHint=wire.idempotent or wire.effect == "read",
-                                    openWorldHint=False), wire.meta)
+                                    openWorldHint=any(route.command in OPEN_WORLD_OPS for route in wire.routes)), wire.meta)
     for effect, door in DOORS.items():
         if door not in listed:
             continue
@@ -569,7 +586,7 @@ def build_tools(commands: Sequence[Any]) -> dict[str, Any]:
             v.destructive for op in operations for r in surface._renderings[op.command] if r.name == op.rendering
             for v in r.variants if v.kind == op.kind)
         publish(door, title, description, door_schema(door, operations),
-                ToolAnnotations(title=title, readOnlyHint=effect == "read",
+                ToolAnnotations(readOnlyHint=effect == "read",
                                 destructiveHint=destructive, idempotentHint=effect == "read", openWorldHint=False))
     return tools
 

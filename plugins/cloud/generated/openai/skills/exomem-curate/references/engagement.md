@@ -9,11 +9,11 @@ nudge re-arms that judgment each turn; on clients without hooks this text is the
 only prompt to check, so read it as standing instruction rather than advice.)
 
 **Prominence level.** How strongly the two behaviours below apply is tunable.
-`bootstrap(operation={'kind': 'instructions'})` reports the effective level under `engagement` for every client.
+`read_instructions()` reports the effective level under `engagement` for every client.
 Use that live value; the table below describes levels, not a request to change one.
 Only an explicit user request to change the setting authorizes
-`change_settings with `operation.kind="set"` or `"clear"``; inspect first and use its revision.
-Ordinary recall, capture, bootstrap, installation, and missing hooks do not
+`manage_memory` with `operation="settings.set"` or `"settings.clear"`; inspect first and use its revision.
+Ordinary recall, capture, reading instructions, installation, and missing hooks do not
 authorize a saved preference change. Hook cadence is separate: when `engagement`
 carries `hook_cadence`, `exomem prominence <level>` on that client changes its
 local reminders, not the saved preference. The section below describes
@@ -72,31 +72,31 @@ Updating a resolved entity follows the live capture disposition; the threshold f
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
   is how the corpus grows.
-- Raw material -> `capture_source`. A durable conclusion -> draft with
-  `create_note` or `read_connections/change_connections`, run
-  `read_connections(operation={'kind': 'suggest-links'})`, use `suggest-relations` when
+- Raw material -> `save_source`. A durable conclusion -> draft with
+  `create_note` or `inspect_memory` and `manage_memory`, run
+  `inspect_memory(operation="connections.suggest_links")`, use `suggest-relations` when
   directional meaning matters, and run the near-duplicate check first,
   then write and report one line: `Saved -> <title>`.
 - Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})` first. If one active page
+  Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` first. If one active page
   matches, use `edit_note` for a small stable-fact correction or the canonical
   relation workflow for a new connection. If none matches, use
-  `change_connections(operation={'kind': 'create-entity'})` only when the identity is stable,
+  `manage_memory(operation="connections.create_entity")` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
-  An unregistered-type finding supplies `proposal` and `expected_hash`; save
+  An unregistered-type finding supplies `proposal` and a hash; save
   those exact values through the governed
-  `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
+  `manage_memory(operation="schema.save_entity_types")` leaf with `why`, never by
   editing frontmatter around the registry rule.
   An incidental name without reusable facts, unresolved identity, or transient participant
   stays in source/note context.
 - **Recurring-identity maintenance boundary (balanced/maximal only).** On the
-  first user turn after bootstrap, after primary work and before the final
-  response, call `read_review(operation={'kind': 'attention', 'categories': ['entity_recurrence'], 'limit': 3})` once per session. Later ordinary
+  first user turn after `read_instructions`, after primary work and before the final
+  response, call `list_review_items(queue='due', categories=['entity_recurrence'], limit=3)` once per session. Later ordinary
   prompts do not rescan. It returns at most three candidates, each carrying at most eight contexts. Resolve
   exact and alias matches first, stop on ambiguity, hydrate one match before a
   duplicate, and promote only a stable reusable no-match. Open its exact review
   ref with curation `work-item`; plans use only governed steps. An unknown kind
-  goes through `change_schema(operation={'kind': 'save-entity-types'})`, then refreshes
+  goes through `manage_memory(operation="schema.save_entity_types")`, then refreshes
   the candidate; never edit the registry through curation.
   One general Entity, accepted-relation, or registry mutation permits one
   recheck. A separately confirmed hydration batch with a terminal receipt
@@ -124,7 +124,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   Planning, then update a matching item before creating an inbox item.
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
-  published, or failed. Route it to Records — `change_records(operation={"kind": "append", ...})`
+  published, or failed. Route it to Records — `add_record(...)`
   into the one compatible collection.
 - **Pairing rule.** Append an observed outcome to Records first; it is the
   canonical observation. It never changes Planning automatically. An explicit
@@ -170,13 +170,13 @@ demand that something be written.
 stopping point, you hold the most context. The recap is a Source, and a live page that
 names it in `sources:` covers it.
 
-1. Record one bounded recap with `record_episode(operation={'kind': 'record'})`: a
+1. Record one bounded recap with `save_episode()`: a
    one-line subject and summary, what was worked on, decided and left open, and at
    most three verbatim user statements worth keeping.
 2. Compile or explicitly dismiss every Decided item; the pass is complete before citation.
 3. Cite the recap from each updated compiled note; the citation records the completed pass.
 
-Use the ordinary writers (`edit_note`, `change_observations`, `supersede_note`) for
+Use the ordinary writers (`edit_note`, `add_observation`, `supersede_note`) for
 each item's canonical page. An item that changes no page needs no write; make its
 disposition explicit. Entity, plan and record pages take no citation. Their updates
 alone leave an episode uncited. In a mixed recap, one compiled note's citation holds
@@ -201,7 +201,7 @@ Record only when the user asks or the live `proactive_capture` disposition permi
 it. At `off` and `light`, an unrequested hook reminder does not authorize capture.
 
 **Episode candidates, where the service runs them.** When
-`read_episode(operation={'kind': 'candidates'})` reports `execution: enabled`, the same
+`inspect_memory(operation="episodes.candidates")` reports `execution: enabled`, the same
 decomposition can run as typed candidates against the recorded recap. `prepare`
 each durable change with its route, its home (an existing page's `target`, or a
 new page's `title`), the pages you inspected as other homes with their scope in
@@ -231,15 +231,15 @@ Remember any prior due mention through continuation, compaction, hooks, MCP, RES
 A transport session, credential, workspace or process does not define a new client conversation.
 Receiving a candidate does not use this allowance; the active agent remembers the mention without a new server ledger.
 
-Read `read_review(operation={'kind': 'item-context', 'ref': ...})` for the needed context; its bounded lookup may fall back to an existing wider audit.
-`read_review/triage_memory` has no `expected_fingerprint` argument.
+Read `inspect_memory(operation="review.item_context", arguments={'ref': ...})` for the needed context; its bounded lookup may fall back to an existing wider audit.
+`decide_review_item` takes the item `id` that `list_review_items` returned and no fingerprint; the server binds the fingerprint.
 After `REVIEW_ITEM_CHANGED`, refresh context and decide again before a mutation.
 
 Use one applicable authored writer to record a verdict or resolving relation under the existing authority gates.
-For example, `change_observations(operation={'kind': 'update'})` uses the real unit fingerprint and current parent hash.
-The due fingerprint binds a review finding and is not the unit fingerprint.
+For example, `edit_note(action='edit_observation')` takes the unit id from `read_page(part="units")`.
+A review item id binds a review finding and is not a unit id.
 The existing projection update clears a resolved finding; do not add a second dismissal.
-If presentation dismissal is the decision, use one `triage_memory(operation={'kind': 'decision', 'ref': ..., 'action': 'dismiss', 'expected_fingerprint': ..., 'why': ...})` mutation.
+If presentation dismissal is the decision, use one `decide_review_item(review_item=..., decision='dismiss', why=...)` mutation.
 That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
 
 ## Passing the conversation to activation
@@ -308,17 +308,17 @@ often this happened, and the writers that would teach the vault, each with the
   at most eight per page and 64 characters each; `edit_note` warns about one
   the index will skip.
 - **A referential cue** (`family: "referential_cue"`): the words this user
-  says to mean "continue". `read_schema(operation={'kind': 'validate', 'subject': 'activation-conventions', 'proposal': ...})` and `diff` first, then
+  says to mean "continue". `inspect_memory(operation="schema.validate", arguments={'subject': 'activation-conventions', 'proposal': ...})` and `diff` first, then
   `save-conventions` with `why` and the advisory's `expected_hash`. Add under
   `referential.add_cues` or `referential.add_filler` (one word), optionally as
   `{value, why, at, evidence}` with the advisory's `review` ref as evidence.
-- **Neither**: the words were a one-off. `triage_memory` with the `review`
+- **Neither**: the words were a one-off. `decide_review_item` with the `review`
   ref, `action="dismiss"`, a `why` and the `fingerprint`; it stays quiet until
   new misses arrive. `review/family/activation-naming` quiets the kind.
 
 A stale hash refuses the write: re-read and decide again. To undo a learned
 name, edit it out of `learned_aliases`. To undo a registry change,
-`read_schema(operation={'kind': 'history'})` lists the kept versions with their
+`inspect_memory(operation="schema.history")` lists the kept versions with their
 reasons, and `restore` takes a `version`, a `why` and the current
 `expected_hash`.
 
@@ -344,14 +344,14 @@ key replays the first answer. The same key with other bytes is refused as
 
 Choose the semantic lane before transport: reasoning material is a Source;
 a deliverable or proof-bearing output is Evidence. MIME never chooses.
-Use `capture_source(..., adoption={key, trigger, selected_file_id})` or
-`preserve_artifacts(..., adoption={...})` when a direct handle exists, with
+Use `save_source(..., options={"adoption": {key, trigger, selected_file_id}})` or
+`save_evidence(..., options={"adoption": {...}})` when a direct handle exists, with
 `selected_file_id` naming the handle you hand over. With no handle,
 report a non-committing `handoff_required` or
 `handoff_prepared`; a token or description is not a saved artifact.
 
 Delivery is a later fact. Record it only after a committed local Evidence
-receipt, through `change_records(operation={"kind": "append", "delivery": {...}, ...})` and one
+receipt, through `add_record(delivery={...}, ...)` and one
 compatible existing Records collection whose declared link field names the
 Evidence companion. Keep reported remote identity separate and set verified
 identity only from matching platform proof; never infer remote byte equality.

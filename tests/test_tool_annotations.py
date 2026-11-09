@@ -3,11 +3,11 @@ open-world hints) so cautious clients render them correctly.
 
 ChatGPT's tool-call panel badged the read-only `find` as WRITE / OPEN-WORLD /
 DESTRUCTIVE because the tools shipped no MCP annotation hints, so the client
-assumed the worst. The hints are derived from the command registry:
-`readOnlyHint = not cli_writes`, `openWorldHint = True` for external artifact
-downloads, and `destructiveHint` is True only for the small set of
-overwrite/remove ops (`commands.DESTRUCTIVE_OPS`). This test pins that contract
-against the live server so a new tool can't ship un-annotated or mis-classified.
+assumed the worst. The hints of a listed tool come from its declared effect and
+routes: `readOnlyHint` for a read tool, `openWorldHint = True` for the tools that
+fetch external artifacts, and `destructiveHint` only for the tools that overwrite
+or revert. This test pins that contract against the live server so a new tool
+can't ship un-annotated or mis-classified.
 
 Built against the repo fixture vault with the same deterministic env as
 `tests/test_mcp_schema_fidelity.py` (embeddings/media/clip off, tier-2 ON).
@@ -23,6 +23,7 @@ import pytest
 from conftest import initialize_vault_state_offline
 
 from exomem import commands as commands_module
+from exomem import public_tools
 from exomem import server as server_module
 from exomem.command_surface import Command
 
@@ -66,56 +67,31 @@ def test_open_world_hint_matches_external_download_capability(
     # URL provenance alone is closed-world; temporary artifact handles are fetched.
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     open_world = {n for n, a in ann.items() if a and a.get("openWorldHint") is True}
-    assert open_world == {"capture_source", "preserve_artifacts"}
+    assert open_world == {"save_source", "save_evidence"}
 
 
-def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    for cmd in commands_module.product_commands_for("mcp"):
-        if "mcp" not in cmd.surfaces:
-            continue  # note: hand-registered for MCP, checked below
-        if cmd.renderings:
-            # Listed as its renderings; tests/test_single_purpose_tools_mcp.py pins their hints.
-            assert cmd.public_name not in ann or cmd.public_name in {r.name for r in cmd.renderings}
-            continue
-        assert ann[cmd.public_name]["readOnlyHint"] is cmd.read_only, (
-            f"{cmd.name}: readOnlyHint={ann[cmd.public_name]['readOnlyHint']} "
-            f"but registry cli_writes={cmd.cli_writes}"
-        )
-
-
-def test_destructive_hint_only_for_overwrite_ops(
+def test_read_only_hint_matches_the_effect_each_public_tool_declares(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    # Related jobs classify only the operations they expose.
-    assert ann["record_episode"]["destructiveHint"] is False
-    assert ann["change_records"]["destructiveHint"] is True
-    for cmd in commands_module.product_commands_for("mcp"):
-        if "mcp" not in cmd.surfaces or cmd.read_only:
-            continue
-        if cmd.renderings:
-            assert cmd.public_name not in ann or cmd.public_name in {r.name for r in cmd.renderings}
-            continue
-        expected = cmd.name in commands_module.DESTRUCTIVE_OPS
-        assert ann[cmd.public_name]["destructiveHint"] is expected, (
-            f"{cmd.name}: destructiveHint={ann[cmd.public_name]['destructiveHint']} expected {expected}"
-        )
+    for name, wire in public_tools.TOOLS.items():
+        if name in ann:
+            assert ann[name]["readOnlyHint"] is (wire.effect == "read"), name
+    assert ann["inspect_memory"]["readOnlyHint"] is True
+    assert ann["manage_memory"]["readOnlyHint"] is False
 
 
-def test_the_tools_that_carry_a_revert_are_destructive_and_the_ones_that_only_dismiss_or_connect_are_not(
+def test_destructive_hint_marks_the_tools_that_can_overwrite_or_revert(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A promotion revert trashes pages and removes bullets, so its two doors must say so.
+    """An edit replaces content and `manage_memory` carries the reverts, repairs and schema changes.
 
-    `DESTRUCTIVE_OPS` feeds the generic test above; this pins the four names so a registry edit cannot
-    quietly drop the hint from a revert door, or add it to the doors that only dismiss or create.
+    This pins the set so a registry edit cannot quietly drop the hint from one of them, or add it to the
+    tools that only create, dismiss or connect.
     """
     ann = _live_annotations(_build_server(monkeypatch, tmp_path))
-    assert {name: ann[name]["destructiveHint"] for name in (
-        "repair_memory", "change_schema", "triage_memory", "change_connections",
-    )} == {
-        "repair_memory": True, "change_schema": True, "triage_memory": False, "change_connections": False,
+    assert {name for name, a in ann.items() if a["destructiveHint"]} == {
+        "edit_note", "supersede_note", "edit_record", "edit_plan_item", "manage_memory",
     }
 
 
@@ -133,7 +109,8 @@ def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "mint_upload_token" not in ann
     assert "mint_download_token" not in ann
     assert "note" not in ann
-    assert ann["transfer_artifact"]["readOnlyHint"] is False
+    assert ann["upload_files"]["readOnlyHint"] is False
+    assert ann["download_files"]["readOnlyHint"] is False
 
 
 def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
@@ -151,23 +128,16 @@ def test_review_question_is_not_advertised_or_classified_as_a_read() -> None:
     )
 
 
-def test_product_titles_reach_both_mcp_title_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_every_listed_tool_carries_a_title(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """ChatGPT drops a tool with no top-level title. The published tools spend no bytes on a second copy."""
     tools = asyncio.run(_build_server(monkeypatch, tmp_path).list_tools())
     wire = {tool.name: tool.to_mcp_tool() for tool in tools}
-    for command in commands_module.product_commands_for("mcp"):
-        if "mcp" not in command.surfaces:
-            continue
-        assert command.public_title
-        if command.renderings:
-            assert command.public_name not in wire or command.public_name in {r.name for r in command.renderings}
-            for rendering in command.renderings:
-                tool = wire[rendering.name]
-                assert tool.title == tool.annotations.title == rendering.title
-            continue
-        tool = wire[command.public_name]
-        assert tool.title == tool.annotations.title == command.public_title
+    assert wire
+    for name, tool in wire.items():
+        assert tool.title, name
+    for name, public in public_tools.TOOLS.items():
+        if name in wire:
+            assert wire[name].title == public.title
 
 
 def test_non_product_title_defaults_to_the_public_name() -> None:

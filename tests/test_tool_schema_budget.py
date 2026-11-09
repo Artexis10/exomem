@@ -25,130 +25,38 @@ from test_mcp_schema_fidelity import _build_server
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
-# No token or quality gain is claimed. Each changed ceiling rounds up to 50 bytes.
-# The separate bootstrap core budget stays unchanged.
-# Remote curation writes add six repair_memory variants, so the budget rises 1,800 B and remote clients
-# keep the curation workflow that local clients have.
-# The change_media reprocess kind with its language hint adds 200 B, so a wrong-language transcript
-# can be redone without losing the old text.
-# The multilingual flag on change_media process and reprocess adds 170 B, so a recording that mixes
-# languages is read in each of them.
-# The change_connections create-entity kind admits `ref` (33 B), so the route that a write receipt's
-# `undeclared_referents` block names runs on the nested surface and records its origin page.
-# Paged, consuming imports add `after` and `consume` to import_memory, so the budget rises 100 B after the
-# import text was trimmed.
-# Remote maintenance jobs add the fix, backfill-ids and reconcile write variants, the job status and cancel
-# variants, the receipt's page cursor, and the adopt-local write variant, so the budget rises 2,000 B and
-# remote clients keep the maintenance that local clients have.
-# The windows status adds `series_id`, `next_window_bytes` and the `after` cursor to read_import, and the
-# acknowledge kind to import_memory, so the budget rises 750 B; the 5.4.8 tool text then stays inside it.
-# The generic-relation wording on the write tools adds 50 B; the `offset` cursor on
-# read_memory adds 150 B for windows over long Source text. Keep both integration costs.
-# Bounded import status adds four view and paging fields. read_import measures 3,052 B;
-# its ceiling rounds to 3,100 B, and the total budget rises 550 B for those protocol inputs.
-# Material binding adds a closed envelope and keyed read: record_episode measures 5,402 B
-# and read_episode measures 1,994 B. Their ceilings round to 5,450 B and 2,000 B;
-# the complete local wire measures 167,706 B, so its budget rises to 168,000 B.
-# A required `expected_hash` on replace_body, with its one-line instruction, adds 99 B:
-# edit_note measures 7,210 B and its ceiling rounds to 7,250 B. The total budget is unchanged.
-# The record_episode close step and the `window_days` field on the dispositions kind of
-# read_review add 196 B. record_episode measures 5,493 B and its ceiling rounds to 5,500 B;
-# with main's edit_note change, the complete local wire measures 167,985 B, so the budget
-# stays at 168,000 B. The next description change needs a budget increase.
-# The `create_missing` flag on edit_section adds 52 B: edit_note measures 7,262 B and its ceiling rounds
-# to 7,300 B. With both changes the complete local wire measures 168,037 B, so the budget rises 50 B.
-# The image kind on read_media, which returns a stored photo as image content an agent can
-# see, adds its path, paths and max_side fields: read_media measures 1,584 B and its ceiling
-# rounds to 1,600 B. The complete local wire measures 168,422 B, so the budget rises 400 B.
-# The caller now chooses the image size up to "original" and a crop `region`, instead of a fixed
-# count and size range in code: read_media measures 1,747 B and its ceiling rounds to 1,750 B. The
-# complete local wire measures 168,585 B, so the budget rises 150 B.
-# The description on the adoption envelope's `key` adds 59 B to capture_source and to
-# preserve_artifacts, so an agent gives each hand-over its own key: capture_source measures 3,395 B
-# and its ceiling rounds to 3,400 B. The complete local wire measures 168,705 B, so the budget rises 150 B.
-# The `cursor` on the collections-store kind of check_memory pages its collection inventory, and the
-# collections-cutover kind previews the move of every collection to SQLite-only storage: check_memory
-# measures 6,981 B and its ceiling rounds to 7,000 B. The complete local wire measures 168,577 B, so the
-# budget rises 150 B.
-# A query that names one row by `item_key` or `plan_id` returns that row's body, which after the SQLite-only
-# conversion has no item file: read_records measures 3,337 B, read_plans 2,757 B and change_plans 3,360 B,
-# so their ceilings round to 3,350 B, 2,800 B and 3,400 B. The complete local wire measures 168,761 B, so
-# the budget rises 200 B.
-# With both sets of changes above, the complete local wire measures 169,044 B, so the budget is 169,050 B.
-# The owner-only approve_procedure tool (approve, revoke and quarantine) measures 1,748 B, and its
-# procedure_approvals listing kind adds 148 B to read_review, which measures 7,591 B. Their ceilings
-# round to 1,750 B and 7,600 B.
-# With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
-# The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
-# size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
-# The `archive` field on preserve_artifacts keeps a held zip as members that a collection import
-# reads: preserve_artifacts measures 2,405 B and its ceiling rounds to 2,450 B. The complete local
-# wire measures 170,945 B, so the total stays within budget.
-TOTAL_BUDGET = 170_950
+# The surface is 23 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
+# wire measures 27,951 B, so the budget is 28,000 B. Raise a ceiling deliberately, in the diff that needs it.
+TOTAL_BUDGET = 28_000
 
-#: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
+#: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "adopt_vault": 1350,
-    "adoption_studio": 3800,
-    "approve_procedure": 1750,
-    "bootstrap": 1450,
-    "browse_memory": 6700,
-    "capture_source": 3400,
-    "import_memory": 6100,
-    "change_connections": 3250,
-    "change_files": 7100,
-    "change_governance": 4650,
-    "change_media": 1600,
-    "change_observations": 6200,
-    "change_plans": 3400,
-    "change_records": 5550,
-    "change_schema": 9450,
-    "change_session_access": 1700,
-    "change_settings": 1500,
-    "check_memory": 7000,
-    "configure_memory": 1400,
-    "connect_memory": 4500,
-    "coordination_status": 500,
-    "create_note": 5700,
-    "edit_note": 7300,
-    "episode_memory": 4200,
-    "govern_memory": 3100,
-    "grant_session_access": 2050,
-    "maintain_memory": 3750,
-    "manage_authorization_session": 2400,
-    "manage_memory_file": 5150,
-    "observe_memory": 5050,
-    "plan_memory": 2700,
-    "prepare_note": 5200,
-    "preserve_artifacts": 2450,
-    "preserve_evidence": 1350,
-    "process_media": 1050,
-    "query_dataset": 1550,
-    "read_import": 3100,
-    "read_connections": 3300,
-    "read_episode": 2000,
-    "read_governance": 2250,
-    "read_media": 1800,
-    "read_memory": 3450,
-    "read_plans": 2800,
-    "read_records": 3350,
-    "read_review": 7600,
-    "read_schema": 16700,
-    "recall_context": 2950,
-    "record_episode": 5500,
-    "record_memory": 4600,
-    "repair_memory": 6050,
-    "review_item_context": 1300,
-    "review_memory": 3500,
-    "schema_memory": 4200,
-    "search_memory": 4000,
-    "supersede_note": 4850,
-    "transfer_artifact": 1300,
-    "triage_memory": 4100,
-    "viewer_map": 3350,
+    "add_observation": 1500,
+    "add_plan_item": 500,
+    "add_record": 850,
+    "create_note": 1700,
+    "decide_review_item": 1000,
+    "download_files": 550,
+    "edit_note": 2550,
+    "edit_plan_item": 750,
+    "edit_record": 800,
+    "inspect_memory": 2150,
+    "list_review_items": 750,
+    "manage_memory": 2450,
+    "query_plan_items": 1050,
+    "query_records": 1100,
+    "read_instructions": 750,
+    "read_page": 700,
+    "recall_context": 2700,
+    "save_episode": 1100,
+    "save_evidence": 1200,
+    "save_source": 1300,
+    "search_memory": 1050,
+    "supersede_note": 1300,
+    "upload_files": 800,
 }
 
-#: A Cloud cell serves the local surface minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only
+#: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
@@ -159,18 +67,13 @@ CLOUD_ONLY_CEILINGS: dict[str, int] = {
 
 def _cloud_total_budget() -> int:
     from exomem import commands
-    from exomem.command_surface import listed_names
+    from exomem.public_surface import public_surface
 
-    ordinary = {name for command in commands.product_commands_for("mcp")
-                for name in listed_names(command, "nested")}
-    cloud = {name for command in commands.product_commands_for("mcp", cloud=True)
-             for name in listed_names(command, "nested")}
+    surface = public_surface()
+    ordinary = set(surface.listed_names(commands.product_commands_for("mcp")))
+    cloud = set(surface.listed_names(commands.product_commands_for("mcp", cloud=True)))
     withheld = sum(TOOL_CEILINGS[name] for name in ordinary - cloud)
     return TOTAL_BUDGET - withheld + sum(CLOUD_ONLY_CEILINGS.values())
-
-
-# These public jobs carry the source commands' authoring contract once per tool.
-AUTHORING_TOOLS = frozenset({"create_note", "supersede_note", "edit_note", "change_observations", "change_files", "browse_memory", "prepare_note"})
 
 
 def _measure_module():
@@ -229,48 +132,15 @@ def test_cloud_surface_stays_under_its_budget_and_ceilings(
     assert not over, "over ceiling: " + "; ".join(over)
 
 
-def _values_for(node, key):
-    """Every value stored under `key` anywhere in a JSON schema."""
-    if isinstance(node, dict):
-        for name, value in node.items():
-            if name == key:
-                yield value
-            yield from _values_for(value, key)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _values_for(item, key)
-
-
 @pytest.mark.parametrize("cloud", [False, True], ids=["local", "cloud"])
-def test_served_schemas_admit_the_revert_action_and_the_registry_remove_verb(
+def test_served_door_admits_the_undo_and_revert_operations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cloud: bool
 ) -> None:
-    """A byte ceiling pushes toward trimming a schema; a trimmed enum or delta shape would refuse the undo."""
+    """A byte ceiling pushes toward trimming a schema; a trimmed enum would refuse the undo."""
     wires = {wire["name"]: wire for wire in _wires(_build_server(monkeypatch, tmp_path, cloud=cloud))}
 
-    revert_choices = [
-        selector.get("enum") for selector in _values_for(wires["repair_memory"]["inputSchema"], "curation_action")
-    ]
-    assert ["revert"] in revert_choices
-    registry_deltas = [
-        delta for delta in _values_for(wires["read_schema"]["inputSchema"], "proposal") if "remove" in delta.get("properties", {})
-    ]
-    assert registry_deltas, "the registry delta admits the remove verb"
-
-
-def test_semantic_authoring_contract_is_carried_once_per_authoring_tool(server) -> None:
-    from exomem.semantic_authoring import AUTHORING_CONTRACT, contract_identity
-
-    marker = f"Semantic authoring [{contract_identity()}]"
-    for wire in _wires(server):
-        in_description = wire["description"].count(marker)
-        in_parameters = str(wire["inputSchema"]).count(marker)
-        expected = 1 if wire["name"] in AUTHORING_TOOLS else 0
-        assert in_description == expected, wire["name"]
-        assert in_parameters == 0, f"{wire['name']} repeats the contract in a parameter"
-        if wire["name"] in AUTHORING_TOOLS:
-            for code in AUTHORING_CONTRACT.findings:
-                assert code in wire["description"], (wire["name"], code)
+    operations = wires["manage_memory"]["inputSchema"]["properties"]["operation"]["enum"]
+    assert {"curation.revert", "governance.undo", "files.revert_reclassification"} <= set(operations)
 
 
 def test_published_schemas_do_not_advertise_optional_null(server) -> None:

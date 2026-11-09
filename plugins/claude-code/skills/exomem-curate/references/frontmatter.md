@@ -72,7 +72,7 @@ with the vault's known kinds. Two values record that nobody chose a kind:
 the hosted capture box, the upload form, a legacy-vault import), and the
 retired `other` on legacy `Sources/Other/` pages. Neither is ever chosen for a
 new capture. Both stay readable and filterable (`source_kinds=["other"]`), and
-are classified with `change_files(operation={'kind': 'reclassify'})`, which moves
+are classified with `manage_memory(operation="files.reclassify")`, which moves
 the page to its kind's folder and rewrites every link to it.
 
 ### research-note
@@ -137,7 +137,7 @@ the page to its kind's folder and rewrites every link to it.
 
 | Field | Required | Notes |
 |---|---|---|
-| `entity_type` | yes | Stable ID from the active entity registry; use bootstrap guidance rather than maintaining a separate validity list. |
+| `entity_type` | yes | Stable ID from the active entity registry; use `read_instructions` guidance rather than maintaining a separate validity list. |
 | Other | per type | see `page-types.md` for entity-type-specific fields |
 
 ### cross-domain bridge (optional on compiled note types)

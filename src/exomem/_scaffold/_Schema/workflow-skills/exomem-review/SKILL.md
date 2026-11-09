@@ -2,7 +2,7 @@
 name: exomem-review
 description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 65ec60ddeed256b2cce1a1e0fca8c8561faeb8095db4a74beb4884d7f9ac2999
+  skill_contract: 346faba8eab974009d4b684b53b99a666e5f89558fda01e863d578941fd5830b
   version: "0.2.0"
 ---
 
@@ -86,7 +86,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    `too_frequent:` — so the decision is still legible months later.
 8. When the user wants to stop hearing about a whole KIND of signal, quiet that
    family rather than lowering prominence, which silences everything:
-   `decide_review_item(ref='exomem://review/family/<family>', action='quiet')` with a
+   `manage_memory(operation="review.set_family", arguments={'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': ...})` with a
    reason code in `why`. `off` additionally hides it from explicit category
    review; `normal` restores it. A quiet family is silent, not clean — it stays
    listed by `inspect_memory(operation="review.dispositions")` and the audit still measures

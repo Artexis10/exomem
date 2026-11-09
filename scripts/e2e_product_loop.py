@@ -1053,7 +1053,9 @@ async def _planning_restart_session(client, state: dict[str, Any], timeout: floa
 def _row_with_key(result: Any, key: str) -> dict[str, Any] | None:
     """The record row whose `record_id` is `key`."""
     rows = result.get("rows", []) if isinstance(result, dict) else []
-    return next((row for row in rows if isinstance(row, dict) and row.get("record_id") == key), None)
+    return next(
+        (row for row in rows if isinstance(row, dict) and row.get("record_id") == key), None
+    )
 
 
 async def _records_first_session(client, state: dict[str, Any], timeout: float) -> None:
@@ -1283,7 +1285,9 @@ async def _manual_records_session(client, state: dict[str, Any], timeout: float)
     )
     if not any(row.get("occurred_on") == "2026-08-03" for row in queried.get("rows", [])):
         raise RuntimeError("installed Records query did not return the manual template session")
-    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
+    inspection = await _inspect(
+        client, "records.inspect", timeout, collection=fixture["collection"]
+    )
     expected_plan = {
         "reference": "exomem://memory/81947000-4c22-46e4-9874-23fed028314b",
         "query": {"filters": {"status": "completed"}, "limit": 24},
@@ -1316,7 +1320,9 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
         if isinstance(row, dict)
     ):
         raise RuntimeError("direct Records edit was not visible after restart")
-    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
+    inspection = await _inspect(
+        client, "records.inspect", timeout, collection=fixture["collection"]
+    )
     history = await _call(
         client,
         "query_records",
@@ -1331,7 +1337,9 @@ async def _records_restart_session(client, state: dict[str, Any], timeout: float
 
 async def _records_rebaseline_session(client, state: dict[str, Any], timeout: float) -> None:
     fixture = state["records"]
-    inspection = await _inspect(client, "records.inspect", timeout, collection=fixture["collection"])
+    inspection = await _inspect(
+        client, "records.inspect", timeout, collection=fixture["collection"]
+    )
     audit = inspection.get("audit")
     guards = inspection.get("lifecycle_guards")
     if (

@@ -28,19 +28,19 @@ If another import is open, inspect its progress through MCP and agree whether to
      While it runs, file each window once it reaches `done` (steps 3 to 5), and discard it (step 8). Read its output for the window IDs.
      The command waits for room, and it stops with the members not yet sent if the cell cannot take them. Until it finishes, those members are only at the source.
    - Exomem Cloud without a shell: give the person the returned CLI command or Home link. For a folder larger than the room, give only the command: Home sends one import. Never try to upload the files yourself.
-2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `read_import` status lists each landed window's `import_id`, so later windows are found there.
-3. Call `import_memory(operation={"kind": "start", "path": "_Imports/<id>"})`. Add `collection` when the person names one.
+2. Wait until the import, or the first window, is `done`. On Cloud, poll `observe_transfer`. `inspect_memory` status lists each landed window's `import_id`, so later windows are found there.
+3. Call `manage_memory(operation="imports.start", arguments={"path": "_Imports/<id>"})`. Add `collection` when the person names one.
 4. File the page: `select` the stage folder, `plan`, `apply`, then `finish`. While a reply carries a `continuation`, call the same action again with it.
 5. While a `start` or later reply carries `next_after`, call `start` again with only `after` set to it, then repeat step 4. Pages file in order and share one collection.
 6. Read the `residual` that the last page's `finish` reports: the files still staged, by reason, with counts and bytes. Its `summary` says in plain words how many files need review. Review those files with the person.
-7. Read `read_import(operation={"kind": "status"})`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
+7. Read `inspect_memory(operation="imports.status")`. It reports each window's unfiled members, the cell's budgets and the effective file limit; a figure that reads `unknown` is not zero. While the file limit reads `unknown`, do not say whether a file fits: say the limit is unknown. Tell the person to keep the source folder while `keep_source.keep` is true.
 8. Discard the stage only after the person agrees. For a series of windows, ask once for the series.
    - Cloud: `transfer_memory(action="import_discard", import_id=<id>, confirm=true)` deletes the staged folder for good.
    - Local: no Exomem command discards a stage. The person deletes `_Imports/<id>` by hand.
    - A discard keeps a residual record of each member that adoption did not file or `finish` did not verify. Status lists those members as "discarded, not filed", with the reason as the `code`.
-   - If a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `read_import` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
+   - If a discard does not finish, `observe_transfer` shows the import stuck in `cleanup_pending`, and its `error_code` may name the refusal. Read `inspect_memory` status for that window. `renames_pending` lists Knowledge Base paths: run `apply`, or move each file and keep the source. The cell retries the discard on its own, so another `import_discard` changes nothing. Keep the source until the window reads `discarded`.
    - A window in state `unreadable` has a record that cannot be read. No tool you hold discards it, and the person cannot either. Keep the source, tell the person, and leave the stage. Only the operator of Exomem Cloud can discard it, with `--walk-stage`.
-9. Acknowledge residual paths only when the person confirms they no longer need to keep them: `import_memory(operation={"kind": "acknowledge", "import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
+9. Acknowledge residual paths only when the person confirms they no longer need to keep them: `manage_memory(operation="imports.acknowledge", arguments={"import_id": <id>, "paths": [...]})`. This is the person's decision. Acknowledged paths stop counting toward `keep_source`. No tool undoes it; the operator can restore the entries by editing the record. A call without paths is refused.
 
 ## Stops
 - `apply_stop` with `INSUFFICIENT_SPACE`: stop, even though the reply carries a `continuation`. The next `apply` stops at the same chunk until the volume has the chunk's bytes plus the reserve free. Tell the person, and call `apply` again with the `continuation` after space is free.
@@ -55,7 +55,7 @@ Keep the original folder, staged import, run and original tool call until recove
 Refreshing the connector or plugin does not repair the Cloud server or update its runtime.
 
 On servers through v0.161.1, per-run status includes the full inventory, plan and outcomes.
-If that reply is too large, `read_import(operation={"kind":"status"})` lists compact run rows without a `run_id`.
+If that reply is too large, `inspect_memory(operation="imports.status")` lists compact run rows without a `run_id`.
 That listing does not reconcile the interrupted call.
 
 On v0.162.0 and later servers, the status schema includes `view`. Use this sequence:
@@ -69,7 +69,7 @@ Other detail views are `inventory`, `selection`, `plan` and `stale`.
 One oversized row appears in `omitted` with `ROW_TOO_LARGE`; it is uninspected, not an empty or successful item.
 `view="full"` remains unbounded for the browser and explicit compatibility callers.
 
-On a v0.162.0 or later server, repeat the interrupted `import_memory` apply call exactly once.
+On a v0.162.0 or later server, repeat the interrupted `manage_memory` apply call exactly once.
 The `view` field in the status schema shows that the server has this repair; an older server cannot reconcile the call.
 Keep its account, client, arguments, original `continuation` and explicit idempotency key when present.
 The server reconciles the same abandoned mutation identity before it resumes the retained scope.

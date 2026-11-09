@@ -176,12 +176,11 @@ def _links(links: list[dict[str, Any]] | None) -> list[dict[str, str]] | None:
 
 #: The id, title or path of one page, as the page tools take it.
 Page = Annotated[str, Field(description="Page title or id.")]
-Why = Annotated[str, Field(description="The reason, one sentence.")]
 
 
 class Link(Wire):
-    relation: str = Field(description="Relation name.")
-    page: Page
+    relation: str
+    page: str
 
 
 class FileHandle(Wire):
@@ -191,9 +190,9 @@ class FileHandle(Wire):
     file_name: str | None = None
 
 
-_UNLINKED = Field(default=None, description="Why this stands alone, when it links to no other page.")
-_PREVIEW = Field(default=None, description="Check the call and write nothing.")
-_DETAIL = Field(default=None, description="compact (default) or full.")
+_UNLINKED = Field(default=None, description="Why this links to no other page.")
+_PREVIEW = Field(default=None)
+_DETAIL = Field(default=None)
 
 
 # --- Reads ----------------------------------------------------------------------------------
@@ -201,18 +200,18 @@ _DETAIL = Field(default=None, description="compact (default) or full.")
 
 class SearchMemory(Wire):
     query: str | None = Field(default=None, description="What to look for. Empty lists recent pages.")
-    types: list[str] | None = Field(default=None, description="Page types.")
+    types: list[str] | None = None
     projects: list[str] | None = None
     tags: list[str] | None = None
     filters: dict[str, Any] | None = Field(
-        default=None, description='Structured page or unit metadata filter, such as {"page.status": "active"}.'
+        default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
     options: dict[str, Any] | None = Field(
-        default=None, description="Rare knobs: mode, rerank, scope, relations, categories, kinds. read_instructions lists them."
+        default=None, description="Rare knobs: mode, rerank, scope, relations, categories, kinds."
     )
     deep: bool | None = Field(default=None, description="Return a packed context for reasoning.")
     limit: int | None = None
-    more: str | None = Field(default=None, description="Token from the previous reply.")
+    more: str | None = Field(default=None, description="Continuation token.")
     detail: Detail | None = _DETAIL
 
 
@@ -231,8 +230,8 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: the observations and the id each edit_note action takes.")
-    more: str | None = Field(default=None, description="Token from the previous reply.")
+    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: observations with their ids.")
+    more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
     )
@@ -264,7 +263,7 @@ def _read_page(wire: dict[str, Any], ctx: Context) -> Translated:
 class ReadInstructions(Wire):
     topic: str | None = Field(
         default=None,
-        description="A tool name, a door name or a door operation such as schema.save. Returns its arguments and an example.",
+        description="A tool, a door or a door operation such as schema.save.",
     )
     profile: str | None = Field(default=None, description="compact (default), full, diagnostics or session.")
     section: str | None = Field(default=None, description="One block of the compact policy; `index` lists them.")
@@ -279,9 +278,9 @@ def _read_instructions(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class VocabularyDecision(Wire):
-    """The answer to a `vocabulary_preparation` that a write returned instead of saving."""
+    """The answer to a vocabulary_preparation."""
 
-    evidence_fingerprint: str = Field(description="The fingerprint in the vocabulary_preparation.")
+    evidence_fingerprint: str
     outcome: Literal["reuse", "create", "defer"]
     canonical: str | None = Field(default=None, description="The value to use; none for defer.")
 
@@ -294,10 +293,10 @@ def _vocabulary(wire: Mapping[str, Any]) -> dict[str, Any]:
 
 class CreateNote(Wire):
     title: str
-    content: str = Field(description="Markdown body with a `## Observations` section of `- [category] text` lines. Link another page with [[Title]].")
-    type: str | None = Field(default=None, description="Note type.")
-    project: str | None = Field(default=None, description="The one project key of a research note. Any slug is legal; a new key registers itself.")
-    projects: list[str] | None = Field(default=None, description="Project keys of any other note. Any slug is legal; a new key registers itself.")
+    content: str = Field(description="Markdown body with a `## Observations` section of `- [category] text` lines. Link a page with [[Title]].")
+    type: str | None = None
+    project: str | None = Field(default=None, description="The research note's project key; a new slug registers itself.")
+    projects: list[str] | None = Field(default=None, description="Project keys of another note; a new slug registers itself.")
     sources: list[str] | None = Field(default=None, description="Titles of the pages this draws from.")
     tags: list[str] | None = None
     fields: dict[str, Any] | None = Field(default=None, description="Type-specific metadata, such as severity or hypothesis.")
@@ -332,10 +331,10 @@ class AddObservation(Wire):
     text: str = Field(description="The observation, on one line.")
     tags: list[str] | None = None
     context: str | None = None
-    links: list[Link] | None = Field(default=None, description="Pages this observation relates to.")
+    links: list[Link] | None = None
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
     verdict: str | None = Field(default=None, description="For a rich kind: confirmed, refuted, qualified, inconclusive or abandoned.")
-    anchor: str | None = Field(default=None, description="A unique anchor within the note; derived when omitted.")
+    anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
     as_of: str | None = Field(default=None, description="ISO date this starts to hold.")
     until: str | None = Field(default=None, description="ISO date this stops holding.")
     check_by: str | None = Field(default=None, description="ISO date to revisit.")
@@ -380,29 +379,29 @@ EncodedTextEdit = Annotated[TextEdit, BeforeValidator(_decoded_object, json_sche
 
 class EditNote(Wire):
     note: Page = Field(description="Page title, or the page id for replace_body.")
-    why: Why
+    why: str
     action: Literal[
         "replace_text", "replace_section", "replace_body", "set_tags", "set_fields", "fill_row",
         "edit_observation", "remove_observation",
     ]
-    old_text: str | None = Field(default=None, description="replace_text: the exact text to find.")
-    new_text: str | None = Field(default=None, description="replace_text and replace_section: the new text.")
-    replace_all: bool | None = Field(default=None, description="replace_text: change every match.")
-    edits: list[EncodedTextEdit] | None = Field(default=None, description="replace_text: several changes in one commit.")
-    heading: str | None = Field(default=None, description="replace_section: the heading to change.")
-    position: Literal["append", "prepend", "replace"] | None = Field(default=None, description="replace_section: where the text goes; append by default.")
-    create_missing: bool | None = Field(default=None, description="replace_section: add the heading when absent.")
-    body: str | None = Field(default=None, description="replace_body: the whole new body.")
-    tags: list[str] | None = Field(default=None, description="set_tags and edit_observation: the full tag list.")
-    fields: dict[str, Any] | None = Field(default=None, description="set_fields: one field and its value.")
-    row: str | None = Field(default=None, description="fill_row: the leading text of the row.")
-    take: str | None = Field(default=None, description="fill_row: the text of the take.")
+    old_text: str | None = Field(default=None, description="replace_text.")
+    new_text: str | None = Field(default=None, description="replace_text, replace_section.")
+    replace_all: bool | None = Field(default=None, description="replace_text: every match.")
+    edits: list[EncodedTextEdit] | None = Field(default=None, description="replace_text: several in one commit.")
+    heading: str | None = Field(default=None, description="replace_section.")
+    position: Literal["append", "prepend", "replace"] | None = Field(default=None, description="replace_section; append by default.")
+    create_missing: bool | None = Field(default=None, description="replace_section: add an absent heading.")
+    body: str | None = Field(default=None, description="replace_body.")
+    tags: list[str] | None = Field(default=None, description="set_tags, edit_observation: the full list.")
+    fields: dict[str, Any] | None = Field(default=None, description="set_fields.")
+    row: str | None = Field(default=None, description="fill_row: the row's leading text.")
+    take: str | None = Field(default=None, description="fill_row.")
     overwrite: bool | None = Field(default=None, description="fill_row: replace a filled take.")
-    observation: str | None = Field(default=None, description="edit_observation and remove_observation: the unit id.")
-    category: str | None = Field(default=None, description="edit_observation: the new category.")
-    text: str | None = Field(default=None, description="edit_observation: the new text.")
-    context: str | None = Field(default=None, description="edit_observation: the new context.")
-    links: list[Link] | None = Field(default=None, description="edit_observation: the full list of related pages.")
+    observation: str | None = Field(default=None, description="edit_observation, remove_observation: the unit id.")
+    category: str | None = Field(default=None, description="edit_observation.")
+    text: str | None = Field(default=None, description="edit_observation.")
+    context: str | None = Field(default=None, description="edit_observation.")
+    links: list[Link] | None = Field(default=None, description="edit_observation: the full list.")
     unlinked_reason: str | None = _UNLINKED
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
@@ -546,14 +545,14 @@ def _is_id(value: object) -> bool:
 class SupersedeNote(Wire):
     note: Page = Field(description="The note to replace.")
     title: str
-    content: str = Field(description="Markdown body of the new note.")
-    why: Why
+    content: str
+    why: str
     type: str | None = None
     project: str | None = None
     projects: list[str] | None = None
     sources: list[str] | None = None
     tags: list[str] | None = None
-    fields: dict[str, Any] | None = Field(default=None, description="Type-specific metadata.")
+    fields: dict[str, Any] | None = None
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
     preview: bool | None = _PREVIEW
@@ -580,13 +579,13 @@ def _supersede_note(wire: dict[str, Any], ctx: Context) -> Translated:
 class SaveSource(Wire):
     title: str
     source_kind: str | None = Field(default=None, description="What the material is, as an open slug such as contract.")
-    content: str | None = Field(default=None, description="The original text. Pass attached files in `files` instead of retyping them.")
+    content: str | None = Field(default=None, description="The original text; attached files go in `files`.")
     url: str | None = None
-    files: list[FileHandle] | None = Field(default=None, description="Up to eight attached files, as the host hands them over.")
+    files: list[FileHandle] | None = Field(default=None, description="Attached files, up to eight.")
     domain: str | None = None
     projects: list[str] | None = None
     tags: list[str] | None = None
-    why: str | None = Field(default=None, description="Why this is saved.")
+    why: str | None = None
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction.")
     detail: Detail | None = _DETAIL
 
@@ -609,7 +608,7 @@ class SaveEvidence(Wire):
     category: str = Field(description="One path segment.")
     name: str | None = Field(default=None, description="File name with extension, for `text`.")
     text: str | None = Field(default=None, description="Exact UTF-8 text to keep.")
-    files: list[FileHandle] | None = Field(default=None, description="Up to eight attached files, as the host hands them over.")
+    files: list[FileHandle] | None = Field(default=None, description="Attached files, up to eight.")
     description: str | None = None
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, transcriptions, archive.")
     detail: Detail | None = _DETAIL
@@ -666,7 +665,7 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class DownloadFiles(Wire):
-    pages: list[str] = Field(min_length=1, max_length=8, description="Titles or ids of the pages whose originals to get.")
+    pages: list[str] = Field(min_length=1, max_length=8, description="Titles or ids of the pages.")
     detail: Detail | None = _DETAIL
 
 
@@ -690,13 +689,13 @@ def _spell_download(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 class QueryRecords(Wire):
-    collection: str | None = Field(default=None, description="Omit to list the collections and their fields.")
+    collection: str | None = Field(default=None, description="Omit to list collections.")
     filters: Filters = None
-    columns: list[str] | None = Field(default=None, description="Rows keep the `id` that edit_record takes only if you also name `record_id` and `item_version`.")
+    columns: list[str] | None = Field(default=None, description="Columns to return; every row keeps its `id`.")
     sort_by: str | None = None
     descending: bool | None = None
     limit: int | None = None
-    more: str | None = Field(default=None, description="Token from the previous reply.")
+    more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: aggregate, date_from, date_to, view, output_format.")
 
 
@@ -733,10 +732,10 @@ def _spell_collection_list(arguments: Mapping[str, Any]) -> dict[str, Any] | Non
 
 class AddRecord(Wire):
     collection: str
-    item: dict[str, Any] = Field(description="The row's fields, by column name.")
-    why: Why
+    item: dict[str, Any] = Field(description="Fields by column name.")
+    why: str
     body: str | None = Field(default=None, description="Free text kept with the row.")
-    hold: bool | None = Field(default=None, description="Hold a row that fails validation instead of refusing it.")
+    hold: bool | None = Field(default=None, description="Hold a row that fails validation.")
     held: str | None = Field(default=None, description="The id of a held row to resume.")
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
@@ -752,13 +751,13 @@ def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class EditRecord(Wire):
     collection: str
-    record: str = Field(description="The row `id` that query_records returned, or `row_id` where the collection has its own `id` field.")
+    record: str = Field(description="The row `id` from query_records, or `row_id` when the collection has its own `id` field.")
     changes: dict[str, Any] = Field(description="Columns to change, by name.")
-    why: Why
+    why: str
     body: str | None = None
     held: str | None = None
     refresh_presentation: bool | None = Field(
-        default=None, description="Rebuild the row's managed Markdown view; `changes` may then be empty."
+        default=None, description="Rebuild the row's Markdown view; `changes` may then be empty."
     )
     detail: Detail | None = _DETAIL
 
@@ -772,20 +771,20 @@ def _edit_record(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class QueryPlanItems(Wire):
-    collection: str | None = Field(default=None, description="Omit to list the plan collections.")
+    collection: str | None = Field(default=None, description="Omit to list plan collections.")
     filters: Filters = None
     columns: list[str] | None = None
     sort_by: str | None = None
     descending: bool | None = None
     limit: int | None = None
-    more: str | None = Field(default=None, description="Token from the previous reply.")
+    more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: lifecycle, hierarchy_mode, aggregate, view, output_format.")
 
 
 class AddPlanItem(Wire):
     collection: str
-    item: dict[str, Any] = Field(description="The item's fields, by column name.")
-    why: Why
+    item: dict[str, Any] = Field(description="Fields by column name.")
+    why: str
     body: str | None = None
     detail: Detail | None = _DETAIL
 
@@ -797,9 +796,9 @@ def _add_plan_item(wire: dict[str, Any], ctx: Context) -> Translated:
 class EditPlanItem(Wire):
     collection: str
     plan_item: str = Field(description="The item id that query_plan_items returned.")
-    why: Why
+    why: str
     changes: dict[str, Any] | None = Field(default=None, description="Columns to change, by name.")
-    status: str | None = Field(default=None, description="Move the item to this status. A refused move names the allowed ones.")
+    status: str | None = Field(default=None, description="Move to this status; a refused move names the allowed ones.")
     body: str | None = None
     detail: Detail | None = _DETAIL
 
@@ -867,12 +866,12 @@ def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class DecideReviewItem(Wire):
     review_item: str = Field(description="The id that list_review_items returned.")
-    decision: Literal["accept", "dismiss", "snooze", "reopen"] = Field(description="accept applies to a relation suggestion.")
+    decision: Literal["accept", "dismiss", "snooze", "reopen"]
     until: str | None = Field(default=None, description="snooze: YYYY-MM-DD.")
     why: str | None = None
     relation: str | None = Field(default=None, description="accept: the relation to record, when the suggestion offers several.")
-    vocabulary_ref: str | None = Field(default=None, description="accept: the recorded vocabulary decision that names a relation the suggestion does not offer.")
-    vocabulary_fingerprint: str | None = Field(default=None, description="accept: the fingerprint of that decision.")
+    vocabulary_ref: str | None = Field(default=None, description="accept: the vocabulary decision that names a relation the suggestion lacks.")
+    vocabulary_fingerprint: str | None = Field(default=None, description="accept: that decision's fingerprint.")
     detail: Detail | None = _DETAIL
 
 
@@ -910,7 +909,7 @@ _NOTE_INVERSE = {"validate_only": "preview", "response_detail": "detail"}
 
 TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict -- the closed set of typed tool names the surface lists.
     _tool("search_memory", "Search memory",
-          "Search notes, sources and evidence for something recall_context did not cover. Hits are named by title; open one with read_page. A miss covers this query only.",
+          "Search notes, sources and evidence for what recall_context missed. Hits are named by title; open one with read_page. A miss covers this query only.",
           SearchMemory, "read", _search,
           [Route("ask_memory", inverse={"continuation": "more"}, bag="options")], idempotent=True),
     _tool("read_page", "Read page", "Read one page by title or id: text, type, date and links.",
@@ -922,14 +921,14 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           ReadInstructions, "read", _read_instructions, [Route("bootstrap")], idempotent=True,
           claims=(("bootstrap", "instructions"),)),
     _tool("create_note", "Create note",
-          "Save a lasting conclusion as a new note. Put raw material in save_source and proof in save_evidence. Link another page with [[Title]], or give unlinked_reason.",
+          "Save a lasting conclusion as a new note. Raw material goes in save_source, proof in save_evidence. Link a page, or give unlinked_reason.",
           CreateNote, "write", _create_note,
           [Route("remember", inverse={"note_type": "type", "suggestions": "suggest_links", **_NOTE_INVERSE},
                  bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],
           example={"title": "Weekly releases beat batch releases", "type": "insight", "content": "Weekly releases cut rollback size.\n\n## Observations\n- [finding] Weekly releases halved rollback size #release\n\n## Relations\n- supports [[Release cadence]]"},
           captures=True),
     _tool("add_observation", "Add observation",
-          "Add one observation to an existing note. Nothing existing changes. Use preview to check first.",
+          "Add one observation to an existing note; nothing existing changes.",
           AddObservation, "write", _add_observation,
           [Route("observe_memory", when={"operation": "add"},
                  inverse={"path": "note", "content": "text", "id": "anchor", "relations": "links", **_NOTE_INVERSE}),
@@ -977,11 +976,11 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("episode_memory", "record"),),
           captures=True),
     _tool("upload_files", "Upload files",
-          "Get a one-use upload for bytes that are on this machine. The reply gives the one step that moves them; then call save_source or save_evidence with the handle.",
+          "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
           [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
     _tool("download_files", "Download files",
-          "Get the original files of one or more pages back out of memory. The reply gives a link or a command that saves each.",
+          "Get the original files of pages back out of memory. The reply gives a link or a command that saves each.",
           DownloadFiles, "write", _download_files,
           [Route("transfer_artifact", when={"operation": "download"}, reverse=_spell_download)]),
     _tool("query_records", "Query records",
@@ -998,7 +997,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("record_memory", "append"),),
           captures=True),
     _tool("edit_record", "Edit record",
-          "Change fields of one record, using the row id that query_records returned.",
+          "Change fields of one record.",
           EditRecord, "write", _edit_record,
           [Route("record_memory", when={"action": "update"}, inverse={"item_id": "record", "response_detail": "detail"},
                  derived=frozenset({"item_key", "expected_item_version", "expected_container_hash"}))],
@@ -1018,7 +1017,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("plan_memory", "add"),),
           captures=True),
     _tool("edit_plan_item", "Edit plan item",
-          "Change one plan item, or move it to a new status with `status`. A refused move names the allowed ones.",
+          "Change one plan item, or move it to a new status with `status`.",
           EditPlanItem, "write", _edit_plan_item,
           [Route("plan_memory", when={"action": "update"}, inverse={"item_id": "plan_item", "response_detail": "detail"},
                  derived=frozenset({"plan_id", "expected_item_version", "expected_container_hash"})),

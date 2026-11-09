@@ -81,7 +81,7 @@ exomem review reopen exomem://review/0123456789abcdef01234567
 ```
 
 Agents call `decide_review_item` with the same `dismiss`, `snooze`, or `reopen`
-action. Decisions live in `.review-state.json` under the external per-vault
+`decision`. Decisions live in `.review-state.json` under the external per-vault
 machine-local state root. The file is portable JSON and stores no note content.
 
 A decision binds to the exact signal fingerprint reviewed. Ranking changes and
@@ -147,7 +147,7 @@ exomem review off near-duplicate --reason false_positive
 exomem review normal prediction_window
 ```
 
-Agents use the same `decide_review_item` command with a family reference,
+Agents use the `review.set_family` operation of `manage_memory` with a family reference,
 `exomem://review/family/<family>`, and the `quiet`, `off`, or `normal` action.
 `quiet` and `off` require a reason code.
 

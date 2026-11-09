@@ -36,7 +36,7 @@ Empty queries degrade to filtered-most-recent regardless of mode.
   A missing ordinary hit does not establish that the collection lacks an item.
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
-  try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
+  try `scope="vault"`, vary the query terms, or `read_page` a path you suspect.
 - **`RETRIEVAL_INDEX_WARMING` is a refusal, not a miss.** A maintained index is
   not ready: retry the same call after `retry_after_ms`. With `relations=` or
   `relation_of=`, the typed graph may be rebuilding: retry, or drop the filter.
@@ -46,7 +46,7 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 When recall returns a `referents` block, name only its `resolved` entities.
 For `partial`, say how many people remain unresolved; for `ambiguous`, ask the
 user to disambiguate; for `unresolved`, never guess. When the user supplies a
-missing identity, run `read_connections(operation={'kind': 'resolve-entity'})` first, then
+missing identity, run `inspect_memory(operation="connections.resolve_entity")` first, then
 create the durable entity or use `edit_note` to add a reviewed alias.
 
 Additional knobs exposed through `search_memory`/`find`: `graph=true` (default; expands
@@ -79,7 +79,7 @@ stages it names under `skipped` and `truncated`: the result is complete for ever
 stage that ran and is not an error, so re-ask with a narrower option set when you
 need what was left out.
 
-A `latency` block on a `bootstrap` response means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
+A `latency` block on a `read_instructions` reply means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
 
 Performance presets:
 - Normal lookup: `search_memory(detail="compact", rerank=false)`.
@@ -100,8 +100,8 @@ retain categorical baseline selection without supplemental task matching.
 
 Use focused `search_memory` for a remaining question. Use `deep=true` when a bounded
 evidence pack helps compare sources. Read a selected source when its qualifications
-or complete contents matter. A directory requires `read_memory(path=<parent page>)`
-without `unit_ref`. A unit read is not the whole page or directory.
+or complete contents matter. A directory requires `read_page(page=<parent page>)`
+without `part="units"`. A unit read is not the whole page or directory.
 
 Before recommending an older action, reconcile newer supported outcomes about that
 action. Keep event time separate from the page's edit time. Treat an unresolved
@@ -112,9 +112,9 @@ Do not repeat an unchanged search or treat delivered text as proof of answer use
 `- [category] content #tags (context) ^anchor`; its governed kind is always
 `observation`, while category remains open vocabulary. Rich `## Kind` blocks use
 a governed non-observation kind and may carry typed relation metadata. Use
-`change_observations with `operation.kind="add"`, `"update"` or `"remove"`, and `prepare_note` with `operation.kind="observation"` for validation` for one unit
-instead of brittle whole-page string surgery. Update/remove must echo the parent
-`content_hash` and current unit fingerprint. Compact units cannot carry typed unit
+`add_observation` (with `preview=true` for validation), and `edit_note` with `action="edit_observation"` or
+`"remove_observation"` and the unit id from `read_page(part="units")`, for one unit
+instead of brittle whole-page string surgery. The server checks the page and unit versions. Compact units cannot carry typed unit
 relations: select rich form or author one reviewed note-level relation under
 `## Relations`.
 
@@ -134,28 +134,28 @@ profile distinguishes raw BM25 values, cosine similarity, RRF contributions,
 reranker values, and final rank; none is confidence, and unavailable or
 nonparticipating lanes must never be invented as zero-valued hit evidence.
 
-Unit recall returns an exact `unit_ref` for `read_memory`. For authored graph
+Unit recall returns an exact unit id; `read_page(part="units")` lists the ids of a page. For authored graph
 context, pass that reference or category/kind filters to
-`read_connections(operation={'kind': 'graph-context'})`. Compact categories do not imply
+`inspect_memory(operation="connections.graph_context")`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
 
 ## Context activation packets (`recall_context`)
 
-Use for initial context when the live engagement policy from `bootstrap` warrants
+Use for initial context when the live engagement policy from `read_instructions` warrants
 recall. Pass the current user's words verbatim, not a search query; skip if a hook
 already injected this turn's working set. For a known information gap, use
-`search_memory`, then `read_memory` on selected refs. Activation is read-only and
+`search_memory`, then `read_page` on selected refs. Activation is read-only and
 abstains rather than guessing.
 
 When sensing is enabled, a page read or activation anchor may carry
 `epistemic_status`. Activation carries compact counts and `evidence_complete`.
-Use `read_memory` for released refinement and contradiction items with reading
+Use `read_page` for released refinement and contradiction items with reading
 provenance. Treat status as evidence for review; it never authorizes a write.
 When completeness is false, counts may be partial.
 
 A packet may instead carry a map: an index of what exists, with titles, refs,
 descriptions and current state when available. Read the map and pull by ref
-with `read_memory`, or query `search_memory`, before answering; cite the refs you use.
+with `read_page`, or query `search_memory`, before answering; cite the refs you use.
 Read `exomem://map` for the paginated index and follow its domain-map refs for
 material beyond the packet. A map is not a claim that its items fit the turn.
 Read an anchor's profile through its `profile` ref.
@@ -184,7 +184,7 @@ a visible choice. The label describes the caller and grants no authority.
 Before consequential output or after continuation restoration, inspect the
 relevant held episode open items and Planning refs against newer closure
 evidence. Refresh only for a remaining gap. Memory responses and rephrased
-summaries alone do not justify another checkpoint. Reuse bootstrap policy;
+summaries alone do not justify another checkpoint. Reuse the `read_instructions` policy;
 request missing or changed sections instead of repeating full instructions.
 Follow the client's reported operation and context bounds. Tool-only clients
 have best-effort initiation; this guidance does not prove native enforcement.
@@ -234,7 +234,7 @@ remain agent guidance; these hooks do not create a Stop continuation gate.
 
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
-Use `read_review(operation={'kind': 'item-context', 'ref': ...})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
+Use `inspect_memory(operation="review.item_context", arguments={'ref': ...})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
 
 Only if needed to resolve the turn, pass relevant `conversation`: up to six
 recent excerpts and 2,400 characters total, `focus` up to 240 characters and
@@ -254,8 +254,8 @@ and the page's own `status` or `summary` line when present. It is chosen by
 recency, not by the turn, so it never queries a Records collection the turn did
 not name; `current_state[]` carries governed state for resolved anchors. A recap
 entry (`why: "episode"`) is the newest revision of one conversation's
-`record_episode/read_episode` record and carries its `episode` key; follow it with
-`read_memory`. With `session` or `workspace`, that conversation's pages come first.
+`save_episode` and `inspect_memory` record and carries its `episode` key; follow it with
+`read_page`. With `session` or `workspace`, that conversation's pages come first.
 
 **Abstention.** `abstained: true` with a reason: `unresolved` (nothing resolved),
 `ambiguous` (two competing senses, listed under `ambiguity`, no role lane runs),
@@ -268,7 +268,7 @@ abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
 under `related[]` (`path`, `title`, `projects`, `evidence: ["retrieval",
 "vector_band"]`): current pages the turn's words reach and whose stored text is
 also semantically close to it. They are listed, never loaded: nothing is served
-for them, so `read_memory` one if it bears on the turn. The list is for the owner
+for them, so `read_page` one if it bears on the turn. The list is for the owner
 only. `generation.related_evidence` says whether it ran: `ready`, or why not
 (`cold` or `space_mismatch` for the stored text, else the state that
 `generation.semantic_evidence` reports for a turn that was not encoded, such as
@@ -309,19 +309,19 @@ refused) or `absent`. Neither field alone proves that the subject resolved.
 `partial`, `seeded`, `behind`, `empty`) and `session_start`. Only salted hashes of
 `session`/`workspace` are stored, locally.
 
-**`episode_due`** (MCP door): after several activations with no `record_episode/read_episode`
+**`episode_due`** (MCP door): after several activations with no `save_episode` and `inspect_memory`
 record from this caller, asks for one at the next decision or stopping point.
 Advice, at most once per half hour, absent when proactive capture is off.
 
 **`upkeep`** (at session start): at most one item the background pass proposed,
 such as two notes that could be connected. It carries its own `route`, a
-`context_route` to read first and a `dispose` route (`triage_memory` dismiss or
+`context_route` to read first and a `dispose` route (`decide_review_item` dismiss or
 snooze). Consideration does not authorize mutation: act through the route under
 its own rules, or dispose of it.
 
 **`learning`** may ride on an `anchor` call whose turn never named the chosen
 page: an advisory naming the writer that would teach the vault the user's words
-(`edit_note` adding to `learned_aliases`, or `read_schema/change_schema save-conventions`
-adding a referential cue) with the `expected_hash` it needs, plus `turn_terms`.
+(`edit_note` adding to `learned_aliases`, or `manage_memory(operation="schema.save_conventions")`
+adding a referential cue) with the hash it names, plus `turn_terms`.
 It writes nothing; act only if those words should reach that page, else dismiss
-its `review` ref with `triage_memory`.
+its `review` ref with `decide_review_item`.

@@ -17,8 +17,8 @@ from . import (
     edit,
     kbdir,
     note_types,
-    page_ids,
     origin_bindings,
+    page_ids,
     provenance,
     semantic_authoring,
     semantic_contract,
@@ -145,7 +145,8 @@ def observe_memory(
         )
     if unit is not None and unit_ref:
         raise ObserveMemoryError(
-            "INVALID_OBSERVE_INPUT", "give the unit id in `unit`, or unit_ref with its guards, not both"
+            "INVALID_OBSERVE_INPUT",
+            "give the unit id in `unit`, or unit_ref with its guards, not both",
         )
     # A unit id names the unit and the version the caller saw; the guards are filled from the
     # page the write reads under the lease, once the unit id has matched it.
@@ -609,7 +610,10 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     fingerprints come from the full page, so listing them would name what the view withholds.
     """
     if egress.restricted_release_filter(vault_root) is not None:
-        return {"status": "unavailable", "reason": "this principal sees a released view of the page"}
+        return {
+            "status": "unavailable",
+            "reason": "this principal sees a released view of the page",
+        }
     path = page.get("path")
     if not isinstance(path, str) or not path.endswith(".md"):
         return []
@@ -621,7 +625,7 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
 
 
 def _bind_unit_id(document: Any, unit: str) -> tuple[str, str]:
-    """The unit_ref and fingerprint of the one unit that `unit` names, or a refusal that says why."""
+    """The unit_ref and fingerprint of the one unit `unit` names, or a refusal that says why."""
     head, _, version = str(unit).partition(".")
     found = [u for u in document.units if u.unit_ref and page_ids.part_head(u.unit_ref) == head]
     if not found:

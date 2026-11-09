@@ -297,8 +297,8 @@ def test_govern_memory_response_detail_default_is_command_scoped(
     assert "compact (default)" in _param(remember, "response_detail").help
     assert _hidden(mcp, "govern_memory")["inputSchema"]["properties"]["response_detail"]["default"] == "full"
     assert _hidden(mcp, "remember")["inputSchema"]["properties"]["response_detail"]["default"] == "compact"
-    # A listed write tool answers compactly unless the call asks for `full`.
-    assert "compact (default)" in _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"]["detail"]["description"]
+    # A listed write tool takes the same two detail levels; the grouped default above is what an omitted one gets.
+    assert _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"]["detail"]["enum"] == ["compact", "full"]
 
 
 def test_govern_memory_schema_exposes_closed_session_action_selector(

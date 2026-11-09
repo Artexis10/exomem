@@ -51,7 +51,7 @@ At a durable capture boundary, call `list_review_items(queue='vocabulary')` (fou
 actionable items by default; `state="all"` includes decision history), inspect a namespaced item with
 `inspect_memory(operation="review.item_context", arguments={'ref': 'exomem://review/vocabulary/<item>'})`, and record the
 reviewed snapshot through
-`decide_review_item(action='decide-vocabulary', ref='exomem://review/vocabulary/<item>', decision=...)`.
+`manage_memory(operation="review.decide_vocabulary", arguments={'action': 'decide-vocabulary', 'ref': 'exomem://review/vocabulary/<item>', 'decision': ...})`.
 Its decision carries the item fingerprint, family, registry hashes, target
 versions, outcome, rationale, and canonical `choice`; it is not execution or permission.
 `generic, no-edge, or defer` are valid truthful outcomes. A proposed
