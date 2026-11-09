@@ -718,16 +718,17 @@ def _offload_admission(
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
-def upload_refusal(vault: Path, declared_bytes: int, filename: str) -> str | None:
+def upload_refusal(vault: Path, declared_bytes: int, filename: str, lane: str) -> str | None:
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
-    Only an upload that offload would store charges the allowance: a note or a dataset stays on the volume
-    (design D1), and so does an artifact too large to offload. The recorded census decides first. Only a
-    record that says the upload does not fit is confirmed by a census read now, and only the confirmed figure
-    refuses. No record, a stale record, an unknown figure, or a configuration, volume or ledger that cannot be
-    read admits the upload: its original stays local with retryable offload demand, and offload rechecks the
-    allowance before publication. The declared size counts as a new version, because nothing shows a
-    duplicate of a stored version before the bytes arrive.
+    Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
+    on the volume (design D1); the Source lane files every upload through `add` as an offloadable original,
+    whatever its name. An artifact too large to offload stays on the volume in either lane. The recorded
+    census decides first. Only a record that says the upload does not fit is confirmed by a census read now,
+    and only the confirmed figure refuses. No record, an unknown figure, or a configuration, volume or ledger
+    that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
+    rechecks the allowance before publication. The declared size counts as a new version, because nothing
+    shows a duplicate of a stored version before the bytes arrive.
     """
     from . import source_inspection
 
@@ -737,19 +738,20 @@ def upload_refusal(vault: Path, declared_bytes: int, filename: str) -> str | Non
         if config is None or config.get("enabled") is not True:
             return None
         bounds = media_capacity.bounds_for(config, vault)
-        stays = originals.is_note_path(filename) or source_inspection.is_dataset_name(filename)
+        # `evidence` is the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
+        stays = lane == "evidence" and (originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))
         if stays or (bounds is not None and bounds.classify(declared_bytes) != media_capacity.OFFLOADABLE):
             return None
         # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
-        # upload: the per-item census cost that task 5.4.9 removed from offload. A record older than the demand
-        # lease is stale, as the window status judges it.
+        # upload: the per-item census cost that task 5.4.9 removed from offload.
         recorded = recorded_census(vault)
-        if recorded is None or recorded.older_than(DEMAND_LEASE_SECONDS):
+        if recorded is None:
             return None
         decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
         if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
             decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
-    except (OSError, ValueError, TypeError, MediaStoreError):  # An unreadable policy, volume or ledger: unknown.
+    except (OSError, ValueError, TypeError, MediaStoreError) as error:  # An unreadable policy, volume or ledger.
+        log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
         return None
     if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
         return None

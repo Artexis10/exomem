@@ -1667,9 +1667,14 @@ def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_o
         vault: Path, selected_store, upload_env, monkeypatch):
     """Defect: each upload walks every note under the consistency guard to admit it, or one the allowance cannot hold is kept.
 
-    The refusal names the requested size and the allowance, never the owner's total in use (D10). A dataset stays
-    on the volume (D1), so the allowance never refuses it.
+    An aged record that says the upload does not fit still refuses, after one confirming walk. A Source upload
+    charges the allowance whatever its name, while an Evidence dataset stays on the volume (D1). The refusal
+    names the requested size and the allowance, never the owner's total in use (D10).
     """
+    import re
+
+    from exomem import held_uploads, media_jobs
+
     used = _recorded_by_a_batch(vault)
     walks = _count_censuses(monkeypatch)
     data = b"exact original\n"
@@ -1681,16 +1686,22 @@ def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_o
     values, config = selected_store
     allowance = used + len(data) - 1
     config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": allowance}}}))
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_owner_census SET observed_at = ?",
+                           ((datetime.now(UTC) - timedelta(hours=1)).isoformat(),))
+    held = sorted(held_uploads._store(vault).iterdir())
 
-    refused = _post(upload_env, _prepare(upload_env, data), data)
+    refused = _post(upload_env, _prepare(upload_env, data), data, filename="table.csv")
 
     assert refused.status_code == 413, refused.text
     assert refused.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
     assert len(walks) == 1
-    reason = refused.json()["reason"]
-    assert f"{len(data):,} bytes" in reason and f"{allowance:,} bytes" in reason and f"{used:,}" not in reason
-    dataset = _post(upload_env, _prepare(upload_env, data), data, filename="table.csv")
-    assert dataset.status_code == 201, dataset.text
+    assert sorted(held_uploads._store(vault).iterdir()) == held
+    # The number tokens of the reason: only the upload's size and the allowance may appear.
+    assert re.findall(r"[\d,]*\d", refused.json()["reason"]) == [f"{len(data):,}", f"{allowance:,}"]
+    evidence = _post(upload_env, _prepare(upload_env, data, lane="evidence"), data, filename="table.csv",
+                     lane="evidence")
+    assert evidence.status_code == 201, evidence.text
 
 
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):

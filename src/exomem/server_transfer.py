@@ -67,11 +67,13 @@ log = logging.getLogger(__name__)
 _header_count = upload_sessions.header_count
 
 
-async def _allowance_refused(vault_root: Path, file_bytes: int | None, filename: str) -> dict[str, str] | None:
+async def _allowance_refused(
+    vault_root: Path, file_bytes: int | None, filename: str, lane: str,
+) -> dict[str, str] | None:
     """The refusal body for an upload that the media allowance cannot hold, read before its bytes are kept (D10).
 
-    The file's name decides whether it charges the allowance. A multipart body names its file only in the
-    body, so the multipart lanes ask once the form is read, before they hold or file a byte. A resumable
+    In the Evidence lane the file's name decides whether it charges the allowance. A multipart body names its
+    file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte. A resumable
     session names it at creation, before any byte. A request without a size carries nothing to admit
     here; offload's own admission then keeps its original local.
     """
@@ -79,7 +81,7 @@ async def _allowance_refused(vault_root: Path, file_bytes: int | None, filename:
 
     if file_bytes is None:
         return None
-    reason = await run_in_threadpool(media_store.upload_refusal, vault_root, file_bytes, filename)
+    reason = await run_in_threadpool(media_store.upload_refusal, vault_root, file_bytes, filename, lane)
     return None if reason is None else {"code": media_allowance.MEDIA_ALLOWANCE_EXCEEDED, "reason": reason}
 
 
@@ -726,7 +728,7 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
             if not await upload_handoff._active(vault_root, ticket["principal"]):
                 return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
             filename = str(form.get("filename") or upload.filename or "")
-            if (refused := await _allowance_refused(vault_root, upload.size, filename)) is not None:
+            if (refused := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
                 return JSONResponse(refused, status_code=413)
             with principal_module.request_scope(ticket["principal"]):
                 held = await run_in_threadpool(
@@ -1024,7 +1026,8 @@ def register_transfer_routes(
                 {"code": "INVALID_UPLOAD", "reason": "archive=members preserves Evidence directly"},
                 status_code=400,
             )
-        if (refused := await _allowance_refused(vault_root, getattr(upload, "size", None), filename)) is not None:
+        lane = str(form.get("lane") or "evidence").strip() if hold else _upload_lane(request)
+        if (refused := await _allowance_refused(vault_root, getattr(upload, "size", None), filename, lane)) is not None:
             return JSONResponse(refused, status_code=413)
         if hold:
             # `preserve-attachment-originals`: hold the bytes for a file-handle
@@ -1047,7 +1050,7 @@ def register_transfer_routes(
                     held_uploads.hold,
                     vault_root,
                     upload.file,
-                    lane=str(form.get("lane") or "evidence").strip(),
+                    lane=lane,
                     filename=filename,
                     content_type=getattr(upload, "content_type", None),
                     # A hold is only worth what its redeeming command can fetch.
@@ -1062,7 +1065,6 @@ def register_transfer_routes(
         from . import archive_members
 
         preserve_module = _preserve_module()
-        lane = _upload_lane(request)
         try:
             manager = get_manager()
             if archive:
@@ -1318,7 +1320,7 @@ def register_transfer_routes(
                         "Evidence is append-only, so pick a new filename",
                         409,
                     )
-            if (refused := await _allowance_refused(vault_root, declared, target["filename"])) is not None:
+            if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
                 return _tus_refusal(refused["code"], refused["reason"], 413)
             session, secret = await run_in_threadpool(
                 upload_sessions.create,
