@@ -833,7 +833,15 @@ def page_stat(path: Path, vault_root: Path) -> PageStat:
 
 
 def page_relative_path(path: Path, vault_root: Path) -> str:
-    """The canonical path identity used by the page parser."""
+    """The canonical path identity used by the page parser.
+
+    A page that the store serves is known by its store key at the leaf: its projected file may be
+    a link, and the target that a link resolves to is neither the page's path nor a path that scope
+    membership or a governance decision may use for it.
+    """
+    stored = stored_relative(path, vault_root)
+    if stored is not None:
+        return stored
     try:
         return path.resolve().relative_to(vault_root.resolve()).as_posix()
     except ValueError:

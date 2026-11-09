@@ -368,13 +368,10 @@ def _page_version(page: str) -> tuple[tuple[int, int], tuple[int, int, int], os.
 
 
 def _remembered_unclaimed(root: Path, path: str) -> bool:
-    from .vault_store import read
-
-    # A remembered note witnesses a file's version. A page that the store serves has none to
-    # witness: an entry from before the vault moved to the store would stat a projection that the
-    # store, not the file, answers for. The page's stored bytes are read and judged instead.
-    if read.serves(root, path if path.lower().endswith(".md") else path + ".md"):
-        return False
+    # Only a file-mode read fills this memo: a stored page's read carries no generation, so
+    # `_remember_unclaimed` never keeps it. Migration to the store runs offline, so a process that
+    # serves a store-mode vault starts empty and never stats a stored page's file here. A caller
+    # that migrates in its own process drops the memo, as a restart does.
     key = (root, path)
     with _UNCLAIMED_LOCK:
         entry = _UNCLAIMED.get(key)
@@ -471,8 +468,13 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
             return None
         # Reaching here means no supplied bytes and no staged overlay, so this is a disk read.
         memoable = content is None and not _OVERLAY.get() and not in_subtree and vault.STAT_GENERATION_TRUSTED
+        # A page that the store serves has no file to probe: the store says whether it exists, so no
+        # projection (absent, damaged or linked elsewhere) can clear or change its claim.
+        from .vault_store import read as vault_store_read
+
+        stored = vault_store_read.serves(root, page_path)
         # A cold inventory cannot classify an absent ordinary companion.
-        if not in_subtree and not reserved_paths.identity_catalogue_ready(root):
+        if not stored and not in_subtree and not reserved_paths.identity_catalogue_ready(root):
             try:
                 (root / page_path).lstat()
             except FileNotFoundError:
@@ -482,7 +484,17 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
             read = reserved_paths.read_generic_bytes(root, page_path)
             raw = read.data
             remembered_read = (read, started_ns) if memoable else None
-        except (reserved_paths.ReservedPathLeafError, RuntimeError):
+        except (reserved_paths.ReservedPathLeafError, RuntimeError) as error:
+            if stored:
+                # Only the store's own "no such page" clears a stored page's claim; any other
+                # failure to read the store is no answer, so it refuses.
+                if (
+                    not in_subtree
+                    and isinstance(error, reserved_paths.ReservedPathLeafError)
+                    and error.code == "MISSING"
+                ):
+                    return None
+                raise
             # Inventory loss can precede a typed read error; only physical absence clears an ordinary claim.
             if not in_subtree:
                 try:
