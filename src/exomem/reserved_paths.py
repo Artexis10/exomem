@@ -2485,9 +2485,9 @@ def list_generic_tree(
     In a store-mode vault the store lists its pages and the folders that hold them, as
     `read_generic_bytes` reads them: a stored page is an entry with no identity, and its file is
     only a projection, or a stray, so the disk's file at a page's path is left out. A folder of
-    the disk is listed when the store holds a page below it or it holds a file that is not a
-    page. A census (`require_complete`) is of the disk, and so is a listing with `stored=False`:
-    a caller that binds each entry's file identity cannot take an entry that has none.
+    the disk is listed unless it holds nothing but stray copies of pages and the store holds no
+    page below it. A census (`require_complete`) is of the disk, and so is a listing with
+    `stored=False`: a caller that binds each entry's file identity cannot take an entry with none.
     """
 
     listing = None if require_complete or not stored else _stored_tree(vault_root, value, recursive)
@@ -2581,6 +2581,7 @@ def _list_stored_tree(
             entries.append(
                 GenericTreeEntry(
                     name, "file", None, page.meta.size, page.meta.mtime_ns / 1e9,
+                    # A file extension is a closed set that the format fixes: it names the format.
                     page.body if name.casefold().endswith(".md") else None,
                 )
             )
@@ -2589,21 +2590,22 @@ def _list_stored_tree(
 
 def _disk_entry_listed(vault_root: Path, rel: str, kind: str, stored_below: bool) -> bool:
     """Whether a store-mode listing keeps this entry of the disk: a file that is not a page, or a
-    folder with a stored page below it or with a file that is not a page.
+    folder, unless the folder holds nothing but stray copies of pages.
 
     A file at a path that the store owns as a page is a projection or a stray, and the store
-    decides which pages exist; a folder of nothing else is only what the projection left behind.
+    decides which pages exist. A folder that holds only such files is what the projection left
+    behind, unless the store holds a page below it. An empty folder is not a stale projection.
     """
     from .vault_store import ownership
 
     if kind != "directory":
         return ownership.classify(rel) is not ownership.Ownership.PAGE
-    return stored_below or _holds_unowned(vault_root, rel)
+    return stored_below or not _holds_only_page_files(vault_root, rel)
 
 
-def _holds_unowned(vault_root: Path, folder: str) -> bool:
-    """Whether a folder of the disk holds, at any depth, a file that is not a stored page: a
-    binary, or a file of another owner. It stops at the first one.
+def _holds_only_page_files(vault_root: Path, folder: str) -> bool:
+    """Whether a folder of the disk holds something, and all of it, at any depth, is a file at a
+    path that the store owns as a page. An empty folder holds nothing and is not one.
     """
     from .vault_store import ownership
 
@@ -2617,15 +2619,12 @@ def _holds_unowned(vault_root: Path, folder: str) -> bool:
         with open_generic_tree(vault_root, folder, recursive=False, select=record) as walked:
             tuple(walked)
     except ReservedPathLeafError:
-        return False
-    return any(
-        ownership.classify(f"{folder}/{name}") is not ownership.Ownership.PAGE
-        for name, kind in names
-        if kind != "directory"
-    ) or any(
-        _holds_unowned(vault_root, f"{folder}/{name}")
-        for name, kind in names
+        return False  # a folder that cannot be read is not shown to hold nothing but strays
+    return bool(names) and all(
+        _holds_only_page_files(vault_root, f"{folder}/{name}")
         if kind == "directory"
+        else ownership.classify(f"{folder}/{name}") is ownership.Ownership.PAGE
+        for name, kind in names
     )
 
 

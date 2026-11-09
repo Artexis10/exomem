@@ -154,7 +154,12 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
 
         # A page that the store serves is read at its store key. Resolving the whole path would
         # follow a link at the page's own name, to another page's bytes or out of the vault.
-        key = read.served_key(vault_root, rel)
+        try:
+            key = read.served_key(vault_root, rel)
+        except FileNotFoundError:
+            raise GetError(
+                code="NOT_FOUND", reason=f"file does not exist: {missing_path}"
+            ) from None
         if key is not None:
             resolution = VaultPathResolution(
                 candidate=vault_root / rel,

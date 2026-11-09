@@ -15,12 +15,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
+from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, vault
 from ..collection_store import connection, runtime
 from . import mode, ownership
 
 NOT_ACTIVE = "VAULT_STORE_NOT_ACTIVE"
+T = TypeVar("T")
 
 # One covering index serves every metadata read, so a point read of a page's hash never walks the
 # body's overflow pages (the body precedes the hash in the row). SQLite prefers the primary key for
@@ -219,7 +221,9 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
 
     The first read pins the WAL snapshot, so ``revision`` is the revision that every later read
     sees. A vault whose store row does not say store mode raises ``VAULT_STORE_NOT_ACTIVE``: an
-    unknown state never reads as an empty store.
+    unknown state never reads as an empty store. That row is also the check on a reader's kept
+    mode answer, at no cost beyond this query: when the row disagrees, the kept answer is dropped,
+    so a read that runs again meets the mode the records now show.
     """
     root = Path(vault_root)
     path = connection.store_path(root)
@@ -228,6 +232,7 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
         try:
             row = reader.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
             if row is None or row[0] != mode.STORE_MODE:
+                mode.forget_read_mode(vault_root)
                 raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
             yield StoreSnapshot(revision=row[1], connection=reader)
         finally:
@@ -256,6 +261,24 @@ def serves(vault_root: Path, rel: str) -> bool:
     return (
         ownership.classify(rel) is ownership.Ownership.PAGE and mode.store_mode_for_reads(vault_root)
     )
+
+
+def from_store(vault_root: Path, rel: str, store_read: Callable[[], T]) -> T | None:
+    """``store_read()`` when the store serves ``rel``, else None: the disk decides.
+
+    A reader whose kept mode answer is stale meets ``VAULT_STORE_NOT_ACTIVE`` from ``snapshot``,
+    which has dropped that answer. The read then runs once more, through the mode that the records
+    now show, and a second refusal reaches the caller.
+    """
+    root = _as_path(vault_root)
+    if not serves(root, rel):
+        return None
+    try:
+        return store_read()
+    except connection.CollectionStoreError as error:
+        if error.code != NOT_ACTIVE:
+            raise
+    return store_read() if serves(root, rel) else None
 
 
 def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
@@ -363,12 +386,14 @@ def _key_below(root: Path, path: Path) -> str | None:
 
 
 def served_key(vault_root: Path, rel: str) -> str | None:
-    """The store key of the page that vault path ``rel`` names, if the store serves and holds it.
+    """The store key of the page that vault path ``rel`` names: None when the disk decides.
 
     ``owned_page_at``'s rule for a caller that holds a vault path. The folders of ``rel`` resolve:
     a folder link inside the vault names the page it reaches and one that leads out names none. The
     page's own name never resolves: a link at a stored page's path is a stray projection, not the
-    page, so it names neither its target nor an escape. None means the disk decides.
+    page, so it names neither its target nor an escape. A path that the store serves but holds no
+    page for raises ``FileNotFoundError``, as ``owned_page`` does: the page is gone, and a file left
+    at its name is not it.
     """
     root = _as_path(vault_root)
     if not serves(root, rel):
@@ -376,7 +401,4 @@ def served_key(vault_root: Path, rel: str) -> str | None:
     key = _key_below(root, root / rel)
     if key is None:
         return None
-    try:
-        return key if owned_meta(root, key) is not None else None
-    except FileNotFoundError:
-        return None
+    return key if owned_meta(root, key) is not None else None

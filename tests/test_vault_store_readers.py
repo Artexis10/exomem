@@ -69,6 +69,7 @@ def answers(root, generated):
     return {
         "find": [(hit.path, hit.title, hit.excerpt) for hit in hits],
         "ask": [(hit["path"], hit.get("title"), hit.get("excerpt")) for hit in asked["hits"]],
+        "notice": asked.get("notice"),
         "pages": [(page.content, page.content_hash) for page in pages],
         "listing": sorted(
             (entry.as_dict() for entry in listing.entries), key=lambda entry: entry["name"]
@@ -115,8 +116,16 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
     sampled = range(0, GENERATED, max(1, GENERATED // 10))
     find_module.clear_cache()
     before = answers(stored, sampled)
-    assert len(before["find"]) >= 2, "find must have answers for this check to mean anything"
-    assert len(before["ask"]) >= 2, "ask_memory must have answers for this check to mean anything"
+    stored_only = f"{generated_page(0)[0].rsplit('/', 1)[0]}/"
+    for answered in (before["find"], before["ask"]):
+        assert len(answered) == 15, "a full page of answers is what this check needs"
+        assert any(hit[0].startswith(stored_only) for hit in answered), (
+            "pages that only the store holds must be among the answers"
+        )
+    # The catalogue is built from files, so it does not cover those pages: the answer says so.
+    assert before["notice"]
+    diagnosed = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
+    assert find_module._RECALL_PROJECTION_STALE_COMPONENT in diagnosed["warming"]["components"]
     assert len(before["listing"]) == GENERATED
     assert len(before["corpus"]) >= GENERATED + 2
     for listed in before["notes"].values():
@@ -239,24 +248,47 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
     assert started == []
 
 
-def test_a_store_mode_listing_shows_a_disk_folder_only_for_a_binary_or_a_stored_page(
+def test_a_store_mode_listing_hides_only_a_disk_folder_that_holds_nothing_but_stray_pages(
     stored, writer  # noqa: F811
 ):
-    """A listing that takes every folder on disk for a folder of the vault: a stray Markdown file at
-    a path that the store owns is no page, so its folder is not there, and one that holds a binary
-    or a stored page is."""
+    """A listing that takes every folder on disk for a folder of the vault, or that hides a folder a
+    person made: a stray Markdown file at a path that the store owns is no page, so a folder of
+    only such files is not there. An empty folder, one that holds a binary and one that holds a
+    stored page are."""
     notes = stored / "Knowledge Base/Notes"
     (notes / "Stray").mkdir()
     (notes / "Stray/stray.md").write_bytes(b"a file that the store never held\n")
     (notes / "Pictures").mkdir()
     (notes / "Pictures/photo.bin").write_bytes(b"\x00\x01")
+    (notes / "Empty").mkdir()
+    (notes / "Nested/Empty").mkdir(parents=True)
     write.commit(writer, put("Knowledge Base/Notes/Fresh/Page.md", EDITED))
 
     listing = list_directory.list_directory(stored, path="Knowledge Base/Notes", recursive=True)
     names = {entry.path.removeprefix("Knowledge Base/Notes/") for entry in listing.entries}
 
     assert {"Pictures", "Pictures/photo.bin", "Fresh", "Fresh/Page.md"} <= names
+    assert {"Empty", "Nested", "Nested/Empty"} <= names
     assert not {name for name in names if name.startswith("Stray")}
+
+
+def test_a_page_the_store_deleted_is_not_found_though_a_link_sits_at_its_name(
+    stored, writer  # noqa: F811
+):
+    """A page read that follows a link at the deleted page's name returns the bytes of the page the
+    link points to, as if the deleted page were still there."""
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),)),
+    )
+    (stored / ALPHA).unlink(missing_ok=True)
+    (stored / ALPHA).symlink_to(stored / BETA)
+
+    with pytest.raises(get_page.GetError) as missing:
+        get_page.get_page(stored, path=ALPHA)
+
+    assert missing.value.code == "NOT_FOUND"
+    assert get_page.get_page(stored, path=BETA).content
 
 
 def test_a_broken_state_root_leaves_a_file_vault_a_vault_and_a_bare_folder_not_one(

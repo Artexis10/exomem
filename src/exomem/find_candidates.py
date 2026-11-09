@@ -340,6 +340,7 @@ def collect_candidates(
     failed_out: list[str] | None,
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
+    catalog_lags: bool = False,
     eligible_paths: set[str] | None = None,
     filtered: bool = False,
     admitted_paths: set[str] | None = None,
@@ -687,7 +688,11 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "bm25"):
-                if not lexical_repair and lexstore.maintained_content_index_enabled():
+                if (
+                    not lexical_repair
+                    and not catalog_lags
+                    and lexstore.maintained_content_index_enabled()
+                ):
                     catalog_result = lexstore.search_bm25_result(
                         vault_root,
                         query,
@@ -771,6 +776,7 @@ def collect_candidates(
                 scope,
                 freshness=snapshot.for_scope(scope),
                 repair=lexical_repair,
+                catalog_lags=catalog_lags,
                 k=candidate_k * 3,
             )
     if shadow is not None:

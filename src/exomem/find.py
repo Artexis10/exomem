@@ -5975,13 +5975,29 @@ def _find_semantic(
 
         lexical_freshness = snapshot.for_scope(scope)
         lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-        if mode != "vector" and not lexical_repair and lexstore.maintained_content_index_enabled():
-            catalog = lexstore.get_store(vault_root).catalog_readiness(
-                scope,
-                lexical_freshness,
-            )
-            if not catalog.complete:
-                _raise_catalog_outcome(catalog)
+        catalog_lags = False
+        if mode != "vector" and lexstore.maintained_content_index_enabled():
+            # The catalogue is built from files, so an inline build would index the files and
+            # present that as the whole store; a store-mode vault only reads the catalogue.
+            store_mode = find_corpus.store_serves(vault_root)
+            if store_mode:
+                lexical_repair = False
+            if not lexical_repair:
+                catalog = lexstore.get_store(vault_root).catalog_readiness(
+                    scope,
+                    lexical_freshness,
+                )
+                if not catalog.complete:
+                    if not store_mode:
+                        _raise_catalog_outcome(catalog)
+                    # Pages that only the store holds are not in the catalogue yet: the
+                    # in-process lanes serve them and the answer names the gap.
+                    catalog_lags = True
+                    if (
+                        degraded_out is not None
+                        and _RECALL_PROJECTION_STALE_COMPONENT not in degraded_out
+                    ):
+                        degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -6059,6 +6075,7 @@ def _find_semantic(
                 else snapshot.recall_paths(recall_scope or scope) & admitted_paths
             ),
             lexical_repair=lexical_repair,
+            catalog_lags=catalog_lags,
             eligible_paths=eligible_paths,
             filtered=filtered,
             admitted_paths=admitted_paths,
@@ -7226,6 +7243,7 @@ def _keyword_match_paths(
     k: int | None = None,
     pending: Any | None = None,
     allowed_paths: set[str] | None = None,
+    catalog_lags: bool = False,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -7250,6 +7268,9 @@ def _keyword_match_paths(
     the truncation below do.
 
     Both backends bound the result identically, so parity holds at any `k`.
+
+    `catalog_lags` is the caller's proof that the catalogue cannot answer this request and its
+    choice to serve it from the scan below, instead of refusing.
 
     `pending` supplies the exact committed generations the persistent catalogue
     has not published yet. Its identities shadow every catalogue row they own --
@@ -7301,7 +7322,7 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
-    if not repair and lexstore.maintained_content_index_enabled():
+    if not catalog_lags and not repair and lexstore.maintained_content_index_enabled():
         catalog_result = lexstore.search_substring_result(
             vault_root,
             query_norm,
@@ -7313,18 +7334,22 @@ def _keyword_match_paths(
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
         return _merged(list(catalog_result.value or []))
-    indexed = lexstore.search_substring(
-        vault_root,
-        query_norm,
-        scope=scope,
-        freshness=freshness,
-        repair=repair,
-        k=persistent_k,
-        allowed_paths=allowed_paths,
+    indexed = (
+        None
+        if catalog_lags
+        else lexstore.search_substring(
+            vault_root,
+            query_norm,
+            scope=scope,
+            freshness=freshness,
+            repair=repair,
+            k=persistent_k,
+            allowed_paths=allowed_paths,
+        )
     )
     if indexed is not None:
         return _merged(indexed)
-    if lexstore.backend() != "python":
+    if not catalog_lags and lexstore.backend() != "python":
         # The sidecar declined. `search_substring` documents exactly one meaning
         # for None -- "fall back" -- and its causes are a retired store, a
         # catalog that is not on disk, a sqlite error, or a sync that could not
