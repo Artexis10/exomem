@@ -20,7 +20,7 @@ import json
 import re
 import secrets
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -176,6 +176,55 @@ def is_retired_revision(path: str, frontmatter: dict[str, Any], *, audience: str
     )
 
 
+def rewrite_fields(
+    block: str, lines: Mapping[str, str | None], *, newline: str = "\n", after: str | None = None
+) -> str | None:
+    """A frontmatter block with named top-level fields replaced, dropped or added, byte-preserving elsewhere.
+
+    `lines[name]` is the field's whole new `name: value` line, or `None` to drop it.
+    A field the block lacks is added after the line of `after`. The result is
+    `None` when the block is not a block-style mapping, a key shares its line
+    with other text, or `after` is needed and missing. Editing spans instead of
+    dumping the parsed mapping keeps every other byte, quoting and timestamp as written.
+    """
+    try:
+        root = yaml.compose(block, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(root, yaml.MappingNode) or root.flow_style:
+        return None
+    wanted = set(lines) | ({after} if after else set())
+    spans: dict[str, tuple[int, int]] = {}
+    for key, value in root.value:
+        if not isinstance(key, yaml.ScalarNode) or key.value not in wanted:
+            continue
+        start = block.rfind("\n", 0, key.start_mark.index) + 1
+        if block[start:key.start_mark.index].strip():
+            return None
+        end = value.end_mark.index
+        if end < len(block) and (end == 0 or block[end - 1] != "\n"):
+            line_end = block.find("\n", end)
+            end = len(block) if line_end == -1 else line_end + 1
+        spans[key.value] = (start, end)
+    edits: list[tuple[int, int, str]] = []
+    for name, line in lines.items():
+        if name in spans:
+            start, end = spans[name]
+            ending = block[start:end][len(block[start:end].rstrip("\r\n")):]
+            edits.append((start, end, "" if line is None else line + ending))
+        elif line is not None:
+            if after not in spans:
+                return None
+            end = spans[after][1]
+            edits.append((end, end, line + newline if block[end - 1:end] == "\n" else newline + line))
+    for start, end, text in sorted(edits, reverse=True):
+        if not text and end == len(block) and start:
+            # The envelope owns the fence newline; appended fields own this separator.
+            start -= 2 if block[:start].endswith("\r\n") else 1
+        block = block[:start] + text + block[end:]
+    return block
+
+
 def pre_retirement_content(content: str) -> str | None:
     """One byte-preserving candidate; only a retained digest can prove it was original."""
     match = _FM_PATTERN.match(content)
@@ -183,30 +232,12 @@ def pre_retirement_content(content: str) -> str | None:
         return None
     try:
         before, body, _raw = parse_frontmatter(content, strict=True)
-        block = match.group(1)
-        root = yaml.compose(block, Loader=yaml.SafeLoader)
-        if not isinstance(root, yaml.MappingNode) or root.flow_style:
+        block = rewrite_fields(match.group(1), dict.fromkeys(_RETIREMENT_FIELDS))
+        if block is None:
             return None
-        spans = []
-        for key, value in root.value:
-            if not isinstance(key, yaml.ScalarNode) or key.value not in _RETIREMENT_FIELDS:
-                continue
-            start = block.rfind("\n", 0, key.start_mark.index) + 1
-            if block[start:key.start_mark.index].strip():
-                return None
-            end = value.end_mark.index
-            if end < len(block) and (end == 0 or block[end - 1] != "\n"):
-                line_end = block.find("\n", end)
-                end = len(block) if line_end == -1 else line_end + 1
-            spans.append((start, end))
-        for start, end in sorted(spans, reverse=True):
-            if end == len(block) and start:
-                # The envelope owns the fence newline; appended fields own this separator.
-                start -= 2 if block[:start].endswith("\r\n") else 1
-            block = block[:start] + block[end:]
         candidate = content[:match.start(1)] + block + content[match.end(1):]
         after, candidate_body, _raw = parse_frontmatter(candidate, strict=True)
-    except (FrontmatterError, yaml.YAMLError):
+    except FrontmatterError:
         return None
     expected = {key: value for key, value in before.items() if key not in _RETIREMENT_FIELDS}
     return candidate if after == expected and candidate_body == body else None

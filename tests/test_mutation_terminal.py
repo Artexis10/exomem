@@ -615,6 +615,31 @@ def test_compact_artifact_paths_count_only_what_this_call_stored() -> None:
     assert compact["summary"] == {"stored": 1, "already_stored": 1, "failed": 1}
 
 
+def test_compact_row_of_a_page_in_many_families_keeps_the_first_ones_and_the_total() -> None:
+    """A page can list more families than a row carries: that clips the list, it never turns a stored file into an invalid row."""
+    mutation_terminal = _terminal_module()
+    families = [{"scope": "case", "category": f"folder-{number:03d}"} for number in range(70)]
+    row = {
+        "file_id": "f1", "outcome": "stored", "state": "already_stored",
+        "duplicate_of": {"path": "Knowledge Base/Evidence/case/raw/one.bin", "ref": "exomem://note/0123456789abcdef"},
+        "stored_path": "Knowledge Base/Evidence/case/raw/one.bin", "path": "Knowledge Base/Evidence/case/raw/one.bin",
+        "ref": "exomem://note/0123456789abcdef", "size": 10, "hash": "a" * 64, "hash_algorithm": "sha256",
+        "content_type": "application/octet-stream", "media_id": None, "warnings": [],
+        "families": families, "family_added": True,
+        "fields_not_applied": [{"field": "filename", "provided": "p" * 500, "kept": "one.bin"}],
+    }
+    terminal = mutation_terminal.committed_terminal(
+        {"files": [row], "summary": {"stored": 0, "already_stored": 1, "failed": 0}},
+        request_id="11111111-1111-4111-8111-111111111111", receipt_id=None, idempotency_key=None,
+    )
+
+    [compact] = mutation_terminal.project_terminal(terminal, "compact")["files"]
+
+    assert compact["state"] == "already_stored"
+    assert compact["families"] == families[:64] and compact["families_total"] == 70
+    assert compact["fields_not_applied"] == [{"field": "filename", "provided": "p" * 300, "kept": "one.bin"}]
+
+
 def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(
