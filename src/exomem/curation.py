@@ -917,12 +917,33 @@ def _instance_identity(vault_root: Path, scope: str) -> str:
     )
 
 
-def registry_identities(vault_root: Path) -> dict[str, str]:
-    """Return deterministic identities for registries that affect executability."""
-    from . import entity_types, relation_registry
+def _stored_schema_rows(vault_root: Path) -> list[dict[str, str]] | None:
+    """The registry and contract files that a store-mode vault's store holds, as ``_schema_rows`` lists them.
 
-    entities = entity_types.load_entity_types(vault_root)
-    relations = relation_registry.load_registry(vault_root)
+    None when the vault is not in store mode. The store's own hash is the hash of the bytes it holds.
+    """
+    from .vault_store import mode, read
+
+    if not mode.store_mode_for_reads(Path(vault_root)):
+        return None
+    schema = f"{kb_dirname()}/_Schema/"
+    registry = f"{schema}semantic-language-registry.yaml"
+    contracts = f"{schema}contracts/"
+    with read.snapshot(Path(vault_root)) as view:
+        metas = [view.page_meta(registry)]
+        # ``*.yaml`` directly below ``contracts``: a file extension is a closed set that the format fixes.
+        metas.extend(
+            meta for meta in view.pages(contracts)
+            if meta.path.endswith(".yaml") and "/" not in meta.path[len(contracts):]
+        )
+    return [{"path": meta.path, "sha256": meta.sha256} for meta in metas if meta is not None]
+
+
+def _schema_rows(vault_root: Path) -> list[dict[str, str]]:
+    """The path and hash of each schema registry file that an executable proof binds."""
+    stored = _stored_schema_rows(vault_root)
+    if stored is not None:
+        return stored
     schema_root = Path(vault_root) / kb_dirname() / "_Schema"
     schema_rows: list[dict[str, str]] = []
     schema_candidates: list[Path] = [schema_root / "semantic-language-registry.yaml"]
@@ -941,6 +962,16 @@ def registry_identities(vault_root: Path) -> dict[str, str]:
                     "CURATION_REGISTRY_UNREADABLE", "schema registry changed while read"
                 ) from error
             schema_rows.append({"path": relative, "sha256": digest})
+    return schema_rows
+
+
+def registry_identities(vault_root: Path) -> dict[str, str]:
+    """Return deterministic identities for registries that affect executability."""
+    from . import entity_types, relation_registry
+
+    entities = entity_types.load_entity_types(vault_root)
+    relations = relation_registry.load_registry(vault_root)
+    schema_rows = _schema_rows(vault_root)
     return {
         "entities": _digest(
             {"core_version": entities.core_version, "extension_hash": entities.extension_hash}

@@ -365,7 +365,8 @@ def effective_digest(registry: str, entries: Mapping[str, Entry]) -> str:
 
 @dataclass(slots=True)
 class _Cached:
-    stat: tuple[int, ...] | None
+    #: The overlay file's stat key, or ``("store", page revision, sha256)`` for a stored overlay; None for none.
+    stat: tuple[object, ...] | None
     snapshot: Snapshot
 
 
@@ -422,6 +423,11 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     root = Path(vault_root)
     path = spec.overlay(root)
     key = _cache_key(vault_root, spec)
+    from ..vault_store import read
+
+    relative = path.relative_to(root).as_posix()
+    if read.serves(root, relative):
+        return _load_stored(spec, root, key, relative)
     stat = _stat_key(path)
     if stat is None:
         # A fresh leaf miss reads no override bytes; only shipped data may return.
@@ -455,6 +461,38 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     guard.recheck(root)
     with _CACHE_LOCK:
         _CACHE[key] = _Cached(stat, snapshot)
+    return snapshot
+
+
+def _load_stored(spec: RegistrySpec, root: Path, key: tuple[str, str, str, str, str], relative: str) -> Snapshot:
+    """``load`` for an overlay that the vault's store serves: the stored page is the override.
+
+    The overlay's file is only a projection and may lag or be absent, so the file's stat and its ancestors
+    decide nothing. The cache keys on the stored page's revision and hash, so a commit that changes the
+    overlay reloads it and any other commit leaves it. A page that the store lacks is no override.
+    """
+    from ..vault_store import read
+
+    with read.snapshot(root) as view:
+        meta = view.page_meta(relative)
+        stamp = None if meta is None else ("store", meta.revision, meta.sha256)
+        with _CACHE_LOCK:
+            cached = _CACHE.get(key)
+        if stamp is not None and cached is not None and cached.stat == stamp:
+            return cached.snapshot
+        page = None if meta is None else view.page(relative)
+    if page is None:
+        snapshot = _pack_only(spec)
+        with _CACHE_LOCK:
+            _CACHE[key] = _Cached(None, snapshot)
+        return snapshot
+    text = page.body.decode("utf-8")
+    if cached is not None and cached.snapshot.overlay_text == text:
+        snapshot = cached.snapshot
+    else:
+        snapshot = _build(spec, text)
+    with _CACHE_LOCK:
+        _CACHE[key] = _Cached(("store", page.meta.revision, page.meta.sha256), snapshot)
     return snapshot
 
 

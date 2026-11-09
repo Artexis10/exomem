@@ -3924,7 +3924,7 @@ def _build_corpus_context_uncached(
 
 def _read_corpus_source(root: Path, path: Path) -> str:
     if request_budget.current_checkpoint() is None:
-        return path.read_bytes().decode("utf-8")
+        return vault.read_bytes_without_pinning(path, root).decode("utf-8")
     return vault.read_guarded_text(root, path)[0]
 
 

@@ -275,10 +275,46 @@ def _cache_manifest(
             del _MANIFEST_CACHE[next(iter(_MANIFEST_CACHE))]
 
 
+def _manifest_from_bytes(key: str, path: Path, raw_bytes: bytes) -> ActivationManifest | None:
+    """The validated manifest for bytes that were read, reusing the parse of identical bytes."""
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    with _MANIFEST_CACHE_LOCK:
+        cached = _MANIFEST_CACHE.get(key)
+    if cached is not None and cached[0] == digest:
+        return cached[1]
+    try:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNREADABLE",
+            f"could not read {path}: {error}",
+        ) from error
+    try:
+        value = yaml.safe_load(raw)
+    except yaml.YAMLError as error:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_INVALID_YAML",
+            f"{path} is not valid YAML: {error}",
+        ) from error
+    manifest = _validate_manifest(value, path=path)
+    _cache_manifest(key, digest, manifest)
+    return manifest
+
+
 def load_manifest(vault_root: Path) -> ActivationManifest | None:
     """Load and validate an existing manifest without changing its bytes."""
     path = manifest_path(vault_root)
     key = _manifest_cache_key(path)
+    from .vault_store import read
+
+    try:
+        # A store-mode vault keeps the manifest in its store: one snapshot read is stable, and the file may lag.
+        stored = read.owned_bytes(vault_root, path.relative_to(vault_root).as_posix())
+    except FileNotFoundError:
+        _cache_manifest(key, None, None)
+        return None
+    if stored is not None:
+        return _manifest_from_bytes(key, path, stored)
     for _ in range(2):
         try:
             signature = _manifest_signature(path)
@@ -308,28 +344,7 @@ def load_manifest(vault_root: Path) -> ActivationManifest | None:
             ) from error
         if confirmed != signature:
             continue
-        digest = hashlib.sha256(raw_bytes).hexdigest()
-        with _MANIFEST_CACHE_LOCK:
-            cached = _MANIFEST_CACHE.get(key)
-        if cached is not None and cached[0] == digest:
-            return cached[1]
-        try:
-            raw = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ActivationManifestError(
-                "ACTIVATION_MANIFEST_UNREADABLE",
-                f"could not read {path}: {error}",
-            ) from error
-        try:
-            value = yaml.safe_load(raw)
-        except yaml.YAMLError as error:
-            raise ActivationManifestError(
-                "ACTIVATION_MANIFEST_INVALID_YAML",
-                f"{path} is not valid YAML: {error}",
-            ) from error
-        manifest = _validate_manifest(value, path=path)
-        _cache_manifest(key, digest, manifest)
-        return manifest
+        return _manifest_from_bytes(key, path, raw_bytes)
     raise ActivationManifestError(
         "ACTIVATION_MANIFEST_UNSTABLE",
         f"{path} changed repeatedly while it was being read",
