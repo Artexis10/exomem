@@ -227,8 +227,8 @@ _OPERATIONAL_KEYS = frozenset(
     }
 )
 
-#: The one sentence a write reply carries as `next` when the capture-sweep ledger judged this write
-#: the first of a new episode. The producer's longer block (rule, examples, recent writes) stays in
+#: The one sentence a write reply carries in `next_action` when the capture-sweep ledger judged this
+#: write the first of a new episode. The producer's longer block (rule, examples, recent writes) stays in
 #: the leaf for its own tests; the agent needs the ask, once, and any `unpaged_mentions` it names.
 CAPTURE_SWEEP_NEXT = (
     "Check the recent conversation once for anything else worth keeping, save what is missing "
@@ -2433,6 +2433,10 @@ def project_terminal(
             reply["diagnostics"] = {"operational": operational, **leaf}
         else:
             reply["diagnostics"] = {"operational": operational, "leaf_result": leaf}
+        if capture_sweep is not None:
+            # The agent reply holds only the sweep's ask; the producer's whole block is
+            # diagnostic detail, and the leaf above has it stripped.
+            reply["diagnostics"]["capture_sweep"] = capture_sweep
     return reply
 
 
@@ -2447,7 +2451,7 @@ def _agent_reply(
     """Split the projected write reply into what the agent reads and what operators read.
 
     The agent reads the outcome sentence, the result fields its next call may take, and at most
-    one `next` and one `notice` sentence. Everything in `_OPERATIONAL_KEYS` is returned
+    one `next_action` and one `notice` sentence. Everything in `_OPERATIONAL_KEYS` is returned
     separately for `diagnostics`. A field this split does not name stays in the agent view, so a
     new result field is never lost to it. A `leaf_owned` key stays in the agent view with the
     leaf's value, and `diagnostics` takes the terminal's own value for it.
@@ -2462,12 +2466,13 @@ def _agent_reply(
         for key, value in wide.items()
         if key not in _OPERATIONAL_KEYS or key in leaf_owned
     }
-    next_action = reply.get("next_action")
-    if isinstance(next_action, str):
-        reply.pop("next_action")
-        reply["next"] = next_action
-    elif capture_sweep is not None:
-        reply["next"] = CAPTURE_SWEEP_NEXT
+    if capture_sweep is not None:
+        # A write's own step (a guarded write waiting for review) is a sentence; the sweep's ask
+        # follows it in the same `next_action`, so neither is lost.
+        own_step = reply.get("next_action")
+        reply["next_action"] = (
+            f"{own_step} {CAPTURE_SWEEP_NEXT}" if isinstance(own_step, str) else CAPTURE_SWEEP_NEXT
+        )
         if mentions := capture_sweep.get("unpaged_mentions"):
             # Names this page reached for that have no page: data the sweep acts on, not rule text.
             reply["unpaged_mentions"] = list(mentions)

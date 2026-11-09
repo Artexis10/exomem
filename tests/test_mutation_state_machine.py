@@ -69,8 +69,8 @@ def test_needs_review_is_not_a_failure():
 
 def test_needs_review_names_the_next_action_and_denies_failure():
     env = mt.project_terminal(mt.needs_review_terminal(_precommit()))
-    assert "not a failure" in env["next"]
-    assert "draft identity" in env["next"]
+    assert "not a failure" in env["next_action"]
+    assert "draft identity" in env["next_action"]
     assert env["notice"]
 
 
@@ -78,7 +78,7 @@ def test_uncommittable_draft_points_at_the_blockers_instead():
     env = mt.project_terminal(
         mt.needs_review_terminal(_precommit(committable_after_review=False))
     )
-    assert "blocking findings" in env["next"]
+    assert "blocking findings" in env["next_action"]
 
 
 # ------------------------------------------------------------------- the correlation

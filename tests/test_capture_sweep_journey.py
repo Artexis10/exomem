@@ -159,7 +159,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         key="journey-meeting",
     )
     assert meeting["user_summary"].startswith("Saved")
-    assert meeting["next"] == CAPTURE_SWEEP_NEXT
+    assert meeting["next_action"] == CAPTURE_SWEEP_NEXT
     assert "capture_sweep" not in meeting
 
     # The booking system is named on the committed page and has no page of its
@@ -178,7 +178,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         slug="booking-lead-time",
         key="journey-quirk",
     )
-    assert "next" not in quirk
+    assert "next_action" not in quirk
 
     # 4. Replay. An acknowledgement the client never received is retried under the
     #    same idempotency key. Each replay returns its ORIGINAL terminal byte for
@@ -202,7 +202,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
     )
     assert meeting_replay == meeting
     assert quirk_replay == quirk
-    assert "next" not in quirk_replay
+    assert "next_action" not in quirk_replay
 
     notes = sorted(
         page.relative_to(vault).as_posix()
@@ -228,7 +228,7 @@ def test_a_quiet_prominence_level_writes_the_same_pages_and_says_nothing(
         vault, content=_meeting_content(), title=MEETING_TITLE, slug="client-meeting-slot"
     )
 
-    assert "next" not in meeting
+    assert "next_action" not in meeting
     assert (vault / meeting["path"]).is_file()
 
 
@@ -259,7 +259,7 @@ def test_a_broken_advisory_never_breaks_a_page_write(
     )
 
     assert result["user_summary"].startswith("Saved")
-    assert "next" not in result
+    assert "next_action" not in result
     assert (vault / result["path"]).is_file()
 
 

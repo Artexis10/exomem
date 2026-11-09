@@ -288,7 +288,7 @@ _REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 
 def _full_loses_nothing_the_old_compact_reply_carried(old_keys: set[str], terminal) -> None:
     full = _terminal_module().project_terminal(terminal, "full")
-    reachable = (set(full) - {"diagnostics", "user_summary", "notice", "next"}) | set(
+    reachable = (set(full) - {"diagnostics", "user_summary", "notice", "next_action"}) | set(
         full["diagnostics"]["operational"]
     )
     assert reachable == old_keys
@@ -1570,7 +1570,7 @@ def test_capture_sweep_is_lifted_from_every_write_container(container) -> None:
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert compact["next"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+    assert compact["next_action"] == mutation_terminal.CAPTURE_SWEEP_NEXT
     assert "capture_sweep" not in compact
 
 
@@ -1582,7 +1582,7 @@ def test_capture_sweep_is_absent_rather_than_null_when_the_leaf_has_none() -> No
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
     assert "capture_sweep" not in compact
-    assert "next" not in compact
+    assert "next_action" not in compact
 
 
 def test_capture_sweep_is_stripped_from_the_legacy_detail() -> None:
@@ -1621,7 +1621,7 @@ def test_an_out_of_bounds_capture_sweep_is_dropped_rather_than_widening_the_wire
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
     assert "capture_sweep" not in compact
-    assert "next" not in compact
+    assert "next_action" not in compact
 
 
 def test_capture_sweep_only_adds_its_next_sentence_and_the_names_without_pages() -> None:
@@ -1638,7 +1638,28 @@ def test_capture_sweep_only_adds_its_next_sentence_and_the_names_without_pages()
     without_block = mutation_terminal.project_terminal(plain_terminal, "compact")
 
     assert {
-        k: v for k, v in with_block.items() if k not in ("next", "unpaged_mentions")
+        k: v for k, v in with_block.items() if k not in ("next_action", "unpaged_mentions")
     } == without_block
-    assert with_block["next"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+    assert with_block["next_action"] == mutation_terminal.CAPTURE_SWEEP_NEXT
     assert with_block["unpaged_mentions"] == CAPTURE_SWEEP_LEAF["unpaged_mentions"]
+
+
+def test_a_write_with_its_own_next_step_carries_the_sweep_ask_after_it() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+    terminal["next_action"] = "Review the draft first."
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["next_action"] == (
+        f"Review the draft first. {mutation_terminal.CAPTURE_SWEEP_NEXT}"
+    )
+    assert compact["unpaged_mentions"] == CAPTURE_SWEEP_LEAF["unpaged_mentions"]
+
+
+def test_full_detail_carries_the_producers_capture_sweep_block() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+
+    full = mutation_terminal.project_terminal(terminal, "full")
+
+    assert full["diagnostics"]["capture_sweep"] == CAPTURE_SWEEP_LEAF
+    assert "capture_sweep" not in full

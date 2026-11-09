@@ -66,9 +66,9 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # that reason: which of an acceptance run's writes carries it is a fact
         # about the run's timing, not about the receipt.
         "capture_sweep",
-        # The envelope's conditional sentences: `next` when the agent must act (the capture
+        # The envelope's conditional sentences: `next_action` when the agent must act (the capture
         # nudge is one), `notice` when the result is partial, unknown or stale.
-        "next",
+        "next_action",
         "notice",
     }
 )

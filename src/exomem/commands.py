@@ -1804,10 +1804,10 @@ def op_bootstrap(
                     "create_note(suggestions=true)"
                 ),
                 (
-                    "Tell the user the reply's user_summary; follow next when present; "
+                    "Tell the user the reply's user_summary; follow next_action when present; "
                     "relay notice in one sentence; never repeat a saved write."
                     if profile == "compact" else
-                    "tell the user the write reply's user_summary. Follow `next` when it is "
+                    "tell the user the write reply's user_summary. Follow `next_action` when it is "
                     "present and relay `notice` in one sentence: it appears only when the "
                     "change may be incomplete. A saved write is never repeated; a refusal's "
                     "`retry` is the exact next call."
@@ -1967,9 +1967,9 @@ def op_bootstrap(
                 # spells out in full (a later decision, lookup, repeated task,
                 # comparison or continuation); it is not repeated here.
                 "capture_sweep_handling": (
-                    "On the first durable write after a quiet interval, the write reply's `next` calls for one bounded pass over recent conversation, once per episode. `unpaged_mentions` names references without pages. Save what qualifies, for example a decision or lookup, in the user's language; otherwise stay silent."
+                    "On the first durable write after a quiet interval, the write reply's `next_action` calls for one bounded pass over recent conversation, once per episode. `unpaged_mentions` names references without pages. Save what qualifies, for example a decision or lookup, in the user's language; otherwise stay silent."
                     if profile == "compact"
-                    else "a write reply's `next` that asks for a pass over the recent exchange means this is the first durable write after a quiet interval, and it arrives once per episode: make one bounded pass for anything else worth keeping. What qualifies is for example a decision, a lookup or a repeated task, not a closed set; `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
+                    else "a write reply's `next_action` that asks for a pass over the recent exchange means this is the first durable write after a quiet interval, and it arrives once per episode: make one bounded pass for anything else worth keeping. What qualifies is for example a decision, a lookup or a repeated task, not a closed set; `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
                 ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": f"when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: {call_text('triage_memory', {'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': '<code>: ...'})}, or action 'off' or 'normal'. quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
