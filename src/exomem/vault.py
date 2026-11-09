@@ -487,11 +487,15 @@ def _is_vault(path: Path) -> bool:
     """
     from .vault_store import read
 
+    if (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists():
+        return True
     # A store-mode vault keeps the legacy sentinel page in its store, and its file may be absent.
-    return (
-        read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
-        or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
-    )
+    try:
+        return read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
+    except ValueError:
+        # Callers probe every ancestor of a path, and one that holds its own state root (the
+        # filesystem root, say) is refused placement: such a directory cannot be a store-mode vault.
+        return False
 
 
 def kb_root(vault: Path) -> Path:

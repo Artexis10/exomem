@@ -2896,7 +2896,7 @@ def _eligible_unit_records(
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
     """Return current unit identities satisfying one exact `(page, unit)` plan."""
     if allowed_parent_paths is not None:
-        walk = (vault_root / rel for rel in allowed_parent_paths)
+        walk: Iterable[Path] = (vault_root / rel for rel in allowed_parent_paths)
     else:
         walk = _corpus_walk(vault_root, scope)
 
@@ -7353,7 +7353,9 @@ def _keyword_match_paths(
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
     if allowed_paths is not None:
-        walk = (vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix()))
+        walk: Iterable[Path] = (
+            vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix())
+        )
     elif scope == "kb" and _kb_missing(vault_root):
         return []
     else:

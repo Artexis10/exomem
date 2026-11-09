@@ -287,7 +287,7 @@ class FrontmatterCache:
             with self._lock:
                 held = self._signatures.get(path)
                 current = held is not None and self._validated_at.get(path) == view.revision
-            if current:
+            if current and held is not None:
                 cached = self._resident(path, held)
                 if cached is not None:
                     return cached
