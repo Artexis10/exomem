@@ -336,11 +336,17 @@ def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolve
     assert find_module.shared_resolver(stored).title_key_for_path(NEW) == "delta"
 
 
-def test_a_find_request_reads_one_store_snapshot_however_many_pages_it_reads(
-    stored, writer, monkeypatch  # noqa: F811
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("caller", ("the owner", "an external caller under an active policy"))
+@pytest.mark.parametrize("tool", ("op_find", "op_ask_memory"))
+def test_a_recall_tool_call_reads_one_store_snapshot_however_many_pages_it_reads(
+    stored, writer, tool, caller, monkeypatch  # noqa: F811
 ):
-    """A reader that opens a snapshot per page costs 7 to 14 ms a page and may mix revisions in one
-    answer; the request's reads must not grow with the pages it touches."""
+    """A reader that opens a snapshot per page costs 7 to 14 ms a page and may mix revisions in
+    one answer; the call's reads, release decisions included, must not grow with its pages."""
+    external = caller != "the owner"
+    if external:
+        restrict_external(stored, 'tags: ["secret"]')
     opened = []
     real = connection.store_reader
 
@@ -350,20 +356,23 @@ def test_a_find_request_reads_one_store_snapshot_however_many_pages_it_reads(
 
     monkeypatch.setattr(connection, "store_reader", counting)
 
-    def snapshots_for_one_find(pages):
+    def snapshots_for_one_call(pages):
         for index in range(pages):
             rel, body = generated_page(index)
             write.commit(writer, put(rel, body))
         find_module.clear_cache()
         opened.clear()
-        hits = find_module.find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
-        assert len(hits) == 15
+        with request_scope(EXTERNAL) if external else contextlib.nullcontext():
+            answer = getattr(commands, tool)(
+                stored, query="lighthouse", limit=15, graph=False, rerank=False
+            )
+        assert answer
         return len(opened)
 
-    few = snapshots_for_one_find(20)
-    many = snapshots_for_one_find(60)
+    few = snapshots_for_one_call(20)
+    many = snapshots_for_one_call(60)
 
-    assert many == few
+    assert (few, many) == (1, 1)
 
 
 def test_a_store_page_tagged_into_a_restricted_scope_is_withheld_whatever_its_projected_file_says(

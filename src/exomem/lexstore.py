@@ -3149,8 +3149,9 @@ def _catalog_usable() -> bool:
     The catalog (pages + semantic_units metadata) lives in ordinary SQLite
     tables and needs neither FTS5 nor the trigram tokenizer, so — unlike the
     content-ranking lanes gated by ``_usable`` — only the explicit ``python``
-    kill switch retires it. Exact category/kind metadata therefore survives an
-    FTS5-less SQLite build.
+    kill switch, or a request that reads a store-mode vault (``backend()`` then
+    answers ``python``), retires it. Exact category/kind metadata therefore
+    survives an FTS5-less SQLite build.
     """
     return backend() != "python"
 

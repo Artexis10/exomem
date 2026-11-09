@@ -1418,7 +1418,9 @@ def _stored_key(vault_root: Path, value: object) -> str | None:
     the disk.
 
     The store holds one spelling of each page, so no physical alias can collide. A page that the
-    store serves but lacks is MISSING, as a file that is gone is.
+    store serves but lacks is MISSING, as a file that is gone is. The folders of ``value`` do not
+    resolve, unlike ``read.served_key``: a write door acts on the page it was given, and a held
+    parent that is a link is refused in file mode, so a folder link here names no page.
     """
     from .vault_store import read
 
