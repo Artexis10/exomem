@@ -477,6 +477,10 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
 
     # A current lexical transaction may land while graph remains old. Current
     # lexical results are usable; stale graph state stays excluded.
+    # The stale search above scheduled a background repair. A foreground upsert
+    # gives up on the publication lock after 0.05 s, so on a loaded machine it
+    # would defer behind that repair's publish; let the repair finish first.
+    assert lexstore.await_repairs_idle(tmp_path)
     store.upsert_paths([path])
     current = lexstore.search_semantic_units(tmp_path, "current", k=5, scope="kb")
     assert current and [hit.category for hit in current] == ["rule"]
