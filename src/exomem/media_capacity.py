@@ -46,6 +46,16 @@ def _largest_plaintext_within(ciphertext_bound: int) -> int:
     return full * AGE_CHUNK_BYTES + max(0, rest - AGE_TAG_BYTES)
 
 
+def classify(plaintext_bytes: int, largest_offloadable: int, *, text: bool = False) -> str:
+    """The rule itself: text stays text, and an artifact offloads only up to the largest offloadable file.
+
+    A sender that reads `largest_offloadable` from the cell's status applies the rule without the bounds.
+    """
+    if text:
+        return TEXT
+    return OFFLOADABLE if plaintext_bytes <= largest_offloadable else RESIDENT
+
+
 @dataclass(frozen=True, slots=True)
 class Bounds:
     """The rule's inputs. A missing object bound means the store sets none."""
@@ -62,9 +72,7 @@ class Bounds:
 
     def classify(self, plaintext_bytes: int, *, text: bool = False) -> str:
         """Classify one member; the caller applies the importer's text rule."""
-        if text:
-            return TEXT
-        return OFFLOADABLE if plaintext_bytes <= self.largest_offloadable() else RESIDENT
+        return classify(plaintext_bytes, self.largest_offloadable(), text=text)
 
     def hydration_fits(self, plaintext_bytes: int) -> bool:
         """Hydration reserves plaintext bytes only (D12, choice 3)."""
