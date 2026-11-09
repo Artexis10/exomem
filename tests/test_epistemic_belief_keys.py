@@ -583,3 +583,30 @@ def test_a_unit_emptied_only_by_a_new_key_stays_in_the_index(vault: Path) -> Non
     assert sorted(hit["unit_ref"] for hit in found if hit["unit_ref"].startswith(POLICY_REF)) == sorted(
         parsed_refs
     )
+
+
+def test_a_find_pack_cuts_a_long_basis_and_says_it_did(vault: Path) -> None:
+    """Catches a free-text belief row that pours its whole length into compiled context."""
+    basis = "Four of the last six releases slipped by a week or more. " * 8
+    page = vault / POLICY
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: resource\nstatus: active\nupdated: 2026-10-01\n"
+        f"exomem_id: {POLICY_ID}\n---\n\n# Deploy policy\n\n"
+        "## Belief\n- id: platform\n- credence_holder: Platform team\n- credence: 0.7\n"
+        f"- credence_basis: {basis}\n- relations: assesses: [[Release date]]\n\n"
+        "The deploy release will slip a week.\n",
+        encoding="utf-8",
+    )
+    lexstore.ensure_fresh(vault)
+
+    result = commands.op_find(vault, query="deploy release slip", mode="keyword", pack=True)
+
+    (unit,) = result["pack"]["semantic_units"][POLICY]["units"]
+    assert unit["credence_basis"].endswith("…")
+    assert len(unit["credence_basis"]) < len(basis.strip())
+    assert unit["credence_holder"] == "Platform team"
+    assert any(
+        note.startswith(f"{POLICY}: ") and "field value(s) omitted by bounds" in note
+        for note in result["pack"]["truncation"]
+    )

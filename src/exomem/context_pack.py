@@ -79,6 +79,9 @@ _DEFAULT_MAX_UNIT_TOTAL_CHARS = 12_000
 _MAX_UNIT_TAGS = 16
 _MAX_UNIT_TAG_CHARS = 64
 _MAX_UNIT_CONTEXT_CHARS = 240
+# A governed row's value. Key, level and number rows stay far below it; a holder, asserter or
+# basis is free text, so it is cut like a unit's context.
+_MAX_UNIT_ROW_CHARS = 240
 _MAX_UNIT_RELATIONS = 8
 _MAX_UNIT_RELATION_TARGET_CHARS = 240
 _MAX_UNIT_RELATION_RAW_CHARS = 320
@@ -425,6 +428,12 @@ def _pack_unit(
         len(relation.target.strip()) > _MAX_UNIT_RELATION_TARGET_CHARS
         for relation in shown_relations
     )
+    rows = {
+        key: value
+        for key in semantic_units.UNIT_ROW_KEYS
+        if (value := getattr(unit, key)) is not None
+    }
+    clipped_fields += sum(len(value.strip()) > _MAX_UNIT_ROW_CHARS for value in rows.values())
     return (
         {
             "unit_ref": unit.unit_ref,
@@ -434,9 +443,9 @@ def _pack_unit(
             # Whose claim or belief the unit is, its modality and its other governed rows, as
             # compiled context shows them; a row the unit lacks is omitted.
             **{
-                key: getattr(unit, key)
-                for key in semantic_units.UNIT_ROW_KEYS
-                if getattr(unit, key) is not None
+                key: shown
+                for key, value in rows.items()
+                if (shown := _cap(value, _MAX_UNIT_ROW_CHARS, whole=whole))
             },
             "form": unit.form,
             "category_raw": unit.category_raw,
