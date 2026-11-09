@@ -129,10 +129,10 @@ def test_the_exact_repeat_of_an_interrupted_call_files_every_source_once(vault, 
                 crashes["armed"] = armed
                 result = await _file(client, f"file-{number}", **operation)
                 if armed:
-                    assert result.structured_content["success"] is False, "the synthetic interruption did not stop the call"
+                    assert "error" in result.structured_content, "the synthetic interruption did not stop the call"
                     published = len(_sources(vault))
                     result = await _file(client, f"file-{number}", **operation)  # the exact repeat
-                    assert not result.is_error and result.structured_content.get("success") is not False, result
+                    assert not result.is_error and "error" not in result.structured_content, result
                     if cut == "after-next-page-start":
                         # The interrupted call never reached an apply, so its repeat published nothing.
                         assert len(_sources(vault)) == published

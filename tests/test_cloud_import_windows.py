@@ -1473,16 +1473,28 @@ def test_an_older_cell_that_refuses_file_keeps_todays_behaviour_and_says_so(rig)
     assert "The upload is done and filing continues." in rig.said()
 
 
-def test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_the_cells_code(rig):
-    """Catches a CLI that reads every refusal as an older cell, which hides the cell's reason and stops filing for good."""
+@pytest.mark.parametrize("envelope", [{}, {"success": False}], ids=["current-cell", "older-cell"])
+def test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_the_cells_code(rig, envelope):
+    """Catches a CLI that reads every refusal as an older cell, or a current cell's bare `error` as unreadable."""
     rig.files(a01__bin=800)
-    rig.cell.file_replies = [{"success": False, "error": {"code": "MUTATION_BUSY", "message": "Another write holds the vault."}}]
+    rig.cell.file_replies = [{**envelope, "error": {"code": "MUTATION_BUSY", "message": "Another write holds the vault."}}]
 
     result = rig.run(file=True)
 
     assert "refused the file call" not in rig.said()
     assert "Filing window 1 stopped (MUTATION_BUSY): Another write holds the vault." in rig.said()
     assert result["filing"]["windows_waiting"] == 1 and "Keep the source folder" in rig.said()
+
+
+def test_a_file_call_whose_outcome_the_cell_does_not_know_is_repeated_once_and_files_the_window(rig):
+    """Catches a CLI that stops a window on an unknown outcome that the exact repeat would settle."""
+    rig.files(a01__bin=800)
+    rig.cell.file_replies = [{"error": {"code": "MUTATION_OUTCOME_UNKNOWN", "message": "The outcome is unknown."}}, FILED]
+
+    result = rig.run(file=True)
+
+    assert len(rig.cell.filed) == 2 and rig.cell.filed[0] == rig.cell.filed[1]
+    assert result["filing"]["windows_waiting"] == 0 and result["filing"]["filed"] == 3
 
 
 def test_a_file_call_that_fails_on_the_way_stops_that_window_and_the_upload_still_ends(rig):

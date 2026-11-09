@@ -12,7 +12,7 @@
 ## 2. The Cloud CLI
 
 - [x] 2.1 File each landed window while the series waits and at the end; add `--no-file` and `--collection`. **Evidence:** the filing cases in `tests/test_cloud_import_windows.py`.
-- [x] 2.2 Treat only a refusal of the action as an older cell; stop one window with the cell's code and reason on any other error, and with the failure's code on a call that fails on the way; repeat the exact call after an unknown or pending outcome. **Evidence:** `test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_the_cells_code`, red when every error reads as an older cell; `test_a_file_call_that_fails_on_the_way_stops_that_window_and_the_upload_still_ends`, red when the failure ends the command.
+- [x] 2.2 Treat only a refusal of the action as an older cell; stop one window with the cell's code and reason on any other error, and with the failure's code on a call that fails on the way; repeat the exact call after an unknown or pending outcome. **Evidence:** `test_a_file_call_that_the_cell_refuses_with_an_error_stops_that_window_with_the_cells_code`, red when every error reads as an older cell; `test_a_file_call_that_fails_on_the_way_stops_that_window_and_the_upload_still_ends`, red when the failure ends the command. `test_a_file_call_whose_outcome_the_cell_does_not_know_is_repeated_once_and_files_the_window` and the refusal test's `current-cell` case, red when a refusal without `success` reads as an unreadable reply.
 - [x] 2.3 Count a moved page position as progress in the stall check, and skip windows whose filing the status reports done on a rerun. **Evidence:** `import_windows` reports `filing_done`; `tests/test_adoption_windows.py` and `tests/test_cloud_import_windows.py` pass.
 
 ## 3. Guidance and artifacts

@@ -259,8 +259,10 @@ class FilingReply:
     @classmethod
     def of(cls, reply: dict) -> FilingReply:
         """Only a refusal of the action itself is an older cell; any other error, or a reply this CLI cannot read, is a stop."""
-        if reply.get("success") is False:
-            error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        # A current cell refuses with `{"error": {...}}` alone; an older cell, and this CLI's tool-error path, add `success`.
+        error = reply.get("error")
+        if reply.get("success") is False or isinstance(error, dict):
+            error = error if isinstance(error, dict) else {}
             code = safe_code(error.get("code"))
             if code == _UNKNOWN_ACTION:
                 raise FilingUnavailable
