@@ -1,7 +1,7 @@
 ## 1. Naming
 
 - [x] 1.1 Add `page_names.resolve_page`, the short id and the ambiguity refusal, and one `title_key` (`tests/test_name_pages_by_title.py`).
-- [x] 1.2 Route the 14 page parameters through `resolve_page`, and translate a short id in `expected_hash` at the command seam.
+- [x] 1.2 Route the 14 page parameters through `resolve_page`, and compare a short id in `expected_hash` in the leaf writers, after admission.
 - [x] 1.3 Let `agent_refusal` pass candidate rows through as mappings.
 
 ## 2. Replies

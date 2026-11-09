@@ -11,8 +11,8 @@ A title that several pages share refuses with `AMBIGUOUS_REFERENCE`: `message` s
 pages carry it, and `candidates` lists at most 5 rows of `title`, `type`, `date` and `id`,
 newest first. Retry with `path` set to the `id` of the page you mean. An `id` in `expected_hash`
 guards the edit against the version that id names; if the page changed since, the refusal is
-`STALE_EDIT` and carries the current `id` in its retry. An edit by `id` that requires
-`expected_hash` and gets none is guarded by the version of the `id` it named.
+`STALE_EDIT` and carries the current `id` in its retry. The `id` of a write reply names the
+version that write left, so it guards your next edit of that page.
 
 ## Mutation results and safe retries
 

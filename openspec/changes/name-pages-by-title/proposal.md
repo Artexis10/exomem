@@ -11,7 +11,7 @@ The decision: **every MCP parameter that takes a page path also takes the page's
 - A new resolver, `page_names.resolve_page`, resolves a page in this order: an `exomem://` ref, an existing vault or KB-relative path, a short id, then a title. A value that names nothing is passed on unchanged, so every not-found and create-missing path behaves as before.
 - A title resolves through the writer's own resolver, so a page created a second ago resolves. A title that several pages the caller may see share refuses with `AMBIGUOUS_REFERENCE` and at most five candidates (`title`, `type`, `date`, `id`), newest first. The retry names the picked page by `id`.
 - A short id has two parts: 7 base32 characters of the page's `exomem_id` and 4 base32 characters of its content hash. The first part names the page across edits and moves. The second part names the version the caller read.
-- `expected_hash` accepts a short id. An operation that requires `expected_hash` takes the version from the id the page was named by. A stale id refuses with `STALE_EDIT` and the current id.
+- `expected_hash` accepts a short id, which the leaf writers compare after the write is admitted. A stale id refuses with `STALE_EDIT` and the current id.
 - Compact write replies of page writes carry `title` and `id` in place of `path`; search hits carry `id` in place of `path` unless the search asks for `detail=full`; a page read carries `id`. `response_detail=full` keeps `path` under `diagnostics`.
 - One `title_key` (NFC, trimmed, lower-cased, no case folding) replaces four copies of a bare `.lower()`.
 - No tool schema or description changes, so the tool-surface digest does not move. The CLI and REST facades keep their reply shapes.

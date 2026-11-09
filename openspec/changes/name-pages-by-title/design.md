@@ -26,15 +26,17 @@ A ref goes first, an existing path second. A path that exists is never a title, 
 
 Several title matches narrow by what the operation needs. An edit prefers pages that are neither append-only nor navigation pages, so a compiled note and its Source of the same title do not block each other. A single match is never hidden. Anything still tied refuses.
 
-### Guards translate at the command seam
+### A guard compares in the leaf, after admission
 
-`expected_hash` accepts the short id or the 64-character hash. The command seam translates an id into the page's current full hash before the leaf runs, so the leaf's own compare, which several writers share, stays as it is. A stale id refuses with the current id. An operation whose schema requires `expected_hash` still requires it; an operation that requires it in the leaf alone (the legacy `new_body` edit and observation update and remove) takes it from the id the page was named by. Optional guards stay optional.
+`expected_hash` accepts the short id or the 64-character hash. The compare stays in the leaf writers, after the write is admitted, through `page_ids.guard_matches`: `edit.load_editable` (shared by `edit`, `multi_edit`, `set_take` and `observe_memory`) and `set_frontmatter_field`. An id names a version by its tail, and the path the caller gave names the page, so the compare reads no page identity and works for a KB-relative path. Nothing reads a page before the leaf admits the write: a read at the command seam would answer a caller who may not see the page, and a withheld page would differ from an absent one.
+
+A stale id leaves the leaf as its usual refusal. `op_edit` and `op_observe_memory` then read the page, which the caller may now see, and refuse with `STALE_EDIT`, the current id and a retry. Every door model already requires `expected_hash` where the leaf does, so the server fills no guard. Optional guards stay optional.
 
 ### Replies are named after the egress release
 
 `command_surface` names the pages in a released MCP reply, after the dispatcher's terminal filter. The filter binds a unit reference to its page by `path` and `after_hash`, so removing the path earlier would break that binding. Naming after it also leaves the CLI and REST replies as they are. A command opts in through `Command.names_pages`, which is true for the page-subject writes and for search. A file tool keeps `path`, because it takes no title or id.
 
-The `replayed: true` marker belongs to the compact reply, and the spec names it. The code that sets it arrives with the busy-yield change, so this change adds no code or test for it.
+A write reply takes the version part of its id from its own `after_hash`, so a replayed reply or a raced write does not name a newer version, and an edit guarded by that id is refused. A reply holds an `after_hash` for its primary page only; the other pages of a multi-page write and a source take the version current when the reply is named.
 
 A search with `detail=full` keeps each hit's `path` beside its `id`. That level is for a harness that reads vault files, as `response_detail=full` is for a write; the default hit names the page by title and id only.
 
@@ -44,6 +46,8 @@ A search with `detail=full` keeps each hit's `path` beside its `id`. That level 
 
 ## Risks
 
+- Three active changes restate the compact-reply requirement of `mutation-terminal-contract`. Archive this change after the other two, and refresh its block against the canonical text then.
+- A short id names a version by 20 bits of its content hash. A stale guard then matches a different version with a chance of about one in a million per stale edit. The 64-character hash stays available where exactness matters.
 - Title ambiguity is common in a large vault. The refusal lists the newest five and the retry names the pick.
 - A cold resolver costs a full vault walk on the first title lookup of a process. The id and path routes do not pay it when the path exists.
 - An agent that guesses a path now falls through to a title lookup before it reaches not-found; the answer is the same refusal.
