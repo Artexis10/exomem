@@ -20,6 +20,7 @@ from exomem import (
     commands,
     note,
     semantic_blocks,
+    semantic_labels,
     semantic_language_registry,
     semantic_units,
     set_frontmatter_field,
@@ -198,7 +199,7 @@ def test_verdict_values_normalize_onto_the_unit(authored: str, expected: str) ->
 
 
 def test_shipped_verdicts_are_the_five_audit_approved_values() -> None:
-    assert semantic_language_registry.core_registry().verdict_keys() == (
+    assert semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS) == (
         "abandoned",
         "confirmed",
         "inconclusive",
@@ -279,7 +280,7 @@ def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
     document = _parse_with(f"## Prediction\n- verdict: {authored}\n\nRetry budgets hold.\n", registry)
 
     error = next(item for item in document.errors if item.code == "invalid_rich_verdict")
-    for key in registry.verdict_keys():
+    for key in registry.label_keys(semantic_labels.VERDICTS):
         assert key in error.remediation
     assert "retracted" in error.remediation
     assert "probability is not a verdict" in error.remediation
@@ -1296,7 +1297,7 @@ def test_concluded_is_an_accepted_experiment_status() -> None:
 
 
 def test_experiment_outcome_shares_the_unit_verdict_vocabulary() -> None:
-    keys = semantic_language_registry.core_registry().verdict_keys()
+    keys = semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS)
 
     assert all(
         vault_module.governed_frontmatter_reason("outcome", key, "experiment") is None

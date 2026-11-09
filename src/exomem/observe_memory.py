@@ -22,6 +22,7 @@ from . import (
     semantic_authoring,
     semantic_contract,
     semantic_index,
+    semantic_labels,
     semantic_language_registry,
     semantic_units,
     semantic_writes,
@@ -775,9 +776,9 @@ def _resolve_governed_value(
 def _canonical_verdict(
     value: str, language: semantic_language_registry.SemanticLanguageRegistry
 ) -> str:
-    verdict = language.resolve_verdict(value)
+    verdict = language.resolve_label(semantic_labels.VERDICTS, value)
     if verdict is None:
-        keys = language.verdict_keys()
+        keys = language.label_keys(semantic_labels.VERDICTS)
         raise ObserveMemoryError(
             "INVALID_SEMANTIC_VERDICT",
             f"verdict must be exactly one of {', '.join(keys)}, as the key or its label",

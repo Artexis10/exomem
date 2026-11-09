@@ -23,6 +23,7 @@ from . import (
     markdown_relations,
     memory_refs,
     semantic_blocks,
+    semantic_labels,
     semantic_language_registry,
 )
 from .relation_registry import RelationRegistry
@@ -1714,7 +1715,7 @@ def _rich_verdict(
     raw = block.metadata.get("verdict")
     if raw is None:
         return None, None
-    verdict = language.resolve_verdict(raw)
+    verdict = language.resolve_label(semantic_labels.VERDICTS, raw)
     if verdict is None:
         return None, _invalid_rich_metadata(
             block,
@@ -1722,7 +1723,7 @@ def _rich_verdict(
             path=path,
             line_by_number=line_by_number,
             message="invalid rich semantic-unit verdict",
-            remediation=verdict_remediation(language.verdict_keys()),
+            remediation=verdict_remediation(language.label_keys(semantic_labels.VERDICTS)),
         )
     return verdict, None
 
