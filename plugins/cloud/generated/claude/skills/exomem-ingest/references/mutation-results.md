@@ -18,7 +18,7 @@ names the same store. A repeat of a request with the same idempotency key return
 first reply, so it reads as the first call did.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
 your next call can take: `path` or `paths`, the hashes a guarded write takes, any
-`warnings`, and at most one `next` sentence (do it) and one `notice` sentence (tell the
+`warnings`, and at most one `next_action` sentence (do it) and one `notice` sentence (tell the
 user). `notice` appears only when the change may be incomplete: for example a background
 update failed, or the call only checked a draft. Everything operational moves under
 `diagnostics.operational`, which only `response_detail="full"` returns: `ok`, `status`,
@@ -51,10 +51,11 @@ does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
 A selected media process/retry/reprocess request can finish without changing canonical
-bytes: it returns `state: settled`, `status: settled`, `terminal: true`, and
-`mutated: false`, with request identity and bounded `media_results`. This means
-the request has completed, not that a new content commit or extraction has
-completed. Inspect each item's state and error/remediation, and use the same
+bytes. The default reply carries no `state`, `status`, `terminal` or `mutated`; with
+`response_detail="full"` they sit under `diagnostics.operational` and read
+`state: settled`, `status: settled`, `terminal: true` and `mutated: false`, beside the
+request identity and bounded `media_results`. This means the request has completed, not
+that a new content commit or extraction has completed. Inspect each item's state and error/remediation, and use the same
 identity for exact replay. A failed-subset retry is a new request containing
 only those failed paths.
 
@@ -110,12 +111,15 @@ committed-uncertain result—reconcile and retry only as instructed.
 ## Refusals
 
 A refused call returns `{"error": {"code", "message", "retry"?, "candidates"?}}` and
-nothing else. `message` is one sentence, and for a write it ends with what happened to
-your data: `Nothing was saved.`, `The change was saved.` or `Whether it was saved is not
-known.` `code` is the specific code. `retry` is the exact next call. It holds the tool
-name and `arguments` that you merge, key by key and including nested objects, into the
-arguments you already sent; a value in angle brackets is for you to supply. `retry.after_s`
-is a wait in seconds. `retry` is absent when no repeat of the call can succeed.
+nothing else. `message` says what was refused. When there is no `retry` it carries the
+whole fix as well, and for a write it ends with what happened to your data: `Nothing was
+saved.`, `The change was saved.` or `Whether it was saved is not known.` A refusal that kept
+something, such as a held candidate, says so instead. `code` is the specific code. `retry`
+is the exact next call. It holds the tool name and `arguments`. For the tool you called,
+merge `arguments` key by key, nested objects included, into the arguments you already sent;
+a `null` clears an argument, and a value in angle brackets is for you to supply. For another
+tool, `arguments` is the whole call. `retry.after_s` is a wait in seconds. `retry` is absent
+when no repeat of the call can succeed.
 `candidates` lists at most five valid values or titles to choose from. With
 `response_detail="full"` a write also returns `diagnostics`: the complete envelope with
 the umbrella code, the remediation text, request identity and wait times.
@@ -126,12 +130,12 @@ Name a specific relation on every edge. A write can answer in two ways.
 
 - **A new generic edge is refused.** The error is `GENERIC_RELATION_REFUSED`. It applies
   to every pair of pages, a note to a note as much as a note to an entity. The write
-  commits nothing. The error lists up to eight `options`, the specific relations that fit
-  the two pages, best first, and `options_route` reads the full list. Its `routes` hold the
-  exact call for each way out. Repeat the call with one of the `options`
-  (`routes.specific`). When none fits, propose a new relation type, then repeat the call
-  with the new key (`routes.propose` holds the `propose-relation` and `save-relations`
-  calls). As a last resort, repeat the call with the plain link (`routes.plain_link`).
+  commits nothing. The compact error lists up to five `candidates`: the specific relations
+  that fit the two pages, best first, with the plain link relation last. Repeat the call
+  with one of them. With `response_detail="full"`, `diagnostics` holds the ranked
+  `options` (up to eight, with `options_route` for the full list) and the `routes` for each
+  way out: `routes.specific`, `routes.propose` (the `propose-relation` and `save-relations`
+  calls, for when no option fits) and `routes.plain_link` (the last resort).
   No other answer keeps the generic edge: neither `relation_disposition="generic"` nor a
   `reason` on a `relations` item exists. An edge the page already carried is not judged
   again, so a page that holds an older generic edge stays editable.
@@ -172,11 +176,13 @@ The decision binds the page, not its bytes. A later edit of a page that holds a
 decision, while the page stays unconnected. An edit that removes a page's last
 qualifying relation is still refused.
 
-A refused Record append or update is held rather than lost: the refusal names
-every failing field under `details.issues` and returns a `held` reference, so fix
-the named field and resume with `change_records(operation={"kind": "append" or "update",
-"held": ...})`, or `discard` it — never loop, and never preserve diagnostic
-breadcrumbs as Evidence.
+A refused Record append or update is held rather than lost. The error message names
+the failing fields (at most three, then "and N more") and says the candidate is kept as a
+held candidate. Its `retry` is the `change_records` call that resumes it with the `held` reference;
+in `item` (append) or `changes` (update) a `null` clears a field and a value in angle
+brackets is yours to supply. With `response_detail="full"`, `diagnostics.error.issues` lists
+every failing field. Fix the named fields and resume, or `discard` the candidate. Never loop,
+and never preserve diagnostic breadcrumbs as Evidence.
 
 On MCP these expected refusals arrive as normal tool content with a top-level
 `error`; inspect it rather than treating it as a transport failure. A `receipt_id`

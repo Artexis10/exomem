@@ -160,7 +160,7 @@ operational or vendor quirk, evidence worth preserving, a relation, a planning
 implication, a record implication. That list is examples rather than a boundary.
 Do not repeat a completed review after every destination write. Never re-write
 what you already wrote in this episode, and stay silent when nothing
-qualifies. A write reply may carry a `next` sentence that asks for one pass over
+qualifies. A write reply may carry a `next_action` sentence that asks for one pass over
 the conversation, with `unpaged_mentions` naming references that have no page. It
 means this is the first write after a quiet interval and arrives once per episode;
 it prompts a pass if one has not already been completed for that episode, never a
