@@ -15,12 +15,15 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from test_derived_identifier_egress import (
+    _WITHHELD_TARGET,
+    _WRITE_SCOPE,
     NOTES,
     WITHHELD_DIR,
     _call,
     _materialize,
     _page,
     _principal,
+    _write_door_fixture,
 )
 from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_sha256
 
@@ -120,6 +123,42 @@ def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
             assert retried["title"] == "Retry policy"
             assert "path" not in retried
 
+            # A KB-relative path with an id guard compares the id's version, as a vault path does.
+            shorthand = await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": read["path"].removeprefix("Knowledge Base/"),
+                    "operation": _replace("limited", "bounded", expected_hash=retried["id"]),
+                    "why": "restore",
+                },
+            )
+            assert shorthand["title"] == "Retry policy"
+
+            # The frontmatter writer compares the id's version too: the version before `shorthand`
+            # is refused, and the version it left is taken.
+            patch = {"kind": "patch_frontmatter", "field": "tags", "value": ["ops"]}
+            stale_patch = await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": created["id"],
+                    "operation": {**patch, "expected_hash": retried["id"]},
+                    "why": "tag",
+                },
+            )
+            assert stale_patch["error"]["code"] == "STALE_EDIT"
+            patched = await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": created["id"],
+                    "operation": {**patch, "expected_hash": shorthand["id"]},
+                    "why": "tag",
+                },
+            )
+            assert patched["title"] == "Retry policy"
+
             # Two pages share the title: the refusal offers both, the picked id resolves.
             await _tool(client, "create_note", _new_note("Retry policy"))
             ambiguous = await _tool(
@@ -181,6 +220,81 @@ def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
     assert answers["with"]["Secret plan"].keys() == answers["with"]["Nonexistent plan"].keys()
 
 
+_FAKE_ID = "aaaaaaa.aaaa"
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        (
+            "edit_memory",
+            {
+                "path": _WITHHELD_TARGET,
+                "why": "fix",
+                "operation": {
+                    "kind": "replace_string",
+                    "old_string": "Withheld",
+                    "new_string": "X",
+                    "expected_hash": _FAKE_ID,
+                },
+            },
+        ),
+        (
+            "observe_memory",
+            {
+                "path": _WITHHELD_TARGET,
+                "operation": "update",
+                "unit_ref": "exomem://memory/0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6#finding",
+                "expected_hash": _FAKE_ID,
+                "expected_fingerprint": "0" * 64,
+                "category": "finding",
+                "content": "New.",
+            },
+        ),
+    ],
+    ids=["edit", "observe"],
+)
+def test_an_id_guard_does_not_tell_a_restricted_caller_a_withheld_page_exists(
+    tmp_path: Path, command: str, arguments: dict[str, Any]
+) -> None:
+    base, withheld = _write_door_fixture()
+    vaults = {
+        name: _materialize(tmp_path / name / "vault", files, "external", scope=_WRITE_SCOPE)
+        for name, files in (("without", dict(base)), ("with", {**base, **withheld}))
+    }
+
+    answers = {
+        name: _call(vault, _principal("external"), command, **arguments)
+        for name, vault in vaults.items()
+    }
+
+    assert answers["with"] == answers["without"]
+    assert "STALE" not in json.dumps(answers["with"])
+
+
+def test_a_visible_page_titled_like_a_withheld_path_is_no_oracle_for_that_path(
+    tmp_path: Path,
+) -> None:
+    visible = {
+        f"{NOTES}/lookalike.md": _page("Notes/Withheld/target", "Visible text.", type="insight"),
+    }
+    vaults = {
+        "without": _materialize(tmp_path / "without" / "vault", dict(visible), "external"),
+        "with": _materialize(
+            tmp_path / "with" / "vault", {**visible, **_write_door_fixture()[1]}, "external",
+            scope=_WRITE_SCOPE,
+        ),
+    }
+
+    answers = {
+        name: _call(vault, _principal("external"), "read_memory", path="Notes/Withheld/target")
+        for name, vault in vaults.items()
+    }
+
+    assert answers["with"] == answers["without"]
+    assert "Visible text." in answers["with"]["body"]
+
+
 def test_a_path_a_title_and_a_short_id_name_pages_in_that_order(tmp_path: Path) -> None:
     root = _materialize(
         tmp_path / "vault",
@@ -195,12 +309,33 @@ def test_a_path_a_title_and_a_short_id_name_pages_in_that_order(tmp_path: Path) 
     # A value that names a file is a path even when another page carries it as its title.
     by_path = page_names.resolve_page(root, "Notes/alpha.md")
     by_title = page_names.resolve_page(root, "Epsilon")
-    by_id = page_names.resolve_page(root, page_names.read_identity(root, by_title.path).id)
+    by_id = page_names.resolve_page(root, page_names.read_identity(root, by_title).id)
 
     assert vault_module.title_key("Notes/alpha.md") in find.shared_resolver(root).titles
-    assert by_path.path.removesuffix(".md").endswith("Notes/alpha")
-    assert by_title.path == f"{NOTES}/delta.md"
-    assert by_id.path == by_title.path and by_id.id is not None
+    assert by_path.removesuffix(".md").endswith("Notes/alpha")
+    assert by_title == f"{NOTES}/delta.md"
+    assert by_id == by_title
+
+
+def test_pages_that_share_one_id_are_told_apart_by_their_paths(tmp_path: Path) -> None:
+    copied = _page(
+        "Copied plan", "Same bytes.", type="insight", exomem_id="0192f0a4-6b7c-4d8e-9f10-a1b2c3d4e5f6"
+    )
+    root = _materialize(
+        tmp_path / "vault",
+        {f"{NOTES}/original.md": copied, f"{NOTES}/copy.md": copied},
+        "external",
+    )
+
+    with pytest.raises(page_names.AmbiguousTitle) as refusal:
+        page_names.resolve_page(root, "Copied plan")
+
+    details = refusal.value.details
+    assert sorted(row["path"] for row in details["candidates"]) == [
+        f"{NOTES}/copy.md",
+        f"{NOTES}/original.md",
+    ]
+    assert details["retry_with"] == {"path": "<path>"}
 
 
 def test_a_title_key_folds_unicode_form_and_case_but_not_distinct_letters() -> None:
@@ -222,4 +357,4 @@ def test_raw_material_gives_way_to_an_editable_page_of_the_same_title(tmp_path: 
         page_names.resolve_page(root, "Rollout plan")
 
     edit = page_names.resolve_page(root, "Rollout plan", prefer=page_names.prefer_editable)
-    assert edit.path == f"{NOTES}/plan.md"
+    assert edit == f"{NOTES}/plan.md"

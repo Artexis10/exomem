@@ -16,18 +16,15 @@ pages hold resolves to nothing, exactly like an unknown title.
 from __future__ import annotations
 
 import base64
-import hashlib
-import re
-import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import find, find_corpus, memory_refs, reserved_paths, semantic_contract, vault
+from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
 from .cli_ops import OpError
 from .governance import egress
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import kb_dirname, kb_page_target, kb_prefix
 
 #: A refusal names at most this many pages to choose from.
 MAX_CANDIDATES = 5
@@ -35,37 +32,8 @@ MAX_CANDIDATES = 5
 _MAX_CANDIDATES_READ = 100
 #: The retry names the id of the page the caller picks; the caller fills it in.
 ID_PLACEHOLDER = "<id>"
-
-# A format check on a value this module itself mints (fixed-width RFC 4648 base32 alphabet), not a
-# reading of what a caller meant, so it is sound under registry C6.
-_ID_PATTERN = re.compile(r"[a-z2-7]{7}\.[a-z2-7]{4}")
-_HEAD_CHARS = 7
-_VERSION_CHARS = 4
-
-
-def is_page_id(value: object) -> bool:
-    """Whether `value` has the shape of a short page id."""
-    return isinstance(value, str) and _ID_PATTERN.fullmatch(value) is not None
-
-
-def _base32(raw: bytes, chars: int) -> str:
-    return base64.b32encode(raw).decode("ascii").lower()[:chars]
-
-
-def id_head(exomem_id: str | None, rel_path: str) -> str:
-    """7 base32 characters of `exomem_id`; a page without one takes its path hash."""
-    if exomem_id:
-        return _base32(uuid.UUID(exomem_id).bytes[:5], _HEAD_CHARS)
-    return _base32(hashlib.sha256(rel_path.encode("utf-8")).digest()[:5], _HEAD_CHARS)
-
-
-def id_version(content_hash: str) -> str:
-    """4 base32 characters of the page's content hash."""
-    return _base32(bytes.fromhex(content_hash)[:3], _VERSION_CHARS)
-
-
-def page_id(exomem_id: str | None, rel_path: str, content_hash: str) -> str:
-    return f"{id_head(exomem_id, rel_path)}.{id_version(content_hash)}"
+#: Pages that share one id (a copied file) cannot be told apart by it, so the retry names a path.
+PATH_PLACEHOLDER = "<path>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,21 +72,9 @@ def read_identity(root: Path, rel_path: str) -> PageIdentity | None:
         title=vault.resolve_display_title(frontmatter, body, rel_path),
         type=str(kind) if kind else None,
         date=str(date) if date else None,
-        id=page_id(exomem_id, rel_path, digest),
+        id=page_ids.page_id(exomem_id, rel_path, digest),
         content_hash=digest,
     )
-
-
-@dataclass(frozen=True, slots=True)
-class NamedPage:
-    """The page a caller named. `id` is set only when the caller named it by short id."""
-
-    path: str
-    id: str | None = None
-
-    @property
-    def version(self) -> str | None:
-        return None if self.id is None else self.id.split(".", 1)[1]
 
 
 class AmbiguousTitle(OpError):
@@ -141,16 +97,18 @@ def resolve_reference(root: Path, value: str, *, serve_stale: bool = False) -> s
     return resolved
 
 
-def _names_a_file(root: Path, raw: str) -> bool:
-    """Whether `raw` already names a file as a vault-relative or KB-relative path.
+def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -> bool:
+    """Whether `raw` already names a file the caller may see, as a vault- or KB-relative path.
 
-    Such a call keeps its meaning and needs no resolver: a path that exists is never a title.
+    Such a call keeps its meaning and needs no resolver: a path that exists is never a title. A file
+    the caller may not see counts as no file, so that a title shaped like its path is judged as it
+    would be in a vault without the file.
     """
     stem = raw.removesuffix(".md")
     for base in ("", kb_prefix()):
         for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
             try:
-                if (root / candidate).is_file():
+                if (root / candidate).is_file() and (visible is None or visible(candidate)):
                     return True
             except (OSError, ValueError):
                 return False
@@ -175,7 +133,7 @@ def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
     for owner in _identity_owners(root, serve_stale):
-        if not owner.startswith(leading) or id_head(owner, "") != head:
+        if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
             continue
         try:
             paths.add(
@@ -197,7 +155,7 @@ def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
         candidate.path
         for candidates in resolver.candidates_by_key.values()
         for candidate in candidates
-        if id_head(None, candidate.path) == head
+        if page_ids.id_head(None, candidate.path) == head
         and (visible is None or visible(candidate.path))
         and _carries_head(root, candidate.path, head)
     )
@@ -209,7 +167,9 @@ def _carries_head(root: Path, rel_path: str, head: str) -> bool:
     return found is not None and found.id.split(".", 1)[0] == head
 
 
-def _ambiguous(root: Path, shown: str, paths: list[str], field: str) -> AmbiguousTitle:
+def _ambiguous(
+    root: Path, shown: str, paths: list[str], field: str, *, by_id: bool
+) -> AmbiguousTitle:
     """The refusal for several visible pages that one title or id head names."""
     identities = [
         found
@@ -217,12 +177,19 @@ def _ambiguous(root: Path, shown: str, paths: list[str], field: str) -> Ambiguou
         if found is not None
     ]
     identities.sort(key=lambda found: found.date or "", reverse=True)
+    shown_pages = identities[:MAX_CANDIDATES]
+    # A copied page repeats its source's id, so an id cannot choose between them; their paths can.
+    twins = len({found.id for found in shown_pages}) < len(shown_pages)
+    candidates = [
+        {**found.row(), "path": found.path} if twins else found.row() for found in shown_pages
+    ]
+    named = f"match the id {shown}" if by_id else f"are titled \u201c{shown}\u201d"
     return AmbiguousTitle(
         "AMBIGUOUS_REFERENCE",
-        f"{len(paths)} pages are titled \u201c{shown}\u201d.",
+        f"{len(paths)} pages {named}.",
         details={
-            "candidates": [found.row() for found in identities[:MAX_CANDIDATES]],
-            "retry_with": {field: ID_PLACEHOLDER},
+            "candidates": candidates,
+            "retry_with": {field: PATH_PLACEHOLDER if twins else ID_PLACEHOLDER},
         },
     )
 
@@ -243,8 +210,8 @@ def resolve_page(
     prefer: Callable[[str], bool] | None = None,
     field: str = "path",
     serve_stale: bool = False,
-) -> NamedPage:
-    """The page `value` names, as a title or a short id when it is neither a ref nor a path.
+) -> str:
+    """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
     Order: a memory ref; an existing file path; a short id; a title. A value that names nothing is
     returned as the path it always was, so today's NOT_FOUND and create-missing paths still apply.
@@ -254,9 +221,10 @@ def resolve_page(
     """
     root = Path(root)
     raw = str(value or "").strip()
-    if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw):
-        return NamedPage(resolve_reference(root, value, serve_stale=serve_stale))
-    if is_page_id(raw):
+    visible = egress.visible_page_filter(root)
+    if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw, visible):
+        return resolve_reference(root, value, serve_stale=serve_stale)
+    if page_ids.is_page_id(raw):
         paths = _paths_for_head(root, raw.split(".", 1)[0], serve_stale=serve_stale)
         if len(paths) > 1:
             # Two pages share a 35-bit head; the version the caller read tells them apart.
@@ -266,9 +234,9 @@ def resolve_page(
                 if (found := read_identity(root, path)) is not None and found.id == raw
             ] or paths
         if len(paths) > 1:
-            raise _ambiguous(root, raw, paths, field)
+            raise _ambiguous(root, raw, paths, field, by_id=True)
         if paths:
-            return NamedPage(resolve_reference(root, paths[0]), id=raw)
+            return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
     key = vault.title_key(raw)
     resolver = find.shared_resolver(root)
@@ -276,7 +244,7 @@ def resolve_page(
         resolver.candidates_by_key,
         resolver.titles.get(key, ()),
         title_key=key,
-        visible=egress.visible_page_filter(root),
+        visible=visible,
     )
     # A page the vault never serves is no page: it counts for nothing, as an unknown title does.
     paths = [
@@ -285,8 +253,8 @@ def resolve_page(
     if len(paths) > 1 and prefer is not None:
         paths = [path for path in paths if prefer(path)] or paths
     if len(paths) > 1:
-        raise _ambiguous(root, raw, paths, field)
-    return NamedPage(resolve_reference(root, paths[0] if paths else raw))
+        raise _ambiguous(root, raw, paths, field, by_id=False)
+    return resolve_reference(root, paths[0] if paths else raw)
 
 
 def resolve_ref(root: Path, value: str, *, field: str = "ref") -> str:
@@ -298,7 +266,7 @@ def resolve_ref(root: Path, value: str, *, field: str = "ref") -> str:
     raw = str(value or "").strip()
     if raw.lower().startswith("exomem://"):
         return value
-    path = resolve_page(Path(root), raw, field=field).path
+    path = resolve_page(Path(root), raw, field=field)
     owner = memory_refs.read_reference_owner(Path(root), Path(root) / path)
     return memory_refs.memory_ref(owner) if owner else value
 
@@ -313,51 +281,32 @@ def resolve_hint(root: Path, value: str) -> str:
     if raw.lower().startswith("exomem://"):
         return value
     try:
-        return resolve_page(Path(root), raw).path
+        return resolve_page(Path(root), raw)
     except (AmbiguousTitle, ValueError):
         return value
 
 
-def stale_edit(identity: PageIdentity, *, path_field: str, guard_field: tuple[str, ...]) -> OpError:
-    """The refusal for a write guarded by a version the page has moved past; it names its id now."""
-    guard: Any = identity.id
+def stale_edit(
+    root: Path, path: str, *, path_field: str, guard_field: tuple[str, ...]
+) -> OpError | None:
+    """The refusal for a write whose short-id guard names a version the page has moved past.
+
+    The leaf has already refused, so the caller was admitted to write the page at `path` (a vault
+    path or a KB shorthand) and may see its id. The refusal names the current id and a retry that
+    carries it, spelled in the command's terms: `path_field` and the nested `guard_field`. None when
+    the page cannot be read, so the leaf's own refusal stands.
+    """
+    current = read_identity(Path(root), kb_page_target(Path(root), path)[1])
+    if current is None:
+        return None
+    guard: Any = current.id
     for name in reversed(guard_field):
         guard = {name: guard}
     return OpError(
         "STALE_EDIT",
-        f"The page changed since that id was issued; its current id is {identity.id}.",
-        details={"retry_with": {path_field: identity.id, **guard}},
+        f"The page changed since that id was issued; its current id is {current.id}.",
+        details={"retry_with": {path_field: current.id, **guard}},
     )
-
-
-def guard_hash(
-    root: Path,
-    named: NamedPage,
-    expected_hash: str | None,
-    *,
-    required: bool,
-    path_field: str = "path",
-    guard_field: tuple[str, ...] = ("expected_hash",),
-) -> str | None:
-    """The full content hash a leaf guard compares, translated from a short id where one stands.
-
-    A short id in `expected_hash` is read against the page's current id. A page named by id whose
-    operation requires `expected_hash` and got none is guarded by the id it was named by. Every
-    other value passes through, so an optional guard stays optional. A match returns the page's
-    full current hash, which the leaf still compares at write time; a stale id refuses with the
-    current id. `path_field` and `guard_field` spell that refusal's retry in the command's terms.
-    """
-    given = expected_hash.strip() if isinstance(expected_hash, str) else None
-    filled = named.id if expected_hash is None and required else None
-    wanted = given if is_page_id(given) else filled
-    if wanted is None:
-        return expected_hash
-    current = read_identity(Path(root), named.path)
-    if current is None:
-        return expected_hash
-    if current.id != wanted:
-        raise stale_edit(current, path_field=path_field, guard_field=guard_field)
-    return current.content_hash
 
 
 def id_of_read(reply: Mapping[str, Any]) -> str | None:
@@ -371,7 +320,7 @@ def id_of_read(reply: Mapping[str, Any]) -> str | None:
         return None
     owner = memory_refs.parse_memory_ref(ref) if isinstance(ref, str) else None
     try:
-        return page_id(owner, path, digest)
+        return page_ids.page_id(owner, path, digest)
     except ValueError:
         return None
 

@@ -113,6 +113,7 @@ from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
+from . import page_ids as page_ids_module
 from . import page_names as page_names_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
@@ -2801,9 +2802,7 @@ def op_find(
     if detail not in ("full", "compact"):
         raise ValueError(f"find: detail must be 'full' or 'compact', got {detail!r}")
     if relation_of:
-        relation_of = page_names_module.resolve_page(
-            vault_root, relation_of, field="relation_of"
-        ).path
+        relation_of = page_names_module.resolve_page(vault_root, relation_of, field="relation_of")
     projection_runtime = projection_runtime_module.load_active_projection_runtime(vault_root)
     if continuation is not None and projection_runtime is None:
         raise projection_runtime_module.ProjectedContinuationUnavailable(
@@ -3228,25 +3227,9 @@ def _citation_url(_path: str) -> str:
     return ""
 
 
-def _resolve_memory_identifier(
-    vault_root: Path, value: str, *, serve_stale: bool = False
-) -> str:
-    """Resolve a path or memory reference to the page a caller may see.
-
-    A command that goes on to write from the answer keeps the default. A read
-    passes `serve_stale`, so the lookup answers from the identity projection
-    even while the watcher publishes an outside edit, rather than scanning
-    the vault.
-    """
-    try:
-        resolved = egress_module.resolve_visible_identifier(
-            vault_root, value, serve_stale=serve_stale
-        )
-    except memory_refs_module.ReferenceError as exc:
-        raise ValueError(f"{exc.code}: {exc.reason}") from exc
-    if reserved_paths_module.classify_logical(resolved).blocked:
-        raise ValueError("NOT_FOUND: memory identifier is unavailable")
-    return resolved
+#: Resolve a path or memory reference to the page a caller may see; defined with the other page
+#: naming in `page_names`, which this module's page parameters already go through.
+_resolve_memory_identifier = page_names_module.resolve_reference
 
 
 def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.GetResult:
@@ -4778,17 +4761,8 @@ def op_edit(
         FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
-    named = page_names_module.resolve_page(
+    path = page_names_module.resolve_page(
         vault_root, path, prefer=page_names_module.prefer_editable, field="path"
-    )
-    path = named.path
-    # A page named by id is guarded by the id's version where the edit requires a guard.
-    expected_hash = page_names_module.guard_hash(
-        vault_root,
-        named,
-        expected_hash,
-        required=new_body is not None,
-        guard_field=("operation", "expected_hash"),
     )
     if new_body is not None and expected_hash is None:
         raise ValueError(
@@ -4898,6 +4872,12 @@ def op_edit(
         set_take_module.SetTakeError,
         set_frontmatter_field_module.SetFrontmatterError,
     ) as e:
+        if e.code == "STALE_EDIT" and page_ids_module.is_page_id(expected_hash):
+            refusal = page_names_module.stale_edit(
+                vault_root, path, path_field="path", guard_field=("operation", "expected_hash")
+            )
+            if refusal is not None:
+                raise refusal from e
         msg = _leaf_error_message(e)
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
@@ -4991,7 +4971,7 @@ def op_replace(
     """
     old_path = page_names_module.resolve_page(
         vault_root, old_path, prefer=page_names_module.prefer_editable, field="old_path"
-    ).path
+    )
     replace_kwargs = {
         "old_path": old_path,
         "reason": reason,
@@ -6865,7 +6845,7 @@ def _anchor_named_page(vault_root: Path, anchor: str) -> str | None:
         named = page_names_module.resolve_page(vault_root, anchor, prefer=carries, field="anchor")
     except (page_names_module.AmbiguousTitle, ValueError):
         return None
-    return working_set_module._eligible_agent_page(vault_root, named.path)
+    return working_set_module._eligible_agent_page(vault_root, named)
 
 
 def _abstention_reason(packet: dict) -> str:
@@ -8171,7 +8151,7 @@ def op_read_memory(
             )
     if continuation is not None:
         raise context_views_module.invalid_continuation()
-    path = page_names_module.resolve_page(vault_root, path, serve_stale=True).path
+    path = page_names_module.resolve_page(vault_root, path, serve_stale=True)
     if unit_ref is not None:
         if frontmatter_only or links or include_raw or offset is not None:
             raise ValueError(
@@ -8633,12 +8613,10 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
-    named_id = None
     if not raw_path.lower().startswith("exomem://"):
-        named = page_names_module.resolve_page(
+        path = page_names_module.resolve_page(
             vault_root, path, prefer=page_names_module.prefer_editable, field="path"
         )
-        path, named_id = named.path, named.id
     try:
         if raw_path.lower().startswith(
             memory_refs_module.REF_PREFIX
@@ -8656,13 +8634,6 @@ def op_observe_memory(
         raise ValueError(
             f"INVALID_PATH: observe_memory parent reference resolves outside {kb_dirname()}/"
         )
-    # A page named by id is guarded by the id's version where the operation requires a guard.
-    expected_hash = page_names_module.guard_hash(
-        vault_root,
-        page_names_module.NamedPage(resolved_path, named_id),
-        expected_hash,
-        required=str(operation or "").strip().lower() in {"update", "remove"},
-    )
     try:
         result = observe_memory_module.observe_memory(
             vault_root,
@@ -8697,6 +8668,12 @@ def op_observe_memory(
             )
         return result
     except observe_memory_module.ObserveMemoryError as error:
+        if error.code == "STALE_PARENT_HASH" and page_ids_module.is_page_id(expected_hash):
+            refusal = page_names_module.stale_edit(
+                vault_root, resolved_path, path_field="path", guard_field=("expected_hash",)
+            )
+            if refusal is not None:
+                raise refusal from error
         message = f"{error.code}: {error.reason}"
         if error.remediation:
             message += f" Remediation: {error.remediation}"
@@ -10031,7 +10008,7 @@ def op_review_memory(
 
             return vocabulary_questions_module.submit(
                 vault_root,
-                path=page_names_module.resolve_page(vault_root, path, field="path").path,
+                path=page_names_module.resolve_page(vault_root, path, field="path"),
                 query=query,
                 family=family,
                 **({"relation_ref": ref} if ref is not None else {}),
@@ -10072,7 +10049,7 @@ def op_review_memory(
         # is passed through before the page-oriented resolution below.
         return plan_progress_module.review(vault_root, collection=path, limit=limit)
     if path:
-        path = page_names_module.resolve_page(vault_root, path, field="path").path
+        path = page_names_module.resolve_page(vault_root, path, field="path")
     if mode == "attention":
         return op_attention(vault_root, categories=categories, limit=limit, state=state)
     if mode == "activation":
@@ -11133,9 +11110,7 @@ def op_connect_memory(
             why=why,
             expected_fingerprint=expected_fingerprint,
             source_path=(
-                page_names_module.resolve_page(vault_root, path, field="path").path
-                if path
-                else path
+                page_names_module.resolve_page(vault_root, path, field="path") if path else path
             ),
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
@@ -11148,9 +11123,9 @@ def op_connect_memory(
         if refusal is not None:
             return refusal
     if path:
-        path = page_names_module.resolve_page(vault_root, path, field="path").path
+        path = page_names_module.resolve_page(vault_root, path, field="path")
     if target:
-        target = page_names_module.resolve_page(vault_root, target, field="target").path
+        target = page_names_module.resolve_page(vault_root, target, field="target")
     if operation == "suggest-links":
         return op_suggest_links(
             vault_root,
