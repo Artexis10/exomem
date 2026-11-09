@@ -8107,6 +8107,7 @@ def op_read_memory(
     continuation: _OptionalViewContinuation = None,
     follow_corrections: bool = True,
     offset: int | None = None,
+    units: bool = False,
 ) -> dict:
     """Read a page, exact unit, or exomem://map view.
 
@@ -8127,6 +8128,7 @@ def op_read_memory(
         continuation: Next-page token of a view.
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
+        units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
@@ -8265,6 +8267,8 @@ def op_read_memory(
     if (named_id := page_names_module.id_of_read(result)) is not None:
         # The id the page's own `title` or this one names for the next call, with the version read.
         result["id"] = named_id
+    if units:
+        result["units"] = observe_memory_module.page_units(vault_root, result)
     return result
 
 
@@ -8567,6 +8571,7 @@ def op_observe_memory(
     until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
+    unit: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -8594,6 +8599,7 @@ def op_observe_memory(
         until: Rich ISO last valid date; '' clears.
         id: Parent-unique anchor; derived on add if omitted.
         unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
+        unit: Unit id from a read or a write reply, for update/remove. It stands for unit_ref and both guards.
         expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
         expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
@@ -8660,6 +8666,7 @@ def op_observe_memory(
             until=until,
             id=id,
             unit_ref=unit_ref,
+            unit=unit,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,
             transition_token=transition_token,

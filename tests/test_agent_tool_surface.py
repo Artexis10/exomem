@@ -71,10 +71,11 @@ def test_an_old_tool_name_is_refused_and_the_reply_lists_the_new_ones(build) -> 
     assert "search_memory" in reply["text"]
 
 
-def _vault_text(vault: Path, needle: str) -> str:
-    for path in (vault / "Knowledge Base").rglob("*.md"):
+def _vault_text(vault: Path, title: str) -> str:
+    """The text of the page whose first heading is `title`; empty when no page has it."""
+    for path in (vault / "Knowledge Base" / "Notes").rglob("*.md"):
         text = path.read_text(encoding="utf-8")
-        if needle in text:
+        if f"\n# {title}\n" in text:
             return text
     return ""
 
@@ -88,7 +89,7 @@ def test_an_agent_reads_creates_and_edits_notes_by_title(build, vault) -> None:
             "content": (
                 "# Retry policy\n\n## Observations\n\n"
                 "- [operating constraint] Cap retries at 30 s #reliability\n\n"
-                "## Relations\n\n- refines [[Retry with a fixed interval]]\n"
+                "## Relations\n\n- refines [[Retry with exponential backoff and full jitter]]\n"
             ),
         })
         edited = await _call(client, "edit_note", {

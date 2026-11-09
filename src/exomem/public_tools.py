@@ -215,7 +215,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history"] | None = Field(default=None, description="text (default) or history.")
+    part: Literal["text", "history", "units"] | None = Field(default=None, description="text (default), history, or units: the observations and the id each edit_note action takes.")
     more: str | None = Field(default=None, description="Token from the previous reply.")
     options: dict[str, Any] | None = Field(
         default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
@@ -223,11 +223,12 @@ class ReadPage(Wire):
 
 
 def _read_page(wire: dict[str, Any], ctx: Context) -> Translated:
-    handled = frozenset({"path", "include_history", "continuation"})
+    handled = frozenset({"path", "include_history", "continuation", "units"})
     options = _bag(wire, "options", ctx, "read_memory", handled, "read_page")
     leaf = _given({
         "path": wire["page"], "continuation": wire.get("more"),
         "include_history": True if wire.get("part") == "history" else None,
+        "units": True if wire.get("part") == "units" else None,
     })
     return "read_memory", {**options, **leaf}
 
@@ -379,13 +380,16 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
         raise Refusal("MISSING_ARGUMENT", f"{action} needs {', '.join(missing)}.")
     detail = _given({"response_detail": wire.get("detail")})
     if action in {"edit_observation", "remove_observation"}:
+        if action == "remove_observation" and wire.get("preview"):
+            raise Refusal("INVALID_ARGUMENT", "remove_observation has no preview.")
+        # The leaf previews an edit of one unit as `validate` with that unit.
+        operation = "remove" if action == "remove_observation" else "validate" if wire.get("preview") else "update"
         leaf = {
-            "operation": "update" if action == "edit_observation" else "remove",
+            "operation": operation,
             "path": wire["note"], "unit": wire["observation"], "reason": wire["why"],
             **_given({
                 "category": wire.get("category"), "content": wire.get("text"), "tags": wire.get("tags"),
                 "context": wire.get("context"), "relations": _links(wire.get("links")),
-                "validate_only": wire.get("preview"),
             }),
             **_unlinked(wire), **detail,
         }

@@ -56,3 +56,18 @@ def guard_matches(expected: str, content_hash: str) -> bool:
     if is_page_id(expected):
         return expected.partition(".")[2] == id_version(content_hash)
     return expected == content_hash
+
+
+def part_id(identity: str, version: str) -> str:
+    """The short id of one part of a page or a collection: a unit, a row, a plan item or a review item.
+
+    `identity` is what survives edits (a unit ref, an item key); `version` is what changes with them
+    (a fingerprint, an item version). The shape matches a page id, so one pattern recognises both.
+    """
+    head = _base32(hashlib.sha256(identity.encode("utf-8")).digest()[:5], HEAD_CHARS)
+    return f"{head}.{_base32(hashlib.sha256(version.encode('utf-8')).digest()[:3], VERSION_CHARS)}"
+
+
+def part_head(identity: str) -> str:
+    return part_id(identity, "").partition(".")[0]
+

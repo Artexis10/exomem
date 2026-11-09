@@ -17,6 +17,7 @@ from . import (
     edit,
     kbdir,
     note_types,
+    page_ids,
     origin_bindings,
     provenance,
     semantic_authoring,
@@ -28,6 +29,7 @@ from . import (
     temporal,
     vault,
 )
+from .governance import egress
 from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate"]
@@ -123,6 +125,7 @@ def observe_memory(
     until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
+    unit: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -140,12 +143,18 @@ def observe_memory(
             "INVALID_OBSERVE_OPERATION",
             "operation must be add, update, remove, or validate",
         )
-    if op in {"update", "remove"} and not unit_ref:
+    if unit is not None and unit_ref:
+        raise ObserveMemoryError(
+            "INVALID_OBSERVE_INPUT", "give the unit id in `unit`, or unit_ref with its guards, not both"
+        )
+    # A unit id names the unit and the version the caller saw; the guards are filled from the
+    # page the write reads under the lease, once the unit id has matched it.
+    if op in {"update", "remove"} and not (unit_ref or unit):
         raise ObserveMemoryError(
             "UNIT_REFERENCE_REQUIRED",
             f"{op} requires the current unit_ref",
         )
-    if op in {"update", "remove"} and (
+    if op in {"update", "remove"} and unit is None and (
         not expected_hash or not expected_fingerprint
     ):
         raise ObserveMemoryError(
@@ -174,7 +183,7 @@ def observe_memory(
             "INVALID_OBSERVE_INPUT",
             "remove accepts only the parent, unit reference, and drift guards",
         )
-    proposal_mode = "update" if op == "validate" and unit_ref else op
+    proposal_mode = "update" if op == "validate" and (unit_ref or unit) else op
     if proposal_mode in {"add", "update"} and (
         category is None or not str(category).strip() or content is None
     ):
@@ -231,6 +240,8 @@ def observe_memory(
         vault_root, editable.rel_path, source=editable.original_text
     )
     current_unit = None
+    if unit is not None:
+        unit_ref, expected_fingerprint = _bind_unit_id(current.document, unit)
     if unit_ref:
         resolution = current.document.resolve_unit(
             unit_ref,
@@ -584,6 +595,52 @@ def observe_memory(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
     )
+
+
+def unit_id(unit: Any) -> str:
+    """The short id that names one unit and its current version."""
+    return page_ids.part_id(str(unit.unit_ref), str(unit.fingerprint))
+
+
+def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
+    """The units of a page just read, each with the id an edit of it takes.
+
+    A principal that sees a released view of the page gets `unavailable`: the unit refs and
+    fingerprints come from the full page, so listing them would name what the view withholds.
+    """
+    if egress.restricted_release_filter(vault_root) is not None:
+        return {"status": "unavailable", "reason": "this principal sees a released view of the page"}
+    path = page.get("path")
+    if not isinstance(path, str) or not path.endswith(".md"):
+        return []
+    document = semantic_index.current_parent_index_state(vault_root, path).document
+    return [
+        {"id": unit_id(unit), "category": unit.category, "text": unit.content}
+        for unit in document.units if unit.unit_ref
+    ]
+
+
+def _bind_unit_id(document: Any, unit: str) -> tuple[str, str]:
+    """The unit_ref and fingerprint of the one unit that `unit` names, or a refusal that says why."""
+    head, _, version = str(unit).partition(".")
+    found = [u for u in document.units if u.unit_ref and page_ids.part_head(u.unit_ref) == head]
+    if not found:
+        raise ObserveMemoryError(
+            "UNIT_NOT_FOUND",
+            f"unit id {unit} names no unit of this note; read the note's units for the current ids",
+        )
+    if len(found) > 1:
+        raise ObserveMemoryError(
+            "AMBIGUOUS_UNIT_REFERENCE", f"unit id {unit} names more than one unit of this note"
+        )
+    current = found[0]
+    if unit_id(current) != unit:
+        raise ObserveMemoryError(
+            "STALE_UNIT_REFERENCE",
+            f"unit id {unit} is stale; the unit now has id {unit_id(current)}. "
+            "Read the unit again and retry with the current id.",
+        )
+    return str(current.unit_ref), str(current.fingerprint)
 
 
 def _legacy_page_given_form(path: str) -> str:
@@ -1120,8 +1177,10 @@ def _result(
         value["timings"] = timings
     if unit is not None:
         value["unit_ref"] = unit.unit_ref
+        value["unit_id"] = unit_id(unit)
         value["unit"] = unit.to_dict()
     if removed_unit is not None:
         value["removed_unit_ref"] = removed_unit.unit_ref
+        value["removed_unit_id"] = unit_id(removed_unit)
         value["removed_unit"] = removed_unit.to_dict()
     return value

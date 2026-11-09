@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, cloud_cell, operation_entries, relation_registry
+from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry
 from . import curation as curation_module
 from .kbdir import kb_prefix
 from .operation_entries import OutcomeVerb
@@ -2592,6 +2592,10 @@ def _commit_metadata_projection(leaf: Any) -> dict[str, str]:
             )
         ):
             projection[key] = value
+    for key in ("unit_id", "removed_unit_id"):
+        # The short id an edit of that unit takes; a format check on a value this server mints.
+        if page_ids.is_page_id(leaf.get(key)):
+            projection[key] = leaf[key]
     return projection
 
 

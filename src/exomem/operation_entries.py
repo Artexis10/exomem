@@ -662,8 +662,8 @@ _REMAINING = {
     "observe_memory": ("operation", (
         _row("validate", "prepare_note", None, ("path",), kind="observation"),
         _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("update", "change_observations", None, ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("remove", "change_observations", ("path", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("update", "change_observations", None, ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("remove", "change_observations", ("path", "unit", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
