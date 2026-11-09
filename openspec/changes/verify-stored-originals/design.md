@@ -20,6 +20,15 @@ The thread runs by default. `EXOMEM_DISABLE_ORIGINAL_FIXITY=1` stops it, as the 
 
 **D4. Budget and schedule are configurable defaults.** The proposed defaults are a pass every hour, a full cycle in about 30 days and a 32 MiB/s read cap. A pass's byte budget is the local original bytes times the pass interval, divided by the cycle, with a floor. The budget limits only the re-hash of unchanged originals. The hash of a changed identity and the check of a restore copy fall outside it. Every hash and every read of a restore candidate stays under the read-rate cap. A restore's own local copies, a media-store download and the media cache record are not paced, and they happen only for a damaged original. One pass reads each member manifest and the local import journals once. Task 5.1 measures the defaults. Fixity never reads an evicted original, because the read would download it and the store confirmed its digest at upload. The damage check takes the consistency guard, because it writes nothing. A restore takes the vault mutation guard as a background holder. Both yield to foreground writes.
 
+**D4a. Measured defaults (task 5.1).** Two runs measured one table rebuild and passes on synthetic vaults:
+
+| Run | Originals | Notes | Rebuild | Full pass | Default pass |
+|---|---|---|---|---|---|
+| Cloud rehearsal cell, 2 CPU and 3 GiB limit | 1,000, 513,979,718 B | 2,000 | 7.7 s (6.9 s CPU) | 19.8 s, 24.7 MiB/s, 3.5 s CPU | 2.6 s, 135 originals in the 64 MiB floor |
+| WSL install, local ext4 | 2,000, 1,963,559,452 B | 20,000 | 10.2 s (5.9 s CPU) | 176.5 s, 10.6 MiB/s, 6.4 s CPU | 6.4 s, 80 originals in the 64 MiB floor |
+
+The Cloud run is GitHub Actions run 42690123576, artifact `cloud-rehearsal-report` (stage `original_fixity`). The WSL run is a one-off script whose JSON record has SHA-256 `5244392b`, measured on 2026-11-09. Both full passes verified every original, and neither reached the 32 MiB/s cap, so the cap did not set their duration. CPU time stayed below a fifth of the wall time. The defaults stand: an hourly pass costs seconds, and a daily walk costs 7.7 to 10.2 seconds. The 64 MiB floor sets the budget below about 45 GiB of originals, so a smaller vault completes a cycle in less than 30 days. A second WSL walk took 58.8 s. Its cause is unverified: host memory was under pressure during that run.
+
 **D5. A restore uses only a copy whose hash matches the binding.** Fixity tries these copies in order and re-hashes each one before use:
 
 1. the media-store version of a cached original;

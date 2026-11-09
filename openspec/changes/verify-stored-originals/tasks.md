@@ -36,10 +36,10 @@
 
 ## 5. Measurement before release (D4)
 
-- [ ] 5.1 Measure one full pass and one table rebuild on WSL and on a Cloud cell. Record the original count, the bytes read, the duration and the read rate, with the run file of each. Verify: design.md cites the numbers, and the defaults for the interval, cycle, read cap and walk interval follow from them.
-- [ ] 5.2 Rehearse the runbook step on a disposable rehearsal cell. Verify: the step restores one original whose bytes hash to its binding.
+- [x] 5.1 Measure one full pass and one table rebuild on WSL and on a Cloud cell. Record the original count, the bytes read, the duration and the read rate, with the run file of each. Verify: design.md cites the numbers, and the defaults for the interval, cycle, read cap and walk interval follow from them.
+- [x] 5.2 Rehearse the runbook step on a disposable rehearsal cell. Verify: the step restores one original whose bytes hash to its binding. Evidence: run 42690123576 restored a damaged original, and the next pass and readiness counted no unresolved original. The rehearsal rendered the scratch restore as rehearsal step 11 does, because the operator scratch command does not yet support a new cell; step 5 of the runbook says so.
 
 ## 6. Delivery
 
-- [ ] 6.1 Give each closed state and cause value a one-line reason in code. Verify: the C6 gate passes, and the review names C4 as absent.
+- [x] 6.1 Give each closed state and cause value a one-line reason in code. Verify: the C6 gate passes, and the review names C4 as absent.
 - [ ] 6.2 After the release, sync the spec and archive this change with `openspec archive`. Verify: `openspec validate --all --strict` passes before and after.
