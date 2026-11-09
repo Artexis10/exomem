@@ -95,9 +95,11 @@ def verify_grant(token: object, keys: Sequence[Ed25519PublicKey]) -> DeletionGra
     return None
 
 
-def verified_grants(raw: str | None, keys: Sequence[Ed25519PublicKey]) -> dict[str, DeletionGrant]:
+def verified_grants(raw: str | None, keys: Sequence[Ed25519PublicKey]) -> dict[str, DeletionGrant] | None:
     """The valid grants of the relayed key, by cell. Each bad entry is skipped on its own and counted in the
-    log. Two valid grants for one cell keep the later `purge_after`, so no grant makes a purge come sooner."""
+    log. Two valid grants for one cell keep the later `purge_after`, so no grant makes a purge come sooner.
+    None when the value is not a list: that is a failed read, not an empty one, so the caller keeps its done
+    marks."""
 
     if raw is None:
         return {}
@@ -107,7 +109,7 @@ def verified_grants(raw: str | None, keys: Sequence[Ed25519PublicKey]) -> dict[s
         entries = None
     if not isinstance(entries, list):
         logger.error("deletion grants: the relayed list is malformed; no grant is read from it")
-        return {}
+        return None
     grants: dict[str, DeletionGrant] = {}
     refused = 0
     for entry in entries:

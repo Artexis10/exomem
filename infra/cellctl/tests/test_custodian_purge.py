@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 
 import jwt
@@ -14,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from kubernetes import client as k8s
 from kubernetes.client.exceptions import ApiException
 
-from cellctl.custodian import PurgeConfig, Purger, _ensure_each
+from cellctl.custodian import MAX_HIDES_PER_SWEEP, PurgeConfig, Purger, _ensure_each
 from cellctl.deletion_grant import load_public_keys, verify_grant
 from cellctl.storage.fake_b2_keys import FakeBucket, FakeKeyStore
 from cellctl.storage.interface import PURGE_KEY_CAPABILITIES
@@ -101,11 +103,11 @@ class Cluster:
                              clock=lambda: self.now)
         return self.purger
 
-    def sweep(self, *, namespaces: tuple[str, ...] = ()) -> None:
+    def sweep(self, *, namespaces: tuple[str, ...] = (), beat: Callable[[], None] = lambda: None) -> None:
         grants_read = self.purger.refresh()
         listed = [k8s.V1Namespace(metadata=k8s.V1ObjectMeta(name=name)) for name in namespaces]
         _ensure_each(self.core, self.keys, listed, lambda: None, self.purger.grants)
-        self.purger.sweep(lambda: None, grants_read=grants_read)
+        self.purger.sweep(beat, grants_read=grants_read)
 
     def purge_keys(self) -> list:
         return [key for key in self.keys.created if key.capabilities == frozenset(PURGE_KEY_CAPABILITIES)]
@@ -309,3 +311,61 @@ def test_a_recreated_namespace_of_a_granted_cell_gets_no_key(tmp_path: Path) -> 
     assert cluster.keys.keys == {}
     assert (f"exo-cell-{CELL}", "cell-object-store-key") not in cluster.core.secrets
 
+
+def test_one_sweep_hides_at_most_its_budget_and_beats_after_each_hide(tmp_path: Path) -> None:
+    """Defect: a large cell's hide pass outlasts the liveness probe, so the kubelet kills the custodian in
+    every pass, and no new cell gets its key while the pass runs."""
+    cluster = Cluster(tmp_path)
+    names = [f"cells/{CELL}/data/{index:04d}" for index in range(MAX_HIDES_PER_SWEEP + 1)]
+    for name in names:
+        cluster.bucket.seed(name, "upload")
+    cluster.core.relay(_grant(CELL))
+    hidden_at_beat: list[int] = []
+
+    cluster.sweep(beat=lambda: hidden_at_beat.append(len(cluster.bucket.hidden)))
+    first = len(cluster.bucket.hidden)
+    cluster.sweep()
+
+    assert first == MAX_HIDES_PER_SWEEP
+    assert max(after - before for before, after in pairwise([0, *hidden_at_beat])) <= 1
+    assert sorted(cluster.bucket.hidden) == names
+    assert cluster.core.done() == [CELL]
+
+
+def test_a_purge_key_whose_creation_reply_was_lost_is_deleted_before_the_next_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defect: the provider creates a purge key but its reply is lost, and the next sweep mints a second key
+    without listing the prefix, so the prefix holds a key that nobody holds."""
+    cluster = Cluster(tmp_path)
+    cluster.bucket.seed(f"cells/{CELL}/data/1", "upload")
+    cluster.core.relay(_grant(CELL))
+    create = cluster.keys.create_purge_key
+
+    def reply_lost(cell_id: str, valid_seconds: int):
+        create(cell_id, valid_seconds)
+        raise TimeoutError("the reply was lost")
+
+    monkeypatch.setattr(cluster.keys, "create_purge_key", reply_lost)
+    cluster.sweep()
+    monkeypatch.undo()
+    cluster.sweep()
+
+    assert cluster.keys.keys == {}
+    assert cluster.bucket.hidden == [f"cells/{CELL}/data/1"]
+
+
+def test_a_malformed_grant_list_keeps_the_done_marks(tmp_path: Path) -> None:
+    """Defect: a relayed value that is not a list reads as "no grants", the done marks go, and the next good
+    read mints a fresh purge key for each finished cell."""
+    cluster = Cluster(tmp_path)
+    cluster.core.relay(_grant(CELL))
+    cluster.sweep()
+    cluster.core.config_maps[("exomem-cloud", "exomem-cell-deletions")] = {"grants.json": "{}"}
+    cluster.sweep()
+    cluster.core.relay(_grant(CELL))
+
+    cluster.sweep()
+
+    assert cluster.core.done() == [CELL]
+    assert len(cluster.purge_keys()) == 1

@@ -30,6 +30,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 from kubernetes import watch
@@ -77,6 +78,10 @@ DONE_KEY = "done.json"
 PURGE_KEY_SECONDS = 3600
 # A pass lists and hides this many times at most; names that still remain wait for the next sweep.
 MAX_HIDE_ROUNDS = 5
+# A sweep hides this many files at most, across all cells, and leaves the rest to the next sweep. The sweep
+# runs before the namespace watch, so this bounds how long a new cell waits for its key: at 0.1 to 0.3
+# seconds for each provider call, 500 hides take under three minutes.
+MAX_HIDES_PER_SWEEP = 500
 
 
 def _secret_exists(core: k8s.CoreV1Api, namespace: str) -> bool:
@@ -165,6 +170,8 @@ class Purger:
     # Cells whose keys a listing showed deleted in this process. Only this process creates keys, and it
     # creates none for a granted cell, so the key listing for such a cell repeats only after a restart.
     _cleared: set[str] = field(default_factory=set)
+    # The hides left in the current sweep (MAX_HIDES_PER_SWEEP).
+    _hides_left: int = 0
 
     def refresh(self) -> bool:
         """Reads the relayed grants. Returns whether the read succeeded."""
@@ -179,7 +186,10 @@ class Purger:
                 logger.error("key custodian: deletion grants not read: %s", describe_error(error))
                 return False
             data = None
-        self.grants = verified_grants((data or {}).get(GRANTS_KEY), keys)
+        grants = verified_grants((data or {}).get(GRANTS_KEY), keys)
+        if grants is None:
+            return False
+        self.grants = grants
         return True
 
     def _namespace_exists(self, cell_id: str) -> bool:
@@ -223,9 +233,10 @@ class Purger:
         else:
             self.core.create_namespaced_config_map(self.config.own_namespace, body)
 
-    def _hide_all(self, hider: PrefixHider, cell_id: str) -> bool:
+    def _hide_all(self, hider: PrefixHider, cell_id: str, beat: Callable[[], None]) -> bool:
         """Hides every current name under the prefix, listing again until none remains. Returns whether a
-        listing found no current name."""
+        listing found no current name. Each hide refreshes the heartbeat, so a long pass is never taken
+        for a hung call."""
 
         prefix = cell_object_prefix(cell_id)
         hidden = 0
@@ -236,12 +247,18 @@ class Purger:
                             cell_id, hidden)
                 return True
             for name in names:
+                if self._hides_left <= 0:
+                    logger.info("key custodian: cell %s waits for the next sweep (%d hidden in this pass)",
+                                cell_id, hidden)
+                    return False
                 hider.hide_file(name)
+                self._hides_left -= 1
                 hidden += 1
+                beat()
         logger.warning("key custodian: cell %s still lists current backup files after %d hides", cell_id, hidden)
         return False
 
-    def _purge(self, grant: DeletionGrant, done: set[str]) -> bool:
+    def _purge(self, grant: DeletionGrant, done: set[str], beat: Callable[[], None]) -> bool:
         """One cell's step. Returns whether it marked the cell done."""
 
         cell_id = grant.cell_id
@@ -252,13 +269,14 @@ class Purger:
             deleted = self._delete_prefix_keys(cell_id)
             if deleted:
                 logger.info("key custodian: deleted cell %s: %d object-store keys deleted", cell_id, deleted)
-        if self.clock() < grant.purge_after or cell_id in done:
+        if self.clock() < grant.purge_after or cell_id in done or self._hides_left <= 0:
             return False
-        purge_key = self.key_store.create_purge_key(cell_id, self.config.purge_key_seconds)
-        # Until the purge key is deleted, the next sweep lists the prefix's keys again.
+        # Until the purge key is deleted, the next sweep lists the prefix's keys again. This comes before
+        # the create: a key that the provider made but whose reply was lost is then still found and deleted.
         self._cleared.discard(cell_id)
+        purge_key = self.key_store.create_purge_key(cell_id, self.config.purge_key_seconds)
         try:
-            finished = self._hide_all(self.hider_for(purge_key), cell_id)
+            finished = self._hide_all(self.hider_for(purge_key), cell_id, beat)
         finally:
             self.key_store.delete_key(purge_key.key_id)
         self._cleared.add(cell_id)
@@ -280,11 +298,12 @@ class Purger:
             logger.error("key custodian: done marks not read; no cell is purged: %s", describe_error(error))
             return
         before = set(done)
+        self._hides_left = MAX_HIDES_PER_SWEEP
         for grant in self.grants.values():
             if grant.cell_id in held:
                 continue
             try:
-                self._purge(grant, done)
+                self._purge(grant, done, beat)
             except Exception as error:  # noqa: BLE001 - a provider or API error is retried by the next sweep
                 logger.error("key custodian: deleted cell %s not purged: %s", grant.cell_id, describe_error(error))
             beat()
@@ -346,10 +365,14 @@ def run() -> None:
         )
     )
     core = k8s.CoreV1Api()
+    # One HTTP client for every purge key: each request carries its own key's authorization, and a pass
+    # leaves no connection pool open behind it.
+    hider_client = httpx.Client(timeout=30.0)
     purger = Purger(
         core,
         key_store,
-        lambda key: B2PrefixHider(B2Config(key_id=key.key_id, application_key=key.key_secret, bucket_id=bucket_id)),
+        lambda key: B2PrefixHider(B2Config(key_id=key.key_id, application_key=key.key_secret, bucket_id=bucket_id),
+                                  client=hider_client),
         PurgeConfig(
             grant_keys_path=Path(os.environ["KEY_CUSTODIAN_GRANT_PUBLIC_KEYS_FILE"]),
             hold_path=Path(os.environ["KEY_CUSTODIAN_HOLD_LIST_FILE"]),
