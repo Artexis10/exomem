@@ -834,8 +834,8 @@ class MediaJobStore:
                              "evicted INTEGER, bytes INTEGER, captured_at TEXT, "
                              "latched INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL, "
                              "attempt_failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, blocked_by TEXT)")
-                conn.execute("CREATE INDEX IF NOT EXISTS media_access_hydrating "
-                             "ON media_access(hydrating) WHERE hydrating = 1")
+                # No query reads this index (design D3, query plans): a ledger from an older release loses it.
+                conn.execute("DROP INDEX IF EXISTS media_access_hydrating")
                 # A store refusal that is final for one original's exact bytes; rebuildable.
                 self._migrate_refusal_size(conn)
                 self._migrate_claim_revision(conn)

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.170.0](https://github.com/Artexis10/exomem/compare/v0.169.0...v0.170.0) (2026-11-09)
+
+
+### Features
+
+* **import:** file a staged folder with one repeatable call ([#2554](https://github.com/Artexis10/exomem/issues/2554)) ([dbf5dd9](https://github.com/Artexis10/exomem/commit/dbf5dd9f0aecadfd8ee65b8dce117046ba47b19c))
+* store identical content once and fold existing duplicates ([#2631](https://github.com/Artexis10/exomem/issues/2631)) ([add9ee2](https://github.com/Artexis10/exomem/commit/add9ee227e1e5d6d449a128603563d71670729a0))
+* **vault-store:** list held items and resolve them by keeping the person's file or the store's page ([#2616](https://github.com/Artexis10/exomem/issues/2616)) ([ff46bf4](https://github.com/Artexis10/exomem/commit/ff46bf443126416ea73ff47cba2b6a5d45248e1b))
+
+
+### Bug Fixes
+
+* **demo:** wait for the find step's lexical repair before removing the temp copy ([#2640](https://github.com/Artexis10/exomem/issues/2640)) ([5bd0a6c](https://github.com/Artexis10/exomem/commit/5bd0a6ca932213d676af1e1274e6e3beb682a92d))
+* **upload:** refuse a large Source ticket upload before its body ([#2645](https://github.com/Artexis10/exomem/issues/2645)) ([7be4edb](https://github.com/Artexis10/exomem/commit/7be4edbfd9f62948397ceed07b9fa248ca172d61))
+
 ## [0.169.0](https://github.com/Artexis10/exomem/compare/v0.168.0...v0.169.0) (2026-11-09)
 
 

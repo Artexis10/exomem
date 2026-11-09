@@ -84,6 +84,7 @@ ATTENTION_CATEGORIES: tuple[str, ...] = (
     *DEFAULT_ATTENTION_CATEGORIES,
     *audit_module.TYPED_SEMANTIC_CATEGORIES,
     *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
+    *audit_module.DUPLICATE_CATEGORIES,
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}

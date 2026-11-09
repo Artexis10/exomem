@@ -18,6 +18,7 @@ from test_working_set_index import _seed_planning
 
 from exomem import context_catalogue as cc
 from exomem import (
+    episode_capture,
     episode_memory,
     epistemic_graph,
     freshness,
@@ -202,6 +203,16 @@ def test_an_incremental_update_equals_a_fresh_build_after_every_kind_of_edit(vau
         _graph(vault)
         update()
         check(f"episode: {revision}")
+    assert len(catalogue.entries(cc.KIND_THREAD)) == 1  # a recap revision rewrites the episode's one page
+
+    # An older release wrote one file per revision, and those files stay beside the live page in one thread.
+    (live,) = (vault / f"{KB}/Sources/Episodes").glob("*.md")
+    _group, order, _digest = episode_capture.filename_parts(live.name)
+    earlier = live.with_name(live.name.replace(order, "20200101t000000000000"))
+    earlier.write_bytes(live.read_bytes())
+    _graph(vault)
+    update([earlier.relative_to(vault).as_posix()])
+    check("older-layout-revision")
     threads = catalogue.entries(cc.KIND_THREAD)
     assert len(threads) == 2 and len({entry.thread_key for entry in threads}) == 1
 

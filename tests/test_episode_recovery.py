@@ -838,6 +838,65 @@ def test_bind_committed_input_keeps_two_audiences_isolated(vault: Path) -> None:
     assert still["input_revision"] == 1
 
 
+def test_an_older_input_revision_is_recovered_from_its_history_entry(vault: Path, source_schema) -> None:
+    """One page per episode leaves an older revision's exact bytes only in its history entry,
+    so recovery must still return them, and report stale once no entry proves them."""
+    from exomem import compiled_history
+    from exomem import episode_model as model
+
+    key = "ep-" + "93" * 16
+    with request_scope(_owner("history-a")):
+        owner = _owner_store(vault)
+        bodies = []
+        for summary in ("First recap", "Second recap", "Third recap"):
+            recorded = commands.op_episode_memory(
+                vault, source_schema, action="record", episode=key,
+                subject="History recovery", summary=summary, worked_on=[f"{summary} step"],
+            )
+            bodies.append(commands.op_get(vault, path=recorded["source"]["path"])["body"])
+        identity = model.episode_id(key)
+
+        first = owner.recover_input(identity, input_revision=1)
+        assert first["status"] == "available" and first["body"] == bodies[0]
+        assert owner.recover_input(identity, input_revision=2)["body"] == bodies[1]
+        assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+        for entry in (vault / compiled_history.history_root()).rglob("*.json"):
+            entry.unlink()
+        assert owner.recover_input(identity, input_revision=1)["status"] == "stale"
+        assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+
+def test_a_folded_recap_revisions_input_is_recovered_from_the_head_history(vault: Path, earlier_episode) -> None:
+    """A fold trashes the superseded recap files, yet a ledger reference to each one still
+    recovers its exact bytes from the head's history, and says unavailable once no entry holds them."""
+    from test_curation_execution import _apply, _fold_step, _propose
+
+    from exomem import compiled_history
+    from exomem import episode_model as model
+
+    key = "ep-" + "b2" * 16
+    pages = earlier_episode(3, key=key)
+    owner = _owner_store(vault)
+    identity = model.episode_id(key)
+    bodies = [commands.op_get(vault, path=path)["body"] for path in pages]
+
+    result = _apply(vault, _propose(vault, _fold_step(pages, vault)))
+
+    assert result["phase"] == "completed"
+    assert not any((vault / path).exists() for path in pages[:-1])
+    first = owner.recover_input(identity, input_revision=1)
+    assert first["status"] == "available" and first["body"] == bodies[0]
+    assert owner.recover_input(identity, input_revision=2)["body"] == bodies[1]
+    assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+    for entry in (vault / compiled_history.history_root()).rglob("*.json"):
+        entry.unlink()
+    assert owner.recover_input(identity, input_revision=1)["status"] == "unavailable"
+    assert owner.recover_input(identity, input_revision=3)["body"] == bodies[2]
+
+
+@pytest.mark.usefixtures("earlier_layout")
 def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, source_schema) -> None:
     """A withheld successor cannot hide the retired recap, exact span or single origin."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
@@ -905,6 +964,7 @@ def test_recorded_recap_revisions_and_exact_units_share_one_root(vault: Path, so
         assert other is not None and other.root != roots[-1]
 
 
+@pytest.mark.usefixtures("earlier_layout")
 @pytest.mark.parametrize("scheme", [None, "evidence-v1"])
 @pytest.mark.parametrize("selection", ["page", "unit"])
 def test_retired_recorder_keeps_the_bound_scope_and_digest_scheme(
@@ -947,6 +1007,7 @@ def test_retired_recorder_keeps_the_bound_scope_and_digest_scheme(
         assert recovered["status"] == ("available" if scheme else "stale")
 
 
+@pytest.mark.usefixtures("earlier_layout")
 @pytest.mark.parametrize("change", ["body", "summary", "title", "tags", "client", "captured"])
 def test_retired_recorder_still_rejects_material_changes(vault: Path, source_schema, change) -> None:
     """Retirement cannot hide a changed recap or other bound metadata."""
@@ -980,6 +1041,7 @@ def test_retired_recorder_still_rejects_material_changes(vault: Path, source_sch
         )) is None
 
 
+@pytest.mark.usefixtures("earlier_layout")
 def test_retired_recorder_cannot_reconstruct_overwritten_fields(vault: Path, source_schema) -> None:
     """Stripping retirement fields does not recover values present in the old binding."""
     from exomem import episode_model as model

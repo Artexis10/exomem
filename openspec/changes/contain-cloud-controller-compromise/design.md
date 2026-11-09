@@ -315,6 +315,8 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - It takes the IDs of keys to delete only from the provider's key listing, matched on the prefix, never from a Secret. Every key listing uses the provider's v4 API: on 2026-11-01 the v3 listing of a live account returned 6 of its 25 keys.
 - It hides a cell's prefix, and then deletes its key, only on a deletion record that Substrate signed with the grant key (audience `exomem-cell-delete`), and only after a 7-day grace period. It raises an alert on each hide. A deleted or recreated namespace alone hides nothing.
 
+**Amendment, 2026-11-09: `automate-cell-storage-deletion` replaces the deletion bullet above.** That change calls the signed object the deletion grant (its D1). The custodian deletes a deleted cell's key once the namespace is gone. After the grace, it mints a second key shape: a short-lived purge key with only `listFiles` and `writeFiles`. It hides the prefix with that key (its D2). The custodian raises no alert. The key watcher raises every deletion alert, and it gains a list key on the backup bucket (its D4).
+
 **What `cellctl` keeps.** It keeps two keys that cannot create keys in the cell-data account, and one in the founder account:
 - a key limited to the staging bucket, for presigning and removing export and import objects;
 - a key that can only list files in the backup bucket, for version bookkeeping;
