@@ -390,9 +390,10 @@ its release, the rescue with `--rescue` and the anomaly triage.
 1. Read the edge's log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge | grep "purge pass is off"`
    Expect no output.
 2. If the line shows, create the list-key Secret as in step 7 of "Create the Secrets".
-3. Restart the edge so that it reads the key: `kubectl -n exomem-cloud rollout restart deployment/exomem-media-edge`
+3. If you created the Secret in step 2, restart the edge so that it reads the key:
+   `kubectl -n exomem-cloud rollout restart deployment/exomem-media-edge`
    The Recreate rollout stops the edge before the new pod is ready, so media requests fail for that time.
-4. Repeat step 1. Expect no output.
+4. If you restarted the edge, repeat step 1. Expect no output.
 
 Expected result: after the cell's `purge_after`, the watcher resolves `CELL_DELETION_PENDING:<cell_id>` and
 raises `CELL_DELETION_HIDDEN:<cell_id>`.

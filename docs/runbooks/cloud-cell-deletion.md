@@ -265,4 +265,4 @@ before Substrate signs with it, and remove the old key only when no relayed gran
 6. If the count is above 0, wait and repeat step 5. A held cell keeps its grant, so release or resolve it first.
 7. Remove the old key from `cellDeletion.grantPublicKeys`, and run the Helm upgrade again.
 
-Expected result: the count in step 3 shows 1 in both namespaces, and the watcher raises no anomaly.
+Expected result: a repeat of step 3 shows 1 key in both namespaces, and the watcher raises no anomaly.
