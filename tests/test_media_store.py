@@ -3687,6 +3687,35 @@ def test_the_media_workers_eviction_tick_drains_a_retained_store(vault: Path, se
     assert media_store.drain_record(vault).latched
 
 
+def test_an_evicted_original_in_trash_is_counted_and_drained_back_into_trash(vault: Path, selected_store, monkeypatch):
+    """Defect: the census refuses a stored reference in Trash whose payload was evicted, so a retained store that
+    ever evicted a Trash original stays unknown, never drains it and never releases its key."""
+    from exomem import delete_file, media_jobs, media_processing, media_store, preserve
+
+    data = b"t" * 300
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "trashed.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(data)
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = vault / delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True).trash_path
+    with media_store.open_original(vault, trashed, read=True):  # A preview records the Trash copy, so eviction may take it.
+        pass
+    assert media_store.evict(vault, trashed)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, trashed))
+
+    assert media_store.drain_census(vault) == (1, len(data))
+    assert media_store.drain_step(vault) == 1
+
+    assert trashed.read_bytes() == data
+    assert originals.original_state(vault, trashed).state == "cached"
+    assert media_store.drain_census(vault) == (0, 0)
+    assert media_store.drain_record(vault).latched
+
+
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
     """Pins the band rule: no hydration, and no eviction, while the evicted bytes leave less than the margin of room."""
     from exomem import media_store

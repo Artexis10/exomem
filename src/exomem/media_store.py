@@ -1276,6 +1276,16 @@ def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) 
     return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
 
 
+def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
+    """Where an original's bytes belong: a live original's bound path, or a Trash payload's path beside its companion.
+
+    A Trash companion of a deleted folder binds the path that the original had before the deletion.
+    """
+    if trash_metadata.is_trash_path(companion):
+        return (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix()
+    return binary.path
+
+
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
@@ -1290,9 +1300,7 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
     for companion, binary, reference in media_allowance.bound_references(
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
-        # A Trash companion sits beside its payload, not at the path that it binds.
-        path = (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix() \
-            if trash_metadata.is_trash_path(companion) else binary.path
+        path = _payload_path(companion, binary)
         if not _on_volume(vault, path):
             yield path, binary, reference
     if not unreadable:
@@ -1936,17 +1944,14 @@ def _on_volume(vault: Path, relative: str) -> bool:
 def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str, tuple[originals.BinaryBinding, StoredObject]]:
     """The originals whose companion binds a reference to the store and whose bytes are not on the volume.
 
+    Each is keyed by where its bytes belong, so an original in Trash is counted, and drained, at its Trash path.
     Raises when a companion or a path cannot be read: an incomplete census is unknown, never a lower count.
     """
     found: dict[str, tuple[originals.BinaryBinding, StoredObject]] = {}
     for companion, binary, reference in media_allowance.bound_references(vault, binding):
-        in_trash = trash_metadata.is_trash_path(companion)
-        # A Trash companion sits beside its payload, not at the path that it binds; task 5.5 places those originals.
-        if _on_volume(vault, companion.removesuffix(".md") if in_trash else binary.path):
-            continue
-        if in_trash:
-            raise ValueError("a stored reference in Trash has no original beside it")
-        found[binary.path] = (binary, reference)
+        path = _payload_path(companion, binary)
+        if not _on_volume(vault, path):
+            found[path] = (binary, reference)
     return found
 
 
