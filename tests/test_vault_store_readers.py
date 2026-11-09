@@ -68,7 +68,7 @@ def answers(root, generated):
     }
     return {
         "find": [(hit.path, hit.title, hit.excerpt) for hit in hits],
-        "ask": [(hit["path"], hit["title"], hit["excerpt"]) for hit in asked],
+        "ask": [(hit["path"], hit.get("title"), hit.get("excerpt")) for hit in asked["hits"]],
         "pages": [(page.content, page.content_hash) for page in pages],
         "listing": sorted(
             (entry.as_dict() for entry in listing.entries), key=lambda entry: entry["name"]
