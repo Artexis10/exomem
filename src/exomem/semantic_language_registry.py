@@ -723,6 +723,26 @@ def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
     return proposal
 
 
+def dropped_verdicts_finding(
+    current: SemanticLanguageRegistry, candidate: SemanticLanguageRegistry
+) -> RegistryFinding | None:
+    """An error when `candidate` loses a verdict key that `current` saved; else None.
+
+    A page that uses a saved verdict stops parsing once a save drops it. A save may still add
+    a verdict or change a label, so only a lost key is refused. Validation and the save both
+    read this one finding.
+    """
+    dropped = sorted(set(current.verdicts) - set(candidate.verdicts))
+    if not dropped:
+        return None
+    return _finding(
+        "verdicts_dropped",
+        "verdicts",
+        f"this save would drop the vault verdicts {', '.join(dropped)}; keep them in the "
+        "proposal's `verdicts` section",
+    )
+
+
 def save_registry(
     vault_root: Path,
     proposal: dict[str, Any],

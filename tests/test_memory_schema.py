@@ -1445,16 +1445,62 @@ def test_the_categories_read_lists_each_accepted_verdict_and_a_save_keeps_the_va
     assert diff["changes"]["verdicts"]["removed"] == ["retracted"]
 
     # A category save that omits the vault's verdicts would make every page that uses one stop
-    # parsing, so it is refused like a save that drops a custom kind.
-    with library_scope(), pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
+    # parsing, so validation and the save refuse it with the same finding.
+    omitted = {"schema_version": 1, "categories": {}, "kinds": {}}
+    validated = commands.op_schema_memory(
+        vault, operation="validate", subject="categories", proposal=omitted
+    )
+    assert validated["valid"] is False
+    [dropped] = [item for item in validated["findings"] if item["code"] == "verdicts_dropped"]
+    assert "retracted" in dropped["detail"] and "keep them" in dropped["detail"]
+    refusal = pytest.raises(ValueError, match="CATEGORY_SAVE_VERDICT_DROPPED")
+    with library_scope(), refusal as refused:
         commands.op_schema_memory(
             vault,
             operation="infer",
             subject="categories",
             save=True,
-            proposal={"schema_version": 1, "categories": {}, "kinds": {}},
+            proposal=omitted,
             expected_hash=created["content_hash"],
         )
+    assert dropped["detail"] in str(refused.value)
+
+
+def test_a_categories_save_adds_and_relabels_verdicts_in_a_saved_registry(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _seed_category_pages(vault)
+    current = {
+        "schema_version": 1,
+        "categories": {"runtime_setting": {"description": "Runtime setting facts"}},
+        "kinds": {},
+    }
+    created = semantic_language_registry.save_registry(vault, current)
+    proposal = {
+        **current,
+        "verdicts": {
+            "retracted": {"label": "Retracted", "description": "Withdrawn by its authors"},
+            "refuted": {"label": "Kumottu"},
+        },
+    }
+
+    validated = commands.op_schema_memory(
+        vault, operation="validate", subject="categories", proposal=proposal
+    )
+    with library_scope():
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal=proposal,
+            expected_hash=created["content_hash"],
+        )
+
+    assert validated["valid"] is True
+    loaded = semantic_language_registry.load_registry(vault)
+    assert loaded.resolve_verdict("retracted") == "retracted"
+    assert loaded.resolve_verdict("Kumottu") == "refuted"
+    assert "runtime_setting" in loaded.categories
 
 
 def test_category_profile_retains_rich_kind_scoped_to_any_attached_project(

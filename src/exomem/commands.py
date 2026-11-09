@@ -12318,16 +12318,22 @@ def op_schema_memory(
                 registry_file_exists = instances.select(
                     vault_root, semantic_language_registry_module.CATEGORY_SPEC
                 ).overlay(vault_root).exists()
-                # A custom kind or verdict that a page already uses stops parsing the moment a save
-                # drops it, so category governance may not rewrite either namespace.
+                dropped = semantic_language_registry_module.dropped_verdicts_finding(
+                    current, candidate
+                )
+                if dropped is not None:
+                    raise ValueError(f"CATEGORY_SAVE_VERDICT_DROPPED: {dropped['detail']}")
+                # Debt: this kinds leg refuses every kind change, an addition too, and validation
+                # does not report it; it predates the verdict leg above, which refuses a loss only.
                 reviewed = semantic_language_registry_module.registry_proposal
-                if registry_file_exists and not candidate.findings and (
-                    reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
-                    or reviewed(current).get("verdicts") != reviewed(candidate).get("verdicts")
+                if (
+                    registry_file_exists
+                    and not candidate.findings
+                    and reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
                 ):
                     raise ValueError(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
-                        "the reviewed custom-kind and verdict namespaces"
+                        "the reviewed custom-kind namespace"
                     )
                 result["saved"] = semantic_language_registry_module.save_registry(
                     vault_root,

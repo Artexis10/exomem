@@ -1300,6 +1300,13 @@ def validate_category_registry(
         else semantic_language_registry.load_registry(vault_root)
     )
     findings: list[dict[str, Any]] = [item.as_dict() for item in registry.findings]
+    if proposal is not None:
+        # The save refuses a proposal that drops a saved verdict, so validation reports it too.
+        dropped = semantic_language_registry.dropped_verdicts_finding(
+            semantic_language_registry.load_registry(vault_root), registry
+        )
+        if dropped is not None:
+            findings.append(dropped.as_dict())
     # A non-fatal registry finding (e.g. a `core_category_shadowed` warning) must
     # NOT suppress unrelated observation validation. Category resolution only
     # collapses to `registry_invalid` when the registry carries an actual error
