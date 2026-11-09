@@ -6363,6 +6363,7 @@ class EpistemicGraphIndex:
                 return None
             if indexed_hashes is not None and indexed_hashes.get(rel) != source_signature[3]:
                 return None
+            # The resolver's title rule (`WikilinkResolver.from_entries`): stripped, lowered.
             title = page.title.strip().lower() if page.title.strip() else None
             if resolver.title_key_for_path(rel) != title:
                 return None

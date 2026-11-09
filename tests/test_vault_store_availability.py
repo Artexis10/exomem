@@ -112,7 +112,7 @@ def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
     availability.require_servable(vault)
-    assert availability.write_refusal(vault) is None
+    assert availability.page_writer(vault) is None
     assert availability.marker_inconsistency(vault) is None
     assert doctor._check_vault_store_records(vault) is None
 
@@ -255,7 +255,7 @@ def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_r
     warnings = [record.getMessage() for record in caplog.records if record.name == availability.log.name]
     assert warnings == [availability.marker_inconsistency(vault)]
     assert "exomem store-mode rollback" in caplog.text
-    assert availability.write_refusal(vault) is None
+    assert availability.page_writer(vault) is None
     check = doctor._check_vault_store_records(vault)
     assert (check.status, check.message) == ("warn", availability.marker_inconsistency(vault))
     assert "exomem store-mode rollback" in check.remediation

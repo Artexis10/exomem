@@ -12,7 +12,7 @@
 - [ ] 2.1 Give the four derivation entry points (page parse, parent state, recall-candidate gate, lexical row builder) a bytes input, replacing the spike's overrides.
 - [x] 2.2 Commit every file of a governed write with its lexical rows, graph rows, audit rows and projection intents in one `BEGIN IMMEDIATE`, through the collection store's existing writer lease and transaction owner; make preserved binary files durable before that commit. Give `unique_path` and `respell_new_path` a store form that lists folder contents from the store, not the disk; store mode needs this for any title-style name, with or without D12.
 - [x] 2.3 Re-resolve dependent pages whose links start resolving in the same transaction.
-- [ ] 2.4 Prove with hard-kill trials that no kill leaves repair state, and with a whole-table diff that rows equal file mode for the same bytes.
+- [ ] 2.4 Prove with hard-kill trials that no kill leaves repair state, and with a whole-table diff that rows equal file mode for the same bytes. A batch that writes `_Schema` derives its pages with the previous registry, because the derivation reads registries from disk while `_Schema` is store-owned; the background registry re-derivation job that the design names settles those rows, and no refusal is added.
 
 ## 3. Readers
 

@@ -4,10 +4,11 @@
 which is the only writer of the store, and it writes no Markdown for a page: the pages of the
 batch commit with their lexical, graph and identity rows in one store transaction
 (``write.commit``). A file that the store holds as a binary, or does not hold at all (a Markdown
-file outside the Knowledge Base folder, a machine-local file), is published to disk first through
-the file-mode machinery, and the same commit then records the binary or derives the rows of the
-file. Only what lives outside the store runs after the commit: the free-text census note, the
-semantic drain's handoff and the heat projection.
+file outside the Knowledge Base folder, a machine-local file), is published to disk through the
+file-mode machinery, and the store commit runs inside that batch's rollback window as its last
+step: it records the binary or derives the rows of the file, and a failure of any part restores the
+published files. Only what lives outside the store runs after the commit: the free-text census
+note, the semantic drain's handoff and the heat projection.
 """
 
 from __future__ import annotations
@@ -168,13 +169,11 @@ class _Plan:
             elif rel is not None and rel.lower().endswith(".md"):
                 self.refresh.append(rel)
         self.disk_guards: list[vault.PathGuard] = []
+        self.disk_censuses: list[vault.DirectoryCensusGuard] = []
         self.disk_completion: list[vault.PathGuard] = []
         self.held: list[_Held] = []
         for rel, write in self.pages:
             self._hold_write(rel, write)
-        # A folder census lists the projection, which trails the store, and the store thread
-        # serializes writers; the held expectation of each exact path binds a page, so a census
-        # adds nothing here.
         for guard in required_guards:
             self._hold_guard(guard, self.disk_guards)
         for guard in completion_guards:
@@ -209,6 +208,12 @@ class _Plan:
         self, guard: vault.PathGuard | vault.DirectoryCensusGuard, disk: list[vault.PathGuard]
     ) -> None:
         if isinstance(guard, vault.DirectoryCensusGuard):
+            # A census of a folder that the store owns lists the projection, which trails the store,
+            # and the store thread serializes writers; the held expectation of each exact path binds
+            # a page, so that census adds nothing. Any other folder holds files that this batch
+            # writes on disk, so its census still binds.
+            if not ownership.owns_folder(guard.target):
+                self.disk_censuses.append(guard)
             return
         if not isinstance(guard, vault.PathGuard):
             raise vault.PathGuardError("PATH_GUARD_INVALID", "unsupported required guard")
@@ -340,12 +345,37 @@ def _commit(
     if before_publication is not None:
         # The owner's own durable write; the commit does not undo it.
         before_publication()
+
+    def commit_to_store() -> None:
+        # Everything that can still fail runs here: the file-mode batch calls this as its last step
+        # before its commit point, so a failure restores the published files.
+        if validate_prepared_bindings is not None:
+            validate_prepared_bindings()
+        _validate(root, writes, vocabulary_auxiliaries, final=True)
+        change = StoreChange(
+            origin=Origin.GOVERNED,
+            reason=_reason(),
+            puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
+            binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
+            refresh=tuple(plan.refresh),
+            expect=plan.expectations(),
+        )
+        try:
+            store_write.commit(writer, change)
+        except StoreConflict as conflict:
+            if conflict.path not in change.expect:
+                raise
+            # The store changed after the check above ran: the batch is stale as a guard says it is.
+            raise vault.PathGuardError(
+                "PATH_GUARD_CHANGED", "a stored page changed before the commit"
+            ) from conflict
+
     if plan.files:
         with vault._BATCH_COMMIT_LOCK:
             vault._batch_atomic_write_locked(
                 plan.files,
                 vault_root=root,
-                required_guards=plan.disk_guards,
+                required_guards=[*plan.disk_guards, *plan.disk_censuses],
                 completion_guards=plan.disk_completion,
                 post_commit_fanout=False,
                 commit_point=False,
@@ -354,29 +384,13 @@ def _commit(
                 _vocabulary_auxiliaries=None,
                 # A store commit derives its graph rows itself; the epoch is file-mode graph sync.
                 _graph_epoch=False,
+                _before_commit_point=commit_to_store,
             )
     else:
         vault.recheck_path_guards(root, (*plan.disk_guards, *plan.disk_completion))
-    if validate_prepared_bindings is not None:
-        validate_prepared_bindings()
-    _validate(root, writes, vocabulary_auxiliaries, final=True)
-    change = StoreChange(
-        origin=Origin.GOVERNED,
-        reason=_reason(),
-        puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
-        binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
-        refresh=tuple(plan.refresh),
-        expect=plan.expectations(),
-    )
-    try:
-        store_write.commit(writer, change)
-    except StoreConflict as conflict:
-        if conflict.path not in change.expect:
-            raise
-        # The store changed after the check above ran: the batch is stale as a guard says it is.
-        raise vault.PathGuardError(
-            "PATH_GUARD_CHANGED", "a stored page changed before the commit"
-        ) from conflict
+        for census in plan.disk_censuses:
+            census.recheck(root)
+        commit_to_store()
     log_active_mutation_phase("canonical_files_committed", affected_count=len(writes))
     call_spans.mark("canonical_files_committed")
     if commit_point:

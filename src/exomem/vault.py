@@ -5009,6 +5009,12 @@ def post_commit_batch_fanout(
 ) -> bool:
     if vault_root is None or not replaced:
         return True
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(Path(vault_root)):
+        # The store commit derived every row of a store-mode vault; the sidecars this fan-out
+        # refreshes belong to file mode, and nothing in store mode reads them.
+        return True
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
     publication_intents = tuple(publication_intents)
@@ -5597,6 +5603,7 @@ def _batch_atomic_write_locked(
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _before_first_install: Callable[[], None] | None = None,
     _graph_epoch: bool = True,
+    _before_commit_point: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -6189,6 +6196,10 @@ def _batch_atomic_write_locked(
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
             guard.recheck()
+        if _before_commit_point is not None:
+            # A store-mode batch commits its pages here, the last step that can fail, so a failure
+            # restores the files above and a retry meets a vault the batch never touched.
+            _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))

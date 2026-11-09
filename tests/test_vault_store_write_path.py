@@ -20,7 +20,7 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem import bm25, commands
+from exomem import bm25, commands, lexstore
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview, runtime
@@ -262,6 +262,68 @@ def test_a_failure_while_deriving_rolls_back_the_page_and_the_revision(served, w
     assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
 
 
+@pytest.mark.parametrize("failing_step", ["bindings", "derivation"])
+def test_a_mixed_batch_that_fails_after_its_files_are_published_restores_them_and_can_retry(
+    served, monkeypatch, failing_step
+):
+    """A retry that meets the files a failed batch left, and refuses them as already created."""
+    payload = bytes(range(64))
+    diagram = "Knowledge Base/Notes/second.bin"
+    probe = "Outside/Probe.md"
+    failing = [True]
+    bindings_calls = []
+
+    def bindings():
+        bindings_calls.append(1)
+        # The first call is the check before any file is published, the second the check after.
+        if failing_step == "bindings" and failing[0] and len(bindings_calls) == 2:
+            raise RuntimeError("a binding changed after publication")
+
+    write_page_rows = lexstore.write_page_rows
+
+    def derive(*arguments, **keywords):
+        if failing_step == "derivation" and failing[0]:
+            raise RuntimeError("derivation failed")
+        return write_page_rows(*arguments, **keywords)
+
+    monkeypatch.setattr("exomem.lexstore.write_page_rows", derive)
+
+    def mixed_batch():
+        return vault_module.batch_atomic_write(
+            [
+                planned(served, GAMMA, GAMMA_TEXT, create_only=True),
+                vault_module.PlannedWrite(
+                    served / diagram,
+                    vault_module.PreparedBinaryContent(
+                        io.BytesIO(payload), len(payload), hashlib.sha256(payload).hexdigest()
+                    ),
+                    create_only=True,
+                    expected_hash=vault_module.MISSING_CONTENT_HASH,
+                ),
+                planned(served, probe, "# Probe\n\nA page outside the Knowledge Base folder.\n"),
+            ],
+            vault_root=served,
+            post_commit_fanout=False,
+            _validate_prepared_bindings=bindings,
+        )
+
+    before = tree(served)
+    start = revision(served)
+    with pytest.raises(RuntimeError):
+        mixed_batch()
+    assert tree(served) == before, "the files that the failed batch published must be restored"
+    assert revision(served) == start
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
+
+    failing[0] = False
+    bindings_calls.clear()
+    mixed_batch()
+    assert (served / diagram).read_bytes() == payload
+    assert (served / probe).exists()
+    assert revision(served) == start + 1
+    assert bm25_paths(served, "harbour") == [GAMMA]
+
+
 def test_a_write_with_no_service_refuses_and_a_read_does_not_need_one(stored):  # noqa: F811
     """A command line write that falls back to Markdown, because no thread holds the store."""
     with pytest.raises(OpError) as refused:
@@ -279,6 +341,55 @@ def test_a_batch_off_the_store_thread_refuses_and_changes_no_byte(stored):  # no
         )
     assert refused.value.code == availability.OFF_THREAD
     assert tree(stored) == before
+
+
+@pytest.mark.parametrize(
+    ("folder", "page", "refused"),
+    [
+        ("Knowledge Base/Notes", GAMMA, False),
+        ("Outside", "Outside/Probe.md", True),
+        ("Outside", GAMMA, True),
+    ],
+    ids=[
+        "a folder that the store owns",
+        "a folder that holds files on disk",
+        "a folder that holds files on disk, with only a page in the batch",
+    ],
+)
+def test_a_folder_census_binds_a_batch_only_where_the_batch_writes_on_disk(
+    served, folder, page, refused
+):
+    """A census that stops binding a folder where files live on disk, or refuses a stored page."""
+    (served / folder).mkdir(parents=True, exist_ok=True)
+    census = vault_module.DirectoryCensusGuard.capture(served, folder, max_entries=100)
+    (served / folder / "stray.txt").write_text("a file that appeared after the census\n")
+    batch = [planned(served, page, GAMMA_TEXT, create_only=True)]
+    if refused:
+        with pytest.raises(vault_module.PathGuardError):
+            vault_module.batch_atomic_write(
+                batch, vault_root=served, required_guards=[census], post_commit_fanout=False
+            )
+        assert not (served / page).exists()
+        with read.snapshot(served) as view:
+            assert view.page(page) is None
+    else:
+        vault_module.batch_atomic_write(
+            batch, vault_root=served, required_guards=[census], post_commit_fanout=False
+        )
+        with read.snapshot(served) as view:
+            assert view.page(page) is not None
+
+
+def test_a_fan_out_that_a_caller_runs_after_its_own_batch_refreshes_no_sidecar_in_store_mode(
+    served, monkeypatch
+):
+    """File-mode rows written beside the store's, by a caller that fans out after its own batch."""
+    refreshed = []
+    monkeypatch.setattr(
+        "exomem.index_sync.upsert_after_write", lambda *arguments, **keywords: refreshed.append(1)
+    )
+    assert vault_module.post_commit_batch_fanout(served, [served / ALPHA], None, None) is True
+    assert refreshed == []
 
 
 def test_a_batch_that_mixes_a_page_a_binary_and_a_file_the_store_does_not_own(served):

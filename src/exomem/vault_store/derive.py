@@ -3,9 +3,14 @@
 ``apply`` runs inside ``write.commit``'s transaction, after the page tables hold the commit's own
 bytes. It writes the lexical, graph and identity rows of every page that the commit gives bytes to,
 drops the rows of every page that it removes, and re-derives the graph rows of the pages whose
-links the commit re-resolves. It reads only the transaction's own tables (and the disk for a page
-that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves no
-row without its page.
+links the commit re-resolves. It reads the transaction's own tables for pages (and the disk for a
+page that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves
+no row without its page.
+
+The registries (traversal profiles, the type basis) are the exception: the owners' builders read
+them from disk, while the schema overlay under ``_Schema`` is store-owned. A batch that writes
+``_Schema`` therefore derives its pages with the previous registry, and the background job that
+the design gives the registry state re-derives them afterwards.
 
 The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.page_graph_rows``,
 ``memory_refs.identity_row``); this module only says which bytes, which resolver and which pages.
@@ -239,9 +244,9 @@ class _Derivation:
         for rel in (*self.written, *self.refreshed):
             if rel not in self.existing and rel not in before:
                 moved.add(rel)
-            elif _title_key(before.get(rel)) != _title_key(after.get(rel)) or (rel in before) != (
-                rel in after
-            ):
+            elif before_resolver.title_key_for_path(rel) != after_resolver.title_key_for_path(
+                rel
+            ) or (rel in before) != (rel in after):
                 moved.add(rel)
             else:
                 edited.add(rel)
@@ -252,7 +257,3 @@ class _Derivation:
         # replay of the same commit writes the same rows.
         return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed))
 
-
-def _title_key(title: str | None) -> str | None:
-    """The resolver's title key as ``WikilinkResolver.from_entries`` keeps it: stripped, lowered."""
-    return title.strip().lower() if title and title.strip() else None

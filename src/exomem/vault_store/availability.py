@@ -87,21 +87,13 @@ def marker_inconsistency(vault_root: Path) -> str | None:
             f"serves its pages from files, and {ROLLBACK} settles the records")
 
 
-def write_refusal(vault_root: Path):
-    """The OpError that a Markdown write to a store-mode vault gets, or None.
-
-    None means a file-mode vault, or a store-mode vault whose write reaches the store: the caller
-    runs on the store thread. A write that reached disk would put bytes where the store holds the
-    pages, so the first cause that applies names itself: the serving thread, a takeover still
-    pending, a recorded divergence, then a write that did not come through the store thread.
-    """
-    return _write_state(vault_root)[1]
-
-
 def page_writer(vault_root: Path):
     """The collection store writer that a governed batch commits through; None for file mode.
 
-    It raises ``write_refusal``'s error, so a store-mode vault never gets a Markdown write.
+    A store-mode vault never gets a Markdown write: a write that reached disk would put bytes where
+    the store holds the pages, so this raises the first cause that applies: the serving thread, a
+    takeover still pending, a recorded divergence, then a write that did not come through the store
+    thread.
     """
     in_store_mode, refusal = _write_state(vault_root)
     if refusal is not None:
