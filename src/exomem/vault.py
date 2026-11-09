@@ -5528,6 +5528,26 @@ def batch_atomic_write(
     return result
 
 
+def _abort_rolled_back_receipt(root: Path, receipt: Any | None) -> None:
+    """Retire the derived receipt of a batch whose rollback restored every path.
+
+    Only the writer knows the attempt did not commit: recovery sees a prepared receipt at its before-state
+    and cannot tell a rollback from a crash before the first replacement, so it keeps the receipt and
+    retries it. A fenced write refused at the commit fence left one that way for good once later writes
+    moved its paths on. A failed abort leaves the receipt to recovery, as before.
+    """
+    if receipt is None:
+        return
+    from . import derived_receipts
+
+    try:
+        derived_receipts.prove_committed(
+            root, receipt, current_generation=receipt.canonical_generation, known_uncommitted=True,
+        )
+    except Exception:  # noqa: BLE001 - the write's own error is the one the caller must see
+        log.warning("rolled-back derived receipt was not retired; recovery keeps it", exc_info=True)
+
+
 def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite],
     *,
@@ -6247,6 +6267,7 @@ def _batch_atomic_write_locked(
                 False,
                 diagnostics=rollback_errors,
             ) from commit_error
+        _abort_rolled_back_receipt(root, fast_receipt)
         if cleanup_retained:
             if publication_intents:
                 from . import file_watcher

@@ -1560,6 +1560,38 @@ def test_crash_cut_pre_prepare_leaves_no_custody_and_no_canonical_change(
     assert derived_receipts.due_component_count(vault) == 0
 
 
+def test_a_write_refused_at_the_commit_fence_retires_its_own_receipt(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that loses its lease after preparing its receipt leaves nothing for recovery to retry.
+
+    Only the writer knows it replaced nothing. Left prepared, the receipt was stranded for good once later
+    writes moved its paths on, and the drain retried it every cycle.
+    """
+    from exomem import writer_lease
+    from exomem.cli_ops import OpError
+
+    rel = "Knowledge Base/Notes/Insights/fenced-after-prepare.md"
+    original = _compiled_page("Fenced after prepare", "fencedafterprepare")
+    _put(vault, rel, original)
+
+    def fenced() -> None:
+        raise OpError("WRITER_FENCED", "writer lease fencing token 7 is no longer current")
+
+    monkeypatch.setattr(writer_lease, "validate_active_write_fence", fenced)
+    with pytest.raises(Exception, match="no longer current"):  # noqa: B017, PT011 - the envelope varies
+        _governed_write(
+            _manager(tmp_path),
+            vault,
+            rel_path=rel,
+            source=_compiled_page("Fenced after prepare", "changed"),
+        )
+
+    assert (vault / rel).read_text(encoding="utf-8") == original
+    assert derived_receipts.recoverable_batch_count(vault) == 0
+    assert derived_receipts.stranded_batch_count(vault) == 0
+
+
 def test_crash_cut_prepared_before_replacement_never_publishes(vault: Path) -> None:
     """Cut 2: prepared, then death before the first canonical replacement."""
     rel = "Knowledge Base/Notes/cut-prepared.md"
