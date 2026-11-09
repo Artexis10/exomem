@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from test_curation_execution import _propose
-from test_relation_endpoints import _entity, _extension, _save_extension, _served
+from test_relation_endpoints import _entity, _extension, _page_path, _save_extension, _served
 
 from exomem import (
     command_surface,
@@ -71,16 +71,19 @@ def _person_and_organization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A person and an organization that cite one source, and the queue's candidate between them."""
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    person = _entity(call, "person", "Ada Marsh")["path"]
-    organization = _entity(call, "organization", "Birch Works")["path"]
-    source = call(
-        "capture_source",
-        {
-            "title": "Shared source",
-            "source_kind": "session",
-            "content": "Ada Marsh runs Birch Works.",
-        },
-    )["path"]
+    person = _page_path(_entity(call, "person", "Ada Marsh"))
+    organization = _page_path(_entity(call, "organization", "Birch Works"))
+    source = _page_path(
+        call(
+            "capture_source",
+            {
+                "title": "Shared source",
+                "source_kind": "session",
+                "content": "Ada Marsh runs Birch Works.",
+                "response_detail": "full",
+            },
+        )
+    )
     for page in (person, organization):
         _cite(vault, page, source)
     _rebuild(vault, monkeypatch)
@@ -393,13 +396,20 @@ def test_suggest_relations_does_not_warn_for_edges_the_page_already_authors(
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    person = _entity(call, "person", "Ada Marsh")["path"]
-    organization = _entity(call, "organization", "Birch Works")["path"]
-    other = _entity(call, "organization", "Cedar Works")["path"]
-    source = call(
-        "capture_source",
-        {"title": "Shared source", "source_kind": "session", "content": "Three pages cite this."},
-    )["path"]
+    person = _page_path(_entity(call, "person", "Ada Marsh"))
+    organization = _page_path(_entity(call, "organization", "Birch Works"))
+    other = _page_path(_entity(call, "organization", "Cedar Works"))
+    source = _page_path(
+        call(
+            "capture_source",
+            {
+                "title": "Shared source",
+                "source_kind": "session",
+                "content": "Three pages cite this.",
+                "response_detail": "full",
+            },
+        )
+    )
     for page in (person, organization, other):
         _cite(vault, page, source)
     _rebuild(vault, monkeypatch)
@@ -447,7 +457,7 @@ def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    person = _entity(call, "person", "Ada Marsh")["path"]
+    person = _page_path(_entity(call, "person", "Ada Marsh"))
     # The organization, not the person, authors the specific relation toward the person.
     typed = _entity(
         call,
@@ -459,11 +469,18 @@ def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_
     )
     assert typed["diagnostics"]["operational"]["state"] == "committed", typed
     untyped = _entity(call, "organization", "Cedar Works")
-    source = call(
-        "capture_source",
-        {"title": "Shared source", "source_kind": "session", "content": "Three pages cite this."},
-    )["path"]
-    for page in (person, typed["path"], untyped["path"]):
+    source = _page_path(
+        call(
+            "capture_source",
+            {
+                "title": "Shared source",
+                "source_kind": "session",
+                "content": "Three pages cite this.",
+                "response_detail": "full",
+            },
+        )
+    )
+    for page in (person, _page_path(typed), _page_path(untyped)):
         _cite(vault, page, source)
     _rebuild(vault, monkeypatch)
 
@@ -472,18 +489,25 @@ def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_
     )
 
     shared = {c["to"] for c in suggested["candidates"] if c["method"] == "shared_sources"}
-    assert untyped["path"] in shared
-    assert typed["path"] not in shared
+    assert _page_path(untyped) in shared
+    assert _page_path(typed) not in shared
 
 
 def _two_plain_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Two notes that cite one source, and the queue's candidate between them."""
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    source = call(
-        "capture_source",
-        {"title": "Shared source", "source_kind": "session", "content": "Two notes cite this."},
-    )["path"]
+    source = _page_path(
+        call(
+            "capture_source",
+            {
+                "title": "Shared source",
+                "source_kind": "session",
+                "content": "Two notes cite this.",
+                "response_detail": "full",
+            },
+        )
+    )
     pages = []
     for title in ("Acorn notes", "Birch notes"):
         page = f"{NOTES}/{title.lower().replace(' ', '-')}.md"

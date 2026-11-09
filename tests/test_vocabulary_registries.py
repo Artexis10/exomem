@@ -100,9 +100,10 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
             "entity_type": "venue",
             "name": "Harbour Hall",
             "summary": "A concert hall by the harbour that hosts the spring series.",
+            "response_detail": "full",
         },
     )
-    page = vault / created["path"]
+    page = vault / created["diagnostics"]["operational"]["path"]
     page_bytes = page.read_bytes()
     assert graph_sync.drain_active_rebuilds(timeout=60)
     assert _entity_types_in_bootstrap(call)["top"]["venue"] == 1
@@ -133,7 +134,7 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
         for finding in audit["findings"]
         if finding["category"] == "entity_type_unregistered"
     ]
-    assert [finding["path"] for finding in debt] == [created["path"]]
+    assert [finding["path"] for finding in debt] == [created["diagnostics"]["operational"]["path"]]
 
 
 def test_a_first_use_registration_is_announced_and_marked_new(

@@ -378,6 +378,10 @@ class Command:
     #: A write declares one; a grouped command declares it on each operation row instead, and a
     #: read declares none. A write that declares none gets no summary.
     outcome_verb: OutcomeVerb | None = None
+    #: Over MCP the reply names each page it reports by `title` and short `id`, not by vault path,
+    #: because every page parameter takes those. A command whose subject is a file keeps `path`:
+    #: a file tool takes no title or id.
+    names_pages: bool = False
 
     def __post_init__(self) -> None:
         if self.renderings and self.argument_rules is None:
@@ -1038,6 +1042,13 @@ def bind_vault(
                             observation.capture(result)
                     except Exception:  # noqa: BLE001 - telemetry must not change the response
                         pass
+                if getattr(command, "names_pages", False) and isinstance(result, dict):
+                    from . import page_names
+
+                    # After the dispatcher's release, so the filter judged the paths it names.
+                    result = page_names.name_released_reply(
+                        injected[0], result, keep_paths=kwargs.get("detail") == "full"
+                    )
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,

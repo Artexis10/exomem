@@ -770,11 +770,12 @@ def test_real_edit_semantic_preflight_failure_releases_mutation_boundary(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(semantic_writes, "preflight_existing", preflight)
+    kwargs["response_detail"] = "full"
     refusal = bound(**kwargs)
     assert refusal["error"]["code"] == "STALE_SEMANTIC_WRITE"
     result = bound(**kwargs)
 
-    assert result["path"] == path
+    assert result["diagnostics"]["operational"]["path"] == path
     assert "After" in (vault / path).read_text(encoding="utf-8")
     # Probe the vault's real boundary: the pathless status only covers this
     # process, so it now answers `unknown` rather than a blind `free`.
@@ -829,11 +830,12 @@ def test_real_edit_replays_after_terminal_acknowledgement_loss(
         relation_review_reason="No honest relation exists in the isolated fixture.",
     )
 
+    kwargs["response_detail"] = "full"
     with pytest.raises(asyncio.CancelledError):
         bound(**kwargs)
     replay = bound(**kwargs)
 
-    assert replay["path"] == path
+    assert replay["diagnostics"]["operational"]["path"] == path
     assert (vault / path).read_text(encoding="utf-8").count("After") == 1
     # Probe the vault's real boundary: the pathless status only covers this
     # process, so it now answers `unknown` rather than a blind `free`.
@@ -1859,15 +1861,15 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "principal:test")
 
+    kwargs["response_detail"] = "full"
     with pytest.raises(asyncio.CancelledError):
         bound(**kwargs)
     replay = bound(**kwargs)
 
-    assert replay["path"] == validation["destination"]
-    assert (vault / replay["path"]).is_file()
-    assert list((vault / replay["path"]).parent.glob("acknowledgement-safe-save*.md")) == [
-        vault / replay["path"]
-    ]
+    saved = replay["diagnostics"]["operational"]["path"]
+    assert saved == validation["destination"]
+    assert (vault / saved).is_file()
+    assert list((vault / saved).parent.glob("acknowledgement-safe-save*.md")) == [vault / saved]
 
 
 def test_reviewed_transition_commits_when_the_clock_ticks_between_calls(

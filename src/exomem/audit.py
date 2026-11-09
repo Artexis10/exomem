@@ -2608,7 +2608,7 @@ def _check_wikilinks(
     full_paths: set[str] = set()          # vault-relative, no .md, e.g. "Reference/Strategy"
     kb_stripped_paths: set[str] = set()   # KB-relative, no .md
     names_to_paths: dict[str, list[str]] = {}  # bare filename (no ext) → vault-rel paths
-    titles_to_paths: dict[str, list[str]] = {}  # lower(frontmatter title) → paths
+    titles_to_paths: dict[str, list[str]] = {}  # title_key(frontmatter title) → paths
     for md_path in _walk_vault_md(vault_root):
         request_budget.checkpoint()
         try:
@@ -2628,7 +2628,7 @@ def _check_wikilinks(
         fm, _, _ = parse_frontmatter(text)
         title = fm.get("title") if isinstance(fm, dict) else None
         if isinstance(title, str) and title.strip():
-            titles_to_paths.setdefault(title.strip().lower(), []).append(no_ext)
+            titles_to_paths.setdefault(vault_module.title_key(title), []).append(no_ext)
 
     for page in pages:
         # Skip wikilinks inside fenced code blocks and inline code spans —
@@ -2664,7 +2664,7 @@ def _check_wikilinks(
                 ambiguous_stem = bool(stem_matches)
                 # Title fallback. Only resolves when unambiguous; ambiguous
                 # title matches stay flagged so the user can disambiguate.
-                title_matches = titles_to_paths.get(target_for_resolve.lower())
+                title_matches = titles_to_paths.get(vault_module.title_key(target_for_resolve))
                 if not ambiguous_stem and title_matches and len(title_matches) == 1:
                     continue
                 ambiguous_title = not ambiguous_stem and bool(title_matches)

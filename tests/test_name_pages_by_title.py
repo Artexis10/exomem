@@ -1,0 +1,225 @@
+"""An agent names a page by its title or a short id wherever a tool takes a page path.
+
+The end-to-end test drives the real MCP server over a temporary vault. The restricted-caller test
+drives the dispatcher a connector uses. The unit tests cover the branches the workflow does not.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastmcp import Client
+from test_derived_identifier_egress import (
+    NOTES,
+    WITHHELD_DIR,
+    _call,
+    _materialize,
+    _page,
+    _principal,
+)
+from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_sha256
+
+from exomem import call_ledger, find, page_names, writer_lease
+from exomem import server as server_module
+from exomem import vault as vault_module
+
+_ID = re.compile(r"[a-z2-7]{7}\.[a-z2-7]{4}")
+_STANDALONE = {"relation_disposition": "reviewed_none", "relation_review_reason": "standalone"}
+
+
+@pytest.fixture
+def build(vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    monkeypatch.delenv("EXOMEM_MCP_TOOL_SHAPE", raising=False)
+    call_ledger.reset_chain_cache()
+    yield lambda: server_module.build_server(require_auth=False)
+    writer_lease.reset_managers_for_tests()
+
+
+async def _tool(client: Client, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    result = await client.call_tool(name, arguments, raise_on_error=False)
+    assert result.structured_content is not None
+    return result.structured_content
+
+
+def _new_note(title: str) -> dict[str, Any]:
+    return {
+        "title": title,
+        "content": (
+            f"# {title}\n\n## Observations\n\n"
+            "- [operating constraint] Keep retries bounded #reliability\n"
+        ),
+        "note_type": "insight",
+        **_STANDALONE,
+    }
+
+
+def _replace(old: str, new: str, **operation: Any) -> dict[str, Any]:
+    return {"kind": "replace_string", "old_string": old, "new_string": new, **operation}
+
+
+def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            created = await _tool(client, "create_note", _new_note("Retry policy"))
+            assert created["user_summary"].startswith("Saved -> Retry policy (")
+            assert created["title"] == "Retry policy"
+            assert _ID.fullmatch(created["id"])
+            assert "path" not in created
+
+            # A page created a second ago resolves by its title, and read replies carry the same id.
+            read = await _tool(
+                client, "read_memory", {"operation": {"kind": "page", "path": "Retry policy"}}
+            )
+            assert "Keep retries bounded" in read["body"]
+            assert read["id"] == created["id"]
+
+            # An edit names the page by id and needs no `expected_hash`.
+            edited = await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": created["id"],
+                    "operation": _replace("bounded", "capped"),
+                    "why": "tighten",
+                },
+            )
+            assert edited["title"] == "Retry policy"
+            head = created["id"].partition(".")[0]
+            assert edited["id"].startswith(f"{head}.") and edited["id"] != created["id"]
+
+            # A guard that names a version the page moved past refuses with the current id.
+            # One retry using that refusal's own arguments succeeds.
+            stale_call = {
+                "path": created["id"],
+                "operation": _replace("capped", "limited", expected_hash=created["id"]),
+                "why": "tighten",
+            }
+            refused = await _tool(client, "edit_note", stale_call)
+            assert refused["error"]["code"] == "STALE_EDIT"
+            assert edited["id"] in refused["error"]["message"]
+            fix = refused["error"]["retry"]["arguments"]
+            assert fix["path"] == edited["id"]
+            retried = await _tool(
+                client,
+                "edit_note",
+                {
+                    **stale_call,
+                    **fix,
+                    "operation": {**stale_call["operation"], **fix["operation"]},
+                },
+            )
+            assert retried["title"] == "Retry policy"
+            assert "path" not in retried
+
+            # Two pages share the title: the refusal offers both, the picked id resolves.
+            await _tool(client, "create_note", _new_note("Retry policy"))
+            ambiguous = await _tool(
+                client, "read_memory", {"operation": {"kind": "page", "path": "Retry policy"}}
+            )
+            error = ambiguous["error"]
+            assert error["code"] == "AMBIGUOUS_REFERENCE"
+            assert error["message"] == "2 pages are titled “Retry policy”."
+            assert [set(row) for row in error["candidates"]] == [
+                {"title", "type", "date", "id"}
+            ] * 2
+            assert error["retry"]["arguments"]["operation"]["path"] == "<id>"
+            picked = await _tool(
+                client,
+                "read_memory",
+                {"operation": {"kind": "page", "path": error["candidates"][0]["id"]}},
+            )
+            assert picked["id"] == error["candidates"][0]["id"]
+
+    asyncio.run(run())
+
+    # No published tool schema or description moved.
+    digest, _ = _tool_surface_sha256(build())
+    assert json.loads(TOOL_SURFACE_CONTRACT_PATH.read_text(encoding="utf-8"))["sha256"] == digest
+
+
+def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
+    tmp_path: Path,
+) -> None:
+    open_pages = {
+        f"{NOTES}/shared.md": _page("Shared plan", "Visible twin.", type="insight"),
+        f"{NOTES}/open.md": _page("Open plan", "Visible text.", type="insight"),
+    }
+    withheld_pages = {
+        f"{WITHHELD_DIR}/shared.md": _page("Shared plan", "Withheld twin.", type="insight"),
+        f"{WITHHELD_DIR}/secret.md": _page("Secret plan", "Withheld text.", type="insight"),
+    }
+    vaults = {
+        "without": _materialize(tmp_path / "without" / "vault", dict(open_pages), "external"),
+        "with": _materialize(
+            tmp_path / "with" / "vault", {**open_pages, **withheld_pages}, "external"
+        ),
+    }
+
+    answers = {
+        name: {
+            title: _call(vault, _principal("external"), "read_memory", path=title)
+            for title in ("Secret plan", "Shared plan", "Nonexistent plan")
+        }
+        for name, vault in vaults.items()
+    }
+
+    # A title only withheld pages hold refuses as the vault without those pages refuses it.
+    assert answers["with"]["Secret plan"] == answers["without"]["Secret plan"]
+    # A withheld page of the same title neither makes the title ambiguous nor is a candidate.
+    assert answers["with"]["Shared plan"] == answers["without"]["Shared plan"]
+    assert "Visible twin." in answers["with"]["Shared plan"]["body"]
+    # And an unknown title refuses in the same shape.
+    assert answers["with"]["Secret plan"].keys() == answers["with"]["Nonexistent plan"].keys()
+
+
+def test_a_path_a_title_and_a_short_id_name_pages_in_that_order(tmp_path: Path) -> None:
+    root = _materialize(
+        tmp_path / "vault",
+        {
+            f"{NOTES}/alpha.md": _page("Gamma", "Named by its path.", type="insight"),
+            f"{NOTES}/beta.md": _page("Notes/alpha.md", "Titled like the path.", type="insight"),
+            f"{NOTES}/delta.md": _page("Epsilon", "Named by its title.", type="insight"),
+        },
+        "external",
+    )
+
+    # A value that names a file is a path even when another page carries it as its title.
+    by_path = page_names.resolve_page(root, "Notes/alpha.md")
+    by_title = page_names.resolve_page(root, "Epsilon")
+    by_id = page_names.resolve_page(root, page_names.read_identity(root, by_title.path).id)
+
+    assert vault_module.title_key("Notes/alpha.md") in find.shared_resolver(root).titles
+    assert by_path.path.removesuffix(".md").endswith("Notes/alpha")
+    assert by_title.path == f"{NOTES}/delta.md"
+    assert by_id.path == by_title.path and by_id.id is not None
+
+
+def test_a_title_key_folds_unicode_form_and_case_but_not_distinct_letters() -> None:
+    assert vault_module.title_key("Café Plan ") == vault_module.title_key("CAFÉ plan")
+    assert vault_module.title_key("Straße") != vault_module.title_key("Strasse")
+
+
+def test_raw_material_gives_way_to_an_editable_page_of_the_same_title(tmp_path: Path) -> None:
+    root = _materialize(
+        tmp_path / "vault",
+        {
+            f"{NOTES}/plan.md": _page("Rollout plan", "A note.", type="insight"),
+            "Knowledge Base/Sources/plan.md": _page("Rollout plan", "Raw capture.", type="source"),
+        },
+        "external",
+    )
+
+    with pytest.raises(page_names.AmbiguousTitle):
+        page_names.resolve_page(root, "Rollout plan")
+
+    edit = page_names.resolve_page(root, "Rollout plan", prefer=page_names.prefer_editable)
+    assert edit.path == f"{NOTES}/plan.md"

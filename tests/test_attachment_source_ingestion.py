@@ -1139,6 +1139,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     if mode == "text":
         arguments.pop("files")
         arguments["content"] = original.decode()
+        arguments["response_detail"] = "full"
     if mode == "adoption":
         arguments["adoption"] = {
             "key": "source-guidance-adoption", "trigger": "selected", "selected_file_id": "f1",
@@ -1156,7 +1157,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     )
 
     if mode == "text":
-        page_path = payload["path"]
+        page_path = payload["diagnostics"]["operational"]["path"]
         assert original.decode() in (vault / page_path).read_text(encoding="utf-8")
     else:
         files = payload.get("files") or payload.get("result", {}).get("files")

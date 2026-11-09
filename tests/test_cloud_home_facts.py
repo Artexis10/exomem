@@ -131,7 +131,7 @@ def test_home_sees_a_recall_with_the_notes_it_released_and_the_note_count_move(c
     before, recall, after = cell(scenario)
 
     # The session's first recall carries the vault's due-state block beside the hits.
-    released = {hit["path"] for hit in recall["result"]["hits"]}
+    released = {hit["id"] for hit in recall["result"]["hits"]}
     assert released, "sanity: the recall returned notes"
     assert before["events"] == []
     assert [(e["client"], e["action"], e["items"]) for e in after["events"]] == [
@@ -179,9 +179,10 @@ def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, va
     async def scenario(client):
         saved = await _call(client, "remember", {
             "content": "The second build fixed the flaky upload.",
-            "title": "Flaky upload fixed", "status": "draft",
+            "title": "Flaky upload fixed", "status": "draft", "response_detail": "full",
         }, oauth_client="ChatGPT")
-        ref = memory_refs.ref_from_markdown((vault / saved["path"]).read_text(encoding="utf-8"))
+        saved_path = saved["diagnostics"]["operational"]["path"]
+        ref = memory_refs.ref_from_markdown((vault / saved_path).read_text(encoding="utf-8"))
         assert ref, "sanity: the saved page has a reference"
         await _call(client, "edit_memory", {
             "path": ref, "why": "name the fixing build",
