@@ -210,13 +210,11 @@ def plan(
                 rendered = raw_protection.protect(rendered, artifact_path=artifact, digest=member.sha256)
             binary_path = vault_root / artifact
             page_path = vault_root / page
-            state = originals.original_state(vault_root, artifact).state if existing else "missing"
-            if state != "missing":
+            # An evicted member counts as absent here: the container holds its bytes, so recovery rebuilds it from
+            # the container stream, with no store download, and keeps working during a store outage.
+            if existing and binary_path.exists():
                 _require_identity(vault_root, artifact, member.sha256, member.size)
-                # An evicted member keeps its stored version: recovery guards its absence and writes no bytes.
-                result.guards.append(
-                    PathGuard.capture(vault_root, artifact, leaf_policy="absent") if state == "evicted"
-                    else PathGuard.capture(vault_root, artifact, leaf_policy="content", expected_content_hash=member.sha256))
+                result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="content", expected_content_hash=member.sha256))
             else:
                 result.writes.append(PlannedWrite(binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256), create_only=True, expected_hash=MISSING_CONTENT_HASH))
             if existing and page_path.exists():

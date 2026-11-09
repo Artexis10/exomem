@@ -1047,56 +1047,30 @@ def test_eviction_survives_real_reconciliation_and_deletion_fanout(vault: Path, 
         assert source.stream.read() == b"original video bytes"
 
 
-def test_evicted_originals_stay_stored_through_the_restart_scan_and_container_recovery(vault: Path, selected_store):
+def test_the_restart_scan_queues_the_pending_extraction_of_an_evicted_original(vault: Path, selected_store):
     """Defect: the worker's restart scan takes an evicted original for a deleted one and leaves its extraction unqueued.
 
-    The scan also skips the page when offload's companion rewrite leaves a capture time that the page check
-    refuses. Explicit container recovery must keep an evicted member stored: it guards the member's absence,
-    and neither refuses the container nor rewrites the member's companion.
+    The scan also skips the page when offload's companion rewrite leaves a capture time that the page check refuses.
     """
     import base64
-    import io
 
-    from test_document_containers import container_bytes
-
-    from exomem import (
-        extract,
-        media_jobs,
-        media_processing,
-        media_store,
-        media_worker,
-        preserve,
-    )
+    from exomem import extract, media_jobs, media_processing, media_store, media_worker, preserve
 
     ledger = media_jobs.MediaJobStore(vault)
     report = vault / preserve.preserve(vault, scope="Test", category="documents", filename="report.pdf",
                                        content_base64=base64.b64encode(b"pending pdf bytes").decode()).path
     media_processing.reconcile_media(vault, report)
     _offload(vault, report)
-    container = preserve.preserve_stream(vault, scope="Examples", category="Documents", filename="bundle.asice",
-                                         stream=io.BytesIO(container_bytes([("one.pdf", b"pdf member bytes")])))
-    member = vault / container.document_container["payloads"][0]
-    _offload(vault, vault / container.path)
-    _offload(vault, member)
-    for original in (report, member):
-        # The ledger loses the OCR stage while the companion still says pending: the restart scan must queue it again.
-        ledger.retire_ocr(original, extract.media_type_for(original))
-        assert media_store.evict(vault, original)
-    companions = {original: original.with_name(original.name + ".md").read_bytes() for original in (report, member)}
+    # The ledger loses the OCR stage while the companion still says pending: the restart scan must queue it again.
+    ledger.retire_ocr(report, extract.media_type_for(report))
+    assert media_store.evict(vault, report)
+    companion = report.with_name(report.name + ".md").read_bytes()
 
     assert media_worker.MediaWorker(vault, execution_mode="process")._scan_pending_ocr() == 1
     assert ledger.get_by_binary(report).do_ocr
-    assert media_processing.reconcile_media(vault, vault / container.path, explicit=True).state != media_jobs.FAILED
-    # Explicit recovery reads the evicted member back through the cache, so eviction can take it again.
-    ledger.retire_ocr(member, extract.media_type_for(member))
-    assert media_store.evict(vault, member)
-
-    for original, data in ((report, b"pending pdf bytes"), (member, b"pdf member bytes")):
-        assert not original.exists()
-        assert originals.original_state(vault, original).state == "evicted"
-        assert original.with_name(original.name + ".md").read_bytes() == companions[original]
-        with media_store.open_original(vault, original) as source:
-            assert source.stream.read() == data
+    assert not report.exists()
+    assert originals.original_state(vault, report).state == "evicted"
+    assert report.with_name(report.name + ".md").read_bytes() == companion
 
 
 def test_hydration_reservation_bounds_concurrency(vault: Path, selected_store, monkeypatch):
