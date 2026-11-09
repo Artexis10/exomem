@@ -349,11 +349,12 @@ def wait_while(waiting: Callable[[], bool], *, max_wait: float = MAX_YIELD_SECON
 
     For a wait that no foreground mark covers, such as a writer in another process that polls for the
     boundary this thread just released. The floors are `yield_to_foreground`'s: the cap, the pass's
-    progress share, and a thread that holds a boundary or runs foreground work never waits. A stop
-    of an owned bulk scope ends the wait. It holds no lock; `waiting` must hold none either.
+    progress share, and a thread that holds a boundary never waits. A thread that runs foreground
+    work does wait, since a CLI maintenance run is one and the cap bounds it. A stop of an owned bulk
+    scope ends the wait. It holds no lock; `waiting` must hold none either.
     """
     check_cancelled()
-    if getattr(_local, "depth", 0) or _holds_a_boundary() or not waiting():
+    if _holds_a_boundary() or not waiting():
         return 0.0
     budget: PassBudget | None = getattr(_local, "budget", None)
     started = time.monotonic()

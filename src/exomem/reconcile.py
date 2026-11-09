@@ -994,7 +994,8 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             _phase_holds(vault_root, "reconcile_embeddings", missing_rels, remove_missing, dry_run=dry_run)
             _phase_holds(vault_root, "reconcile_embeddings", list(drifted), refresh_drifted, dry_run=dry_run)
             drifted_abs = refreshed_paths
-        report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0
+        # The pages refreshed so far, also when a later batch failed and the rest stays deferred.
+        report.embeddings_refreshed = len(drifted_abs)
         if not refresh_succeeded:
             report.embeddings_status = "deferred"
         else:
