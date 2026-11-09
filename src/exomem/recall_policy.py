@@ -11,7 +11,7 @@ import hashlib
 import os
 import stat
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -223,12 +223,16 @@ def admits_markdown_content(vault_root: Path, path: Path | str, content: bytes) 
 
 
 def _admitted_relative(
-    vault_root: Path, path: Path | str, proven_directories: set[str] | None
+    vault_root: Path,
+    path: Path | str,
+    proven_directories: set[str] | None,
+    held: Callable[[str], bool | None] | None = None,
 ) -> str | None:
     """`is_recall_candidate`'s decision, as the admitted vault-relative path or None.
 
     `proven_directories` holds the directories whose ancestry one pass has
     already proven (see `admitted_relative_paths`); None proves every ancestor.
+    `held` is the pass's `read.served_lookup`; None asks the store for this path alone.
     """
     from .foreground_activity import checkpoint
 
@@ -238,6 +242,12 @@ def _admitted_relative(
     if rel is None:
         return None
     parts = rel.split("/")
+    # A page that the store serves is a row, not a file. Its projection may lag, be absent or be a
+    # link to another page, and none of that changes what the store holds, so the row admits it and
+    # the file checks below do not apply. The store never owns a Records or Planning path.
+    stored = _stored_page(root, rel) if held is None else held(rel)
+    if stored is not None:
+        return rel if stored and access.is_indexable(root, rel) else None
     # Validate the spelling we were handed before asking the OS to expand it.
     # That preserves the no-follow/reparse boundary while still allowing the
     # post-validation canonicalization below to catch Windows 8.3 aliases that
@@ -268,6 +278,16 @@ def _admitted_relative(
     if not access.is_indexable(root, rel):
         return None
     return rel
+
+
+def _stored_page(root: Path, rel: str) -> bool | None:
+    """Whether the store holds the page at `rel`; None when the store does not serve that path."""
+    from .vault_store import read
+
+    try:
+        return None if read.owned_meta(root, rel) is None else True
+    except FileNotFoundError:
+        return False
 
 
 #: Admission of a collection manifest, keyed by its exact bytes. Parsing is a
@@ -307,8 +327,9 @@ def is_structured_only_path(vault_root: Path, path: Path | str) -> bool:
 def iter_recall_markdown(vault_root: Path, paths: Iterable[Path]) -> Iterator[Path]:
     """Yield ordinary-recall candidates, applying admission before page reads."""
     root = Path(vault_root)
+    held = _held_pages(root)
     for path in paths:
-        if is_recall_candidate(root, path):
+        if _admitted_relative(root, path, None, held) is not None:
             yield path
 
 
@@ -331,10 +352,18 @@ def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[
     """`admitted_relative_paths` as `(path, relative spelling)` pairs, for a caller that keys on the path."""
     root = Path(vault_root)
     proven: set[str] = set()
+    held = _held_pages(root)
     for path in paths:
-        rel = _admitted_relative(root, path, proven)
+        rel = _admitted_relative(root, path, proven, held)
         if rel is not None:
             yield path, rel
+
+
+def _held_pages(root: Path) -> Callable[[str], bool | None]:
+    """One pass's answer to "does the store hold this page?", so a pass makes one query."""
+    from .vault_store import read
+
+    return read.served_lookup(root)
 
 
 def recall_policy_identity(vault_root: Path) -> tuple[str, str]:

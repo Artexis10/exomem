@@ -33,7 +33,6 @@ import time
 from pathlib import Path
 
 from . import foreground_priority, runtime_resources
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -336,10 +335,9 @@ def warm_caches(
         _run_step(durations, name, fn)
 
     def _warm_pages() -> None:
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
+        if find._kb_missing(vault_root):
             return
-        for p in find._walk_md(kb):
+        for p in find._corpus_walk(vault_root, "kb"):
             foreground_priority.check_cancelled()
             if not recall_policy.is_recall_candidate(vault_root, p):
                 continue
