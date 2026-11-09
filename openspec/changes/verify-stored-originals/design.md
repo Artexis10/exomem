@@ -35,7 +35,7 @@ Before it moves anything, fixity re-checks under the vault mutation guard that t
 
 **D8. Fail closed on restore, eventually consistent on schedule.** Restore selection and the pre-move re-check refuse on any doubt. A busy guard, a pressured pass or a stale table reschedules work and refuses nothing.
 
-**D9. Signals carry no content off the owner's surfaces.** The attention item and the status block may name paths, because the owner reads them. Cloud readiness carries only counts, and the count never makes a cell unready. Rejected: failing readiness, because one damaged file would take a serving cell out.
+**D9. Signals carry no content off the owner's surfaces.** The attention item and the status block may name paths, because the owner reads them. Another audience that reads attention receives a copy outside the vault by its kind only, because its path names the owner's own filesystem. Cloud readiness carries only counts, and the count never makes a cell unready. Rejected: failing readiness, because one damaged file would take a serving cell out.
 
 A `restored` original reaches the owner's attention item and the status counts. The readiness count holds only unresolved `missing` and `corrupt_no_copy` rows, because a restore needs no operator action.
 

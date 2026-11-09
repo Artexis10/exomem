@@ -421,8 +421,12 @@ def build_runtime_readiness(
     traffic: Mapping[str, Any] | None = None,
     retrieval: Mapping[str, Any] | None = None,
     cutover: Mapping[str, Any] | None = None,
+    originals: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state.
+
+    ``originals`` is the fixity count (`verify-stored-originals` D9). It never gates
+    ``status``: cellctl alerts on it, and one damaged file must not take a cell out.
 
     ``cutover`` is the standby/promotion component set (`seamless-managed-worker-handoff`
     D9).  It never gates the serving ``status``: a standby answers its own probe
@@ -524,7 +528,20 @@ def build_runtime_readiness(
         payload["cutover"] = dict(cutover)
     if traffic is not None:
         payload["traffic"] = dict(traffic)
+    if originals is not None:
+        payload["originals"] = _public_originals(originals)
     return payload
+
+
+def _public_originals(value: Mapping[str, Any]) -> dict[str, Any]:
+    """The fixity block as a state and a count only, so no path, name or hash leaves the cell."""
+    from . import original_fixity
+
+    state, unresolved = value.get("state"), value.get("unresolved")
+    if state == original_fixity.SIGNAL_MEASURED and type(unresolved) is int and unresolved >= 0:
+        return {"state": state, "unresolved": unresolved}
+    return {"state": original_fixity.SIGNAL_OFF if state == original_fixity.SIGNAL_OFF
+            else original_fixity.SIGNAL_UNKNOWN}
 
 
 # The published catalogue checkpoint pair this process first saw while it was
@@ -814,4 +831,14 @@ def runtime_readiness(
         ),
         retrieval=retrieval,
         cutover=service_standby.readiness_payload(),
+        originals=_measure_originals(configured_vault),
     )
+
+
+def _measure_originals(vault: Path | None) -> dict[str, Any]:
+    from . import original_fixity
+
+    try:
+        return original_fixity.readiness(vault)
+    except Exception:  # noqa: BLE001 - diagnostics must not break readiness
+        return {"state": original_fixity.SIGNAL_UNKNOWN}

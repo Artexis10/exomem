@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -1285,6 +1286,55 @@ def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
         "_start_vocabulary_recovery",
         lambda self, _root: calls.append("vocabulary"),
     )
+
+
+def test_original_fixity_runs_its_own_pass_where_media_extraction_is_off(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: fixity rides on the media worker, so a host with extraction off never verifies an original."""
+    from exomem import original_fixity
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _quiet_starters(monkeypatch, [])
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_ORIGINAL_FIXITY", raising=False)
+    activation = server_runtime.LocalRuntimeActivation(vault)
+    try:
+        activation.start()
+        activation._thread.join(5)
+        assert activation.original_fixity is not None
+        deadline = time.monotonic() + 5
+        while original_fixity.status(vault)["state"] != "measured" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert original_fixity.status(vault)["state"] == "measured"
+    finally:
+        original_fixity.stop(worker=activation.original_fixity)
+        readiness.reset()
+
+
+def test_a_failing_fixity_start_leaves_the_rest_of_the_runtime_starting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: fixity started outside the guarded starters, so its failure stops every later worker."""
+    from exomem import original_fixity
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    _quiet_starters(monkeypatch, calls)
+    monkeypatch.setattr(original_fixity, "start", lambda _root: (_ for _ in ()).throw(OSError("state folder")))
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation, "_start_dreamer", lambda self, _root: calls.append("dreamer")
+    )
+    try:
+        activation = server_runtime.LocalRuntimeActivation(vault)
+        activation.start()
+        activation._thread.join(5)
+        assert calls[-1] == "dreamer"
+        assert activation.original_fixity is None
+    finally:
+        readiness.reset()
 
 
 def test_dreamer_starts_last_and_only_when_enabled(

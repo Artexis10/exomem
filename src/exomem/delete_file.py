@@ -321,10 +321,7 @@ def _delete_file_local(
     # Move to trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    date_dir = now.strftime("%Y-%m-%d")
-    time_prefix = now.strftime("%H%M%S")
-    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
-    trash_filename = trash_metadata.preserve_floor(rel_path, f"{time_prefix}-{sanitized}")
+    date_dir, trash_filename = trash_metadata.placement(rel_path, now)
     trash_dir = kb_root(vault_root) / TRASH_SUBPATH / date_dir
     trash_abs = trash_dir / trash_filename
 

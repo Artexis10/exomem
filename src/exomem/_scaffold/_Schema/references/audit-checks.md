@@ -70,6 +70,16 @@ discard either with a reason; a later edit of the view never resolves them. A
 owner saves a valid edit of the view, or when you discard it. Discarding an
 invalid view that is still in place renders the view from the store again.
 
+## Stored original fixity
+
+`original_fixity` lists each stored original that the background check found
+`missing` or `corrupt_no_copy` (`error`), or `restored` (`info`). Each finding
+names the binding page, with `meta.original_path`, `meta.cause`,
+`meta.expected_sha256` and `meta.route`, the copies that hold the expected
+bytes. A `restored` original needs no action: its changed bytes are in Trash,
+and the item clears at its next verification. For the other two, restore the
+file from a route copy or a backup. Never record a new hash for changed bytes.
+
 ## Path variants
 
 `path_variants` (opt-in: `categories=["path_variants"]`) lists sibling names

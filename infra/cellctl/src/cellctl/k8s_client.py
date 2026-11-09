@@ -101,8 +101,8 @@ API_REQUEST_TIMEOUT = (5, 30)
 # never a clean one.
 METRICS_TIMEOUT = 3.0
 METRICS_MAX_BYTES = 256 * 1024
-# The cell-recall-lagging alert reads each cell's readiness answer, a few KB of
-# fixed fields, the same way.
+# The cell-recall-lagging and cell-originals-damaged alerts read each cell's
+# readiness answer, a few KB of fixed fields, the same way.
 READINESS_TIMEOUT = 3.0
 READINESS_MAX_BYTES = 64 * 1024
 
@@ -335,7 +335,7 @@ class ClusterClient:
         return scraped
 
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
-        """The cell-recall-lagging alert's input: each cell's readiness answer,
+        """The readiness alerts' input: each cell's readiness answer,
         read from its health-only port on its ready pod's own IP (`addresses`:
         cell id -> pod IP). cellctl derives every cell bearer, so it reads no
         other port of a cell, and the network policies admit it to no other.

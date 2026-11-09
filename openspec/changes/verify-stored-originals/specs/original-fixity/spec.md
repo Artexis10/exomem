@@ -99,7 +99,7 @@ Fixity SHALL report a missing original with its path, its expected SHA-256 and a
 
 ### Requirement: Fixity results reach the owner without new agent steps
 
-Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A `restored` finding SHALL be informational. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass completes, and SHALL NOT report a zero for an unknown count. After a pass, it SHALL report the count of each state, the last pass time and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Fixity SHALL add no tool and no agent step.
+Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A `restored` finding SHALL be informational. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. Another audience SHALL receive a copy outside the vault by its kind, without its path. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass completes, and SHALL NOT report a zero for an unknown count. After a pass, it SHALL report the count of each state, the last pass time and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Fixity SHALL add no tool and no agent step.
 
 #### Scenario: Status before the first pass
 

@@ -475,6 +475,30 @@ Expected result: the cell's readiness shows `retrieval.state` `ready`, and a
 `RESOLVED: cell-recall-lagging` email follows within a few minutes. If no email
 follows, the cellctl log names the serving cells that cellctl could not read.
 
+## Cell originals damaged
+
+cellctl emails `cell-originals-damaged` while any serving cell's readiness
+answer counts a stored original that is missing or damaged with no matching copy.
+The cell checks its stored originals in the background and restores a damaged
+one from a matching copy by itself. A restored original reaches only the owner.
+The cell stays ready, so `cell-unavailable` does not fire. The email names no cell.
+
+cellctl reads the count from the same readiness answer as
+[Cell recall lagging](#cell-recall-lagging): `originals.state` and
+`originals.unresolved`. The answer names no file. A cell reads `unknown` before
+its first fixity pass, and `off` while `EXOMEM_DISABLE_ORIGINAL_FIXITY=1` is set.
+Either keeps that cell's last reading, so the alert cannot resolve until every
+serving cell has a `measured` reading.
+
+1. List the cells that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-originals-damaged`.
+2. Set `CELL_ID` to a listed cell, then read the pod's IP and node: `kubectl -n "exo-cell-$CELL_ID" get pod cell-0 --output wide`.
+3. On that node, read the count: `curl --silent --max-time 10 "http://<pod IP>:8766/health/ready"`. Expect `originals.unresolved` above zero.
+4. Tell the owner. Their attention items name each original, its state and the copies the cell found.
+5. If the owner asks for a backed-up copy, follow [Restore one original](cloud-operator-restore.md#restore-one-original).
+
+Expected result: the cell's readiness shows `originals.unresolved` `0`, and a
+`RESOLVED: cell-originals-damaged` email follows within a few minutes.
+
 ## Move a cell to a new claim
 
 A planned move takes a serving cell off its volume without losing a write.
