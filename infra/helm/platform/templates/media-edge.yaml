@@ -42,6 +42,9 @@ while the list cannot be read. Emptying mediaEdge.collectCells first stops it.
 {{- $keyDir := "/run/exomem/media-edge/key" }}
 {{- $setDir := "/run/exomem/media-edge/active-set" }}
 {{- $stateDir := "/var/lib/exomem-media-edge" }}
+{{- /* automate-cell-storage-deletion D3: the relayed grants, and the chart-owned grant keys and hold list. */ -}}
+{{- $grantsDir := "/run/exomem/media-edge/deletions" }}
+{{- $policyDir := "/run/exomem/cell-deletion" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -104,6 +107,27 @@ spec:
                 secretKeyRef:
                   name: {{ $edge.b2SecretName }}
                   key: applicationKey
+            # The purge pass lists a deleted cell's prefix with this list-only key. The edge purges only
+            # when the key and all three files are present, so a missing Secret leaves the edge serving
+            # and the cell purge undone, which the key watcher reports per cell.
+            - name: EXOMEM_MEDIA_EDGE_LIST_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.purgeListSecretName }}
+                  key: keyId
+                  optional: true
+            - name: EXOMEM_MEDIA_EDGE_LIST_APPLICATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.purgeListSecretName }}
+                  key: applicationKey
+                  optional: true
+            - name: EXOMEM_MEDIA_EDGE_GRANTS_FILE
+              value: {{ printf "%s/grants.json" $grantsDir | quote }}
+            - name: EXOMEM_MEDIA_EDGE_GRANT_PUBLIC_KEYS_FILE
+              value: {{ printf "%s/grant-public-keys.json" $policyDir | quote }}
+            - name: EXOMEM_MEDIA_EDGE_HOLD_LIST_FILE
+              value: {{ printf "%s/hold-cells.json" $policyDir | quote }}
             - name: TMPDIR
               value: /tmp
           resources:
@@ -139,6 +163,12 @@ spec:
               readOnly: true
             - name: state
               mountPath: {{ $stateDir }}
+            - name: cell-deletions
+              mountPath: {{ $grantsDir }}
+              readOnly: true
+            - name: cell-deletion-policy
+              mountPath: {{ $policyDir }}
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
@@ -160,6 +190,17 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: exomem-media-edge-state
+        # cellctl creates this ConfigMap with its first grant; until then the edge reads no grant.
+        - name: cell-deletions
+          configMap:
+            name: exomem-cell-deletions
+            optional: true
+            items:
+              - key: grants.json
+                path: grants.json
+        - name: cell-deletion-policy
+          configMap:
+            name: exomem-cell-deletion-policy
 ---
 # The edge's recovery state outlives its pod and its release: losing it orphans provider writes.
 apiVersion: v1

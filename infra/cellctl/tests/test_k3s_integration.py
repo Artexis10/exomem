@@ -1112,8 +1112,9 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
                                                   settings=("--set", "keyCustodian.enabled=true"))
         if document["kind"] not in {"Deployment", "NetworkPolicy"}
     ]
-    assert {"Namespace", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy",
-            "ValidatingAdmissionPolicyBinding"} == {document["kind"] for document in custodian_documents}
+    assert {"Namespace", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding",
+            "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"} == {
+        document["kind"] for document in custodian_documents}
     _kubectl(k3s.name, ["apply", "--filename=-"], documents=custodian_documents)
     _wait_for(lambda: "typeChecking" in json.loads(_kubectl(
         k3s.name, ["get", "validatingadmissionpolicy", "exomem-key-custodian-scope", "--output=json"]
@@ -1911,6 +1912,36 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         print(f"[3.10] scenario: admission denies the key custodian writing {described}")
         denied_custodian = _kubectl(
             k3s.name, ["create", "--dry-run=server", "--filename=-", f"--as={CUSTODIAN_USERNAME}"],
+            documents=[document], check=False,
+        )
+        assert denied_custodian.returncode != 0, described
+        assert "exomem-key-custodian-scope" in denied_custodian.stderr, (described, denied_custodian.stderr)
+
+    # automate-cell-storage-deletion D2: the purge gets a cell's namespace directly, reads the relayed grants
+    # and records each finished purge, by create and then update, in its own ConfigMap and nowhere else.
+    print("[3.10] scenario: the key custodian gets a namespace, reads the grants and writes only its done marks")
+    assert _can_i(CUSTODIAN_USERNAME, "get", f"namespaces/{namespace}") == "yes"
+    assert _can_i(CUSTODIAN_USERNAME, "get", "configmaps/exomem-cell-deletions", "--namespace", "exomem-cloud") == "yes"
+    assert _can_i(CUSTODIAN_USERNAME, "get", "configmaps/exomem-media-edge-active-set",
+                  "--namespace", "exomem-cloud") == "no"
+
+    def _custodian_config_map(name: str, data: dict[str, str]) -> dict[str, Any]:
+        return {"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": name, "namespace": "exomem-key-custody"}, "data": data}
+
+    done_marks = _custodian_config_map("exomem-key-custodian-purges", {"done.json": "[]"})
+    _kubectl(k3s.name, ["create", "--filename=-", f"--as={CUSTODIAN_USERNAME}"], documents=[done_marks])
+    done_marks["data"]["done.json"] = json.dumps([cell_id])
+    _kubectl(k3s.name, ["replace", "--filename=-", f"--as={CUSTODIAN_USERNAME}"], documents=[done_marks])
+    for described, (verb, document) in {
+        "the chart's grant keys and hold list beside its done marks":
+            ("create", _custodian_config_map("exomem-cell-deletion-policy", {"hold-cells.json": "[]"})),
+        "its done marks with a second key":
+            ("replace", _custodian_config_map("exomem-key-custodian-purges", {"done.json": "[]", "extra": "[]"})),
+    }.items():
+        print(f"[3.10] scenario: admission denies the key custodian writing {described}")
+        denied_custodian = _kubectl(
+            k3s.name, [verb, "--dry-run=server", "--filename=-", f"--as={CUSTODIAN_USERNAME}"],
             documents=[document], check=False,
         )
         assert denied_custodian.returncode != 0, described
