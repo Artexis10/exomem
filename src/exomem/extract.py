@@ -273,11 +273,12 @@ def extract_text(
     raise ExtractionUnavailable(f"no extractor for media_type={mt!r} (path {p.name!r})")
 
 
-def dependencies_present(media_type: str | None) -> bool:
+def dependencies_present(media_type: str | None, path: Path | None = None) -> bool:
     """Whether the extractor for `media_type` has what it imports. Loads nothing.
 
     Mirrors the imports of the extractors below; the media worker uses it to requeue
-    work that waited for a missing engine once that engine is installed.
+    work that waited for a missing engine once that engine is installed. With `path`,
+    an image also needs the codec for its extension.
     """
     from importlib.util import find_spec
 
@@ -289,7 +290,10 @@ def dependencies_present(media_type: str | None) -> bool:
             or (find_spec("onnx_asr") is not None and find_spec("av") is not None)
         )
     if media_type == "image":
-        return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
+        from . import image_codecs
+
+        suffix = "" if path is None else Path(path).suffix
+        return image_codecs.decoder_present(suffix) and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
         return find_spec("fitz") is not None
     if media_type in _DOC_READERS:

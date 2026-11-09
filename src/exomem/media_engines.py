@@ -17,6 +17,7 @@ import os
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 
 from . import cloud_cell, media_types
 
@@ -90,11 +91,11 @@ def stage_enabled(media_type: str | None, env: Mapping[str, str] | None = None) 
     return engine is None or engine in enabled_engines(env)
 
 
-def stage_available(media_type: str | None) -> bool:
-    """Enabled, and the extractor's dependencies are installed. Loads no model."""
+def stage_available(media_type: str | None, path: Path | None = None) -> bool:
+    """Enabled, and the extractor's dependencies for this file are installed. Loads no model."""
     from . import extract
 
-    return stage_enabled(media_type) and extract.dependencies_present(media_type)
+    return stage_enabled(media_type) and extract.dependencies_present(media_type, path)
 
 
 def status(env: Mapping[str, str] | None = None) -> dict[str, str]:

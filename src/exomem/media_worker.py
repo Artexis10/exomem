@@ -1080,7 +1080,7 @@ class MediaWorker:
             elif not media_engines.stage_enabled(job.media_type):
                 if self._present_pending(job):
                     dropped += self._store.drop_extraction_stage(job)
-            elif media_engines.stage_available(job.media_type):
+            elif media_engines.stage_available(job.media_type, job.binary_path):
                 requeued += self._store.requeue_engine_wait(job)
         if requeued or dropped:
             log.info(

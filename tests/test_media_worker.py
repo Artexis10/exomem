@@ -5571,7 +5571,7 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
     installed = {"pdf": False}
-    monkeypatch.setattr(extract, "dependencies_present", lambda media_type: installed[media_type])
+    monkeypatch.setattr(extract, "dependencies_present", lambda media_type, path=None: installed[media_type])
 
     for engine_present in (False, True):
         installed["pdf"] = engine_present
@@ -5582,6 +5582,53 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
         finally:
             worker.stop()
         assert requeued is engine_present
+
+
+def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_installed(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OCR being installed is not enough: a DNG needs rawpy, or every start requeues it to fail again."""
+    import importlib.machinery
+    import importlib.util
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    result = _preserve_media_stub(vault, filename="portrait.dng")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="image",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    store.mark(
+        claimed,
+        media_jobs.BLOCKED,
+        "ExtractionUnavailable: Camera raw decoding requires rawpy; install exomem[image-codecs]",
+        blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
+    )
+    real_find_spec = importlib.util.find_spec
+    installed = {"PIL": True, "rawpy": False}
+
+    def find_spec(name, *args, **kwargs):
+        if name in installed:
+            return importlib.machinery.ModuleSpec(name, None) if installed[name] else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+    for codec_present in (False, True):
+        installed["rawpy"] = codec_present
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        try:
+            requeued = _wait_until(lambda: store.next_pending() is not None, seconds=2.0)
+        finally:
+            worker.stop()
+        assert requeued is codec_present
 
 
 def test_supervisor_start_drops_work_whose_engine_is_switched_off(
