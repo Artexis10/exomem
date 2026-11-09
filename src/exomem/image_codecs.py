@@ -56,6 +56,8 @@ def _image_formats() -> list[str]:
 def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
     """Demosaic a DNG to an upright image at its full size, or refuse it before LibRaw decodes.
 
+    The caller has checked `_is_dng`: LibRaw must see no other bytes.
+
     The full sensor image is decoded, not an embedded preview: phone raws often carry none,
     a 12 MP demosaic takes about a second, and the shown size then stays the original's.
     LibRaw applies the camera's orientation, so the result carries no orientation to apply again.
