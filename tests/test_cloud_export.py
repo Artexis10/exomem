@@ -39,6 +39,8 @@ class PartStore(BaseHTTPRequestHandler):
     parts: dict[str, bytes] = {}
     objects: dict[str, bytes] = {}
     ranges: list[tuple[int, int]] = []
+    # A status the storage answers every part PUT with, as an expired or wrongly signed URL does.
+    refuse_put: int | None = None
 
     def do_GET(self):  # noqa: N802 - http.server's handler name
         body = self.objects.get(self.path)
@@ -60,6 +62,9 @@ class PartStore(BaseHTTPRequestHandler):
 
     def do_PUT(self):  # noqa: N802 - http.server's handler name
         body = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.refuse_put is not None:
+            self.send_error(self.refuse_put)
+            return
         self.parts[self.path] = body
         self.send_response(200)
         self.send_header("ETag", '"' + hashlib.md5(body).hexdigest() + '"')  # noqa: S324 - S3's part ETag
@@ -88,6 +93,7 @@ def storage(tmp_path):
     PartStore.parts = {}
     PartStore.objects = {}
     PartStore.ranges = []
+    PartStore.refuse_put = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), PartStore)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_path, key_path)
@@ -201,6 +207,19 @@ def test_a_part_url_without_tls_is_refused(vault, tmp_path, storage):
                                   urls=[f"http://127.0.0.1:9/cells/{CELL}/exports/archive.zip?partNumber=1"])
     assert status == 1 and report["error"] == "EXPORT_FAILED"
     assert storage["parts"] == {}
+
+
+def test_a_refused_part_upload_names_the_storage_status(vault, tmp_path, storage):
+    """Defect: a refused part upload reported only `ExportRefused` from `_put`.
+
+    The report could not tell a refused signature from a server error, a missing
+    ETag or a dropped connection, so a failure seen once in CI could not be diagnosed.
+    """
+    PartStore.refuse_put = 403
+    urls = [f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber={number}" for number in range(1, 201)]
+    status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, urls=urls)
+    assert status == 1 and report["error"] == "EXPORT_UPLOAD_FAILED"
+    assert report["diagnostic"] == {"type": "ExportRefused", "function": "_put", "cause": "HTTPError", "status": 403}
 
 
 def test_the_part_digest_matches_cellctls_vector():
