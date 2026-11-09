@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
@@ -45,22 +45,6 @@ _TASK_LABELS = frozenset({"", " ", "x", "X", "-"})
 _IDENTITY_SCHEMA = "exomem.semantic-unit.identity.v1"
 # This version describes retained parser facts, independently of selected vocabulary.
 STRUCTURAL_FORMAT = 1
-
-#: The one closed vocabulary for how a claim about the world turned out.
-#:
-#: A unit's ``verdict`` and an experiment page's ``outcome`` draw from this same
-#: set, so a reader never translates between the two altitudes. It is
-#: deliberately categorical: Exomem stores no numeric confidence, credence, or
-#: probability, and a verdict is lifecycle state rather than a score. Refuted is
-#: not superseded — a refuted claim keeps active standing and full rank, because
-#: a negative result is knowledge, not replaced knowledge.
-EPISTEMIC_OUTCOMES: tuple[str, ...] = (
-    "abandoned",
-    "confirmed",
-    "inconclusive",
-    "qualified",
-    "refuted",
-)
 
 #: Governed rich unit-metadata keys this module parses, validates, and projects.
 GOVERNED_UNIT_METADATA_KEYS = semantic_blocks.GOVERNED_UNIT_METADATA_KEYS
@@ -570,6 +554,7 @@ def materialize_structural_unit(
     body: str, selected: UnitStructure, occurrence: Mapping[str, Any], *,
     content: str, category_raw: str, category_key: str, tags: tuple[str, ...],
     context: str | None, parent_ref: str | None, path: str,
+    language_registry: semantic_language_registry.LanguageRegistryView | None = None,
 ) -> SemanticUnit:
     """Bind stored parser facts to a checked canonical slice without parsing Markdown."""
     start, end = occurrence["start_offset"], occurrence["end_offset"]
@@ -591,7 +576,9 @@ def materialize_structural_unit(
             line=selected.line, end_line=selected.end_line, body=content,
             metadata=dict(occurrence["metadata"]), relations=list(selected.relations),
         )
-        unit, _ = _rich_unit(block, span=span, path=path, line_by_number={})
+        unit, _ = _rich_unit(
+            block, span=span, path=path, line_by_number={}, language=language_registry
+        )
     else:
         unit = SemanticUnit(
             form=selected.form, kind=selected.kind, kind_raw=selected.kind, kind_key=selected.kind,
@@ -1030,6 +1017,7 @@ def parse_semantic_units(
             span=_span_for_line_range(source, line_by_number, block.line, block.end_line),
             path=source_path,
             line_by_number=line_by_number,
+            language=language_registry,
         )
         if validate:
             errors.extend(unit_errors)
@@ -1117,14 +1105,21 @@ def _rich_unit(
     span: SourceSpan,
     path: str,
     line_by_number: dict[int, _SourceLine],
+    language: semantic_language_registry.LanguageRegistryView | None = None,
 ) -> tuple[SemanticUnit, list[SemanticUnitDiagnostic]]:
-    """One rich unit from a recognized block; parsing and summaries share it."""
+    """One rich unit from a recognized block; parsing and summaries share it.
+
+    `language` resolves the verdict; selection-free callers omit it and read the shipped verdicts.
+    """
     category_raw, category_key, category_error = _rich_category(
         block, path=path, line_by_number=line_by_number,
     )
     rich_tags, tags_error = _rich_tags(block, path=path, line_by_number=line_by_number)
     rich_context, context_error = _rich_context(block, path=path, line_by_number=line_by_number)
-    rich_verdict, verdict_error = _rich_verdict(block, path=path, line_by_number=line_by_number)
+    rich_verdict, verdict_error = _rich_verdict(
+        block, path=path, line_by_number=line_by_number,
+        language=language or semantic_language_registry.core_registry(),
+    )
     rich_check_by, check_by_error = _rich_date(block, key="check_by", path=path, line_by_number=line_by_number)
     rich_as_of, as_of_error = _rich_date(block, key="as_of", path=path, line_by_number=line_by_number)
     rich_until, until_error = _rich_date(block, key="until", path=path, line_by_number=line_by_number)
@@ -1696,31 +1691,38 @@ def _rich_context(
     return context, None
 
 
+#: Why a number is no verdict, said once for every boundary that refuses one.
+NO_CONFIDENCE_RULE = (
+    "A verdict is categorical state about how a claim turned out. A confidence, score or "
+    "probability is not a verdict, so a number or percentage is never valid here."
+)
+
+
+def verdict_remediation(keys: Iterable[str]) -> str:
+    """What a refused unit verdict should become: a registered key or its label."""
+    return f"Use exactly one of {', '.join(keys)}, as the key or its label. {NO_CONFIDENCE_RULE}"
+
+
 def _rich_verdict(
     block: semantic_blocks.SemanticBlock,
     *,
     path: str,
     line_by_number: dict[int, _SourceLine],
+    language: semantic_language_registry.LanguageRegistryView,
 ) -> tuple[str | None, SemanticUnitDiagnostic | None]:
     """Validate the governed categorical `verdict` row, never a number."""
     raw = block.metadata.get("verdict")
     if raw is None:
         return None, None
-    verdict = unicodedata.normalize("NFKC", raw.strip()).casefold()
-    if verdict not in EPISTEMIC_OUTCOMES:
+    verdict = language.resolve_verdict(raw)
+    if verdict is None:
         return None, _invalid_rich_metadata(
             block,
             key="verdict",
             path=path,
             line_by_number=line_by_number,
             message="invalid rich semantic-unit verdict",
-            remediation=(
-                "Use exactly one of "
-                f"{', '.join(EPISTEMIC_OUTCOMES)}. A verdict is categorical "
-                "lifecycle state; numeric confidence is not a stored field in "
-                "this vault, so a score, probability, or percentage is never a "
-                "valid verdict."
-            ),
+            remediation=verdict_remediation(language.verdict_keys()),
         )
     return verdict, None
 

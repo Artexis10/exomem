@@ -140,6 +140,7 @@ from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
+from . import semantic_verdicts as semantic_verdicts_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
@@ -1577,11 +1578,19 @@ def op_bootstrap(
             ),
         },
         "vocabulary": {
-            "outcomes": list(semantic_units_module.EPISTEMIC_OUTCOMES),
+            # The shipped verdicts only. A vault's own live in its registry and in the schema read
+            # named by `vault_verdicts`; teaching them here would hand every vault the same list.
+            "outcomes": list(semantic_verdicts_module.pack()),
             "governed_unit_metadata": list(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS),
             "verdict": (
-                "The judgment: exactly one outcome word, shared with an experiment "
+                "The judgment: exactly one verdict, shared with an experiment "
                 "page's outcome. A number, percentage, or hedge is rejected outright."
+            ),
+            # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
+            "vault_verdicts": (
+                "A vault may add verdicts. "
+                f"{call_text('schema_memory', {'subject': 'categories', 'operation': 'infer'})} "
+                "lists every accepted verdict under `verdicts`."
             ),
             "check_by": (
                 "One exact ISO calendar date (YYYY-MM-DD) naming the day to revisit "
@@ -12309,11 +12318,18 @@ def op_schema_memory(
                 registry_file_exists = instances.select(
                     vault_root, semantic_language_registry_module.CATEGORY_SPEC
                 ).overlay(vault_root).exists()
+                dropped = semantic_language_registry_module.dropped_verdicts_finding(
+                    current, candidate
+                )
+                if dropped is not None:
+                    raise ValueError(f"CATEGORY_SAVE_VERDICT_DROPPED: {dropped['detail']}")
+                # Debt: this kinds leg refuses every kind change, an addition too, and validation
+                # does not report it; it predates the verdict leg above, which refuses a loss only.
+                reviewed = semantic_language_registry_module.registry_proposal
                 if (
                     registry_file_exists
                     and not candidate.findings
-                    and semantic_language_registry_module.registry_proposal(current)["kinds"]
-                    != semantic_language_registry_module.registry_proposal(candidate)["kinds"]
+                    and reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
                 ):
                     raise ValueError(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
