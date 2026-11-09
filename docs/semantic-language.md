@@ -93,8 +93,14 @@ decide the hour and a wrong negation would silently drop pages.
 `verdict` is state, not supersession, and not a score. A refuted unit keeps its
 page's active standing and its ordinary rank: nothing replaced it, the question
 simply got an answer, and the negative result stays retrievable with the
-evidence that refuted it. Exomem stores no numeric confidence, so a probability
-or percentage is never a valid `verdict`; the parser rejects one outright. The
+evidence that refuted it. A claim carries no confidence score and a verdict is a
+judgment in words, so a probability or percentage is never a valid `verdict`; the
+parser rejects one outright. A degree of belief is its own `## Belief` unit: the
+belief in prose, the unit rows `credence_holder` and `credence`, and an `assesses`
+relation to the claim. `credence` is a unit row, never a frontmatter field. It is a
+belief level or a probability from 0 to 1, a probability needs `credence_basis`, and
+nothing invents a number. A belief records what its holder stated; Exomem and the
+agent never write one on a holder's behalf. The
 `prediction` governed kind names a unit that is a claim about the future, and
 pairs naturally with both keys. None of this adds a relation kind: attach the
 refuting or confirming material with the governed vocabulary you already have

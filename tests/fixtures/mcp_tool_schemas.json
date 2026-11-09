@@ -1674,7 +1674,7 @@
             },
             "verdict": {
               "type": "string",
-              "description": "Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears."
+              "description": "Rich: a verdict key or label, in words, never a number. Shipped: abandoned, confirmed, inconclusive, qualified, refuted. `schema_memory(subject=\"categories\", operation=\"infer\")` lists a vault's own under `verdicts`. '' clears."
             },
             "check_by": {
               "type": "string",
@@ -4918,7 +4918,7 @@
                 },
                 "verdict": {
                   "type": "string",
-                  "description": "Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears."
+                  "description": "Rich: a verdict key or label, in words, never a number. Shipped: abandoned, confirmed, inconclusive, qualified, refuted. `schema_memory(subject=\"categories\", operation=\"infer\")` lists a vault's own under `verdicts`. '' clears."
                 },
                 "check_by": {
                   "type": "string",

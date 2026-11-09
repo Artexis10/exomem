@@ -124,9 +124,9 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 )
 
 # Frontmatter keys the schema deliberately excludes (see _scaffold's
-# references/frontmatter.md): numeric confidence scores misrepresent the signal
-# (trust is citations + link count), and knowledge does not expire on a schedule.
-# Governed write paths refuse them so the documented "no confidence floats / no
+# references/frontmatter.md): a claim carries no confidence score (trust is citations + link
+# count, and a degree of belief is its own belief unit), and knowledge does not expire on a
+# schedule. Governed write paths refuse them so the documented "no confidence floats / no
 # retention decay" stance is actually enforced, not just described.
 EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset({"confidence", "decay_at", "expires_at"})
 EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
@@ -178,12 +178,21 @@ def excluded_field_in_collection_frontmatter(
 
 def excluded_frontmatter_reason(field: str) -> str | None:
     """A refusal reason if `field` is a schema-excluded frontmatter key, else None."""
-    if field.strip().casefold() in EXCLUDED_FRONTMATTER_FIELDS:
+    name = field.strip().casefold()
+    if name == "confidence":
+        return (
+            f"`{field}` is a schema-excluded frontmatter field: a claim carries no confidence "
+            "score. When the holder of a belief stated one, record it as a `## Belief` unit "
+            "in the page body, with `- credence_holder:`, `- credence:` (a belief level, or a "
+            "probability from 0 to 1 with `- credence_basis:`) and `- relations: assesses: "
+            "<the claim>`. Never write a belief on a holder's behalf (see SKILL.md). Omit "
+            "this field."
+        )
+    if name in EXCLUDED_FRONTMATTER_FIELDS:
         return (
             f"`{field}` is a schema-excluded frontmatter field. Exomem does not "
-            "record numeric confidence scores or time-based decay/expiry — trust "
-            "is conveyed by citations and link count, and old material is never "
-            "auto-decayed (see SKILL.md). Omit this field."
+            "record time-based decay/expiry — old material is never auto-decayed "
+            "(see SKILL.md). Omit this field."
         )
     return None
 
