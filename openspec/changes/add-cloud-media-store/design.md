@@ -95,10 +95,18 @@ Candidate failures remain path-bearing rows, and no sibling count or truncation 
 Exhaustive browsing would need a separate interface decision.
 
 Ordinary pins insert without scanning existing pins.
-Hydration accounts only for indexed hydration reservations; eviction cleans only indexed pins for its target.
+Hydration accounts only for hydration and offload reservations; eviction cleans only indexed pins for its target.
 Dead idle pins can remain until that path is considered, without spending hydration capacity.
 Page moves prepare the catalog and validate bindings before hydration, while retaining pins through rename, rollback and publication.
 Hydration classifies only backend open and read errors as transport failures; local staging errors retain their cause.
+
+**Query plans (task 3.7), recorded 2026-11-09.** SQLite 3.53.1 planned each query on a temporary ledger with 20,000 cache, protection and job rows and 2,000 access rows. The ledger had no `ANALYZE` statistics, as at runtime, and an empty ledger gives the same plans.
+
+- `media_access_binary_rel`: the pin check `SELECT 1 FROM media_access WHERE binary_rel = ?` searches the covering index. The pin subquery of the eviction candidates uses it too.
+- `media_protections_original_object`: the protection check by original and object searches the covering index. The upload-name lookup searches the index by original, then sorts that original's rows by creation time.
+- `media_cache_candidates`: the eviction batch and the eligible-bytes sum search the index by `evicted` and the size range. Their job subqueries search `jobs_binary_rel`. The batch sorts in a temporary B-tree, so each pass reads every row in that index range. The evicted-bytes sum and the too-large count read only the index. The drain row searches the index and sorts only the last term of its order.
+- `jobs_hydrated_claims`: the count of hydrated claims reads only the partial index.
+- `media_access_hydrating`: no query uses it. Since offload reservations (task 5.4.13), the reservation query reads `temporary_bytes > 0 OR hydrating = 1`, and SQLite scans `media_access` for it. That table holds only live pins and reservations, so the scan grows with the current reads, not with the vault.
 
 **Amendment, 2026-10-30 (task 5.4): eviction runs during an import.**
 

@@ -2044,6 +2044,28 @@ def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, m
     assert damaged.exists() and not sound.exists()
 
 
+@pytest.mark.parametrize("query", ["eviction batch", "eligible bytes", "hydrated claims"])
+def test_the_ledger_queries_of_each_eviction_pass_and_claim_read_through_an_index(vault: Path, query):
+    """Defect: an edit to a query's condition stops it using its index, so each pass or claim reads the whole cache
+    or job table. The reservation query lost its index this way (design.md D3, query plans)."""
+    from exomem import media_jobs, media_store
+
+    sql = {
+        "eviction batch": "SELECT binary_rel, size " + media_store._ELIGIBLE + " " + media_store._EVICTION_ORDER
+                          + " LIMIT :batch OFFSET :offset",
+        "eligible bytes": "SELECT COALESCE(SUM(size), 0) " + media_store._ELIGIBLE,
+        "hydrated claims": media_jobs._HYDRATED_CLAIMS,
+    }[query]
+    parameters = {"hydration": 1 << 30, "idle_before": 0.0, "batch": 64, "offset": 0}
+
+    # Without ANALYZE statistics, as at runtime, an empty ledger gets the same plan as a populated one.
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
+
+    # SQLite's plan names a read of a whole table or index SCAN, and a lookup through an index SEARCH.
+    assert not [step for step in plan if step.startswith("SCAN ")], plan
+
+
 def test_a_store_outage_ends_the_eviction_pass_at_its_first_head(vault: Path, selected_store, monkeypatch):
     """Catches a pass that asks an unreachable store once per candidate, which holds its caller for one timeout each."""
     from exomem import media_store
