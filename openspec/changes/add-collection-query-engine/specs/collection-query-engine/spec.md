@@ -128,14 +128,14 @@ Version 1 SHALL support up to 4 group keys, source-local day/ISO-week/month buck
 
 ### Requirement: Joins follow only declared current-item relations
 
-Joins SHALL follow only the single-valued references that `collection-row-references` declares, resolving each value through the target's single-field natural key or a canonical row ref. Requests SHALL use inner or left semantics, with at most 2 hops and 2 edges. Joins SHALL NOT match undeclared keys, traverse many-valued references or reverse fan-out, recurse, or resolve historical pins. Many-valued and reverse relations SHALL be served only as bounded expansion. Both sides SHALL pass the same row governance before joining. A withheld or missing target collection SHALL be refused with the same generic `COLLECTION_NOT_FOUND` whenever a request names a reference to it.
+Queries SHALL follow only the single-valued references that `collection-row-references` declares, through dotted paths in select, filter and grouping, with at most 2 hops. Each value SHALL resolve through the target's single-field natural key or a canonical row ref. Selecting or grouping by a path SHALL keep every base row and report a reference that does not resolve as `unresolved`. Filtering through a path SHALL exclude such rows and report their count as `excluded_unresolved`. Paths SHALL NOT match undeclared keys, traverse many-valued references or reverse fan-out, recurse, or resolve historical pins; many-valued and reverse relations SHALL be served only as bounded expansion. Both sides SHALL pass the same row governance first. A withheld or missing target collection SHALL be refused with the same generic `COLLECTION_NOT_FOUND` whenever a request names a reference to it.
 
 #### Scenario: Withheld right item is indistinguishable from absent
 - **WHEN** a visible execution links to a withheld recipe in one fixture and a missing recipe in its twin
-- **THEN** a left join retains the same visible execution with an absent target, and an inner join excludes it in both fixtures
+- **THEN** selecting the path retains the same visible execution with the reference `unresolved`, and filtering through the path excludes it and counts it in `excluded_unresolved`, identically in both fixtures
 
 #### Scenario: Undeclared or excessive traversal is refused
-- **WHEN** a request supplies an undeclared join key, a many-valued or reverse edge, a cycle or a third hop
+- **WHEN** a request supplies an undeclared path, a many-valued or reverse edge, a cycle or a third hop
 - **THEN** it fails before any target values are decoded
 
 ### Requirement: Governance is SQL row admission before every reduction

@@ -2,7 +2,7 @@
 
 ### Requirement: A collection field declares a reference to one target collection
 
-A Records or Planning manifest SHALL let a string field, an array of strings, or a string property of objects in an array declare `references: {collection: <collection ref>}`. A scalar field SHALL be single-valued and an array SHALL be many-valued. Create and revise SHALL refuse a target that is missing, in another vault or not admitted to the author with one generic error, before naming anything about the target. They SHALL then refuse, naming what to change, a target without a single-field natural key of type string, date or datetime, and a source field that is not a string. Code SHALL NOT list relations or branch on a relation name.
+A Records or Planning manifest SHALL let a string field, an array of strings, or a string property of objects in an array declare `references: {collection: <collection ref>}`. A scalar field SHALL be single-valued and an array SHALL be many-valued. For a new or changed declaration, create and revise SHALL refuse a target that is missing, in another vault or not admitted to the author with one generic error, before naming anything about the target. They SHALL then refuse, naming what to change, a target without a single-field natural key of type string, date or datetime, a source field that is not a string, and a source or target collection that is not store-backed. Code SHALL NOT list relations or branch on a relation name.
 
 #### Scenario: A diary field refers to a sites collection
 
@@ -16,7 +16,7 @@ A Records or Planning manifest SHALL let a string field, an array of strings, or
 
 ### Requirement: A value resolves only through its declared key
 
-A value that parses as a canonical record or plan row ref SHALL be read only as that ref, and a ref to another collection SHALL NOT resolve. Any other value SHALL match the target row whose natural-key field equals it under the target's natural-key normalisation: Unicode NFC, case-sensitive, untrimmed. A null, absent or empty value SHALL be no reference. A value repeated in one array SHALL count once.
+A value that parses as a canonical record or plan row ref SHALL be read only as that ref, and a ref to another collection SHALL NOT resolve. Any other value SHALL match the target row whose natural-key field equals it under the target's natural-key normalisation: Unicode NFC for strings and ISO form for dates, case-sensitive, untrimmed. A malformed date SHALL read `unresolved`, never an error. A null, absent or empty value SHALL be no reference. A value repeated in one array SHALL count once.
 
 #### Scenario: Case differs
 
@@ -25,7 +25,7 @@ A value that parses as a canonical record or plan row ref SHALL be read only as 
 
 ### Requirement: Each reference read is resolved or unresolved
 
-Every declared reference on a returned row SHALL read `resolved` or `unresolved`. It SHALL be `unresolved` when no released target row matches, when the target row is withheld, and when the target's natural-key field is withheld from the caller. A withheld target row SHALL read exactly as a missing one. A query that names a reference to a withheld or missing target collection SHALL be refused with `COLLECTION_NOT_FOUND`. A filter or inverse expansion over a source field the caller cannot read SHALL be refused with `QUERY_FIELD_UNAVAILABLE`.
+Every reference a query names SHALL read `resolved` or `unresolved` on each returned row; references the query does not name SHALL NOT be resolved. It SHALL be `unresolved` when no released target row matches, when the target row is withheld, and when the target's natural-key field is withheld from the caller. A withheld target row SHALL read exactly as a missing one. A query that names a reference to a withheld or missing target collection SHALL be refused with `COLLECTION_NOT_FOUND`. A path, `related` expansion, filter or inverse expansion over a source field the caller cannot read SHALL be refused with `QUERY_FIELD_UNAVAILABLE`. `inspect` SHALL compute resolution counts and unresolved values under the caller's view, and SHALL omit inbound declarations whose source field is withheld from the caller.
 
 #### Scenario: Withheld and missing target rows read the same
 
@@ -34,7 +34,7 @@ Every declared reference on a returned row SHALL read `resolved` or `unresolved`
 
 ### Requirement: A row query expands references, filters through them and totals honestly
 
-A row query SHALL accept `related`, naming declared references to expand into each returned row with the target's released fields, bounded per row with an exact count. A filter SHALL be able to address a released field of a single-valued reference's target. Expansion SHALL NOT multiply base rows. Each target collection SHALL pass its own admission and field plan before any of its values are read, and a truncated expansion SHALL say so with its reason. One filter SHALL feed the row page and any aggregate on the same snapshot. The aggregate SHALL report `combined` with `count`, `unresolved_rows` (combined rows where a named reference did not resolve) and `excluded_unresolved` (base rows a reference filter excluded only because their reference did not resolve). The row page and its cursor SHALL name the combined rows. A cursor SHALL bind each target collection's authorization and freshness, and SHALL refuse once any of them changed.
+A row query SHALL accept `related`, naming declared references to expand into each returned row with the target's released fields, bounded per row with an exact count. A dotted path through a single-valued reference SHALL work in select, filter and grouping. Expansion SHALL NOT multiply base rows. Each target collection SHALL pass its own admission and field plan before any of its values are read, and a truncated expansion SHALL say so with its reason. One filter SHALL feed the row page and any aggregate on the same snapshot. The aggregate SHALL report `combined` with `count`, `unresolved_rows` (combined rows where a named reference did not resolve) `excluded_unresolved` (base rows a reference filter excluded only because their reference did not resolve, whatever the cause) and `unresolved_values` (a bounded list of distinct unresolved values with their counts). The row page and its cursor SHALL name the combined rows. A cursor SHALL bind the release-qualified visible-state basis of the source and each target collection, and SHALL refuse once any of them changed; a change visible only to hidden rows SHALL NOT invalidate it.
 
 #### Scenario: One call answers a question across three collections
 
@@ -43,8 +43,8 @@ A row query SHALL accept `related`, naming declared references to expand into ea
 
 #### Scenario: A renamed site is not a silent zero
 
-- **WHEN** a site's key was renamed so that three diary rows still hold the old key, and an agent totals hours filtered on that site's name
-- **THEN** `combined.count` counts only the rows that resolve, and `excluded_unresolved` is 3
+- **WHEN** a site's key was renamed so that three diary rows still hold the old key, no other diary row holds an unresolved site, and an agent totals hours filtered on that site's name
+- **THEN** `combined.count` counts only the rows that resolve, `excluded_unresolved` is 3, and `unresolved_values` lists the old key with count 3
 
 #### Scenario: A combined row with an unresolved skill
 
@@ -59,6 +59,11 @@ A create, append, update or import that stores a value which does not resolve fo
 
 - **WHEN** an owner appends a diary row whose `site` names a site not yet recorded
 - **THEN** the row commits, and the reply warns that `site` does not resolve
+
+#### Scenario: Withheld and missing sites warn alike
+
+- **WHEN** a writer who cannot read one site appends a row naming it, and its twin appends a row naming a site that does not exist
+- **THEN** both rows commit with the same warning
 
 ### Requirement: Reverse expansion is bounded and never reveals a hidden collection
 
@@ -76,12 +81,17 @@ A row query on a target collection SHALL accept `related: [{inverse: {collection
 
 ### Requirement: Declarations change without breaking unrelated work
 
-Removing a `references` declaration SHALL drop its index rows, and saved views that use it SHALL report a visible stale state. A target that is later deleted, or withheld from the author, SHALL NOT block unrelated revises of the source collection.
+A revise that removes a declaration still used by a saved view in the same manifest SHALL be refused, naming the view. A saved view in another collection that depends on a removed declaration SHALL report a stale state at read time. Removing a declaration SHALL drop its index rows. A target that is later deleted, or withheld from the author, SHALL NOT block revises that leave the declaration unchanged.
 
-#### Scenario: A declaration is removed under a saved view
+#### Scenario: A declaration is removed under its own saved view
 
-- **WHEN** an owner removes `references` from `site` while a saved view filters on `site.name`
-- **THEN** the revise commits, and the saved view reports that it cannot be served, naming the view
+- **WHEN** an owner removes `references` from `site` while a saved view in the same manifest filters on `site.name`
+- **THEN** the revise is refused, naming that view
+
+#### Scenario: A target disappears
+
+- **WHEN** the target of `site` is deleted and the owner revises an unrelated field of the diary
+- **THEN** the revise commits, and `site` reads unresolved
 
 ### Requirement: A reference never changes Planning state
 

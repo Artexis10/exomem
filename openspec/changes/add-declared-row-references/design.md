@@ -29,44 +29,46 @@ Design sources: Anthropic, "Writing effective tools for agents". An agent should
 
 ### D1. Declare references on the source field, in the manifest
 
-Add `references: {collection: <stable collection ref>}` to a string field, an array of strings, or a string property of objects in an array. Cardinality follows from the field's shape: a scalar is single-valued and an array is many-valued. Revise validates the declaration and refuses one target that is missing, in another vault or not admitted to the author with one generic error. It checks that before it names anything about the target. It then requires:
+Add `references: {collection: <stable collection ref>}` to a string field, an array of strings, or a string property of objects in an array. Cardinality follows from the field's shape: a scalar is single-valued and an array is many-valued. Create and revise validate a new or changed declaration. They refuse a target that is missing, in another vault or not admitted to the author with one generic error. It checks that before it names anything about the target. It then requires:
 
 - a single-field natural key on the target, of type string, date or datetime;
-- a string source field.
+- a string source field;
+- store-backed source and target collections. File-mode and derived collections are refused in phase 1.
 
 A type-level declaration, as in the earlier CQ4 text, is rejected, because a relation binds two collections that one owner keeps, not two shapes. This change amends CQ4 to match. Relations are per-vault schema data in the manifest. The vocabulary registry keeps graph relation types. Code never lists relations or branches on a relation key. Planning `parent` and `area` and the `links.plans[]` binding stay separate in this change. Whether `links.plans[]` folds into declared references is a follow-up question.
 
 ### D2. Resolve by the target's natural key, or by a canonical row ref
 
-A value that parses as a canonical `exomem://record/<cid>/<key>` or `exomem://plan/<cid>/<key>` ref is read only as that ref; a ref to another collection does not resolve. Any other value matches the target row whose natural-key field equals it, under the target's own natural-key normalisation: Unicode NFC, case-sensitive, no trimming. A null, absent or empty value is no reference. A value repeated in one array counts once. Revise forbids changing a collection's natural key or schema version, and the store keeps one row per natural key, so a value matches at most one row. Fuzzy matching is excluded, and so is matching on an undeclared field.
+A value that parses as a canonical `exomem://record/<cid>/<key>` or `exomem://plan/<cid>/<key>` ref is read only as that ref; a ref to another collection does not resolve. Any other value matches the target row whose natural-key field equals it, under the target's own natural-key normalisation: Unicode NFC for strings and ISO form for dates, case-sensitive, no trimming. A malformed date reads `unresolved` and never raises an error. A null, absent or empty value is no reference. A value repeated in one array counts once. Revise forbids changing a collection's natural key or schema version, and the store keeps one row per natural key, so a value matches at most one row. Fuzzy matching is excluded, and so is matching on an undeclared field.
 
 ### D3. Phase 1 needs no new table
 
-Forward resolution is a lookup on the target's existing unique natural-key index, or on `(collection, item_key)` for a canonical ref. A filter through a single-valued reference first resolves the released target keys, then applies them to the source field. Declaring `references` marks the source field filterable, as named-validator references already are. Resolution happens at read time, so renaming a target rewrites nothing: the old values stop resolving and stay visible.
+Forward resolution is a lookup on the target's existing unique natural-key index, or on `(collection, item_key)` for a canonical ref. A filter through a single-valued reference first resolves the released target keys, then applies them to the source field. Declaring `references` marks the source field filterable, as named-validator references already are. If that exceeds the collection's index budget, the filter falls back to a bounded scan, as named-validator references do. Resolution happens at read time, so renaming a target rewrites nothing: the old values stop resolving and stay visible.
 
 Phase 2 adds `item_references(source collection, row, field path, ordinal, raw value)`, indexed on `(source collection, field path, value)`, for inverse expansion. It is maintained in the canonical item transaction, added by a new collection-store schema revision (never by editing a shipped one), kept out of the in-vault replica and rebuilt from items. Until it is built, inverse reads report warming, never an empty list. Materialising resolved targets was rejected. It would need a write cascade across collections, which the store does not have.
 
 ### D4. Every reference has a visible state
 
-Each declared reference on a returned row reads `resolved` or `unresolved`. A reference is `unresolved` in any of these cases:
+Each reference that a query names reads `resolved` or `unresolved` on every returned row. References the query does not name are not resolved, so existing reads stay unchanged. A reference is `unresolved` in any of these cases:
 
 - no released target row matches;
 - the target row is withheld;
 - the target's natural-key field is withheld from the caller by field release.
 
-A withheld target is indistinguishable from a missing one, the same rule as CQ4. A query that names a reference to a withheld or missing target collection is refused with the generic `COLLECTION_NOT_FOUND`, as CQ4 requires. A filter or inverse expansion over a source field the caller cannot read is refused with `QUERY_FIELD_UNAVAILABLE`.
+A withheld target is indistinguishable from a missing one, the same rule as CQ4. A query that names a reference to a withheld or missing target collection is refused with the generic `COLLECTION_NOT_FOUND`, as CQ4 requires. Any path, `related` expansion, filter or inverse expansion over a source field the caller cannot read is refused with `QUERY_FIELD_UNAVAILABLE`, because expanding it would reveal the value through the target row. `inspect` computes resolution counts and unresolved values under the caller's view, and omits inbound declarations whose source field is withheld from the caller.
 
 ### D5. One query: expand, filter and total
 
-A row query gains two things. `related` names declared references to expand into each row, and a filter can address a single-valued reference's target field, such as `site.name`. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the source collection and each target collection's authorization and freshness, and it refuses once any of them changed.
+A row query gains two things. `related` names declared references to expand into each row. A dotted path through a single-valued reference, such as `site.name`, works in select, filter and grouping, as the amended CQ4 states. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the release-qualified visible-state basis of the source and of each target collection, and refuses once any of them changed. A write that only hidden rows see never invalidates a restricted caller's cursor.
 
 Totals need two things that do not exist today: reductions with a filter, and a result that carries rows and totals together. `combined` forces the base-row path, never the rollup. It reports three counts:
 
 - `count`: the rows combined;
 - `unresolved_rows`: combined rows where a reference the query names did not resolve;
-- `excluded_unresolved`: base rows that a reference filter excluded only because their reference did not resolve.
+- `excluded_unresolved`: base rows that a reference filter excluded only because their reference did not resolve, whatever the cause;
+- `unresolved_values`: a bounded list of the distinct values that did not resolve, with their counts, so an agent can recognise an old key after a rename.
 
-The row page and its cursor name the combined rows. So after a site rename, "hours at site X" is not a silent zero: `excluded_unresolved` shows the rows the rename cut off.
+The row page and its cursor name the combined rows. So after a site rename, "hours at site X" is not a silent zero: `excluded_unresolved` counts the rows that no longer resolve, and `unresolved_values` shows the old key among them.
 
 The motivating question becomes one call on the diary:
 
@@ -88,7 +90,7 @@ A resolved reference between a Records row and a plan item is evidence, never pr
 
 ### D9. Declarations change safely
 
-Removing a `references` declaration drops its phase 2 index rows. Saved views that use it then report a visible stale state, as a saved view on an undeclared value does today. If the target is later deleted, or withheld from the author, that does not block unrelated revises of the source collection.
+A saved view in the same manifest that uses a declaration blocks its removal. The revise names the view, as revise refuses broken views today and as CQ1 refuses removing a required lookup. A view in another collection that depends on the declaration, such as an inverse view on the target, reports a stale state at read time. Refusing the revise there would reveal a collection the author may not be able to read. Removing a declaration drops its phase 2 index rows. A target that is later deleted, or withheld from the author, does not block revises that leave the declaration unchanged.
 
 ## Alternatives
 
