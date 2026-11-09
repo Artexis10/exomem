@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import BEHAVIOURS, STORE_NAMES, is_stable
+from .cases import BEHAVIOURS, holds_store_name, is_stable
 
 SEED = 20261108
 STORE_MARK = "[store]"
@@ -156,7 +156,8 @@ def items(
     if items_file.exists():
         if items_file.read_text() != "".join(lines):
             raise SystemExit(
-                f"{items_file} was pooled from different answers; move {judge_run} aside to judge again"
+                f"{items_file} was pooled from different answers or by an older mask; "
+                f"move {judge_run} aside to judge again"
             )
         return
     (judge_run / "judge").mkdir(parents=True)
@@ -173,14 +174,14 @@ def items(
 
 
 def hide_store_names(text: str) -> str:
-    """``text`` with each whole token that holds a store name (``STORE_NAMES``) replaced by ``STORE_MARK``.
+    """``text`` with each whole token that holds a store name (``holds_store_name``) replaced by ``STORE_MARK``.
 
     A sentence's closing full stop stays outside the mark."""
 
     def mask(match: re.Match[str]) -> str:
         token = match.group()
         body = token.rstrip(".")
-        if any(name in body.casefold() for name in STORE_NAMES):
+        if holds_store_name(body):
             return STORE_MARK + token[len(body):]
         return token
 

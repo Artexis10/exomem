@@ -515,6 +515,16 @@ def test_a_files_value_that_is_not_an_object_is_named_not_a_crash():
     assert problems == ["probe p-early needs a `task` string and a `files` object"]
 
 
+def test_a_key_list_field_that_is_not_a_list_is_named_not_a_crash():
+    """A key with `accept: 5` must get the shape problem back, not a traceback from the store-name scan."""
+    project = invented_project()
+    project["probes"][0]["key"]["accept"] = 5
+
+    problems = cases.structure_problems(project)
+
+    assert problems == ["probe p-early: key.accept, key.rubric and key.behaviours must be lists"]
+
+
 def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
     tmp_path,
 ):

@@ -38,6 +38,12 @@ RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 STORE_NAMES = ("memory/", "exomem")
 
 
+def holds_store_name(text: str) -> bool:
+    """Whether ``text`` holds a store name: the one rule that the mask, the case check and the report count share."""
+    folded = text.casefold()
+    return any(name in folded for name in STORE_NAMES)
+
+
 def refused(message: str) -> SystemExit:
     return SystemExit(f"refused: {message}")
 
@@ -141,12 +147,14 @@ def store_name_problems(project: dict) -> list[str]:
         for field in ("value", "trap"):
             places.append((f"probe {name} key.{field}", key.get(field)))
         for field in ("accept", "rubric"):
-            for i, text in enumerate(key.get(field) or []):
+            # `structure_problems` already names a field that is not a list.
+            texts = key.get(field) if isinstance(key.get(field), list) else []
+            for i, text in enumerate(texts):
                 places.append((f"probe {name} key.{field}[{i}]", text))
     return [
         f"{where} holds a store name the judge masks ({', '.join(STORE_NAMES)}); reword it"
         for where, text in places
-        if isinstance(text, str) and any(n in text.casefold() for n in STORE_NAMES)
+        if isinstance(text, str) and holds_store_name(text)
     ]
 
 
