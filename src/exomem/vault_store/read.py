@@ -252,6 +252,17 @@ def owned_meta(vault_root: Path, rel: str) -> PageMeta | None:
     return meta
 
 
+def page_exists(vault_root: Path, rel: str) -> bool:
+    """Whether a page is at ``rel``: the store's page when the store serves that path, else the file."""
+    root = _as_path(vault_root)
+    try:
+        if owned_meta(root, rel) is not None:
+            return True
+    except FileNotFoundError:
+        return False
+    return (root / rel).exists()
+
+
 def owned_bytes(vault_root: Path, rel: str) -> bytes | None:
     """``owned_page``'s bytes: the stored page when the store serves ``rel``, else None."""
     page = owned_page(vault_root, rel)

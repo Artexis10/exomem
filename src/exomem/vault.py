@@ -485,8 +485,11 @@ def _is_vault(path: Path) -> bool:
     at all, so a vault has to stay a vault across the move in both directions --
     one that has migrated, and one that never will.
     """
+    from .vault_store import read
+
+    # A store-mode vault keeps the legacy sentinel page in its store, and its file may be absent.
     return (
-        (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
+        read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
         or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
     )
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import cli_ops
+from ..kbdir import kb_dirname
 
 _LEAN_FALLBACK_VARS = (
     "EXOMEM_DISABLE_EMBEDDINGS",
@@ -186,6 +187,12 @@ class ExomemBackend:
         from .. import state_migration
 
         state_migration.require_vault_state_ready(self._vault)
+        from ..vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self._vault):
+            # The warm-up builds the lexical catalogue, the graph and the drain queues from files; a
+            # store-mode vault has no such files to build from, so the session reads the store and runs none.
+            return
         try:
             from .. import warmup
 
@@ -468,6 +475,20 @@ class ExomemBackend:
         """
         if self._vault is None:
             return {"notes": 0, "sources": 0, "known": False}
+        from ..vault_store import mode as store_mode, read
+
+        if store_mode.store_mode_for_reads(Path(self._vault)):
+            # The store's pages are the notes; their files are only a projection and may lag.
+            with read.snapshot(Path(self._vault)) as view:
+
+                def stored(name: str) -> int:
+                    return sum(
+                        1
+                        for meta in view.pages(f"{kb_dirname()}/{name}/")
+                        if meta.path.lower().endswith(".md") and not meta.path.endswith("/index.md")
+                    )
+
+                return {"notes": stored("Notes"), "sources": stored("Sources"), "known": True}
         kb = Path(self._vault) / "Knowledge Base"
         if not kb.is_dir():
             return {"notes": 0, "sources": 0, "known": False}

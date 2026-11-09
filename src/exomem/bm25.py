@@ -943,8 +943,13 @@ class BM25Index:
         backend, or `UNKNOWN_ERROR_RETIREMENT` consecutive unclassified
         sidecar errors warm the Python rung.
         """
-        from . import lexstore
+        from . import find_corpus, lexstore
 
+        if find_corpus.store_serves(vault_root):
+            # The lexical sidecar is built from files, and a store-mode vault's row readers are not here yet,
+            # so this warm builds no sidecar: it holds the corpus that the store gives.
+            self._fresh_corpus(vault_root, scope, None)
+            return "python"
         if lexstore.search_bm25(vault_root, "warm", 1, scope=scope) is not None:
             # FTS5 serves: the probe query ran the sync check and faulted the
             # index in. The rank-bm25 corpus stays cold on purpose — not

@@ -128,18 +128,6 @@ def unreadable_or_absent(
     return GetError(code=code, reason=reason)
 
 
-def _exists(vault_root: Path, rel: str) -> bool:
-    """Whether a page is at ``rel``: the store's page in a store-mode vault, else the file."""
-    from .vault_store import read
-
-    try:
-        if read.owned_meta(vault_root, rel) is not None:
-            return True
-    except FileNotFoundError:
-        return False
-    return (vault_root / rel).exists()
-
-
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     """Normalize, resolve, and bind one direct read to an immutable snapshot."""
 
@@ -157,7 +145,7 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if len(named) > 1 and not _exists(vault_root, rel) and _exists(vault_root, named[1]):
+        if len(named) > 1 and not read.page_exists(vault_root, rel) and read.page_exists(vault_root, named[1]):
             rel = named[1]
 
         try:
