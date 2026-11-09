@@ -850,6 +850,25 @@ def test_three_identical_photos_give_one_finding_with_two_fold_steps(vault: Path
     assert result["metadata"]["coverage"]["duplicate_content"] == "complete"
 
 
+def test_fold_steps_from_two_groups_go_into_one_proposal(vault: Path) -> None:
+    """A batch folds several groups in one run, so the steps the audit suggests must not share an id across groups."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+
+    _three_photos(vault)
+    scan = b"%PDF a scanned letter"
+    evidence_filing(vault, "Case", "letters", "letter.pdf", scan, filed=dt.date(2026, 1, 1))
+    evidence_filing(vault, "Case", "exhibits", "exhibit-b.pdf", scan, filed=dt.date(2026, 2, 1))
+
+    findings = _duplicate_audit(vault, "duplicate_content")["findings"]
+    steps = [step for finding in findings for step in finding["meta"]["steps"]]
+
+    assert (len(findings), len(steps)) == (2, 3)
+    with library_scope():
+        curation.propose(vault, {"version": 1, "title": "Fold both groups", "steps": steps})
+
+
 def test_a_stale_index_entry_gives_no_finding(vault: Path) -> None:
     """The index only proposes a group: when one original no longer hashes to its page, the audit stays silent."""
     pages = _three_photos(vault)
