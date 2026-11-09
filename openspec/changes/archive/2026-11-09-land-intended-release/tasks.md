@@ -8,4 +8,4 @@
 
 ## 2. Verify on a real release
 
-- [ ] 2.1 The next release dispatched with its reviewed head merges itself after its required gate passes, and Release Please tags it
+- [x] 2.1 The next release dispatched with its reviewed head merges itself after its required gate passes, and Release Please tags it (v0.169.0: release PR #2611 merged by the release App at the intended head 43 s after its required gate passed; tagged 13 s later)

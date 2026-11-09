@@ -1550,6 +1550,7 @@ def test_a_withheld_preserved_original_reads_back_exactly_like_a_deleted_one(vau
     assert Path(originals["hidden"]).name not in json.dumps(covered)
 
 
+@pytest.mark.usefixtures("duplicate_index")
 @pytest.mark.parametrize("route", ["source", "evidence"])
 def test_known_native_preservation_does_not_seal_an_inert_leaf(vault, owner, route):
     from exomem import add

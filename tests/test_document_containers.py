@@ -494,6 +494,7 @@ def test_catalog_preflight_classifies_staged_parent_and_payload_bytes(vault):
     assert not (vault / parent).exists()
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_duplicate_preservation_writes_nothing_and_does_not_repair_children(vault, tmp_path, monkeypatch):
     from test_client_artifacts import _staged
 

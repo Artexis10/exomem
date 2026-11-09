@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -203,14 +204,19 @@ def resolve_retained_input(
 
 
 @reader
-def exact_text_verdict(vault_root: Path, value: str) -> str:
+def exact_text_verdict(
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
+) -> str:
     """Check an exact selected representation without recording unreturned targets.
 
     Answers an `egress.TEXT_*` verdict. Only the reference gate can answer
     `TEXT_LOOKUP_STALE`; a redaction or a scrub that changes the text is final.
+    `resolved_here` names pages the caller proved the text cites (`egress.direct_text_references_verdict`).
     """
     principal = _principal()
-    verdict = egress.direct_text_references_verdict(vault_root, value, principal=principal)
+    verdict = egress.direct_text_references_verdict(
+        vault_root, value, principal=principal, resolved_here=resolved_here
+    )
     if verdict != egress.TEXT_RELEASED:
         return verdict
     with egress.disclosure_boundary(vault_root, "retained-input-reference-validation") as collector:
@@ -223,9 +229,11 @@ def exact_text_verdict(vault_root: Path, value: str) -> str:
     return egress.TEXT_REFUSED
 
 
-def exact_text_visible(vault_root: Path, value: str) -> bool:
+def exact_text_visible(
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
+) -> bool:
     """Whether an exact selected representation is released unchanged."""
-    return exact_text_verdict(vault_root, value) == egress.TEXT_RELEASED
+    return exact_text_verdict(vault_root, value, resolved_here=resolved_here) == egress.TEXT_RELEASED
 
 
 @reader

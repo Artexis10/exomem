@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import io
+import stat
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,8 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert companions.classify(vault, result.path).projects == ()
 
 
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.usefixtures("duplicate_index")
 def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: Path) -> None:
     """An exact-byte legacy duplicate must not undo the caller's protection opt-in."""
     from exomem import commands
@@ -117,6 +120,138 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
 
 
 
+@pytest.mark.usefixtures("duplicate_index")
+def test_text_handed_into_a_second_family_is_one_page_that_lists_both(vault: Path) -> None:
+    """Identical Evidence bytes are stored once; the page gains the second family and keeps everything else."""
+    from exomem import commands
+
+    content = "Dear Ms. Vale, please withdraw the notice."
+    first = commands.op_preserve_evidence(
+        vault, scope="Case", category="letters", filename="letter.txt", content=content,
+    )
+    page = vault / first["sidecar_path"]
+    before = vault_module.parse_frontmatter(_read(page), strict=True)
+    stored_files = sorted(path for path in (vault / "Knowledge Base" / "Evidence").rglob("*") if path.is_file())
+
+    second = commands.op_preserve_evidence(
+        vault, scope="case", category="exhibits", filename="exhibit-a.txt", content=content,
+        description="The letter, filed as an exhibit.",
+    )
+
+    assert second["state"] == "already_stored"
+    assert second["family_added"] is True
+    # The page keeps its own name and caption, so the outcome names what this caller passed and did not get.
+    assert second["fields_not_applied"] == [
+        {"field": "filename", "provided": "exhibit-a.txt", "kept": "letter.txt"},
+        {"field": "description", "provided": "The letter, filed as an exhibit.", "kept": None},
+    ]
+    assert second["families"] == [
+        {"scope": "Case", "category": "letters"},
+        {"scope": "Case", "category": "exhibits"},
+    ]
+    assert second["path"] == first["path"]
+    assert sorted(path for path in (vault / "Knowledge Base" / "Evidence").rglob("*") if path.is_file()) == stored_files
+    after = vault_module.parse_frontmatter(_read(page), strict=True)
+    assert after[0]["families"] == second["families"]
+    assert after[1] == before[1]
+    unchanged = {key: value for key, value in before[0].items() if key != "tags"}
+    assert {key: after[0][key] for key in unchanged} == unchanged
+    assert after[0]["tags"] == [*before[0]["tags"], "exhibits"]
+
+    settled = _read(page)
+    repeated = commands.op_preserve_evidence(
+        vault, scope="Case", category="exhibits", filename="exhibit-b.txt", content=content,
+    )
+    assert repeated["family_added"] is False
+    assert _read(page) == settled
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_the_default_reply_of_an_already_stored_hand_over_names_the_earlier_copy_and_what_it_kept(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The compact reply is what a caller gets unless it asks for the full one, so it carries the outcome fields."""
+    from exomem import commands, writer_lease
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(candidate for candidate in commands.PRODUCT_COMMANDS if candidate.name == "preserve_evidence")
+    content = "Dear Ms. Vale, please withdraw the notice."
+    first = writer_lease.invoke_command(
+        command, vault, scope="Case", category="letters", filename="letter.txt", content=content,
+        idempotency_key="letter-first",
+    )
+
+    other_family = writer_lease.invoke_command(
+        command, vault, scope="case", category="exhibits", filename="exhibit-a.txt", content=content,
+        description="The letter, filed as an exhibit.", idempotency_key="letter-exhibit",
+    )
+    same_family = writer_lease.invoke_command(
+        command, vault, scope="Case", category="letters", filename="letter-again.txt", content=content,
+        idempotency_key="letter-again",
+    )
+
+    both = [{"scope": "Case", "category": "letters"}, {"scope": "Case", "category": "exhibits"}]
+    assert other_family["duplicate_of"]["path"] == first["path"]
+    assert other_family["families"] == both and other_family["family_added"] is True
+    assert other_family["fields_not_applied"] == [
+        {"field": "filename", "provided": "exhibit-a.txt", "kept": "letter.txt"},
+        {"field": "description", "provided": "The letter, filed as an exhibit.", "kept": None},
+    ]
+    assert same_family["duplicate_of"] == other_family["duplicate_of"]
+    assert same_family["families"] == both and same_family["family_added"] is False
+    assert same_family["fields_not_applied"] == [
+        {"field": "filename", "provided": "letter-again.txt", "kept": "letter.txt"},
+    ]
+
+
+def test_a_mode_restore_never_follows_a_link_that_replaced_the_page(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's mode is restored through a no-follow descriptor: a link swapped in after the commit keeps its target's mode."""
+    sidecar = vault / "Knowledge Base" / "Evidence" / "swapped.jpg.md"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("---\n---\n", encoding="utf-8")
+    sidecar.chmod(0o644)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("not a page", encoding="utf-8")
+    victim.chmod(0o600)
+
+    def writer(writes, **kwargs):  # noqa: ANN001
+        sidecar.unlink()
+        sidecar.symlink_to(victim)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(catalog_publication, "publish_markdown_batch", lambda _prepared: None)
+    preserve_module.commit_media_sidecar_writes(
+        vault,
+        (PlannedWrite(sidecar, "---\n---\nbody\n", expected_hash=content_hash("---\n---\n")),),
+        post_commit_fanout=False,
+        batch_writer=writer,
+    )
+
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_protected_original_is_not_rewritten_to_add_a_family(vault: Path) -> None:
+    """A release grant binds to the protected page's content hash, so a rewrite would revoke it silently."""
+    from exomem import commands
+
+    arguments = dict(filename="sample.txt", content="sensitive original", raw_protection=True)
+    first = commands.op_preserve_evidence(vault, scope="Case", category="letters", **arguments)
+    page = vault / first["sidecar_path"]
+    stored = page.read_bytes()
+
+    elsewhere = commands.op_preserve_evidence(vault, scope="Case", category="exhibits", **arguments)
+
+    assert elsewhere["state"] == "stored"
+    assert elsewhere["path"] != first["path"]
+    assert page.read_bytes() == stored
+
+
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.usefixtures("duplicate_index")
 def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
     """Authored Markdown cannot substitute an unrelated or changed original for new bytes."""
     import hashlib
@@ -762,6 +897,7 @@ def test_preserve_refuses_oversized_stream_without_canonical_residue(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_large_preserved_stream_is_never_held_whole_in_memory(vault: Path, tmp_path: Path, request) -> None:
     """An upload session commits a file of up to 2 GiB through `preserve_stream`. The
     vault's atomic publish read the staged file into memory, twice over, so one large
