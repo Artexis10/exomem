@@ -7,4 +7,4 @@
 
 ## 2. Closure
 
-- [ ] 2.1 Merge, sync the delta into `openspec/specs/records/spec.md` and archive this change.
+- [x] 2.1 Merge, sync the delta into `openspec/specs/records/spec.md` and archive this change.
