@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import platform
+import struct
+import sys
 from pathlib import Path
 from typing import BinaryIO
+
+# TIFF tags the DNG and EXIF specifications fix.
+_DNG_VERSION = 50706
+_DATE_TIME = 0x0132
 
 
 def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: int | None = None):
@@ -44,30 +51,82 @@ def _image_formats() -> list[str]:
 
 
 def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
-    """Demosaic a camera raw to an upright RGB image at its full size.
+    """Demosaic a DNG to an upright image at its full size, or refuse it before LibRaw decodes.
 
     The full sensor image is decoded, not an embedded preview: phone raws often carry none,
-    a 12 MP demosaic takes under a second, and the shown size then stays the original's.
-    LibRaw applies the camera's orientation, so the result carries no EXIF to turn again.
+    a 12 MP demosaic takes about a second, and the shown size then stays the original's.
+    LibRaw applies the camera's orientation, so the result carries no orientation to apply again.
     """
     from PIL import Image
 
     try:
         import rawpy
     except ImportError as error:
+        if sys.platform == "darwin" and platform.machine() == "x86_64":
+            raise ImportError(
+                "Camera raw decoding needs rawpy, which publishes no build for Intel macOS; "
+                "download the original instead"
+            ) from error
         raise ImportError("Camera raw decoding requires rawpy; install exomem[image-codecs]") from error
+    # LibRaw chooses its parser from the bytes, and also decodes headerless sensor dumps by their
+    # length. Only a DNG, which a TIFF directory declares, may reach it.
+    if not _is_dng(path):
+        raise OSError("the file is not a DNG camera raw")
     limit = max_pixels if max_pixels is not None else (
         2 * Image.MAX_IMAGE_PIXELS if Image.MAX_IMAGE_PIXELS else None
     )
+    memory = (rawpy.LibRawMemPoolOverflowError, rawpy.LibRawUnsufficientMemoryError)
     try:
         with rawpy.imread(path if hasattr(path, "read") else str(path)) as raw:
-            pixels = raw.sizes.width * raw.sizes.height
-            if limit is not None and pixels > limit:
+            sizes = raw.sizes
+            # The output is stretched by the pixel aspect ratio, and the unpacked sensor buffer
+            # can exceed the visible area; whichever is larger is what decoding costs.
+            aspect = sizes.pixel_aspect if sizes.pixel_aspect > 0 else 1.0
+            cost = max(sizes.width * sizes.height * max(aspect, 1 / aspect), sizes.raw_width * sizes.raw_height)
+            if limit is not None and cost > limit:
                 raise Image.DecompressionBombError(
-                    f"camera raw of {pixels} pixels exceeds the limit of {limit} pixels"
+                    f"camera raw of {int(cost)} decoded pixels exceeds the limit of {limit} pixels"
                 )
             rgb = raw.postprocess(use_camera_wb=True)
+            taken = raw.other.timestamp
+    except rawpy.LibRawTooBigError as error:
+        raise Image.DecompressionBombError("camera raw is too large to decode") from error
+    except memory as error:
+        # The media worker stops on memory exhaustion instead of failing the artifact.
+        raise MemoryError("camera raw decoding ran out of memory") from error
     except rawpy.LibRawError as error:
         # Callers treat OSError as an undecodable image, as Pillow raises it.
-        raise OSError(f"camera raw could not be decoded: {error}") from error
-    return Image.fromarray(rgb)
+        raise OSError(f"camera raw could not be decoded ({type(error).__name__})") from error
+    if rgb.ndim == 3 and rgb.shape[2] == 1:
+        rgb = rgb[:, :, 0]  # a monochrome raw decodes to one channel
+    image = Image.fromarray(rgb)
+    # LibRaw reads the capture time; it travels as EXIF DateTime, with no orientation tag.
+    # A raw that records none has timestamp 0.
+    if taken is not None and taken.timestamp() > 0:
+        exif = Image.Exif()
+        exif[_DATE_TIME] = taken.strftime("%Y:%m:%d %H:%M:%S")
+        image.info["exif"] = exif.tobytes()
+    return image
+
+
+def _is_dng(path: Path | BinaryIO) -> bool:
+    """Whether the bytes are a TIFF whose first directory declares a DNG version."""
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    def declares_dng(stream: BinaryIO) -> bool:
+        try:
+            directory = ImageFileDirectory_v2(stream.read(8))
+            stream.seek(directory.next)
+            directory.load(stream)
+        except (OSError, SyntaxError, ValueError, struct.error):
+            return False
+        return _DNG_VERSION in directory
+
+    if hasattr(path, "read"):
+        start = path.tell()
+        try:
+            return declares_dng(path)
+        finally:
+            path.seek(start)
+    with open(path, "rb") as stream:
+        return declares_dng(stream)

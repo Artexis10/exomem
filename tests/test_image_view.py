@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -140,37 +141,74 @@ def test_agent_sees_a_camera_raw_photo_upright_at_its_sensor_size(served, vault)
     assert hashlib.sha256((vault / path).read_bytes()).hexdigest() == hashlib.sha256(original).hexdigest()
 
 
-def test_a_camera_raw_too_large_is_refused_before_it_is_demosaiced(served, monkeypatch):
-    import rawpy
+def _dng(width: int, height: int, tags: dict | None = None, *, pixels: bytes = b"") -> bytes:
+    """A DNG directory declaring a 16-bit sensor image of `width` x `height`, then `pixels`."""
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
 
+    # TIFF field types for the tags Pillow does not know: SHORT, BYTE and RATIONAL.
+    types = {33421: 3, 33422: 1, 50706: 1, 50718: 5, 50829: 3}
+    directory = ImageFileDirectory_v2()
+    fields = {
+        254: 0, 256: width, 257: height, 258: 16, 259: 1, 262: 32803, 277: 1, 278: height,
+        273: 4096, 279: max(len(pixels), 2), 33421: (2, 2), 33422: b"\x00\x01\x01\x02",
+        50706: b"\x01\x04\x00\x00", 50717: 4095, **(tags or {}),
+    }
+    for tag, value in fields.items():
+        if value is None:  # the caller removes a default field
+            continue
+        if tag in types:
+            directory.tagtype[tag] = types[tag]
+        directory[tag] = value
+    out = io.BytesIO()
+    out.write(b"II*\x00\x08\x00\x00\x00")
+    directory.save(out)
+    return out.getvalue().ljust(4096, b"\x00") + pixels
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        pytest.param(_dng(60000, 60000), id="declared-huge"),
+        # DefaultScale stretches a 4 MP sensor image tenfold on output.
+        pytest.param(_dng(4000, 1000, {50718: (Fraction(10), Fraction(1))}), id="stretched"),
+        # ActiveArea shows 32 x 32 pixels of an 8000 x 8000 sensor buffer that is still unpacked.
+        pytest.param(_dng(8000, 8000, {50829: (0, 0, 32, 32)}), id="small-active-area"),
+    ],
+)
+def test_a_camera_raw_that_would_decode_too_large_is_refused_before_it_is_demosaiced(served, monkeypatch, declared):
+    """Defect: a small hostile DNG demosaics gigabytes in the serving process before any size check."""
     from exomem import image_view
 
     mcp, client = served
-    path = _upload(client, "PXL_0002.dng", (SAMPLES / "ocr-eng.dng").read_bytes(), "image/x-adobe-dng")
-    monkeypatch.setattr(image_view, "MAX_DECODE_PIXELS", 1068 * 280 - 1)
-    demosaiced = []
-    imread = rawpy.imread
-
-    class Recorded:
-        def __init__(self, raw):
-            self.raw, self.sizes = raw, raw.sizes
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return self.raw.__exit__(*exc)
-
-        def postprocess(self, **kwargs):
-            demosaiced.append(True)
-            return self.raw.postprocess(**kwargs)
-
-    monkeypatch.setattr(rawpy, "imread", lambda source: Recorded(imread(source).__enter__()))
+    monkeypatch.setattr(image_view, "MAX_DECODE_PIXELS", 10_000_000)
+    path = _upload(client, "PXL_0002.dng", declared, "image/x-adobe-dng")
 
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 
     assert "IMAGE_TOO_LARGE" in refused
-    assert demosaiced == [], "the raw was demosaiced before the size check"
+
+
+def test_bytes_that_are_not_a_dng_never_reach_the_raw_decoder(served):
+    """Defect: LibRaw decodes any file of a known sensor-dump length, so noise named .dng is shown and indexed."""
+    mcp, client = served
+    path = _upload(client, "PXL_0004.dng", bytes(range(256)) * 3072, "image/x-adobe-dng")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_UNDECODABLE" in refused
+
+
+def test_a_monochrome_camera_raw_is_shown_in_greyscale(served):
+    """Defect: a one-channel raw crashes the decoder instead of reaching the model."""
+    mcp, client = served
+    # LinearRaw, one sample per pixel. LibRaw reads past the declared strip, so the file is padded.
+    mono = _dng(64, 64, {262: 34892, 33421: None, 33422: None}, pixels=b"\x00\x08" * 64 * 64 + bytes(65536))
+    path = _upload(client, "PXL_0005.dng", mono, "image/x-adobe-dng")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    [shown] = result.structured_content["images"]
+    assert shown["original_pixels"] == [64, 64]
 
 
 def test_a_damaged_camera_raw_is_named_undecodable(served):

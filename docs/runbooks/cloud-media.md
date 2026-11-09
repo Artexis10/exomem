@@ -338,10 +338,12 @@ Those software licence terms do not establish patent clearance.
 
 The `image-codecs` extra installs `rawpy`, which bundles LibRaw, on every platform except Intel macOS, where no wheel exists.
 Image view, OCR, the visual index and the caption decode `.dng` through it: the full sensor image with the camera's white balance, turned upright by the camera's orientation.
-A raw whose sensor image exceeds the caller's pixel ceiling is refused before it is demosaiced; a 12 MP phone raw decodes in under a second.
+Only a file whose TIFF directory declares a DNG version reaches LibRaw, which would otherwise also decode headerless sensor dumps by their length.
+A raw is refused before it is demosaiced when its output, stretched by its pixel aspect ratio, or its unpacked sensor buffer exceeds the caller's pixel ceiling; a 12 MP phone raw decodes in about a second.
+LibRaw memory exhaustion is reported as memory exhaustion, so the media worker stops instead of failing the artifact.
 The Cloud image gate includes a synthetic portrait DNG with known text.
 Distributed packages retain the upstream notices under `exomem/_licenses/rawpy-0.28.0/`.
-Raw images report no capture time: the decoder does not read the raw file's EXIF.
+The capture time comes from LibRaw's reading of the raw file's EXIF.
 ## Notes for a new engine
 
 - The media child sets `OPENBLAS_NUM_THREADS=1` under the brakes. Without it, numpy's OpenBLAS reserves data segment for one thread per host CPU (about 40 MiB each), so the child's VmData follows the node instead of the engine. On a 20-CPU host, the child's baseline VmData was 855 MiB instead of 97 MiB.
