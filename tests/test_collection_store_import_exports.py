@@ -24,6 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 import tzdata
+from test_attachment_custody import _local_session
 from test_collection_store_importer import CID, call, count, manifest_text, refused, release, setup
 from test_collection_store_importer import run as run_jobs
 from test_collection_store_s1_gate import _until
@@ -39,7 +40,7 @@ from test_collection_store_writer import manifest_path
 from test_collection_store_writer import store as store
 from test_governance_egress import _external
 
-from exomem import __version__, archive_members, commands, records
+from exomem import __version__, archive_members, commands, held_uploads, records
 from exomem import structured_collections as collections
 from exomem.collection_store import capability, connection, importer, tokens, typed_storage
 from exomem.collection_store.preview import preview_store
@@ -155,12 +156,18 @@ MIXED_DOCUMENT = {"days": [
 ]}
 
 
-def preserve_export(store, name, members):
-    """Zip the invented member documents and preserve the zip through archive expansion."""
+def export_zip(members):
+    """The invented member documents as one zip export."""
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
         for path, document in members.items():
             zipped.writestr(path, document if type(document) is bytes else json.dumps(document))
+    return archive
+
+
+def preserve_export(store, name, members):
+    """Zip the invented member documents and preserve the zip through archive expansion."""
+    archive = export_zip(members)
     receipt, stored = archive_members.preserve_members(
         store.root, guard=contextlib.nullcontext, scope="device", category="export", filename=f"{name}.zip",
         stream=archive, max_bytes=archive.getbuffer().nbytes, verified="upload",
@@ -665,6 +672,48 @@ def test_a_served_export_imports_members_that_start_on_later_store_checkouts(
     first = len(AUTUMN["days"][0]["samples"])
     assert first > importer.MAX_BATCH_ROWS  # the second member starts in a later batch
     assert len(rows) == first + len(NOVEMBER["days"][0]["samples"])
+
+
+def test_a_held_export_preserved_as_members_over_mcp_imports_and_its_refresh_adds_only_new_members(
+    service: Service,  # noqa: F811 - the imported fixture, by name
+    monkeypatch,
+):
+    """Defect: an MCP-only client can hold a zip export but not keep it as members, so no import reads it,
+    and a refreshed export either cannot be preserved or stores its unchanged members a second time."""
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    held_cid = "88888888-8888-4888-8888-888888888888"
+    served(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Held"),
+           manifest_text=sqlite_text(manifest_text(held_cid, "Held", FIELDS)), why="held samples")
+
+    def preserve(name, data):
+        with _local_session("session-export"):
+            handle = held_uploads.hold(service.root, io.BytesIO(data), lane="evidence", filename=f"{name}.zip",
+                                       content_type="application/zip", max_bytes=len(data))["file"]
+            [row] = served(service.root, "preserve_artifacts", scope="device", category="export", files=[handle],
+                           archive="members")["files"]
+        return row
+
+    export = export_zip({"samples/1-autumn.json": AUTUMN, "samples/2-november.json": NOVEMBER}).getvalue()
+    first = preserve("export", export)
+    assert (first["state"], first["archive"]["members"], first["archive"]["new_blobs"]) == ("stored", 2, 2), first
+    request = {"source_ref": first["path"], "format": "json-document", "members": "samples/*", "mapping": SAMPLES}
+    preview = imported(service.root, collection=held_cid, mode="preview", **request)
+    assert preview["rows"]["invalid"] == 0 and preview["rows"]["valid"] > 0, preview
+    job = imported(service.root, collection=held_cid, mode="start", **request)
+    _until(lambda: imported(service.root, collection=held_cid, mode="status",
+                            continuation=job["continuation"])["state"] != "running", 30)
+    rows = served(service.root, "record_memory", action="query", collection=held_cid)["rows"]
+    assert len(rows) == len(AUTUMN["days"][0]["samples"]) + len(NOVEMBER["days"][0]["samples"])
+
+    again = preserve("export", export)
+    assert (again["state"], again["path"]) == ("already_stored", first["path"]), again
+    refreshed = preserve("export-refresh", export_zip({"samples/1-autumn.json": AUTUMN,
+                                                       "samples/2-november.json": NOVEMBER,
+                                                       "samples/3-spring.json": SPRING}).getvalue())
+    assert (refreshed["state"], refreshed["archive"]["members"], refreshed["archive"]["new_blobs"]) == (
+        "stored", 3, 1), refreshed
+    pool = (service.root / first["path"]).parent / archive_members.POOL_DIRNAME
+    assert len([blob for blob in pool.rglob("*.gz")]) == 3
 
 
 def test_numbers_beyond_int64_or_a_float_cost_only_their_own_rows(tmp_path):
