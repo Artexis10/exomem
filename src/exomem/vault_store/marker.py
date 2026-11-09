@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,21 +65,32 @@ def clear(tx: sqlite3.Connection) -> None:
 
 
 def read_replica(vault_root: Path) -> Replica:
-    """Read the marker from the vault's replica; an unreadable replica is reported, not guessed."""
+    """Read the marker from the vault's replica; an unreadable replica is reported, not guessed.
+
+    ``store_meta`` is a generic key and value table at every schema, so it is read without the
+    store's schema ceiling: a replica that a newer build wrote still says store when it says store.
+    Only a file that is missing or half-arrived (a sync copy that is not a database yet) is
+    unreadable.
+    """
     path = replica.replica_path(vault_root)
     if not path.is_file():
         return Replica(ABSENT)
     try:
-        reader, _ = connection._open_read_only(path, connection.BUSY_TIMEOUT_MS)
-        with closing(reader):
+        with closing(
+            sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=connection.BUSY_TIMEOUT_MS / 1000,
+            )
+        ) as reader:
             found = dict(
                 reader.execute(
                     "SELECT key, value FROM store_meta WHERE key IN (?, ?, ?)",
                     (KEY, schema.META_STORE_ID, schema.META_INSTANCE_ID),
                 )
             )
-    except Exception as error:  # noqa: BLE001 - a replica mid-sync or damaged is no verdict
-        return Replica(UNREADABLE, reason=str(getattr(error, "code", type(error).__name__)))
+    except (sqlite3.Error, OSError) as error:
+        return Replica(UNREADABLE, reason=f"{type(error).__name__}: {error}")
     return Replica(
         STORE if found.get(KEY) == ACTIVE else CLEAR,
         store_id=found.get(schema.META_STORE_ID),
@@ -86,19 +98,44 @@ def read_replica(vault_root: Path) -> Replica:
     )
 
 
+def carry(conn: sqlite3.Connection, replica_meta: Mapping[str, str]) -> None:
+    """Make a takeover's store say about the marker what the replica it continues from says.
+
+    A takeover starts a tenure on the replica's bytes (adopt) or on a store that carries the same
+    head (continue). It never decides the marker: a root without a ``store_mode`` row has not
+    migrated or rolled back, so it copies the replica's key or its absence. A root with the row
+    decided the marker in its own transaction and keeps its own key: the replica may be behind
+    that decision, and a copy would drop a marker that was not published yet.
+    """
+    if conn.execute("SELECT 1 FROM store_mode WHERE id = 1").fetchone() is not None:
+        return
+    if replica_meta.get(KEY) is None:
+        clear(conn)
+    else:
+        conn.execute(
+            "INSERT INTO store_meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (KEY, replica_meta[KEY]),
+        )
+
+
 def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
-    """Whether the hand-back must copy the replica again: it disagrees with the store on the marker.
+    """Whether the hand-back must copy the replica again: it disagrees with this store's own mode.
 
     The replica is published by head, and store mode changes no head: activation and rollback
     commit the marker without a collection-chain commit. Without this answer the hand-back would
     find the head unchanged and keep the old replica, so a file-mode service elsewhere would never
-    see the marker. A store in store mode needs a replica that says store, and an unreadable
-    replica is copied fresh. A store in file mode needs only that no replica still says store.
+    see the marker. Only a root that holds a ``store_mode`` row decides, because only a root that
+    migrated or rolled back knows the mode: any other root carries the replica's marker through its
+    takeovers (``carry``) and never forces. A store in store mode needs a replica that says store,
+    and a store in file mode needs only that no replica still says store. An unreadable replica
+    forces nothing: it is no evidence, and a copy would replace a replica that a newer build wrote.
     """
-    wanted = store.execute("SELECT value FROM store_meta WHERE key = ?", (KEY,)).fetchone()
-    says_store = wanted is not None and wanted[0] == ACTIVE
+    row = store.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
+    if row is None:
+        return False
     found = read_replica(vault_root).state
-    return (found != STORE) if says_store else (found == STORE)
+    return found in (CLEAR, ABSENT) if row[0] == mode.STORE_MODE else found == STORE
 
 
 def report(vault_root: Path) -> dict:

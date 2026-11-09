@@ -373,6 +373,10 @@ def _restamp(conn, staged, token):
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
     for key in _DROPPED:
         conn.execute("DELETE FROM store_meta WHERE key=?", (key,))
+    from ..vault_store import marker
+
+    # A takeover neither invents nor drops the store-mode marker: the tenure publishes what the replica said.
+    marker.carry(conn, meta)
     return meta[schema.META_STORE_ID], instance
 
 
