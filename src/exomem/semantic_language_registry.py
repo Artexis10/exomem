@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 import yaml
 
-from . import semantic_blocks
+from . import semantic_kinds
 from .kbdir import kb_dirname
 from .vocabulary import registry as vocabulary_registry
 
@@ -29,7 +29,7 @@ _SEPARATORS_RE = re.compile(r"[\s_-]+")
 _DEFINITION_FIELDS = frozenset(
     {"description", "aliases", "status", "replaced_by", "scope"}
 )
-_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases"}
+_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases", "traits"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +82,14 @@ class KindDefinition:
     status: str = "active"
     replaced_by: str | None = None
     core: bool = False
+    traits: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         out = _definition_dict(self)
         if self.heading_aliases:
             out["heading_aliases"] = sorted(self.heading_aliases)
+        if self.traits:
+            out["traits"] = sorted(self.traits)
         if self.core:
             out["core"] = True
         return out
@@ -278,6 +281,36 @@ class SemanticLanguageRegistry:
     def _has_error_findings(self) -> bool:
         return any(finding["severity"] == "error" for finding in self.findings)
 
+    def traits_of(self, kind: str) -> frozenset[str]:
+        """The traits of the kind `kind`, a resolved key. An unregistered key has none.
+
+        Scope and status do not matter: a deprecated or scoped kind keeps its traits, because
+        its units still exist and still behave as the kind does.
+        """
+        definition = self.core_kinds.get(kind) or self.kinds.get(kind)
+        return definition.traits if definition is not None else frozenset()
+
+    def has(self, kind: str, trait: str) -> bool:
+        """Whether units of `kind` have `trait`. A name outside `KIND_TRAITS` is a defect in the
+        caller, so it raises instead of reading false for every kind."""
+        if trait not in semantic_kinds.KIND_TRAITS:
+            raise ValueError(f"{trait!r} is not a kind trait")
+        return trait in self.traits_of(kind)
+
+    def kinds_with(self, trait: str) -> frozenset[str]:
+        """Every core kind and every vault kind that has `trait`, whatever its status or scope.
+
+        A name outside `KIND_TRAITS` is a defect in the caller, so it raises instead of
+        answering with an empty set."""
+        if trait not in semantic_kinds.KIND_TRAITS:
+            raise ValueError(f"{trait!r} is not a kind trait")
+        return frozenset(
+            key
+            for definitions in (self.core_kinds, self.kinds)
+            for key, definition in definitions.items()
+            if trait in definition.traits
+        )
+
     def as_dict(self) -> dict[str, Any]:
         """Return deterministic semantic content (the byte hash is transport metadata)."""
         return {
@@ -377,11 +410,11 @@ class SemanticLanguageRegistry:
         project: str | None = None,
         page_type: str | None = None,
     ) -> LabelResolution:
-        """Resolve rich headings; the compact-only ``observation`` stays inert."""
+        """Resolve rich headings; a compact kind, such as ``observation``, stays inert."""
         key = normalize_label(raw)
         core_canonical = _core_heading_aliases().get(key, key)
         core_definition = self.core_kinds.get(core_canonical)
-        if core_definition is not None and core_canonical != "observation":
+        if core_definition is not None and core_canonical not in semantic_kinds.compact_kinds():
             status = "alias" if core_canonical != key else "core"
             return LabelResolution(
                 str(raw), key, core_canonical, status, core_definition
@@ -509,15 +542,9 @@ def registry_path(vault_root: Path) -> Path:
 def core_registry() -> SemanticLanguageRegistry:
     core_kinds: dict[str, KindDefinition] = {
         key: KindDefinition(
-            key=key,
-            description=(
-                "Compact semantic observation"
-                if key == "observation"
-                else f"Portable {key.replace('_', ' ')} semantic block"
-            ),
-            core=True,
+            key=key, description=kind.description, core=True, traits=kind.traits
         )
-        for key in sorted((*semantic_blocks.BLOCK_TYPES, "observation"))
+        for key, kind in sorted(semantic_kinds.pack().items())
     }
     return SemanticLanguageRegistry(
         SCHEMA_VERSION,
@@ -878,6 +905,7 @@ def _parse_definitions(
                     findings,
                 )
             )
+            common["traits"] = _kind_traits(value.get("traits", []), span, findings)
         definitions[key] = definition_type(**common)
     return definitions
 
@@ -1092,6 +1120,8 @@ def _definition_proposal(
         out["aliases"] = sorted(definition.aliases)
     if isinstance(definition, KindDefinition) and definition.heading_aliases:
         out["heading_aliases"] = sorted(definition.heading_aliases)
+    if isinstance(definition, KindDefinition) and definition.traits:
+        out["traits"] = sorted(definition.traits)
     if definition.status != "active":
         out["status"] = definition.status
     if definition.replaced_by is not None:
@@ -1104,6 +1134,21 @@ def _definition_proposal(
     if scope:
         out["scope"] = scope
     return out
+
+
+def _kind_traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozenset[str]:
+    """The traits a vault kind declares; one outside `KIND_TRAITS` is an error naming the rest."""
+    names = _strings(raw, f"{span}.traits", findings)
+    unknown = sorted(set(names) - semantic_kinds.KIND_TRAITS)
+    if unknown:
+        findings.append(
+            _finding(
+                "unknown_trait",
+                f"{span}.traits",
+                f"{unknown} are not kind traits; use any of {sorted(semantic_kinds.KIND_TRAITS)}",
+            )
+        )
+    return frozenset(names) - set(unknown)
 
 
 def _strings(value: Any, path: str, findings: list[RegistryFinding]) -> list[str]:
@@ -1213,7 +1258,7 @@ def _core_category_shadow_findings(
 def _core_heading_aliases() -> dict[str, str]:
     return {
         normalize_label(alias): canonical
-        for alias, canonical in semantic_blocks._BLOCK_TYPE_ALIASES.items()
+        for alias, canonical in semantic_kinds.heading_aliases().items()
     }
 
 

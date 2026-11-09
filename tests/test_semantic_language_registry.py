@@ -447,3 +447,71 @@ def test_expected_hash_refuses_recreating_a_missing_registry(tmp_path: Path) -> 
         )
 
     assert not path.exists()
+
+
+def test_the_shipped_traits_sit_on_the_kinds_the_replaced_kind_sets_named() -> None:
+    registry = language_registry.core_registry()
+
+    assert {
+        trait: registry.kinds_with(trait)
+        for trait in ("assertion", "page_claim", "procedure", "outcome", "question")
+    } == {
+        "assertion": {"claim", "finding", "inference", "hypothesis", "result"},
+        "page_claim": {"claim"},
+        "procedure": {"procedure"},
+        "outcome": {"result"},
+        "question": {"open_question"},
+    }
+    assert registry.traits_of("result") == {"assertion", "outcome"}
+    assert registry.traits_of("decision") == frozenset()
+    assert registry.traits_of("not_a_kind") == frozenset()
+
+
+def test_a_trait_outside_the_closed_set_raises_instead_of_reading_false() -> None:
+    registry = language_registry.core_registry()
+
+    with pytest.raises(ValueError, match="not a kind trait"):
+        registry.kinds_with("assertive")
+    with pytest.raises(ValueError, match="not a kind trait"):
+        registry.has("claim", "assertive")
+
+
+def test_a_vault_kind_declares_traits_and_a_vault_cannot_change_a_core_kind() -> None:
+    registry = language_registry.load_registry(
+        proposal=_proposal(
+            kinds={
+                "protocol": {"description": "A repeatable protocol", "traits": ["procedure"]},
+                "claim": {"description": "Shadows the built-in", "traits": []},
+            }
+        )
+    )
+
+    assert registry.has("protocol", "procedure")
+    assert registry.kinds_with("procedure") == {"procedure", "protocol"}
+    assert registry.kinds["protocol"].as_dict()["traits"] == ["procedure"]
+    assert registry.traits_of("claim") == {"assertion", "page_claim"}
+    assert [item["code"] for item in registry.findings] == ["canonical_collision"]
+
+
+def test_an_unknown_trait_is_refused_and_names_the_accepted_traits() -> None:
+    findings = language_registry.validate_proposal(
+        _proposal(kinds={"protocol": {"description": "A protocol", "traits": ["procedural"]}})
+    )
+
+    assert [item["code"] for item in findings] == ["unknown_trait"]
+    assert findings[0]["path"] == "kinds.protocol.traits"
+    for accepted in ("assertion", "page_claim", "procedure", "outcome", "question"):
+        assert accepted in findings[0]["detail"]
+
+
+def test_a_saved_vault_kind_keeps_its_traits(tmp_path: Path) -> None:
+    proposal = _proposal(
+        kinds={"protocol": {"description": "A repeatable protocol", "traits": ["procedure"]}}
+    )
+
+    language_registry.save_registry(tmp_path, proposal)
+
+    reloaded = language_registry.load_registry(tmp_path)
+    assert reloaded.findings == ()
+    assert reloaded.traits_of("protocol") == {"procedure"}
+    assert language_registry.registry_proposal(reloaded) == proposal
