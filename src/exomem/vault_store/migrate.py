@@ -231,8 +231,8 @@ def preflight(vault_root: Path) -> dict:
     """Refuse a vault that cannot enter store mode; otherwise count what a migration would take. It takes no lease.
 
     Each refusal costs the owner one command to fix: the release gate, the lease topology, the collection store,
-    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong footing would
-    fail on late.
+    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong
+    footing would fail on late.
     """
     admission.require_owner(vault_root, "store-mode migrate")
     if not capability.vault_store_enabled():
