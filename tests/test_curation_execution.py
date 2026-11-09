@@ -1082,21 +1082,17 @@ def _identity(vault: Path, path: str) -> str:
     return identity
 
 
-@pytest.mark.parametrize("live", [False, True], ids=["full-read", "live-registry"])
 def test_fold_refuses_a_revision_that_a_page_cited_by_memory_reference_after_the_proposal(
-    vault: Path, earlier_episode, live: bool  # noqa: ANN001
+    vault: Path, earlier_episode  # noqa: ANN001
 ) -> None:
-    """The reference census follows a write made after the proposal: a live registry never hides a new citer."""
+    """The reference census follows a write made after the proposal."""
     from test_latency_gate import _seed_freshness_live
 
-    from exomem import curation, freshness, memory_refs
+    from exomem import curation, memory_refs
 
     pages = earlier_episode(3)
     note = _seed_note(vault, "curation-fold-late-ref")
-    if live:
-        _seed_freshness_live(vault)
-    else:
-        freshness.clear()  # the episode fixture leaves the registry live; a process without one reads every page
+    _seed_freshness_live(vault)
     proposed = _propose(vault, _fold_step(pages, vault))
     commands.op_edit(
         vault, path=note, why="Cite the earlier recap.", old_string="Keep old text.",
@@ -1109,18 +1105,50 @@ def test_fold_refuses_a_revision_that_a_page_cited_by_memory_reference_after_the
     assert all((vault / path).is_file() for path in pages)
 
 
-def test_a_live_registry_lets_a_repeat_census_read_only_the_pages_that_changed(
-    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+@pytest.mark.parametrize("citer", ["memory-ref-new-page", "memory-ref-edited-page", "wikilink-new-page"])
+def test_fold_refuses_a_revision_that_a_page_written_outside_the_service_cites_before_the_watcher_reports_it(
+    vault: Path, earlier_episode, citer: str  # noqa: ANN001
 ) -> None:
-    """A fold step holds the mutation boundary for a time that does not grow with the vault: a repeat census reads no unchanged page."""
+    """A citer that reaches the disk with no registry event still pins: the census reads the disk, not the registry."""
     from test_latency_gate import _seed_freshness_live
 
+    from exomem import curation, memory_refs
+
+    pages = earlier_episode(3)
+    note = _seed_note(vault, "curation-fold-outside-edit")
+    _seed_freshness_live(vault)
+    proposed = _propose(vault, _fold_step(pages, vault))
+    reference = (
+        f"[[{pages[0].removesuffix('.md')}]]"
+        if citer == "wikilink-new-page"
+        else memory_refs.memory_ref(_identity(vault, pages[0]))
+    )
+    if citer == "memory-ref-edited-page":
+        edited = vault / note
+        edited.write_text(edited.read_text(encoding="utf-8") + f"\nCited as {reference}.\n", encoding="utf-8")
+    else:
+        # A plain write: no governed writer, so neither the freshness registry nor the watcher hears of it.
+        (vault / "Knowledge Base" / "Notes" / "Insights" / "written-outside.md").write_text(
+            "---\ntitle: Written outside\ntype: insight\nstatus: active\ncreated: 2026-01-01\n"
+            f"updated: 2026-01-01\ntags: [probe]\n---\n\nCited as {reference}.\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert all((vault / path).is_file() for path in pages)
+
+
+def test_a_repeat_census_reads_only_the_pages_that_changed(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """A fold step holds the mutation boundary for a stat walk, not a read of the vault: a repeat census reads no unchanged page."""
     from exomem import fold_leaf, freshness, memory_refs
     from exomem import vault as vault_module
 
     pages = earlier_episode(2)
     notes = [_seed_note(vault, f"curation-census-{number}") for number in range(3)]
-    _seed_freshness_live(vault)
     targets = {pages[0]: _identity(vault, pages[0])}
     read: list[str] = []
     read_text = Path.read_text

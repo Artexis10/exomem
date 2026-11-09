@@ -229,10 +229,9 @@ def listing_pages(vault_root: Path, path: str) -> list[str]:
 MEMORY_REFERENCE = re.compile(re.escape(memory_refs.REF_PREFIX) + r"([0-9a-fA-F-]{36})")
 
 
-#: What each vault page cited when it was last read, by page and the registry signature it was read at.
-#: A live registry already holds a signature for every page the vault walk yields, so a repeat call reads
-#: only the pages whose signature moved and holds the vault mutation boundary for a time that does not
-#: grow with the vault. Without a live registry nothing is cached, and every call reads every page.
+#: What each vault page cited when it was last read, by page and the stat signature it was read at.
+#: A repeat census stats every page and reads again only the pages whose signature moved, so the vault
+#: mutation boundary is held for a stat walk, not a read of every page. The first census reads every page.
 _CITED: dict[str, dict[str, tuple[freshness.FileSignature, frozenset[str]]]] = {}
 _CITED_LOCK = threading.Lock()
 
@@ -250,18 +249,45 @@ def _identities_in(page: Path) -> frozenset[str] | None:
     )
 
 
-def _live_citations(vault_root: Path, live: Mapping[str, freshness.FileSignature]) -> Iterator[tuple[str, frozenset[str]]]:
-    """Each live page and what it cites, reading only a page whose registry signature moved since its last read.
+def _disk_signatures(vault_root: Path) -> dict[str, freshness.FileSignature]:
+    """The stat signature of every page the vault walk yields: one stat per page and no read."""
+    signatures: dict[str, freshness.FileSignature] = {}
+    for page in vault.walk_vault_md(vault_root):
+        try:
+            signatures[str(page)] = freshness.stat_signature(page)
+        except OSError:
+            continue  # the page went away after the walk listed it
+    return signatures
 
-    The signature is read before the bytes, so the bytes are never older than the signature they are
-    held under. A page that cannot be read is answered as citing nothing and never held, so a transient
-    failure cannot hide a citation until the page changes.
+
+def _settle_inbound_index(vault_root: Path, signatures: Mapping[str, freshness.FileSignature]) -> None:
+    """Withdraw the resident inbound-link index when the freshness registry lags the disk.
+
+    The index is keyed to the registry, and a page written outside the service stays unknown to both until
+    the watcher reports it. A lookup after a withdrawal reads the pages, so a citer that the registry has
+    not seen still pins. A registry that agrees with the disk keeps the index, and a process without a live
+    registry already stats the disk for its key.
+    """
+    registered = freshness.triple(vault_root, "vault")
+    if registered is not None and registered != freshness.triple_from_entries(signatures.items()):
+        vault.evict_inbound_index(vault_root)
+
+
+def _citations(
+    vault_root: Path, signatures: Mapping[str, freshness.FileSignature]
+) -> Iterator[tuple[str, frozenset[str]]]:
+    """Each vault page, as a path string, and the memory identities it cites, over the whole vault.
+
+    The census does not trust the freshness registry: a citation it missed would let a fold trash the page
+    it cites. `signatures` was read from the disk before any page, so the bytes are never older than the
+    signature they are held under. A page that cannot be read is answered as citing nothing and never held,
+    so a transient failure cannot hide a citation until the page changes.
     """
     root = str(Path(vault_root).resolve())
     with _CITED_LOCK:
         known = _CITED.get(root, {})
     held: dict[str, tuple[freshness.FileSignature, frozenset[str]]] = {}
-    for location, signature in live.items():
+    for location, signature in signatures.items():
         entry = known.get(location)
         if entry is None or entry[0] != signature:
             cited = _identities_in(Path(location))
@@ -275,21 +301,12 @@ def _live_citations(vault_root: Path, live: Mapping[str, freshness.FileSignature
         _CITED[root] = held
 
 
-def _citations(vault_root: Path) -> Iterator[tuple[str, frozenset[str]]]:
-    """Each vault page, as a path string, and the memory identities it cites, over the whole vault."""
-    # An external edit the watcher saw but has not published leaves the registry behind the disk.
-    live = None if freshness.external_pending(vault_root) else freshness.live_entries(vault_root, "vault")
-    if live is not None:
-        yield from _live_citations(vault_root, live)
-        return
-    for page in vault.walk_vault_md(vault_root):
-        yield str(page), _identities_in(page) or frozenset()
-
-
-def _pages_citing(vault_root: Path, identities: Collection[str]) -> dict[str, set[str]]:
+def _pages_citing(
+    vault_root: Path, identities: Collection[str], signatures: Mapping[str, freshness.FileSignature]
+) -> dict[str, set[str]]:
     """Each memory identity mapped to the vault-relative pages that cite it, whatever their caller or class."""
     citing: dict[str, set[str]] = {identity: set() for identity in identities}
-    for location, cited in _citations(vault_root):
+    for location, cited in _citations(vault_root, signatures):
         for identity in cited & citing.keys():
             if (relative := freshness.registry_rel(vault_root, location)) is not None:
                 citing[identity].add(relative)
@@ -305,7 +322,12 @@ def referencing_pages(
     whole vault with no caller filter: a wikilink (which is how a `sources:` citation is written) and a
     memory reference to the target's identity. Any live page counts, whatever its lifecycle class: a
     superseded or retired page still cites what it cited. A generated listing never cites.
+
+    One stat of every page settles both evidences against the disk, so a page written outside the service
+    and not yet reported by the watcher still counts.
     """
+    signatures = _disk_signatures(vault_root)
+    _settle_inbound_index(vault_root, signatures)
     named: dict[str, set[str]] = {target: set() for target in targets}
     for target, links in vault.find_inbound_wikilinks_many(vault_root, list(targets)).items():
         named[target].update(link.path for link in links if link.path not in own and not is_navigation(link.path))
@@ -313,7 +335,7 @@ def referencing_pages(
         identity: target for target, ref in targets.items() if (identity := memory_refs.normalize_id(ref))
     }
     if identities:
-        for identity, pages in _pages_citing(vault_root, identities).items():
+        for identity, pages in _pages_citing(vault_root, identities, signatures).items():
             named[identities[identity]].update(page for page in pages if page not in own)
     return {target: sorted(pages) for target, pages in named.items()}
 
