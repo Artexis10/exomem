@@ -198,6 +198,26 @@ def test_a_belief_that_names_no_claim_warns_with_the_relation_to_add() -> None:
     assert "- relations: assesses:" in warning.remediation
 
 
+def test_a_vault_extension_of_assesses_names_the_assessed_claim(tmp_path: Path) -> None:
+    """Catches the assessed-claim check reading the core key, so a vault's own relation fails."""
+    overlay = relation_registry.extension_registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(
+        "schema_version: 1\nextensions:\n"
+        "  x.grades: {parent: assesses, description: Grades how far a claim holds}\n",
+        encoding="utf-8",
+    )
+    document = semantic_units.parse_semantic_units(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n"
+        "- relations: x.grades: [[Release date]]\n\nThe release will slip a week.\n",
+        path=PATH, language_registry=language_registry.core_registry(),
+        relation_registry=relation_registry.load_registry(tmp_path),
+    )
+
+    assert [unit.kind for unit in document.units] == ["belief"]
+    assert document.errors == () and document.warnings == ()
+
+
 def test_a_belief_with_a_credence_but_no_holder_is_refused() -> None:
     """Catches a belief that nobody holds, which reads as the vault's own view."""
     document = _parse(
