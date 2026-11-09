@@ -361,6 +361,11 @@ def plan_snapshot(
     return version, write
 
 
+def _is_snapshot_name(name: str, suffix: str = ".yaml") -> bool:
+    """Whether ``name`` is a snapshot file's name: a version stamp, then ``suffix``."""
+    return name.endswith(suffix) and VERSION_RE.match(name[: -len(suffix)]) is not None
+
+
 def _snapshot_names(
     filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory, suffix: str = ".yaml"
 ) -> list[str]:
@@ -373,8 +378,7 @@ def _snapshot_names(
             for child in children.require()
             if child.identity.kind == "file"
             and child.identity.link_count == 1
-            and child.relative_path.endswith(suffix)
-            and VERSION_RE.match(child.relative_path[: -len(suffix)])
+            and _is_snapshot_name(child.relative_path, suffix)
         ),
         reverse=True,
     )
@@ -443,10 +447,50 @@ def read_kept(
                     return None
 
 
+def _prune_in_store(root: Path, stem: str, writer: Any) -> None:
+    """Delete the snapshots beyond `HISTORY_KEEP` from the store, listed from the store.
+
+    A snapshot of a store-mode vault is a stored page, and its file is only a projection that may
+    not exist yet, so the disk listing would miss it and an unlink would leave the page behind.
+    """
+    from .vault_store import batch, read, write
+
+    relative = history_dir(root, stem).relative_to(root).as_posix()
+    try:
+        with read.snapshot(root) as view:
+            names = sorted(
+                (
+                    meta.path
+                    for meta in view.pages(f"{relative}/")
+                    # One file level, as the disk listing sees the directory's children.
+                    if "/" not in meta.path[len(relative) + 1 :]
+                    and _is_snapshot_name(meta.path[len(relative) + 1 :])
+                ),
+                reverse=True,
+            )
+        stale = names[HISTORY_KEEP:]
+        if stale:
+            batch.commit_batch(
+                writer,
+                [],
+                vault_root=root,
+                lifecycle=batch.Lifecycle(deletes=tuple(write.PageDelete(rel) for rel in stale)),
+            )
+    except Exception:  # noqa: BLE001 - a prune never fails the save that triggered it
+        # The commit rolled back whole; the prune is best effort and a later save runs it again.
+        log.debug("registry history snapshots not pruned: %s", stem, exc_info=True)
+
+
 def _prune(vault_root: Path, stem: str) -> None:
     """Keep the newest `HISTORY_KEEP`. Best effort: a snapshot that cannot be
     removed now is removed by a later save."""
     root = Path(vault_root)
+    from .vault_store import availability
+
+    writer = availability.page_writer(root)
+    if writer is not None:
+        _prune_in_store(root, stem, writer)
+        return
     acquired = held_fs.acquire(root)
     if not acquired.ok:
         return
