@@ -42,7 +42,7 @@ Provider behaviour in this document marked † is not yet confirmed on the provi
 
 ### D1. Substrate signs a deletion grant
 
-When Substrate writes `desired_state = 'deleted'` for a cell, it signs a deletion grant with its grant key. It stores the grant in a new column, `deletion_grant`, of `exomem_cloud_cells`. The database grants `cellctl`'s role read access to that column and no write access. Substrate's existing grant signer returns nothing while the grant key is absent, so nothing purges before the key exists.
+When Substrate writes `desired_state = 'deleted'` for a cell, it signs a deletion grant with its grant key. The grant key is a dedicated Ed25519 key, `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`, separate from the key that signs operation grants. It stores the grant in a new column, `deletion_grant`, of `exomem_cloud_cells`. The database grants `cellctl`'s role read access to that column and no write access. Substrate's grant signer returns nothing while the grant key is absent, so nothing purges before the key exists.
 
 `contain-cloud-controller-compromise` D9 calls this object a signed deletion record. This change calls it the deletion grant, because `make-cloud-cells-operator-resistant` already uses "deletion record" for the record that states `keys_expire_at`.
 
@@ -244,7 +244,7 @@ This path ends when the last such cell migrates (`contain-cloud-controller-compr
 ## Rollout
 
 1. Run task 1 on a disposable bucket, and record each result in this document.
-2. Confirm that Substrate's grant key is live and the media bucket's lifecycle rule is applied (`collect-released-media` rollout step 5).
+2. Confirm that Substrate's grant key (`EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`) is live and the media bucket's lifecycle rule is applied (`collect-released-media` rollout step 5).
 3. Apply the two Terraform keys from a saved plan.
 4. After its owner agrees, update `KEY_WATCHER_PINNED_SET` by read-modify-write of its live value.
 5. Add the watcher's backup list key and the endpoint address to the watcher workflow's secrets.
@@ -265,7 +265,7 @@ Expected result: the operator receives each alert of the rehearsal cell, and bot
 - **Skew margin.** Proposed one hour. The watcher's pinned set holds it. It covers clock skew between an executor and the provider, and the requests in flight when a cell stops.
 - **Purge key validity.** Proposed one hour. It must cover one hide pass of the largest cell, and a rerun replaces an expired key.
 - **Sandbox authority for task 1.** The operator authorizes the disposable bucket and its sandbox credentials.
-- **Substrate's grant key.** Whether it is live (`contain-cloud-controller-compromise` task 3.3). Until it is, nothing purges, and the manual path stays.
+- **Substrate's grant key.** Whether `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY` is live. It is not the operation-grant key of `contain-cloud-controller-compromise` task 3.3. Until it is, nothing purges, and the manual path stays.
 - **Cell counts.** The number of live cells with data in the legacy backup bucket, and the number of deleted cells that await cleanup.
 - **Lock extender.** Whether it is live (`lock-cloud-backups-against-deletion` task 2.3). The version bound assumes that locks end at most R plus 1 days after a hide.
 - **The pinned set.** The read-modify-write of `KEY_WATCHER_PINNED_SET` for the edge list key, the watcher's backup list key, the purge shape and the deletion watch. `contain-cloud-controller-compromise` owns the watcher's pinned set, so its owner agrees first.

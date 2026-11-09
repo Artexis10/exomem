@@ -126,7 +126,7 @@ Do this once. Agree each live change with its owner first, as the rollout of `au
 
 1. Pin the deletion watch, as "Pin the deletion watch" in [Cloud key custody](cloud-key-custody.md) says.
 2. If the platform has the media edge, create its list-key Secret, as [Cloud media edge](cloud-media-edge.md) step 7 of "Create the Secrets" says.
-3. Set `cellDeletion.grantPublicKeys` in the private values file to a list with Substrate's grant public key, in PEM.
+3. Set `cellDeletion.grantPublicKeys` in the private values file to a list with the public half of Substrate's `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`, in PEM. Derive it with `openssl pkey -pubout`. Do not use the operation-grant key.
 4. Keep `cellDeletion.holdCells` empty.
 5. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
 6. If the platform has the media edge, read its log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge | grep "purge pass is off"`
