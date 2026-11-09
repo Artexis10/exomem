@@ -82,7 +82,7 @@ VAULT_STORE = "vault_store"  # in store mode, the store's own page, which still 
 # The copies whose path is a vault path; the others name a file outside the vault.
 _VAULT_COPIES = (MEDIA_STORE, POOL_BLOB, STORED_ORIGINAL, VAULT_STORE)
 
-# The readiness block's states: a count after a pass, none before one, or none because it is off.
+# The readiness block's states: a count after a recent pass, none before one or after a stale one, or none when off.
 SIGNAL_MEASURED = "measured"
 SIGNAL_UNKNOWN = "unknown"
 SIGNAL_OFF = "off"
