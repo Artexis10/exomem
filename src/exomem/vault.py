@@ -291,7 +291,10 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_Adoption",
     }
 )
-VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+# Runtime names a scan skips at any depth: batch workspaces, and the entries a
+# held-filesystem capability probe briefly creates (symlink aliases included)
+# in a root it tests, which can lie inside the Knowledge Base.
+VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-", held_fs.PROBE_ENTRY_PREFIX)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
 _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"

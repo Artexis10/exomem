@@ -368,6 +368,13 @@ def platform_support() -> PlatformSupport:
     )
 
 
+#: The name prefix of every entry a backend's capability probe creates in the
+#: root it tests. The probe briefly leaves symlink aliases there, and a root can
+#: lie inside the Knowledge Base, so vault scans skip these names
+#: (`vault.VAULT_SCAN_SKIP_DIR_PREFIXES`) rather than refuse them as aliases.
+PROBE_ENTRY_PREFIX = ".exomem-held-probe-"
+
+
 def probe(root: Path) -> Capabilities:
     """Probe one stable root once per process; no failed probe gets a fallback."""
     root = Path(root)
