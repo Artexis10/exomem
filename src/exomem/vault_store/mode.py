@@ -60,7 +60,10 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
     """The manifest's identity and change marks, or None when it is absent: one stat, no read.
 
     An atomic replace changes the inode and an in-place rewrite changes ``st_ctime_ns``, which no caller can
-    set back, so an unchanged signature means the same bytes.
+    set back, so an unchanged signature means the same bytes. On Windows ``st_ctime_ns`` is the
+    creation time, so only the file ID covers a rewrite there; Exomem writes the manifest by
+    ``os.replace``, which gives it a new ID, and only a hand edit that restores the mtime would go
+    unseen.
     """
     try:
         found = manifest.stat()
@@ -105,17 +108,63 @@ def _stored_mode(vault_root: Path) -> str | None:
     return None if row is None else row[0]
 
 
+#: The projector acts on a queued intent only while no hold sits on its path or on a move's old
+#: path. The projector's listing and the status age both read this rule, over the queue as ``q``.
+UNHELD_INTENT = (
+    "NOT EXISTS (SELECT 1 FROM store_held h WHERE h.path = q.path OR h.path = q.from_path)"
+)
+#: What ``status`` reports for a record it cannot read: never a zero, which would pass for empty.
+UNKNOWN = "unknown"
+#: The report's own field names for a store-mode vault: the figures that it adds to mode and gate.
+STORE_FIGURES = (
+    "revision",
+    "release",
+    "changed_at",
+    "pages",
+    "binaries",
+    "queued_projections",
+    "oldest_projection_age_seconds",
+    "held",
+    "held_by_kind",
+    "audit_rows",
+)
+
+
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
     A file-mode vault reports only the mode and the release gate. A crash window reports its own state. A
-    store-mode vault adds the figures that an operator checks before a rollback: stored pages and binaries,
-    queued projections and held items.
+    store-mode vault adds the figures that an operator checks before a rollback: stored pages and
+    binaries, queued projections, the age in seconds of the oldest queued projection that no hold
+    sits on (None when none waits, "unknown" when the clock says it is in the future), and held
+    items in total and by kind. A projection that the projector deferred, such as one on a linked
+    file, stays queued and keeps ageing. A store that cannot be read gives "unknown", for the mode
+    or for each figure, with the error's name in ``unreadable``: an unreadable store never reports
+    zeros. A damaged state manifest raises instead, so that the command refuses and names it.
     """
     report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
-    current = state(vault_root)
+    # A damaged manifest raises here, so the command refuses and names it.
+    if not state_migration.vault_store_recorded(vault_root):
+        return {**report, "mode": FILE_MODE}
+    try:
+        current = state(vault_root)
+    except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never a mode
+        return {**report, "mode": UNKNOWN, "unreadable": _reason(error)}
     if current != STORE_MODE:
         return {**report, "mode": current}
+    try:
+        figures = _store_figures(vault_root)
+    except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never zeros
+        figures = {**dict.fromkeys(STORE_FIGURES, UNKNOWN), "unreadable": _reason(error)}
+    return {**report, "mode": STORE_MODE, **figures}
+
+
+def _reason(error: Exception) -> str:
+    """The error's own code, or its type: a name that never carries a path or a page's content."""
+    return str(getattr(error, "code", type(error).__name__))
+
+
+def _store_figures(vault_root: Path) -> dict:
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
     )
@@ -127,15 +176,27 @@ def status(vault_root: Path) -> dict:
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
         }
+        # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
+        # The age counts what the projector can still act on: a held path waits for a person. An
+        # intent that the projector deferred is counted, so that it never hides as a quiet queue.
+        (age,) = reader.execute(
+            "SELECT CAST(strftime('%s', 'now') AS INTEGER) "
+            "- CAST(strftime('%s', MIN(queued_at)) AS INTEGER) "
+            f"FROM store_projection_queue q WHERE {UNHELD_INTENT}"
+        ).fetchone()
+        held_by_kind = dict(
+            reader.execute("SELECT kind, COUNT(*) FROM store_held GROUP BY kind").fetchall()
+        )
     return {
-        **report,
-        "mode": STORE_MODE,
         "revision": revision,
         "release": release,
         "changed_at": changed_at,
         "pages": counts["store_pages"],
         "binaries": counts["store_binaries"],
         "queued_projections": counts["store_projection_queue"],
+        # A negative age is a clock that went backwards: it is not known, and it is never a zero.
+        "oldest_projection_age_seconds": UNKNOWN if age is not None and age < 0 else age,
         "held": counts["store_held"],
+        "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
     }
