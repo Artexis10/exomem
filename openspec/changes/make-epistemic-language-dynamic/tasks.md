@@ -32,9 +32,10 @@
 ## 5. Dimensions
 
 - [x] 5.1 Add the dimension registry with the 12 shipped dimensions and their members.
-- [ ] 5.2 Add filtering in retrieval, grouping in the context compiler, and queues in reviews and reports, for any dimension. Slice 5a delivered the `unit.dimension` retrieval filter and the per-dimension unit counts in the category report (`schema_memory` `infer`, subject `categories`). Grouping in the context compiler and the review queues are left for 5b.
+- [ ] 5.2 Add filtering in retrieval, grouping in the context compiler, and queues in reviews and reports, for any dimension. Slice 5a delivered the `unit.dimension` retrieval filter at unit grain, and the per-dimension unit counts in the category report (`schema_memory` `infer`, subject `categories`). The offline reader evaluates every dimension on every unit. The served reader rewrites a dimension that the index answers, and checks every other dimension on its hits after the limit, so such a search can return fewer hits than its limit; task 5.5 removes that gap. Grouping in the context compiler and the review queues are left for 5b.
 - [ ] 5.3 Add the closed display-behaviour set, and prove that no display behaviour hides a unit or changes its standing. Declare the `closable` kind trait with `flag_open`, its only reader. Slice 5a delivered the closed set (`lead_with_current`, `show_origin`, `flag_open`, `order_in_time`) as registry validation only: an undeclared value is refused by name. The effects, the proof that none hides a unit, and `closable` with `flag_open` are left for 5b.
 - [ ] 5.4 Check on real models that the display annotations help an agent rather than add noise.
+- [ ] 5.5 Answer `unit.dimension` from the index on the managed runtime, so that a filtered search fills its limit. Index each unit's governed row keys as a filter field. Join typed edges when the single-store edge table lands (task 1.3).
 
 ## 6. Language and teaching
 
