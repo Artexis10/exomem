@@ -344,6 +344,7 @@ LibRaw memory exhaustion is reported as memory exhaustion, so the media worker s
 The Cloud image gate includes a synthetic portrait DNG with known text.
 Distributed packages retain the upstream notices under `exomem/_licenses/rawpy-0.28.0/`.
 The capture time comes from LibRaw's reading of the raw file's EXIF.
+
 ## Notes for a new engine
 
 - The media child sets `OPENBLAS_NUM_THREADS=1` under the brakes. Without it, numpy's OpenBLAS reserves data segment for one thread per host CPU (about 40 MiB each), so the child's VmData follows the node instead of the engine. On a 20-CPU host, the child's baseline VmData was 855 MiB instead of 97 MiB.

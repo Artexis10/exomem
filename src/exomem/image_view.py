@@ -339,7 +339,8 @@ def show(
             raise ImageViewError(
                 "IMAGE_TOO_LARGE", _download_instead(path, smaller_helps=error.smaller_helps)
             ) from error
-        except Image.DecompressionBombError as error:
+        except (Image.DecompressionBombError, MemoryError) as error:
+            # A decoder out of memory names the same remedy as a declared size over the ceiling.
             raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path)) from error
         except (OSError, ValueError) as error:
             raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error

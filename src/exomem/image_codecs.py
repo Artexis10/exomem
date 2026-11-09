@@ -65,7 +65,7 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
         if sys.platform == "darwin" and platform.machine() == "x86_64":
             raise ImportError(
                 "Camera raw decoding needs rawpy, which publishes no build for Intel macOS; "
-                "download the original instead"
+                "download the original with transfer_artifact operation=download"
             ) from error
         raise ImportError("Camera raw decoding requires rawpy; install exomem[image-codecs]") from error
     # LibRaw chooses its parser from the bytes, and also decodes headerless sensor dumps by their
@@ -88,7 +88,10 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
                     f"camera raw of {int(cost)} decoded pixels exceeds the limit of {limit} pixels"
                 )
             rgb = raw.postprocess(use_camera_wb=True)
-            taken = raw.other.timestamp
+            try:
+                taken = raw.other.timestamp
+            except (ValueError, OverflowError, OSError):
+                taken = None  # a malformed EXIF date loses only the date, as it does for a JPEG
     except rawpy.LibRawTooBigError as error:
         raise Image.DecompressionBombError("camera raw is too large to decode") from error
     except memory as error:

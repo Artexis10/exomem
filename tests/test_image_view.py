@@ -211,6 +211,36 @@ def test_a_monochrome_camera_raw_is_shown_in_greyscale(served):
     assert shown["original_pixels"] == [64, 64]
 
 
+def test_a_camera_raw_with_a_malformed_date_is_shown_without_one(served):
+    """Defect: a bad EXIF date in a raw throws away a decode that succeeded, where a JPEG loses only the date."""
+    mcp, client = served
+    dated = _dng(64, 64, {262: 34892, 33421: None, 33422: None, 306: "99999999:1:1 0:0:0"},
+                 pixels=b"\x00\x08" * 64 * 64 + bytes(65536))
+    path = _upload(client, "PXL_0006.dng", dated, "image/x-adobe-dng")
+
+    [shown] = _call(mcp, {"kind": "image", "path": path}).structured_content["images"]
+
+    assert shown["taken_at"] is None
+
+
+def test_a_raw_the_decoder_runs_out_of_memory_on_names_the_download(served, monkeypatch):
+    """Defect: decoder memory exhaustion surfaces as an unhandled error that names nothing to change."""
+    from exomem import image_codecs
+
+    mcp, client = served
+    path = _upload(client, "PXL_0007.dng", (SAMPLES / "ocr-eng.dng").read_bytes(), "image/x-adobe-dng")
+
+    def exhausted(*_args, **_kwargs):
+        raise MemoryError("camera raw decoding ran out of memory")
+
+    monkeypatch.setattr(image_codecs, "_open_raw", exhausted)
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_TOO_LARGE" in refused
+    assert "transfer_artifact operation=download" in refused
+
+
 def test_a_damaged_camera_raw_is_named_undecodable(served):
     mcp, client = served
     path = _upload(client, "PXL_0003.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
