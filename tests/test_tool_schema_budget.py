@@ -81,12 +81,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
 # The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
 # size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
+# The `archive` field on preserve_artifacts keeps a held zip as members that a collection import
+# reads: preserve_artifacts measures 2,405 B and its ceiling rounds to 2,450 B. The complete local
+# wire measures 170,945 B, so the total stays within budget.
 # The `file` kind of import_memory adds one variant (kind, path, collection, continuation) and the lead
 # sentence that names it: import_memory measures 6,653 B, 9% over its old size, and its ceiling rounds to
 # 6,700 B. read_import names `file` as the next step and measures 3,119 B, so its ceiling rounds to 3,150 B.
 # The kind replaces a six-call import loop.
-# With every change above, the complete local wire measures 171,447 B, so the budget is 171,450 B.
-TOTAL_BUDGET = 171_450
+# With every change above, the complete local wire measures 171,567 B, so the budget is 171,600 B.
+TOTAL_BUDGET = 171_600
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -122,7 +125,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "observe_memory": 5050,
     "plan_memory": 2700,
     "prepare_note": 5200,
-    "preserve_artifacts": 2300,
+    "preserve_artifacts": 2450,
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,

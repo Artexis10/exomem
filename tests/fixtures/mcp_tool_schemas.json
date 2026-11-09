@@ -5119,6 +5119,11 @@
           "description": "Keep originals owner-only until whole-artifact release.",
           "type": "boolean"
         },
+        "archive": {
+          "const": "members",
+          "type": "string",
+          "description": "Keep a held zip as members; path is an import source_ref."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Success detail: compact (default), full, or legacy.",

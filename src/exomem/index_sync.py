@@ -891,6 +891,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         or report.reconcile_required
     ):
         return False
+    if not report.eligible_paths and not report.paths_truncated and not report.components:
+        # Every written path is one no index reads (`_Schema/`, `_trash/`, ...): nothing is owed.
+        return True
     if (
         len(report.components) != len(_FULL_UPSERT_COMPONENTS)
         or {component.component for component in report.components} != _FULL_UPSERT_COMPONENTS
@@ -1401,12 +1404,12 @@ def requeue_quarantined_graph_paths(vault_root: Path) -> int:
 
 def _quarantine_change_backoff(attempts: int) -> float:
     """Seconds after its last failure before a changed quarantined page is retried."""
-    from . import epistemic_graph
+    from . import backoff, epistemic_graph
 
-    excess = max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS)
-    return min(
+    return backoff.capped_doubling(
+        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS,
         epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
-        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS * 2**excess,
+        attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS,
     )
 
 
