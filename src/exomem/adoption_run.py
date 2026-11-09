@@ -1839,6 +1839,8 @@ def _applied(planned: dict) -> dict:
     }
     if planned.get("artifact_path"):
         outcome["artifact_path"] = planned["artifact_path"]
+    if planned.get("stored_own_copy"):
+        outcome["stored_own_copy"] = planned["stored_own_copy"]
     return outcome
 
 
@@ -1915,24 +1917,30 @@ def _settle_on_stored(
 ) -> dict | None:
     """Settle an item whose exact bytes the vault already stores: name that Source, write nothing else.
 
-    The duplicate lookup repeats here, under the apply's mutation guard, so a Source that another run or door
-    filed since the plan decides, and a copy the plan named that has gone does not. `holder` is the Source the
-    plan froze for the item; it is the one named while it still holds the bytes. The Source gains this
-    item's path as one mapping, through a write that checks the page's content hash and touches no other
-    field. The outcome is `already-applied`, with `mapped: true` when this call recorded the mapping, and
-    `mapping_not_recorded` (the reason) when the Source is raw-protected and so is never rewritten. A
-    failed outcome means the mapping could not be recorded. None means no usable copy holds the bytes:
-    the vault has none, the index cannot answer, or the caller cannot write the Source that holds them.
+    `holder` is the Source the plan named for the item's bytes. It is read again under the apply's mutation
+    guard and named while its stored bytes still hash to the item's, with no help from the duplicate index,
+    so a plan that named its holder applies when the index cannot answer. When it names none, or the one it
+    named has gone, the duplicate lookup repeats here instead, so a Source that another run or door filed
+    since the plan decides. The Source gains this item's path as one mapping, through a write that checks the
+    page's content hash and touches no other field. The outcome is `already-applied`, with `mapped: true`
+    when this call recorded the mapping, and `mapping_not_recorded` (the reason) when the Source is
+    raw-protected and so is never rewritten. A failed outcome means the mapping could not be recorded. None
+    means no usable copy holds the bytes: the vault has none, the index cannot answer, or the caller cannot
+    write the Source that holds them. The caller then stores the item's own bytes.
     """
-    lookup = duplicates.find_duplicate(
-        root, sha256=planned["original_sha256"], lane=duplicates.SOURCES,
-        protected=raw_protection.marked(planned["target_path"]), keeps_original=planned["form"] == "artifact",
-        prefer=(lambda hit: hit.path == holder) if holder else None,
+    sha256, protected = planned["original_sha256"], raw_protection.marked(planned["target_path"])
+    keeps_original = planned["form"] == "artifact"
+    hit = None if holder is None else duplicates.named_duplicate(
+        root, holder, sha256=sha256, lane=duplicates.SOURCES, protected=protected, keeps_original=keeps_original,
     )
-    if not lookup.available:
-        stats["duplicate_check_unavailable"] += 1
-        return None
-    hit = lookup.hit
+    if hit is None:
+        lookup = duplicates.find_duplicate(
+            root, sha256=sha256, lane=duplicates.SOURCES, protected=protected, keeps_original=keeps_original
+        )
+        if not lookup.available:
+            stats["duplicate_check_unavailable"] += 1
+            return None
+        hit = lookup.hit
     if hit is None or access.writable_reason(root, hit.path) is not None:
         return None
     if planned["form"] == "artifact" and not _original_unchanged(root, planned):
@@ -1981,6 +1989,54 @@ def _record_stored(
         reads.index.append(
             adoption_plan.earlier_import_of(held, collection=label, captured=run["plan"]["date"])
         )
+
+
+def _free_destinations(root: Path, plan: dict) -> adoption_plan.Destinations:
+    """Destinations that know the paths the plan froze for its writes, so a new one never takes a later item's."""
+    destinations = adoption_plan.Destinations(root)
+    for item in plan["items"]:
+        if item["action"] == "copy-as-source":
+            destinations.reserve(item["target_path"])
+            if item.get("artifact_path"):
+                destinations.reserve(item["artifact_path"])
+    return destinations
+
+
+def _own_copy(planned: dict, page: str, artifact: str | None) -> dict:
+    """`planned` as an ordinary item that stores its own bytes at `page`, because no copy could stand for it."""
+    own = {key: value for key, value in planned.items() if key not in ("duplicate_of", "mapping")}
+    own.update(
+        action="copy-as-source", target_path=page, target_ref=context_refs.source_ref(page), artifact_path=artifact,
+        stored_own_copy="the Source that the plan named for these bytes was missing or changed at apply time, "
+        "so they were stored as a Source of their own",
+    )
+    return own
+
+
+def _store_own_copy(
+    root: Path, planned: dict, destinations: adoption_plan.Destinations, *, date_iso: str
+) -> tuple[dict | None, dict | None]:
+    """`planned` as an ordinary item with a destination allocated now, or the failed outcome when it has none.
+
+    The fail-open answer when the Source that a plan named for an item's bytes cannot hold them: the item
+    files as its own Source, in the folder its own classification gives, never as a failure that a re-plan
+    would not cure. A taxonomy that no longer accepts the classification, or a folder the caller cannot write,
+    still fails the item.
+    """
+    classification = planned.get("classification")
+    folder = adoption_plan.folder_for(
+        root, classification, source_taxonomy.load_taxonomy(root) if classification else None
+    )
+    if isinstance(folder, str):
+        return None, _failed(folder, "the Source taxonomy no longer accepts this rule's kind or domain")
+    page, artifact, slug_warning = adoption_plan.allocate_source(planned, folder, destinations, date_iso=date_iso)
+    reason = access.writable_reason(root, page)
+    if reason is not None:
+        return None, _failed("WRITE_REFUSED", reason)
+    own = _own_copy(planned, page, artifact)
+    if slug_warning:
+        own["slug_warning"] = slug_warning
+    return own, None
 
 
 class _ApplyPacer:
@@ -2403,7 +2459,8 @@ def _apply_chunk(
     label = (run.get("collection") or {}).get("label")
     settled: list[dict] = []
     # Items that repeat another item of the plan wait for the Source of the item they repeat.
-    deferred: list[dict] = []
+    deferred: list[tuple[dict, str | None]] = []
+    destinations: adoption_plan.Destinations | None = None
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
     stage = reads.filing_stage(root, run)
@@ -2413,6 +2470,9 @@ def _apply_chunk(
     for planned in chunk:
         path = planned["original_path"]
         frozen = (publication.get("items") or {}).get(path) if publication else None
+        if frozen and planned["action"] != "copy-as-source":
+            # Only an item that stored its own bytes in place of a named Source is ever frozen under another action.
+            planned = _own_copy(planned, frozen["target_path"], frozen["artifact_path"])
         by_rename = import_rename.renamable(stage, planned)
         text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
         moved = None
@@ -2499,7 +2559,7 @@ def _apply_chunk(
             settled.append(planned)
             continue
         if planned["action"] == "duplicate-of":
-            deferred.append(planned)
+            deferred.append((planned, text))
             continue
         # An item that was renamed into the vault already sits at its frozen artifact path: its Source completes the filing.
         stored = None if moved is not None else _settle_on_stored(
@@ -2510,10 +2570,17 @@ def _apply_chunk(
             _record_stored(root, run, reads, planned, stored, settled=settled)
             continue
         if planned["action"] == "already-imported":
-            outcomes[path] = _failed(
-                "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
-            )
-            continue
+            if moved is not None:  # its staged file already sits at the artifact path of the Source that the plan named
+                outcomes[path] = _failed(
+                    "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
+                )
+                continue
+            # The Source that the plan named for these bytes has gone or changed: this item stores its own.
+            destinations = destinations or _free_destinations(root, plan)
+            planned, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
+            if failure is not None:
+                outcomes[path] = failure
+                continue
         occupied = [
             target for target in (planned["target_path"], planned.get("artifact_path"))
             if target and os.path.lexists(root / target)
@@ -2530,48 +2597,27 @@ def _apply_chunk(
             item.artifact.placed = True
             placed[path] = moved
         survivors.append((planned, item))
-    reconciling = False
-    if survivors:
-        publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date)
-    if survivors and stage is not None:
-        survivors = _file_by_rename(
-            root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
-        )
-    landed: list[dict] = []
-    if survivors:
-        landed = _commit_chunk(
-            root, store, run, survivors,
-            run_date=dt.date.fromisoformat(publication["date"]) if publication else run_date,
-            label=label, reads=reads, placed=placed, publication=publication, reconciling=reconciling,
-        )
-        for planned in landed:
-            _release_hold(root, planned)
-        for planned in landed:
-            if _source_status(outcomes[planned["original_path"]]) == "applied":
-                reads.pages.append(planned["target_path"])
-                if reads.index is not None:
-                    reads.index.append(
-                        adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
-                    )
-        # The lookups below, and every later chunk's, must find the Sources this chunk just filed.
-        lexstore.record_payload_commit(
-            root, [
-                planned["target_path"] for planned in landed
-                if _source_status(outcomes[planned["original_path"]]) == "applied"
-            ],
-        )
-    for planned in deferred:
+    landed = _file_survivors(
+        root, store, run, survivors, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads
+    )
+    own_copies: list[tuple[dict, adopt_module.ImportItem]] = []
+    for planned, text in deferred:
         repeated = outcomes.get(planned["duplicate_of"]) or {}
-        stored = None
-        if repeated.get("status") in (*_APPLIED_STATUSES, _SOURCE_ONLY):
-            stored = _settle_on_stored(
-                root, planned, label=label, stats=stats, holder=repeated["target_path"]
-            )
-        if stored is None:
-            stored = _failed(
-                "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
-            )
-        _record_stored(root, run, reads, planned, stored, settled=settled)
+        holder = repeated["target_path"] if repeated.get("status") in (*_APPLIED_STATUSES, _SOURCE_ONLY) else None
+        stored = _settle_on_stored(root, planned, label=label, stats=stats, holder=holder)
+        if stored is not None:
+            _record_stored(root, run, reads, planned, stored, settled=settled)
+            continue
+        # The Source that the plan named for these bytes did not get written or no longer holds them.
+        destinations = destinations or _free_destinations(root, plan)
+        own, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
+        if failure is not None:
+            outcomes[planned["original_path"]] = failure
+            continue
+        own_copies.append((own, adopt_module.import_item(root, own, text=text, date_iso=plan["date"], collection=label)))
+    landed += _file_survivors(
+        root, store, run, own_copies, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads
+    )
     landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
         outcome = outcomes[planned["original_path"]]
@@ -2600,6 +2646,49 @@ def _apply_chunk(
         label=label, notes=reads.notes, pacer=pacer, stats=stats, written=written,
     )
     return extractions
+
+
+def _file_survivors(
+    root: Path, store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
+    stage: import_stage.Stage | None, placed: dict[str, import_rename.Placed], run_date: dt.date, ceiling: int,
+    reads: _CallReads,
+) -> list[dict]:
+    """File `survivors` in one batch: freeze their post-images, rename the staged binaries, then commit.
+
+    Returns the items now on disk. Their Sources are then findable by the duplicate lookups of every later batch.
+    """
+    if not survivors:
+        return []
+    outcomes = run["outcomes"]
+    label = (run.get("collection") or {}).get("label")
+    publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date)
+    if stage is not None:
+        survivors = _file_by_rename(
+            root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
+        )
+    if not survivors:
+        return []
+    landed = _commit_chunk(
+        root, store, run, survivors,
+        run_date=dt.date.fromisoformat(publication["date"]) if publication else run_date,
+        label=label, reads=reads, placed=placed, publication=publication, reconciling=reconciling,
+    )
+    for planned in landed:
+        _release_hold(root, planned)
+    for planned in landed:
+        if _source_status(outcomes[planned["original_path"]]) == "applied":
+            reads.pages.append(planned["target_path"])
+            if reads.index is not None:
+                reads.index.append(
+                    adoption_plan.earlier_import_of(planned, collection=label, captured=run["plan"]["date"])
+                )
+    lexstore.record_payload_commit(
+        root, [
+            planned["target_path"] for planned in landed
+            if _source_status(outcomes[planned["original_path"]]) == "applied"
+        ],
+    )
+    return landed
 
 
 def _file_by_rename(
