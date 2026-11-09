@@ -336,13 +336,16 @@ def test_an_owner_on_a_connection_the_connector_boundary_limits_hears_why_its_co
     try:
         receipts = [call(root, "plan_memory", action="add", collection=PLANNING,
                          item={"title": title, "kind": "outcome", "status": "planned",
-                               "commitment": "committed", "horizon": "quarter"}, why="state the plan")
+                               "commitment": "committed", "horizon": "quarter"}, why="state the plan",
+                         response_detail="full")
                     for title in ("Visible plan", "Withheld plan")]
     finally:
         service.stop()
     # The host withholds one plan and the whole Publications collection from every connection it does not
     # map, the owner's local client included.
-    withheld = [receipts[1]["affected_paths"][0].removeprefix("Knowledge Base/"), "Records/Publications/**"]
+    # The written path is operational detail, so it is read from the full receipt.
+    written = receipts[1]["diagnostics"]["operational"]["affected_paths"][0]
+    withheld = [written.removeprefix("Knowledge Base/"), "Records/Publications/**"]
     scope = root / "Knowledge Base/_Governance/scopes/withheld.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(f"governance_version: 1\nid: {SCOPE_ID}\nname: Withheld\npaths: {json.dumps(withheld)}\n")
