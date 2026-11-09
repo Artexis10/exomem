@@ -858,6 +858,10 @@ async def _delete(fleet: Fleet, cell_id: str, at: datetime) -> None:
     fleet.cluster.observations[cell_id] = ClusterObservation()
 
 
+def _alerting(fleet: Fleet) -> None:
+    fleet.config = dataclasses.replace(fleet.config, alert_delivery_secret=("ns", "alerts", "url"))
+
+
 async def _media_store_of(fleet: Fleet, cell_id: str) -> dict:
     return json.loads((await fleet.rows())[cell_id].custody_observation)[reconcile.MEDIA_STORE_RECORD]
 
