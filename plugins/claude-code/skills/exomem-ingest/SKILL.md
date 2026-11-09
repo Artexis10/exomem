@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: e8ccdee8de0a2e8771c103c4876d8cb17ad4d432ce4717de03fce51243f3926b
+  skill_contract: 36fa20dd6ad21940bb3974b36e63f704fb38fcd9c552be41f53640adb2b514a3
   version: "0.1.0"
 ---
 
@@ -81,12 +81,16 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    For a whole folder or collection of existing files, use `import_memory` instead of
    capturing one by one. A folder outside the vault is staged first: run
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then set `operation.kind` to `start`
-   with a `collection` name, `select` folders (with a `source_kind` and `domain` per folder rule where known),
-   `plan`, `apply`, then `finish`. Repeat `plan` or `apply` with the returned `continuation`
-   until none returns, and report the `coverage` from `finish`, including what was refused,
-   what is still pending and how many notes were created. For a large folder, a full disk
-   or a staged copy to discard, follow [importing](references/importing.md).
+   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then set `operation.kind` to `file`
+   with the staged `path` and a `collection` name where the person gives one. Repeat the same
+   call with the returned `continuation` until `filing` is not `working`. Report the whole
+   import from `summary` and the `progress` counts, including the failed files, then the
+   residual in `filed.residual` and what the `person` list asks. `filed.last_finished_page`
+   describes one page only, never the import. A folder with own-note rules, or an older server that
+   refuses `file`, uses the step path: `start`, `select` folders (with a `source_kind` and
+   `domain` per folder rule where known), `plan`, `apply`, then `finish`, repeating each with
+   its `continuation`. For a large folder, a full disk or a staged copy to discard, follow
+   [importing](references/importing.md).
    A folder of the person's own notes can also become notes. Ask which folders hold them;
    never guess from file names. Give that folder the rule
    `{path, adopt_as: "note", note_type, project?, domain?}`, with a `note_type` that

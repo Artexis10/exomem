@@ -6485,6 +6485,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "select": "mutation",
         "plan": "mutation",
         "apply": "mutation",
+        "file": "mutation",
         "cancel": "mutation",
         "finish": "mutation",
         "work-item": "structure",
@@ -7836,12 +7837,15 @@ def owner_only_aggregate(
 
         operation = writer._operation
         try:
-            for entry in reserved_paths.list_generic_tree(vault_root, ".", checkpoint=checkpoint):
+            # The disk's census: a collection projects files, and a stored page is no collection's.
+            for entry in reserved_paths.list_generic_tree(
+                vault_root, ".", checkpoint=checkpoint, stored=False
+            ):
                 if checkpoint is not None:
                     checkpoint()
                 path = authority._knowledge_base_spelling(vault_root, entry.relative_path)
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
-                if entry.identity.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
+                if entry.kind != "file" or not path.startswith(f"{kb_dirname()}/"):
                     continue
                 canonical = operation.projection_decision(path)
                 if canonical is None:

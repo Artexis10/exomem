@@ -212,8 +212,7 @@ def _advice(selection: import_selection.Selection, free_after: int, progress: Pr
 
     if len(selection.kept) > adoption_run.MAX_CANDIDATES_DEFAULT:
         progress.say(f"Note: adoption lists up to {adoption_run.MAX_CANDIDATES_DEFAULT:,} files per page; "
-                     f"this folder has {len(selection.kept):,}. Each page reply carries next_after: "
-                     "call start again with it until a reply has none.")
+                     f"this folder has {len(selection.kept):,}. The file call goes through the pages by itself.")
     ceiling = client_artifacts.adoption_ceiling()
     large = sum(1 for item in selection.kept if item.size > ceiling)
     if large:
@@ -520,9 +519,10 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
 
 def _closing_lines(result: dict) -> list[str]:
     staged = result["staged"]
-    start = f'adoption_studio start with path "{result["start_path"]}"'
-    if result["include_hidden"]:
-        start += " and include_hidden=true"
+    start = f'import_memory with operation kind "file" and path "{result["start_path"]}"'
+    # `file` scans as `start` does by default, so a hidden file that the person staged stays staged and is reported.
+    hidden = (' Hidden files stay staged: to file them, call import_memory with operation kind "start" and include_hidden=true on that path.'
+              if result["include_hidden"] else "")
     lines = [f"Staged {files_phrase(staged['files'])}, {human_bytes(staged['bytes'])}, in {result['staged_folder']}.",
              "This is a second copy of the folder on this disk. No Exomem command discards it: "
              f"after adoption finishes, delete {Path(result['staged_folder']).parent} to free the space."]
@@ -533,7 +533,7 @@ def _closing_lines(result: dict) -> list[str]:
         consume = ("Adoption removes each staged file once its copy in the Knowledge Base matches."
                    if result["stage_recorded"] else
                    "The vault's state folder is not set up yet, so adoption keeps every staged copy.")
-        return [*lines, consume, *note, f"Manifest: {result['manifest']}", f"Next: run {start}."]
+        return [*lines, consume, *note, f"Manifest: {result['manifest']}", f"Next: run {start}, and repeat it with its continuation until filing is done.{hidden}"]
     return [*lines, f"Manifest: {result['manifest']}",
             f"The import is not finished: {files_phrase(result['failed_while_copying'])} could not be copied. "
             f"Run the same command again to retry only those under import {result['import_id']}.",

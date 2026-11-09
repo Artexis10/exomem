@@ -58,7 +58,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | create_note | Direct inputs | remember |
 | edit_note | Direct inputs | edit_memory |
 | grant_session_access | grant | govern_memory |
-| import_memory | save-manifest, copy-as-sources, compile-selected, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adopt_vault, adoption_studio |
+| import_memory | save-manifest, copy-as-sources, compile-selected, file, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adopt_vault, adoption_studio |
 | manage_authorization_session | open, status, rotate, close | govern_memory |
 | prepare_note | observation, compile | observe_memory, compile_source |
 | preserve_artifacts | Direct inputs | preserve_artifacts |

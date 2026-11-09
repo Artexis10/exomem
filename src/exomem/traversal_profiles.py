@@ -210,7 +210,7 @@ def load_profiles(
         return ProfileRegistry(builtins, "none")
     path = profile_path(vault_root)
     try:
-        raw = path.read_bytes().decode("utf-8")
+        raw = vault.read_bytes_without_pinning(path, vault_root).decode("utf-8")
     except FileNotFoundError:
         return ProfileRegistry(builtins, "none")
     digest = _hash(raw)

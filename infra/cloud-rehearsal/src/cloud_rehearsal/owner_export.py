@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
-from cellctl.exports import job_name
+from cellctl.export_layout import legacy_job_name
 from cellctl.manifests import namespace_name
 
 from .infra import STAGING_BUCKET, docker_labels
@@ -138,7 +138,7 @@ async def run_export(ctx: Context, verifier_image: str, *, timeout_seconds: floa
         packed_row = await until(packed)
         await until(ready)
         jobs = ctx.kube_json("get", "jobs", "--namespace", namespace_name(cell_id))["items"]
-        if any(job["metadata"]["name"] == job_name(export_id) for job in jobs):
+        if any(job["metadata"]["name"] == legacy_job_name(export_id) for job in jobs):
             raise StepFailure("the completed export still has a Job")
         pods = ctx.kube_json(
             "get",
@@ -146,7 +146,7 @@ async def run_export(ctx: Context, verifier_image: str, *, timeout_seconds: floa
             "--namespace",
             namespace_name(cell_id),
             "--selector",
-            f"batch.kubernetes.io/job-name={job_name(export_id)}",
+            f"batch.kubernetes.io/job-name={legacy_job_name(export_id)}",
         )["items"]
         if pods:
             raise StepFailure("the completed export still has pods")
