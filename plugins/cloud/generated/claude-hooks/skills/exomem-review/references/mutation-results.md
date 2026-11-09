@@ -9,10 +9,14 @@ the version you read. A vault path, a KB-relative path and an `exomem://` ref ke
 
 A title that several pages share refuses with `AMBIGUOUS_REFERENCE`: `message` says how many
 pages carry it, and `candidates` lists at most 5 rows of `title`, `type`, `date` and `id`,
-newest first. Retry with `path` set to the `id` of the page you mean. An `id` in `expected_hash`
+newest first. Retry with `path` set to the `id` of the page you mean. Copies of one page share an
+`id`; then each row also carries its `path`, and the retry is `<path>`: set `path` to the `path`
+of the copy you mean. An `id` in `expected_hash`
 guards the edit against the version that id names; if the page changed since, the refusal is
 `STALE_EDIT` and carries the current `id` in its retry. The `id` of a write reply names the
-version that write left, so it guards your next edit of that page.
+version that write left, so it guards your next edit of that page, even when the reply is a
+replay. A source and a superseded page take no guarded edit, so their `id` names the version
+current when the reply was made.
 
 ## Mutation results and safe retries
 
