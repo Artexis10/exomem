@@ -30,6 +30,7 @@ from . import (
 from .cli_ops import OpError
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, new_id, normalize_id
+from .vault_store import targets as store_targets
 
 #: The fixed storage folder below the knowledge base that holds one review record per page; the write gate
 #: (`governance.policy.is_workflow_state_path`) reads it from here.
@@ -2099,6 +2100,15 @@ def cleanup_stale_lifecycle_prepared_batch(
     items = tuple(inspections)
     if not items:
         return LifecyclePreparedCleanupBatch((), ())
+    # Each slot was judged stale against a corpus that reconcile builds from the files, and a
+    # store-mode vault holds its pages in the store with files that trail it, so that judgement may
+    # name a live transition. Removing the file of a slot also leaves its stored page behind.
+    store_targets.refuse_unrouted(
+        root,
+        "lifecycle prepared cleanup",
+        "it judges a slot stale from the files, which trail the pages a store-mode vault holds",
+        files=tuple(item.prepared.reference for item in items),
+    )
     if len(items) > _LIFECYCLE_MAX_IDENTITIES:
         raise RelationReviewError(
             "LIFECYCLE_RECONCILE_LIMIT",

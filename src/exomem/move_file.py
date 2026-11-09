@@ -473,7 +473,7 @@ def _move_file_local(
     A caller's binding witness is checked before rename and batch publication.
     """
     # The semantic preflight below judges a move against the pages on disk, and a store-mode vault
-    # holds a page there only once its projector writes it; the store form of the move waits for that.
+    # holds a page there only once its projector writes it; the store move waits for that.
     store_targets.refuse_unrouted(
         vault_root,
         "move_file",

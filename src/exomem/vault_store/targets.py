@@ -1,4 +1,4 @@
-"""Where a store-mode writer looks for its page, and what it refuses (OpenSpec make-vault-store-canonical, task 2.2).
+"""Where a store-mode writer looks for its page, and what it refuses (store task 2.2).
 
 A page that a commit stored has no file until the projector writes it, so a writer that asks the
 disk whether its source exists, or whether its destination is free, answers for the projection and
@@ -33,7 +33,7 @@ def holds(vault_root: Path, rel: str) -> bool:
 
 
 def resolve_existing(vault_root: Path, path: str) -> tuple[Path, str]:
-    """``resolve_under_vault(must_exist, must_be_file, refuse_withheld)`` with the store's answer for a page.
+    """``resolve_under_vault`` for an existing file, with the store's answer for a page.
 
     It raises the ``VaultPathError`` that the disk form raises: NOT_FOUND for an absent page and
     for a withheld one, whose text is the same, and NOT_A_FILE for a folder.
@@ -50,6 +50,22 @@ def resolve_existing(vault_root: Path, path: str) -> tuple[Path, str]:
     if resolution.candidate.exists() and not resolution.candidate.is_file():
         raise vault.VaultPathError(code="NOT_A_FILE", reason=f"path is not a regular file: {rel}")
     return resolution.candidate, rel
+
+
+def holds_pages_under(vault_root: Path, folder: str) -> bool:
+    """Whether the store holds a page below ``folder``, whatever the disk shows of it."""
+    with read.snapshot(vault_root) as view:
+        return next(view.pages(f"{folder}/"), None) is not None
+
+
+def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
+    """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
+
+    It prevents the same disk write as ``refuse_unrouted`` and is the form for a writer that has no
+    path to test before it starts, so it costs a rollback to run that writer on files.
+    """
+    if mode.store_mode_active(vault_root):
+        raise availability.unrouted(operation, why)
 
 
 def refuse_unrouted(

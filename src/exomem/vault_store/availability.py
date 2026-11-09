@@ -160,7 +160,7 @@ def refuse_page_loss(vault_root: Path, operation: str) -> None:
 
 
 def unrouted(operation: str, why: str):
-    """The refusal of a governed write that has no store form yet, raised before it changes anything.
+    """The refusal of a governed write with no store form yet, raised before it changes anything.
 
     It prevents a write that would put bytes on disk where the store holds the pages: the importer
     would then adopt them as an outside edit, and the store and the files would disagree. A false

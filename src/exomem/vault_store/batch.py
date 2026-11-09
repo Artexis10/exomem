@@ -125,7 +125,7 @@ def commit_batch(
             )
     if not caller_writes and lifecycle is None:
         return []
-    # A lifecycle commit with no page to write carries no curation witness: it has no write to witness.
+    # A lifecycle commit with no page to write carries no curation witness: nothing to witness.
     augmented, witness = (
         curation_witness.augment_batch(
             caller_writes, vault_root=root, planned_write=vault.PlannedWrite
@@ -305,7 +305,7 @@ def _check_held(plan: _Plan) -> None:
     none of them.
     """
     with read.snapshot(plan.root) as view:
-        # A lifecycle source is checked as the commit checks it, and its conflict reaches the writer.
+        # A lifecycle source is checked as the commit checks it; its conflict reaches the writer.
         store_write.check(view.connection, plan.lifecycle.expect)
         for held in plan.held:
             try:

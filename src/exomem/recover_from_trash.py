@@ -110,7 +110,7 @@ def _recover_from_trash_local(
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoverResult:
     # The recovery preflight judges the restore against the pages on disk, and a store-mode vault
-    # holds a page there only once its projector writes it; the store form of recovery waits for that.
+    # holds a page there only once its projector writes it; the store recovery waits for that.
     store_targets.refuse_unrouted(
         vault_root,
         "recover_from_trash",

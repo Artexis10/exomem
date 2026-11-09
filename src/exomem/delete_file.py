@@ -147,7 +147,11 @@ def _delete_file_local(
         else:
             abs_path, rel_path = store_targets.resolve_existing(vault_root, path)
     except VaultPathError as e:
-        if store_writer is not None or e.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
+        if (
+            store_writer is not None
+            or e.code != "NOT_FOUND"
+            or originals.binding_for(vault_root) is None
+        ):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
         try:
             abs_path, rel_path = resolve_under_vault(vault_root, path, must_be_file=True)
@@ -160,7 +164,7 @@ def _delete_file_local(
         if evicted_original.state != "evicted" or (visible is not None and not visible(rel_path)):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
     try:
-        # A stored page has no file to acquire; its spelling is checked when its bytes are read below.
+        # A stored page has no file to acquire; its spelling is checked when its bytes are read.
         if evicted_original is None and store_writer is None:
             reserved_paths.inspect_generic_file(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
@@ -750,7 +754,7 @@ def _trash_metadata_bytes(
     force_superseded: bool,
     allow_curated: bool,
 ) -> bytes:
-    """The `.meta.json` sidecar that records where a trashed file came from and which flags it used."""
+    """The `.meta.json` sidecar that records where a trashed file came from and its flags."""
     meta = {
         "original_path": rel_path,
         "trashed_at": now.isoformat(),
@@ -778,7 +782,7 @@ def _store_form_gap(vault_root: Path, rel_path: str, fm: dict) -> str | None:
     if not rel_path.lower().endswith(".md"):
         return "only a Markdown page is held by the store, and a file's bytes stay on disk"
     if lifecycle.policy_governs_anything(vault_root):
-        return "a governance policy is declared, and its tombstones and receipts are written to files"
+        return "a governance policy is declared, and its tombstones and receipts go to files"
     parts_folder = Path(vault_root) / extraction_parts.folder_for(Path(rel_path))
     if "stored_object" in fm or extraction_parts.count_of(fm) > 1 or parts_folder.is_dir():
         return "its stored original or its part pages move with it, and they have no store form"
@@ -818,8 +822,12 @@ def _trash_in_store(
         store_batch.commit_batch(writer, [sidecar], vault_root=root, lifecycle=moves)
     except StoreConflict as conflict:
         if conflict.path == rel_path:
-            raise DeleteFileError("STALE_DELETE", "delete source changed since it was read") from conflict
-        raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from conflict
+            raise DeleteFileError(
+                "STALE_DELETE", "delete source changed since it was read"
+            ) from conflict
+        raise DeleteFileError(
+            "DELETE_FAILED", "Trash placement could not be published"
+        ) from conflict
     except (CreateOnlyConflict, PathGuardError, OSError) as error:
         raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from error
     today_iso, rel_no_ext, body = log_entry

@@ -126,7 +126,8 @@ def _delete_directory_local(
     store_targets.refuse_unrouted(
         vault_root,
         "delete_directory",
-        "trashing a folder needs a trash move and a sidecar for each page it holds, and has no store form yet",
+        "trashing a folder needs a trash move and a sidecar for each page it holds, "
+        "and has no store form yet",
         folders=(path,),
     )
     try:
