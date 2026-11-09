@@ -243,13 +243,7 @@ def _resolved(index: Mapping[str, Any], page: Mapping[str, Any]) -> tuple[dict, 
         sources[unit["ref"]] = tuple(sorted(set(documents)))
         for raw in unit["supersedes"]:
             target = _target(index, raw, page["path"])
-            if (
-                target
-                and target[1]
-                and unit["valid"]
-                # Debt (verdict keys): a fixed set of verdicts that withdraw a unit's replacement.
-                and unit["unit"]["verdict"] not in {"retracted", "false", "failed"}
-            ):
+            if target and target[1] and unit["valid"]:
                 superseded.add(target[1])
     return links, sources, superseded, dependencies
 

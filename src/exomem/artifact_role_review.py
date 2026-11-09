@@ -175,12 +175,7 @@ def _pending_subject(unit: Any) -> str | None:
 
 
 def _result_subject(unit: Any, kinds: Any) -> str | None:
-    if (
-        not outcome(unit, kinds)
-        # Debt (verdict keys): this set names verdicts a unit may carry, not the shipped vocabulary.
-        or unit.verdict in {"retracted", "false", "failed"}
-        or _historical_or_future(unit)
-    ):
+    if not outcome(unit, kinds) or _historical_or_future(unit):
         return None
     authored = clauses(unit)
     if _pending_subject(unit) is not None or any(
@@ -239,7 +234,6 @@ def detect(
         u
         for u in units
         if outcome(u, kinds)
-        and u.verdict not in {"retracted", "false", "failed"}
         and not _historical_or_future(u)
         and _cue(u, SUCCESS_CUES)
     ]
