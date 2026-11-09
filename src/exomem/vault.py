@@ -4579,6 +4579,12 @@ def read_bounded_guarded_bytes_with_generation(
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
+    raw, guard = read_guarded_bytes(vault_root, path)
+    return raw.decode("utf-8"), guard
+
+
+def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
+    """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -4606,8 +4612,7 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    raw, guard = read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
-    return raw.decode("utf-8"), guard
+    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
 
 
 @dataclass
@@ -8097,8 +8102,12 @@ def on_inbound_files_changed(
     """
     if not freshness.event_indexes_enabled():
         return
-    changed_list = list(changed_rels)
-    deleted_list = list(deleted_rels)
+    # The index covers the pages the vault walk yields, and the walk yields only `.md` files
+    # (`_walk_vault_md_entry`). A batch that carries any other file, such as a curation run
+    # artifact, leaves the registry where it was, which this patch reads as unproven data and
+    # withdraws, so the next lookup under the mutation boundary rebuilt the whole index.
+    changed_list = [rel for rel in changed_rels if rel.lower().endswith(".md")]
+    deleted_list = [rel for rel in deleted_rels if rel.lower().endswith(".md")]
     if not (changed_list or deleted_list):
         return
     root = str(vault_root.resolve())

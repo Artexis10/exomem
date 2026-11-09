@@ -833,7 +833,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 16: `unit_revisions` names each parent's unit rows and summary by a revision
 #: that every write to them changes, so ranking statistics re-read only parents
 #: that moved.
-SCHEMA_VERSION = 16
+#: 17: `pages.payload_hash` and `pages.source_url` hold the exact-bytes identity and the canonical URL
+#: that `duplicates.derive_page_payload` derives for Sources and Evidence pages. A v16 catalogue is
+#: rebuilt from canonical pages, which also indexes every page written before the columns existed.
+SCHEMA_VERSION = 17
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1044,6 +1047,8 @@ class RepairCause(enum.StrEnum):
     # request, or the catalogue holds no rows for the checkpoint it names.
     RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
     RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
+    # A duplicate lookup found no current catalogue, so a door stored unchecked while it rebuilds.
+    DUPLICATE_INDEX_NOT_CURRENT = "duplicate_index_not_current"
 
 
 class DeclineCause(enum.StrEnum):
@@ -4515,15 +4520,16 @@ def _eligibility_metadata_query(
     return result
 
 
-def ensure_fresh(vault_root: Path) -> None:
+def ensure_fresh(vault_root: Path) -> bool:
     """Run the reconcile NOW (reconcile's seam) instead of lazily on the next
     search — and paranoidly: verified state is discarded first, so this pass
     exact-checks the sidecar against the walk even where a search would trust
     it. No-op only when the sidecar is disabled outright (the ``python`` kill
-    switch): the normal-table catalog builds even on an FTS5-less SQLite."""
+    switch): the normal-table catalog builds even on an FTS5-less SQLite.
+    Returns whether the pass ran to its end."""
     if not _catalog_usable():
-        return
-    get_store(vault_root).ensure_fresh()
+        return False
+    return get_store(vault_root).ensure_fresh()
 
 
 def cache_token(vault_root: Path) -> str:
@@ -4640,6 +4646,103 @@ def page_content_hashes(vault_root: Path, rel_paths: Iterable[str]) -> dict[str,
     if not _custody_catalogue_live(vault_root):
         return dict.fromkeys(wanted, None)
     return get_store(vault_root).page_content_hashes(wanted)
+
+
+#: The two derived-column lookups of the duplicate-handling index, oldest filing first.
+_PAYLOAD_PATHS_SQL = "SELECT path FROM pages WHERE payload_hash = ? ORDER BY mtime_ns, path"
+_SOURCE_URL_PATHS_SQL = "SELECT path FROM pages WHERE source_url = ? ORDER BY mtime_ns, path"
+#: The same two columns as groups: every value that more than one page holds, with the pages that hold it.
+_PAYLOAD_GROUPS_SQL = (
+    "SELECT payload_hash, path FROM pages WHERE payload_hash IN "
+    "(SELECT payload_hash FROM pages WHERE payload_hash IS NOT NULL GROUP BY payload_hash HAVING COUNT(*) > 1) "
+    "ORDER BY payload_hash, mtime_ns, path"
+)
+_SOURCE_URL_GROUPS_SQL = (
+    "SELECT source_url, path FROM pages WHERE source_url IN "
+    "(SELECT source_url FROM pages WHERE source_url IS NOT NULL GROUP BY source_url HAVING COUNT(*) > 1) "
+    "ORDER BY source_url, mtime_ns, path"
+)
+
+
+def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> LexicalStore | None:
+    """The store once its catalogue is current and in step with the commits of this process, else None.
+
+    A catalogue that is missing, at an older schema or built under another semantic identity is rebuilt from
+    canonical pages in the background (`rebuild_atomic`) and reads as None until that lands: the rebuild is
+    O(vault) and a storing door asks under its mutation boundary (D5), so the door stores unchecked meanwhile.
+    A store flagged by a failed `record_payload_commit` is reconciled inline, which costs one pass over the
+    pages and never rebuilds whole, because the identity was proved first. `verify` reconciles the catalogue
+    against the pages even when nothing flags it, because the audit counts every row and a row lost to a failed
+    upsert must not read as complete. None means the index cannot be proven complete, which a caller
+    must carry as unavailable and never as empty.
+    """
+    if not _catalog_usable():
+        return None
+    store = get_store(vault_root)
+    if store._failed:
+        return None
+    if not store.catalogue_current():
+        _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
+        return None
+    if store._payload_stale or verify:
+        try:
+            reconciled = store.ensure_fresh()
+        except OSError as error:
+            log.info("lexical duplicate-index reconcile failed (%s)", error)
+            return None
+        if not reconciled or not store.catalogue_current():
+            return None
+        store._payload_stale = False
+    return store
+
+
+def payload_candidates(vault_root: Path, payload_sha256: str) -> tuple[str, ...] | None:
+    """Paths of pages whose indexed payload hash is `payload_sha256`, oldest first; None when the index cannot answer.
+
+    Candidates only: `duplicates.find_duplicate` re-derives each one from its stored bytes.
+    """
+    store = _duplicate_index_store(vault_root)
+    found = None if store is None else store.paths_where(_PAYLOAD_PATHS_SQL, payload_sha256)
+    return None if found is None else tuple(found)
+
+
+def source_url_candidates(vault_root: Path, canonical_url: str) -> tuple[str, ...] | None:
+    """Paths of Sources whose indexed canonical URL is `canonical_url`, oldest first; None when the index cannot answer."""
+    store = _duplicate_index_store(vault_root)
+    found = None if store is None else store.paths_where(_SOURCE_URL_PATHS_SQL, canonical_url)
+    return None if found is None else tuple(found)
+
+
+def duplicate_groups(
+    vault_root: Path,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]] | None:
+    """The payload hashes and the canonical source URLs that two or more indexed pages share, or None when the index cannot answer.
+
+    Each maps to the paths that hold it, oldest first. This is the audit's one enumeration of candidate groups, and it
+    reconciles the catalogue with the pages first (`verify`), so a lost row never reads as a complete answer. Like every
+    lookup here it only proposes: the audit re-derives each member.
+    """
+    store = _duplicate_index_store(vault_root, verify=True)
+    if store is None:
+        return None
+    payload, urls = store.groups_where(_PAYLOAD_GROUPS_SQL), store.groups_where(_SOURCE_URL_GROUPS_SQL)
+    return None if payload is None or urls is None else (payload, urls)
+
+
+def record_payload_commit(vault_root: Path, rel_paths: Iterable[str]) -> bool:
+    """Make the payload hashes of pages a door just committed visible to the next lookup.
+
+    A storing door calls this under its mutation boundary, after its canonical write and before it
+    releases the boundary. Returns False when it could not; the next lookup in this process then
+    reconciles the catalogue first. A sidecar that does not exist yet needs nothing, because its first
+    build reads the committed page.
+    """
+    if not _catalog_usable():
+        return False
+    wanted = [str(rel) for rel in rel_paths]
+    if not wanted or not lexical_path(vault_root).exists():
+        return True
+    return get_store(vault_root).record_payload_commit(wanted)
 
 
 def page_eligibility_rows(
@@ -5057,6 +5160,9 @@ def page_rows(
         eligibility_view = None
         content_hash = None
         ranking = None
+    from . import duplicates
+
+    payload = duplicates.derive_page_payload(rel, raw)
     columns = {
         "path": rel,
         "title": title,
@@ -5070,6 +5176,8 @@ def page_rows(
         "eligibility_view_json": eligibility_view,
         "content_hash": content_hash,
         "ranking_json": ranking,
+        "payload_hash": None if payload is None else payload.sha256,
+        "source_url": None if payload is None else payload.source_url,
     }
     structure_json = None
     units: list[SemanticUnitRow] = []
@@ -5161,9 +5269,30 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
     return cur.lastrowid
 
 
+#: The columns that schema 17 added to `pages`; a store that the released code created at schema 16 lacks them.
+_SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
+
+
+def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`columns` without the schema 17 columns that this connection's `pages` table does not have yet.
+
+    No door reads a store's own `pages` table (the duplicate index is the sidecar, which a schema 16 build
+    reads as not current and answers "unchecked"), so a page written without these values leaves nothing
+    to mislead. Any other missing column still fails the insert, because that is a store that is wrong.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    if all(name in present for name in _SCHEMA_17_PAGE_COLUMNS):
+        return columns
+    return {
+        name: value
+        for name, value in columns.items()
+        if name in present or name not in _SCHEMA_17_PAGE_COLUMNS
+    }
+
+
 def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
     """Insert one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
-    rowid = _insert_row(conn, "pages", rows.columns)
+    rowid = _insert_row(conn, "pages", _page_columns_of_table(conn, rows.columns))
     if fts5_available():
         conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.stemmed))
         conn.execute(
@@ -5250,6 +5379,9 @@ class LexicalStore:
         # Guarded by `_lock`; consumed and cleared by that hand-off.
         self._stranded_scopes: set[str] = set()
         self._failed = False  # runtime-retired for this process
+        # Set when a door's commit could not record its payload hash. The next duplicate lookup in this
+        # process then reconciles the catalogue first. Another process learns it from its own repair pass.
+        self._payload_stale = False
         self._last_rebuild_result: str | None = None
         # The step that produced `_last_rebuild_result`, and the path keys the
         # pass's source censuses excused because their own replay re-proved
@@ -6172,7 +6304,10 @@ class LexicalStore:
     # one or more of these, so it must be rebuilt before a new-column INSERT.
     # nosemgrep: ep-word-set -- the catalogue schema fixes these column names.
     _CURRENT_PAGES_COLUMNS = frozenset(
-        {"emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json", "ranking_json"}
+        {
+            "emitted_parent_path", "title", "content_hash", "eligibility_view_json", "structure_json",
+            "ranking_json", "payload_hash", "source_url",
+        }
     ) | frozenset(_ELIGIBILITY_COLUMNS)
     #: The eligibility sentinels on `semantic_units`. A catalog missing any of
     #: them cannot answer a governed unit filter, so it is a legacy shape.
@@ -6265,7 +6400,9 @@ class LexicalStore:
             " updated_day TEXT,"
             " updated_json TEXT,"
             " eligibility_view_json TEXT,"
-            " content_hash TEXT, structure_json TEXT, ranking_json TEXT)"
+            " content_hash TEXT, structure_json TEXT, ranking_json TEXT,"
+            # The duplicate-handling index: derived from the page's bytes, never authority.
+            " payload_hash TEXT, source_url TEXT)"
         )
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
@@ -6378,6 +6515,13 @@ class LexicalStore:
         # index-ranged instead of scanning 100k rows.
         conn.execute("CREATE INDEX IF NOT EXISTS pages_kb ON pages(in_kb, mtime_ns)")
         conn.execute("CREATE INDEX IF NOT EXISTS pages_vault ON pages(in_vault, mtime_ns)")
+        # Only Sources and Evidence pages carry these, so the partial indexes stay small.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_payload_hash ON pages(payload_hash) WHERE payload_hash IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_source_url ON pages(source_url) WHERE source_url IS NOT NULL"
+        )
         # Scoped emitted-parent lookup for the scene-expansion arm of the
         # candidate-parent query (`emitted_parent_path IN (...)` within a scope).
         conn.execute(
@@ -7168,13 +7312,16 @@ class LexicalStore:
             return False, False
         return _membership_of_parts(rel_parts)
 
-    def upsert_paths(self, paths: list[Path]) -> bool:
+    def upsert_paths(
+        self, paths: list[Path], *, timeout: float = _PUBLICATION_TIMEOUT_FOREGROUND
+    ) -> bool:
         """Bounded inline upsert under the publication barrier.
 
         Replacing file rows is a LIVE-sidecar change, so it shares the publication
         barrier. Inline hooks and stale-parent request repair get only the short
-        foreground wait. Contention, absence, or a noncurrent schema declines and
-        schedules atomic repair; this path never performs DDL or walks the corpus.
+        foreground wait; `record_payload_commit` passes the longer one. Contention, absence,
+        or a noncurrent schema declines and schedules atomic repair; this path never
+        performs DDL or walks the corpus.
         Returns whether the bounded row update committed.
         """
         if self._failed:
@@ -7183,7 +7330,7 @@ class LexicalStore:
         from .vault import VaultLockError
 
         try:
-            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+            with self._publication_lock(timeout=timeout):
                 applied = self._upsert_paths_locked(paths)
         except VaultLockError as e:
             # Contention only: the writer held the vault lock, so the rows are
@@ -8111,7 +8258,7 @@ class LexicalStore:
                     _note_source_proof("blessed")
                 self._witnessed.pop(scope, None)
 
-    def ensure_fresh(self) -> None:
+    def ensure_fresh(self) -> bool:
         """Reconcile both scopes against their walks, PARANOIDLY: verified
         state (memo, meta, hook witness) is discarded first, so this pass
         exact-checks the sidecar even where a search would trust it — this is
@@ -8123,9 +8270,11 @@ class LexicalStore:
         barrier is acquired ONCE here and handed to `_ensure_synced` via
         `barrier_held=True`, so the non-reentrant barrier is never re-acquired. A
         contended barrier declines this reconcile; the next reconcile retries.
+        Returns whether the pass ran to its end, which a caller that needs the result
+        (the duplicate lookup) must know and a declined or failed pass does not give.
         """
         if self._failed:
-            return
+            return False
         from .vault import VaultLockError
 
         try:
@@ -8133,11 +8282,14 @@ class LexicalStore:
                 self._ensure_fresh_locked()
         except VaultLockError as e:
             log.info("lexical ensure_fresh deferred (%s); live sidecar preserved", e)
+            return False
         except sqlite3.Error as e:
             self._note_query_failure(
                 e,
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",
             )
+            return False
+        return not self._failed
 
     def _ensure_fresh_locked(self) -> None:
         """`ensure_fresh` body with the publication barrier already held."""
@@ -11299,6 +11451,99 @@ class LexicalStore:
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical page-row probe declined (%s)")
             return dict.fromkeys(rel_paths, None)
+
+    def catalogue_current(self) -> bool:
+        """Whether the sidecar exists at the current schema, shape and semantic identity. Read-only, no DDL.
+
+        A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
+        wait for that (the duplicate lookup) treats it as absent.
+        """
+        from .vocabulary.registry import RegistryError
+
+        if self._failed or not self.path.exists():
+            return False
+        try:
+            with self._query_connection() as conn:
+                return self._schema_is_current(conn) and self._meta_catalog_identity(
+                    conn
+                ) == catalog_semantic_identity(self.vault_root)
+        except RegistryError:
+            return False
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical catalogue probe declined (%s)")
+            return False
+
+    def paths_where(self, sql: str, value: str) -> list[str] | None:
+        """The paths one fixed `SELECT path FROM pages WHERE <derived column> = ?` returns, or None when the catalogue cannot answer.
+
+        Read-only and non-walking: one indexed lookup, never a parse. `sql` is one of this module's two
+        constants above, so no caller text reaches the statement.
+        """
+        if self._failed or not self.path.exists():
+            return None
+        try:
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    return None
+                return [row[0] for row in conn.execute(sql, (value,))]
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical duplicate-index probe declined (%s)")
+            return None
+
+    def groups_where(self, sql: str) -> dict[str, tuple[str, ...]] | None:
+        """The `(derived value, path)` rows one of this module's group statements returns, grouped by value; None when the catalogue cannot answer.
+
+        Read-only and non-walking. `sql` is one of the two constants above, so no caller text reaches the statement.
+        """
+        if self._failed or not self.path.exists():
+            return None
+        try:
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    return None
+                grouped: dict[str, list[str]] = {}
+                for value, path in conn.execute(sql):
+                    grouped.setdefault(value, []).append(path)
+                return {value: tuple(paths) for value, paths in grouped.items()}
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical duplicate-index probe declined (%s)")
+            return None
+
+    def record_payload_commit(self, rel_paths: list[str]) -> bool:
+        """Apply the rows of pages a door just committed, so their payload hashes are readable now.
+
+        Other derived indexes may lag and the inline upsert declines after 50 ms of contention, so this
+        waits for the publication barrier as the background repair does. A page whose row already carries
+        its current payload hash costs one read and no write. False means a hash may be missing: the next
+        lookup in this process reconciles first.
+        """
+        from . import duplicates
+
+        if self._failed:
+            self._payload_stale = True
+            return False
+        pending: list[Path] = []
+        try:
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    self._payload_stale = True
+                    return False
+                for rel in rel_paths:
+                    path = self.vault_root.joinpath(*rel.split("/"))
+                    payload = duplicates.derive_page_payload(rel, path.read_bytes())
+                    if payload is None:
+                        continue
+                    row = conn.execute("SELECT payload_hash FROM pages WHERE path = ?", (rel,)).fetchone()
+                    if row is None or row[0] != payload.sha256:
+                        pending.append(path)
+        except (sqlite3.Error, OSError) as error:
+            log.info("lexical payload commit probe failed (%s)", error)
+            self._payload_stale = True
+            return False
+        if pending and not self.upsert_paths(pending, timeout=_PUBLICATION_TIMEOUT_BACKGROUND):
+            self._payload_stale = True
+            return False
+        return True
 
     def unit_categories_of(self, paths: Iterable[str]) -> dict[str, frozenset[str]] | None:
         """The categories each page's own semantic units are filed under.

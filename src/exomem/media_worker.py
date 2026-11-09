@@ -35,6 +35,7 @@ from typing import Any
 
 from . import (
     asr_runtime,
+    backoff,
     cuda_containment,
     deferred_index,
     embeddings,
@@ -2087,7 +2088,7 @@ class MediaWorker:
                                 delay,
                             )
                         elif crashed:
-                            delay = min(2.0 * 2 ** (crashes - 1), _CHILD_CRASH_BACKOFF_MAX_SECONDS)
+                            delay = backoff.capped_doubling(2.0, _CHILD_CRASH_BACKOFF_MAX_SECONDS, crashes - 1)
                             log.error(
                                 "media child died with signal %d (%d in a row); recovered %d job(s); retrying after %.0fs",
                                 -returncode,

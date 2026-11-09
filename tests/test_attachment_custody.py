@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import struct
+import zipfile
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -455,6 +456,7 @@ def test_a_transcription_is_written_nowhere_when_its_original_fails(vault: Path,
     assert not _vault_text_contains(vault, TRANSCRIPTION)
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, lease) -> None:
     original = _png()
     with _local_session("session-home"):
@@ -480,6 +482,7 @@ def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, leas
 
 
 @pytest.mark.parametrize("replacement", ["changed_bytes", "symlink"])
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_replaced_original_cannot_stand_for_a_duplicate(
     vault: Path, lease, replacement: str,
 ) -> None:
@@ -609,6 +612,29 @@ def test_a_held_file_that_is_no_zip_is_refused_as_members_and_stays_redeemable(v
 
     assert refused["files"][0]["code"] == "ARCHIVE_INVALID", refused
     assert kept["files"][0]["state"] == "stored", kept
+
+
+def test_a_members_replay_settles_unwritten_unless_it_restores_a_blob(vault: Path, lease) -> None:
+    """Defect: a replay that wrote nothing was committed with a receipt, and one that restored a blob read as a reuse."""
+    export = io.BytesIO()
+    with zipfile.ZipFile(export, "w") as archive:
+        archive.writestr("samples/one.json", '{"day": 1}')
+
+    def held() -> dict:
+        return _hold(vault, export.getvalue(), name="export.zip", content_type="application/zip")["file"]
+
+    def status_of(key: str) -> dict:
+        reply = _preserve(lease, vault, [held()], key, archive="members", response_detail="full")
+        return reply["diagnostics"]
+
+    with _local_session("session-home"):
+        commands.op_preserve_artifacts(vault, scope="Clinic", category="Appointments", files=[held()], archive="members")
+        replay = status_of("replay")
+        next(_evidence(vault).rglob("*.gz")).unlink()
+        restored = status_of("restore")
+
+    assert (replay["operational"]["status"], replay.get("capture_outcome")) == ("settled", "reused")
+    assert (restored["operational"]["status"], restored.get("capture_outcome")) == ("committed", None)
 
 
 def test_members_refuse_a_fetched_attachment_before_fetching_it(vault: Path, lease) -> None:

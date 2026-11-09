@@ -887,6 +887,8 @@ async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without
             await fleet.run(NOW + timedelta(minutes=minute))
         waiting = (await fleet.rows())[CANARY]
         assert (waiting.observed_state, delivered) == ("deleting", [])
+        # Key retirement does not wait for the edge: the media key is gone while the deletion still waits.
+        assert waiting.media_key_wrapped is None and waiting.content_keys_retired_at is not None
 
         fleet.cluster.reported = fleet.cluster.serving()
         await fleet.run(NOW + timedelta(minutes=9))
