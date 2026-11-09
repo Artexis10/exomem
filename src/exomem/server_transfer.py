@@ -67,6 +67,25 @@ log = logging.getLogger(__name__)
 _header_count = upload_sessions.header_count
 
 
+async def _allowance_refused(vault_root: Path, file_bytes: int | None) -> dict[str, str] | None:
+    """The refusal body for an upload that the media allowance cannot hold, read before any byte (D10).
+
+    A request without a declared size carries nothing to admit here; offload's own admission
+    then keeps its original local.
+    """
+    from . import media_allowance, media_store
+
+    if file_bytes is None:
+        return None
+    reason = await run_in_threadpool(media_store.upload_refusal, vault_root, file_bytes)
+    return None if reason is None else {"code": media_allowance.MEDIA_ALLOWANCE_EXCEEDED, "reason": reason}
+
+
+def _form_file_bytes(declared: int | None) -> int | None:
+    """The least size of a multipart body's file: its Content-Length less the form overhead."""
+    return None if declared is None else max(0, declared - _FORM_OVERHEAD_BYTES)
+
+
 def _flag(value: str) -> bool | None:
     """An `/upload` yes-or-no field: empty is no, `1` or `true` is yes, anything else is None."""
     value = value.strip()
@@ -696,6 +715,8 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
         return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}, status_code=413)
+    if (refused := await _allowance_refused(vault_root, _form_file_bytes(declared))) is not None:
+        return JSONResponse(refused, status_code=413)
     try:
         async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
@@ -967,6 +988,8 @@ def register_transfer_routes(
                 {"code": "TOO_LARGE", "reason": f"upload exceeds the {max_bytes:,}-byte limit"},
                 status_code=413,
             )
+        if (refused := await _allowance_refused(vault_root, _form_file_bytes(declared))) is not None:
+            return JSONResponse(refused, status_code=413)
         try:
             # `max_part_size` bounds form fields only; the copy loops bound the file.
             form = await request.form(max_part_size=config.upload_max_bytes)
@@ -1297,6 +1320,8 @@ def register_transfer_routes(
                         "Evidence is append-only, so pick a new filename",
                         409,
                     )
+            if (refused := await _allowance_refused(vault_root, declared)) is not None:
+                return _tus_refusal(refused["code"], refused["reason"], 413)
             session, secret = await run_in_threadpool(
                 upload_sessions.create,
                 vault_root,

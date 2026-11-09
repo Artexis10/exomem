@@ -1565,6 +1565,40 @@ def test_allowance_refusal_reports_the_current_unknown_or_exceeded_code(vault: P
     assert originals.original_state(vault, path).state == "cached"
 
 
+@pytest.mark.parametrize("route", ["session", "form"])
+def test_an_upload_above_the_remaining_allowance_is_refused_before_any_byte(vault: Path, selected_store, monkeypatch, route):
+    """Defect: ingress admits an upload that the allowance cannot hold, so its bytes land and only offload refuses."""
+    import base64
+
+    from test_upload_sessions import TUS, _client
+
+    from exomem import upload_sessions
+    from exomem.state_paths import vault_state_dir
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": path.stat().st_size + 4096}}}))
+    client = _client(vault, monkeypatch)
+    before = sorted(vault.rglob("*"))
+    if route == "session":
+        metadata = {"filename": "large.bin", "scope": "Device", "category": "Uploads", "sha256": "0" * 64}
+        refused = client.request("POST", upload_sessions.SESSIONS_PATH, headers={
+            **TUS, "Upload-Length": "4097",
+            "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
+        })
+    else:
+        # The form's least file size is its Content-Length less the 1 MiB that the route allows for framing.
+        refused = client.request("POST", "/upload", headers={"Authorization": "Bearer sekret"},
+                                 files={"file": ("large.bin", b"x" * (1024 * 1024 + 4097), "application/octet-stream")},
+                                 data={"scope": "Device", "category": "Uploads"})
+    assert refused.status_code == 413, refused.text
+    assert refused.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert f"of {path.stat().st_size + 4096:,} bytes are in use" in refused.json()["reason"]
+    assert sorted(vault.rglob("*")) == before
+    assert not (vault_state_dir(vault) / upload_sessions.STORE_DIRNAME).exists()
+
+
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
     from exomem import media_jobs, media_store
 

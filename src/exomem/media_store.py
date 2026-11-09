@@ -712,6 +712,31 @@ def _offload_admission(
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
+def upload_refusal(vault: Path, declared_bytes: int) -> str | None:
+    """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
+
+    Ingress applies offload's admission rule to a census read now, before any byte arrives. A store that
+    does not offload never receives the upload, and a resident upload stays on the volume, so neither
+    charges the allowance. An unknown census or allowance admits the upload: its original stays local with
+    retryable offload demand, as the spec asks of an unknown meter. The declared size counts as a new
+    version, because nothing shows a duplicate of a stored version before the bytes arrive.
+    """
+    vault = Path(vault).resolve()
+    config = originals.configuration(vault)
+    if config is None or config.get("enabled") is not True:
+        return None
+    bounds = media_capacity.bounds_for(config, vault)
+    if bounds is not None and bounds.classify(declared_bytes) == media_capacity.RESIDENT:
+        return None
+    upload = originals.BinaryBinding("", "", declared_bytes)  # A version not uploaded yet: only its size counts.
+    decision = media_allowance.admission(media_allowance.reference_usage(vault), upload, None,
+                                         config.get("allowance_bytes"))
+    if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
+        return None
+    return (f"the upload's {declared_bytes:,} bytes exceed the remaining media allowance: {decision.used_bytes:,} of "
+            f"{decision.allowance_bytes:,} bytes are in use; delete stored media and empty Trash, or raise the allowance")
+
+
 def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
     from . import preserve
     from .vault import (
