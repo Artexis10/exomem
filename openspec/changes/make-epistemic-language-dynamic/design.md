@@ -190,6 +190,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | Item | Sites | Why it stays |
 |---|---|---|
 | F7 same-page epistemic flag | relation_census 76, 1460 | Census-only. It is family-keyed, so extensions already reach it. |
+| Projected graph lane tier (K16, change 6) | projection_runtime 1825 | A stored projection edge keeps its canonical key and no extension parent, so only a core plain link ranks last. An extension of `links_to` ranks as typed here until the producer stores the parent. |
 | F8 affiliation count | relation_census 1232 | One entity-census count for one family. |
 | K7 evidence-target check, with C8 `_EVIDENTIAL_KINDS` | relation_census 74, 1447 | Census-only. `target_kinds` cannot express it, because folders and Sources pages count. The kind list stays with the check. |
 | K8 answers-target check (relation side) | relation_census 1454 | Census-only. `settles` is wrong here, because a `resolves` target is often not a question. The target side reads the `question` trait. |
@@ -217,7 +218,7 @@ Extensions, through the parent:
 3. An extension of `answers` or `resolves` feeds `shared_resolution_target` candidates (K1).
 4. An extension of `supersedes` reaches three readers: role review collects its target (K5), the census builds its chain and date check (K6), and the sensed model records it (K11).
 5. The census checks an extension of `contradicts` inside a supersession chain (K9). Stance and the audit already reach it.
-6. An extension of `links_to` ranks as a plain link in referent resolution and projection tiers, and the census skips it (K16 readers, F10 key leg). The graph's `typed` already treats it this way.
+6. An extension of `links_to` ranks as a plain link in referent resolution and the vocabulary pair query, and the census skips it (K16 readers, F10 key leg). The graph's `typed` already treats it this way. The projected graph lane is excluded (see Debt).
 7. An extension or alias of `about_entity` names the subject in restricted working-set admission (K20).
 8. A page-level extension of `derived_from` seeds shared-source candidates. It also stops a frontmatter source from being proposed again as an authored relation (K14, through the binding).
 9. A grandfathered extension whose saved family differs from its parent's follows the parent in every converted family read: lifts, corrects, associative, membership, replaces, plain_link.

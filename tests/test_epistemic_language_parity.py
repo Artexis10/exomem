@@ -798,10 +798,10 @@ def test_projected_graph_lane_ranks_a_plain_link_below_a_typed_edge(
 ) -> None:
     """The projected lane tiers by the `plain_link` behaviour of the stored key.
 
-    A stored edge carries its canonical key and no extension parent, so only the core plain
-    link ranks last. An unregistered key and an extension of `links_to` both rank with the
-    typed edges, and intended change 6 does not reach this lane until the producer stores
-    the parent.
+    Debt (design.md): a stored edge carries its canonical key and no extension parent, so only
+    the core plain link ranks last. An unregistered key and an extension of `links_to` both
+    rank with the typed edges. Intended change 6 excludes this lane until the producer stores
+    the parent, so every line here is CORE.
     """
     for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_CLIP", "EXOMEM_DISABLE_RANKING"):
         monkeypatch.delenv(name, raising=False)
