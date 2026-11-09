@@ -1365,7 +1365,7 @@ def _render_sidecar(
     lines.append(f"Preserved under `{tree}/{scope}/{category}/`.")
     lines.append("")
     if description:
-        lines.append("## Description")
+        lines.append(DESCRIPTION_HEADING)
         lines.append("")
         lines.append(description)
         lines.append("")
@@ -1512,6 +1512,8 @@ def ensure_artifact_page(
     return page, True
 
 
+#: The heading of the caption section of an Evidence page: the writer emits it and the duplicate lookup reads it back.
+DESCRIPTION_HEADING = "## Description"
 _EXTRACTED_HEADING = "## Extracted text"
 #: The section after the extracted text that holds the OCR words under the confidence floor. It
 #: stays in the sidecar, and no search field reads it (`without_low_confidence_ocr`).
@@ -1943,13 +1945,28 @@ def _file_modes(writes: tuple[PlannedWrite, ...]) -> dict[Path, int]:
 
 
 def _restore_modes(modes: dict[Path, int]) -> None:
-    """Give each replaced file its earlier permission bits back. Best effort: the page is committed whatever happens here."""
+    """Give each replaced file its earlier permission bits back. Best effort: the page is committed whatever happens here.
+
+    The change goes through a no-follow descriptor on a regular file, so a path that something swapped for a link,
+    a directory or a pipe after the commit is left alone and never loses its own mode.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:  # Windows has no permission bits to give back.
+        return
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     for path, mode in modes.items():
         try:
-            if stat.S_IMODE(os.lstat(path).st_mode) != mode:
-                os.chmod(path, mode)
+            descriptor = os.open(path, flags)
         except OSError:
             continue
+        try:
+            held = os.fstat(descriptor)
+            if stat.S_ISREG(held.st_mode) and stat.S_IMODE(held.st_mode) != mode:
+                fchmod(descriptor, mode)
+        except OSError:
+            continue
+        finally:
+            os.close(descriptor)
 
 
 def commit_media_sidecar_writes(

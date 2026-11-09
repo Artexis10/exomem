@@ -340,11 +340,14 @@ def _folded_revision(root: Path, source: str, path: str, head_episode: Any) -> b
     )
 
 
-def _folded_siblings(root: Path, directory: str, names: list[str], head: str) -> dict[str, tuple[str, ...]]:
+def _folded_siblings(
+    root: Path, directory: str, names: list[str], head: str, head_episode: Any
+) -> dict[str, tuple[str, ...]]:
     """Each way a wikilink can name a revision that the fold of `head` moved to trash, mapped to `head`.
 
     The revision's own page is gone, so the gate cannot decide it. It is the head's history, and the caller
-    has read the head, so the name resolves to the head and is decided under the head's own admission.
+    has read the head, so the name resolves to the head and is decided under the head's own admission. Only a
+    revision that `_folded_revision` binds to the head's episode counts, as in `_admitted_entry`.
     """
     from .working_set_index import normalize
 
@@ -352,13 +355,14 @@ def _folded_siblings(root: Path, directory: str, names: list[str], head: str) ->
     for name in names:
         try:
             entry = json.loads(registry_history.read_kept(root, directory, name) or "")
-        except ValueError:
+            revision = entry["path"] if entry.get("operation") == FOLD_OPERATION else None
+            if not isinstance(revision, str) or not _folded_revision(root, entry["prior"]["source"], revision, head_episode):
+                continue
+        except (AttributeError, KeyError, TypeError, ValueError):
             continue
-        revision = entry.get("path") if isinstance(entry, dict) and entry.get("operation") == FOLD_OPERATION else None
-        if isinstance(revision, str):
-            bare = revision.removesuffix(".md")
-            for spelling in (revision, bare, bare.rpartition("/")[2]):
-                named.setdefault(normalize(spelling), (head,))
+        bare = revision.removesuffix(".md")
+        for spelling in (revision, bare, bare.rpartition("/")[2]):
+            named.setdefault(normalize(spelling), (head,))
     return named
 
 
@@ -466,7 +470,7 @@ def read(
     def siblings() -> dict[str, tuple[str, ...]]:
         nonlocal folded
         if folded is None:
-            folded = _folded_siblings(root, directory, names, canonical)
+            folded = _folded_siblings(root, directory, names, canonical, current["frontmatter"].get("episode"))
         return folded
 
     examined = 0

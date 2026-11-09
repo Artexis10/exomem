@@ -606,6 +606,74 @@ def reused_capture_terminal(
     return terminal
 
 
+def _duplicate_outcome_projection(outcome: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The bounded earlier-copy fields of a hand-over outcome, or None when one is malformed.
+
+    A hand-over that found its bytes already stored names the earlier artifact (`duplicate_of`) and, for an
+    Evidence page, the families it lists (`families`, `family_added`) and the caller fields it did not take
+    (`fields_not_applied`). A batch row and a file handed over alone carry them alike, so both project them here.
+    A page may list more families than the view carries: the first ones and the total, never an invalid view.
+    """
+
+    def text(value: Any, limit: int) -> bool:
+        return isinstance(value, str) and 0 < len(value) <= limit
+
+    def clipped(value: str | None) -> str | None:
+        return None if value is None else value[:_NOT_APPLIED_CHARS]
+
+    projected: dict[str, Any] = {}
+    if "duplicate_of" in outcome:
+        earlier = outcome["duplicate_of"]
+        if not (
+            isinstance(earlier, Mapping)
+            and set(earlier) == {"path", "ref"}  # nosemgrep: ep-word-set -- the two field names of an earlier-copy pointer, a closed record shape.
+            and text(earlier["path"], 2048)
+            and text(earlier["ref"], 2048)
+        ):
+            return None
+        projected["duplicate_of"] = {"path": earlier["path"], "ref": earlier["ref"]}
+    if "families" in outcome or "family_added" in outcome:
+        listed = outcome.get("families")
+        if not (
+            isinstance(listed, (list, tuple))
+            and listed
+            and all(
+                isinstance(pair, Mapping)
+                and set(pair) == {"scope", "category"}  # nosemgrep: ep-word-set -- the two field names of a family pair, a closed record shape.
+                and text(pair["scope"], 256)
+                and text(pair["category"], 256)
+                for pair in listed
+            )
+            and isinstance(outcome.get("family_added"), bool)
+        ):
+            return None
+        projected["families"] = [
+            {"scope": pair["scope"], "category": pair["category"]} for pair in listed[:_FAMILIES_SHOWN]
+        ]
+        if len(listed) > _FAMILIES_SHOWN:
+            projected["families_total"] = len(listed)
+        projected["family_added"] = outcome["family_added"]
+    if "fields_not_applied" in outcome:
+        differing = outcome["fields_not_applied"]
+        if not (
+            isinstance(differing, (list, tuple))
+            and len(differing) <= 8
+            and all(
+                isinstance(entry, Mapping)
+                and set(entry) == {"field", "provided", "kept"}  # nosemgrep: ep-word-set -- the three field names of a `fields_not_applied` row, a closed record shape.
+                and text(entry["field"], 64)
+                and all(isinstance(value, str) or value is None for value in (entry["provided"], entry["kept"]))
+                for entry in differing
+            )
+        ):
+            return None
+        projected["fields_not_applied"] = [
+            {"field": entry["field"], "provided": clipped(entry["provided"]), "kept": clipped(entry["kept"])}
+            for entry in differing
+        ]
+    return projected
+
+
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     """Keep the bounded client-artifact outcome visible in compact terminals."""
 
@@ -690,56 +758,6 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {field: value[field] for field in fields}
 
-    def duplicate_of(value: Any) -> dict[str, Any] | None:
-        """The bounded identity of the artifact a duplicate resolved to."""
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != {"path", "ref"}
-            or not string(value.get("path"), limit=2048)
-            or not string(value.get("ref"), limit=2048)
-        ):
-            return None
-        return {"path": value["path"], "ref": value["ref"]}
-
-    def families(value: Any) -> list[dict[str, str]] | None:
-        """The `(scope, category)` list an Evidence page carries, every pair checked."""
-        if not (
-            isinstance(value, (list, tuple))
-            and value
-            and all(
-                isinstance(pair, Mapping)
-                and set(pair) == {"scope", "category"}  # nosemgrep: ep-word-set -- the two field names of a family pair, a closed record shape.
-                and string(pair.get("scope"), limit=256)
-                and string(pair.get("category"), limit=256)
-                for pair in value
-            )
-        ):
-            return None
-        return [{"scope": pair["scope"], "category": pair["category"]} for pair in value]
-
-    def not_applied(value: Any) -> list[dict[str, str | None]] | None:
-        """The caller-provided fields the earlier copy did not take; a long value is cut, never a reason to drop the row."""
-        if not (
-            isinstance(value, (list, tuple))
-            and len(value) <= 8
-            and all(
-                isinstance(entry, Mapping)
-                and set(entry) == {"field", "provided", "kept"}  # nosemgrep: ep-word-set -- the three field names of a `fields_not_applied` row, a closed record shape.
-                and string(entry.get("field"), limit=64)
-                and all(isinstance(text, str) or text is None for text in (entry["provided"], entry["kept"]))
-                for entry in value
-            )
-        ):
-            return None
-
-        def clipped(text: str | None) -> str | None:
-            return None if text is None else text[:_NOT_APPLIED_CHARS]
-
-        return [
-            {"field": entry["field"], "provided": clipped(entry["provided"]), "kept": clipped(entry["kept"])}
-            for entry in value
-        ]
-
     def transcription(value: Any) -> dict[str, Any] | None:
         """Whether a client transcription was recorded with its original."""
         if not isinstance(value, Mapping):
@@ -807,28 +825,11 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                         or string(value, limit=300)
                     )
                 }
-            if "duplicate_of" in item:
-                duplicate = duplicate_of(item["duplicate_of"])
-                if duplicate is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["duplicate_of"] = duplicate
-            if "families" in item or "family_added" in item:
-                listed = families(item.get("families"))
-                if listed is None or not isinstance(item.get("family_added"), bool):
-                    projected.append(invalid_row(item, index))
-                    continue
-                # A page may list more families than a row carries: the first ones and the total, never an invalid row.
-                row["families"] = listed[:_FAMILIES_SHOWN]
-                if len(listed) > _FAMILIES_SHOWN:
-                    row["families_total"] = len(listed)
-                row["family_added"] = item["family_added"]
-            if "fields_not_applied" in item:
-                differing = not_applied(item["fields_not_applied"])
-                if differing is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["fields_not_applied"] = differing
+            earlier_copy = _duplicate_outcome_projection(item)
+            if earlier_copy is None:
+                projected.append(invalid_row(item, index))
+                continue
+            row.update(earlier_copy)
             if "transcription" in item:
                 recorded = transcription(item["transcription"])
                 if recorded is None:
@@ -2484,6 +2485,9 @@ def project_terminal(
             compact["plan_id"] = plan["plan_id"]
         compact.update(_adoption_control_projection(leaf))
     compact.update(artifact_receipt)
+    if isinstance(leaf, Mapping) and leaf.get("state") == "already_stored":
+        # A file handed over alone has no row; its outcome names the earlier copy and what it did not take.
+        compact.update(_duplicate_outcome_projection(leaf) or {})
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):
         # Closed text capture outcomes belong to the durable capture protocol.
         from typing import get_args

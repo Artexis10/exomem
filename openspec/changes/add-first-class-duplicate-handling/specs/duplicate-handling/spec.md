@@ -40,7 +40,7 @@ The system SHALL keep a derived, rebuildable index from payload SHA-256 to the l
 
 The commit that stores a new original or Source SHALL record its payload hash in the index before the mutation boundary of that commit is released. The next acquisition of the boundary SHALL see it, whatever other derived indexes have caught up. A Source page written before this capability SHALL be indexed from its stored payload and SHALL NOT gain a recorded hash field.
 
-When the index is missing or at an earlier schema, the system SHALL rebuild it from canonical pages in the background, and lookup SHALL report unavailable until that rebuild lands. A write door SHALL then store the content as new and carry the warning `duplicate_check_unavailable`, and the audit SHALL report its duplicate categories as unchecked. A door SHALL NOT wait for a rebuild, because a rebuild reads the whole vault and a door asks under the vault mutation boundary. The audit SHALL reconcile the index with the pages before it counts, and SHALL report the index as complete only after that succeeds. Failing open is deliberate: a missed duplicate costs one extra copy that the audit reports, while a wrong hit would cost content. No door SHALL scan a content folder to find duplicates.
+When the index is missing, at an earlier schema or built under another semantic identity, the system SHALL rebuild it from canonical pages in the background, and lookup SHALL report unavailable until that rebuild lands. A write door SHALL then store the content as new and carry the warning `duplicate_check_unavailable`, and the audit SHALL report its duplicate categories as unchecked. A door SHALL NOT wait for a rebuild, because a rebuild reads the whole vault and a door asks under the vault mutation boundary. The audit SHALL reconcile the index with the pages before it counts, and SHALL report the index as complete only after that succeeds. Failing open is deliberate: a missed duplicate costs one extra copy that the audit reports, while a wrong hit would cost content. No door SHALL scan a content folder to find duplicates.
 
 #### Scenario: An indexed original changed on disk
 
@@ -74,6 +74,16 @@ Every door that stores originals or Source payloads (capture, preservation, adop
 - **WHEN** two calls with different request identities hand over identical bytes at the same moment
 - **THEN** exactly one original and one page are stored
 - **AND** the other call reports the stored copy as `already_stored` or reused
+
+#### Scenario: The default reply of a hand-over that found its bytes names what it kept
+
+- **WHEN** a file handed over alone finds its bytes already stored, and the caller asked for no full reply
+- **THEN** the compact reply names the earlier copy (`duplicate_of`) and, for an Evidence page, its `families`, `family_added` and each field the page did not take (`fields_not_applied`)
+
+#### Scenario: A text file and an original of identical bytes
+
+- **WHEN** an import holds a text file whose bytes equal those of a Source that keeps an original file, or the reverse
+- **THEN** the import stores its own Source and does not map onto the other form, in the plan and in the vault
 
 ### Requirement: Reuse never discloses content the caller cannot read
 

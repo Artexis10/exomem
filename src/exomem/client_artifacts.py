@@ -1180,7 +1180,7 @@ def _earlier_source(
     if raw_protection:
         return None, True
     lookup = duplicates.find_duplicate(
-        vault_root, sha256=sha256, lane=duplicates.SOURCES, protected=False, needs_original=True
+        vault_root, sha256=sha256, lane=duplicates.SOURCES, protected=False, keeps_original=True
     )
     if lookup.hit is None:
         return None, lookup.available

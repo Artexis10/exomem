@@ -4667,12 +4667,13 @@ _SOURCE_URL_GROUPS_SQL = (
 def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> LexicalStore | None:
     """The store once its catalogue is current and in step with the commits of this process, else None.
 
-    A catalogue that is missing or at an older schema is rebuilt from canonical pages in the background
-    (`rebuild_atomic`) and reads as None until that lands: the rebuild is O(vault) and a storing door asks under
-    its mutation boundary (D5), so the door stores unchecked meanwhile. A store flagged by a failed
-    `record_payload_commit` is reconciled inline, which costs one pass over the pages. `verify` reconciles the
-    catalogue against the pages even when nothing flags it, because the audit counts every row and a row lost to
-    a failed upsert must not read as complete. None means the index cannot be proven complete, which a caller
+    A catalogue that is missing, at an older schema or built under another semantic identity is rebuilt from
+    canonical pages in the background (`rebuild_atomic`) and reads as None until that lands: the rebuild is
+    O(vault) and a storing door asks under its mutation boundary (D5), so the door stores unchecked meanwhile.
+    A store flagged by a failed `record_payload_commit` is reconciled inline, which costs one pass over the
+    pages and never rebuilds whole, because the identity was proved first. `verify` reconciles the catalogue
+    against the pages even when nothing flags it, because the audit counts every row and a row lost to a failed
+    upsert must not read as complete. None means the index cannot be proven complete, which a caller
     must carry as unavailable and never as empty.
     """
     if not _catalog_usable():
@@ -11396,12 +11397,22 @@ class LexicalStore:
             return dict.fromkeys(rel_paths, None)
 
     def catalogue_current(self) -> bool:
-        """Whether the sidecar exists at the current schema and shape. Read-only, no DDL."""
+        """Whether the sidecar exists at the current schema, shape and semantic identity. Read-only, no DDL.
+
+        A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
+        wait for that (the duplicate lookup) treats it as absent.
+        """
+        from .vocabulary.registry import RegistryError
+
         if self._failed or not self.path.exists():
             return False
         try:
             with self._query_connection() as conn:
-                return self._schema_is_current(conn)
+                return self._schema_is_current(conn) and self._meta_catalog_identity(
+                    conn
+                ) == catalog_semantic_identity(self.vault_root)
+        except RegistryError:
+            return False
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical catalogue probe declined (%s)")
             return False

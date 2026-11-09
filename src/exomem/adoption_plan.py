@@ -956,7 +956,8 @@ def plan_item(
     them and, when the vault holds them under another path, the `mapping` that `apply` records on it.
     `seen` holds the writes the plan has made so far, by digest, protection class and form (`seen_in_plan`);
     an original that repeats one gives `duplicate-of` and the same mapping. A text file and a file kept as an
-    original are two forms, so neither is the other's duplicate. A write this call plans joins `seen`.
+    original are two forms, so neither is the other's duplicate, in the plan or in the vault. A write this call plans
+    joins `seen`.
     """
     read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
@@ -1043,7 +1044,7 @@ def plan_item(
         return holds_source(item)
     lookup = duplicates.find_duplicate(
         root, sha256=item["original_sha256"], lane=duplicates.SOURCES, protected=protected,
-        needs_original=item["form"] == "artifact",
+        keeps_original=item["form"] == "artifact",
     )
     if not lookup.available:
         item["duplicate_check_unavailable"] = True

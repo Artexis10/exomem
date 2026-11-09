@@ -102,8 +102,8 @@ def already_in_family(vault_root: Path, *, scope: str, category: str, sha256: st
 
 
 def _stored_description(text: str) -> str | None:
-    """The caption that the page's `## Description` section holds, or None when it has none."""
-    marker = "\n## Description\n\n"
+    """The caption that the page's description section holds, or None when it has none."""
+    marker = f"\n{preserve.DESCRIPTION_HEADING}\n\n"
     at = text.find(marker)
     if at == -1:
         return None

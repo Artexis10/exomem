@@ -1920,7 +1920,7 @@ def _settle_on_stored(
     """
     lookup = duplicates.find_duplicate(
         root, sha256=planned["original_sha256"], lane=duplicates.SOURCES,
-        protected=raw_protection.marked(planned["target_path"]), needs_original=planned["form"] == "artifact",
+        protected=raw_protection.marked(planned["target_path"]), keeps_original=planned["form"] == "artifact",
         prefer=(lambda hit: hit.path == holder) if holder else None,
     )
     if not lookup.available:

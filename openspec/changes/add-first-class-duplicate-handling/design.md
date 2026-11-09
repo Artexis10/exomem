@@ -72,7 +72,7 @@ The index is available at the next boundary acquisition, whatever other derived 
 
 ### D5. The index fails open
 
-When the index is missing or at an earlier schema, the system rebuilds it from canonical pages in the background. Until that lands, a write door stores new content with `duplicate_check_unavailable`, and the audit reports its categories as unchecked. A door never rebuilds inline: a rebuild costs a pass over the whole vault (14.6 s at 6,000 pages) and a door asks under the writer lease. The audit reconciles the index with the pages before it counts and calls the index complete only after that succeeds. Why: a missed duplicate costs one extra copy that the audit finds later. A refusal or a wait would cost every write while a derived index repairs itself. Unknown stays visible and is never zero.
+When the index is missing, at an earlier schema or built under another semantic identity, the system rebuilds it from canonical pages in the background. Until that lands, a write door stores new content with `duplicate_check_unavailable`, and the audit reports its categories as unchecked. A door never rebuilds inline: a rebuild costs a pass over the whole vault (14.6 s at 6,000 pages) and a door asks under the writer lease. The audit reconciles the index with the pages before it counts and calls the index complete only after that succeeds. Why: a missed duplicate costs one extra copy that the audit finds later. A refusal or a wait would cost every write while a derived index repairs itself. Unknown stays visible and is never zero.
 
 ### D6. Identity-bearing captures are exempt from payload reuse
 

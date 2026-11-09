@@ -218,7 +218,7 @@ def original_intact(vault_root, rel: str, payload: PagePayload) -> bool:
 
 
 def find_duplicate(
-    vault_root, *, sha256: str, lane: str, protected: bool, needs_original: bool = False,
+    vault_root, *, sha256: str, lane: str, protected: bool, keeps_original: bool | None = None,
     prefer: Callable[[Duplicate], bool] | None = None,
 ) -> DuplicateLookup:
     """The earliest live page of `lane` and protection class whose stored payload hashes to `sha256`.
@@ -229,8 +229,9 @@ def find_duplicate(
     answer equals the answer of a vault without that page. `available` is False when the catalogue cannot
     answer; the door then stores the content as new and carries `duplicate_check_unavailable`.
 
-    `needs_original` admits only a page that keeps the bytes as a file: a file hand-over has no use for a
-    text Source whose captured text happens to hash alike. `prefer` names the hit a door would rather have
+    `keeps_original` narrows the hit to one form of page: True admits only a page that keeps the bytes as a file
+    (a file hand-over has no use for a text Source whose captured text happens to hash alike), False only a page
+    that holds them as captured text, and None either. `prefer` names the hit a door would rather have
     when several live copies exist (older vaults hold one per family); the earliest hit stands when none
     qualifies.
     """
@@ -249,7 +250,7 @@ def find_duplicate(
         if (payload is None or payload.sha256 != sha256 or payload.lane != lane
                 or payload.protected != protected or payload.ref is None):
             continue
-        if needs_original and payload.artifact_path is None:
+        if keeps_original is not None and (payload.artifact_path is not None) != keeps_original:
             continue
         if payload.artifact_path is not None and not original_intact(vault_root, rel, payload):
             continue

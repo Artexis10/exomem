@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import io
+import stat
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,73 @@ def test_text_handed_into_a_second_family_is_one_page_that_lists_both(vault: Pat
     )
     assert repeated["family_added"] is False
     assert _read(page) == settled
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_the_default_reply_of_an_already_stored_hand_over_names_the_earlier_copy_and_what_it_kept(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The compact reply is what a caller gets unless it asks for the full one, so it carries the outcome fields."""
+    from exomem import commands, writer_lease
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = next(candidate for candidate in commands.PRODUCT_COMMANDS if candidate.name == "preserve_evidence")
+    content = "Dear Ms. Vale, please withdraw the notice."
+    first = writer_lease.invoke_command(
+        command, vault, scope="Case", category="letters", filename="letter.txt", content=content,
+        idempotency_key="letter-first",
+    )
+
+    other_family = writer_lease.invoke_command(
+        command, vault, scope="case", category="exhibits", filename="exhibit-a.txt", content=content,
+        description="The letter, filed as an exhibit.", idempotency_key="letter-exhibit",
+    )
+    same_family = writer_lease.invoke_command(
+        command, vault, scope="Case", category="letters", filename="letter-again.txt", content=content,
+        idempotency_key="letter-again",
+    )
+
+    both = [{"scope": "Case", "category": "letters"}, {"scope": "Case", "category": "exhibits"}]
+    assert other_family["duplicate_of"]["path"] == first["path"]
+    assert other_family["families"] == both and other_family["family_added"] is True
+    assert other_family["fields_not_applied"] == [
+        {"field": "filename", "provided": "exhibit-a.txt", "kept": "letter.txt"},
+        {"field": "description", "provided": "The letter, filed as an exhibit.", "kept": None},
+    ]
+    assert same_family["duplicate_of"] == other_family["duplicate_of"]
+    assert same_family["families"] == both and same_family["family_added"] is False
+    assert same_family["fields_not_applied"] == [
+        {"field": "filename", "provided": "letter-again.txt", "kept": "letter.txt"},
+    ]
+
+
+def test_a_mode_restore_never_follows_a_link_that_replaced_the_page(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page's mode is restored through a no-follow descriptor: a link swapped in after the commit keeps its target's mode."""
+    sidecar = vault / "Knowledge Base" / "Evidence" / "swapped.jpg.md"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("---\n---\n", encoding="utf-8")
+    sidecar.chmod(0o644)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("not a page", encoding="utf-8")
+    victim.chmod(0o600)
+
+    def writer(writes, **kwargs):  # noqa: ANN001
+        sidecar.unlink()
+        sidecar.symlink_to(victim)
+        return [write.path for write in writes]
+
+    monkeypatch.setattr(catalog_publication, "publish_markdown_batch", lambda _prepared: None)
+    preserve_module.commit_media_sidecar_writes(
+        vault,
+        (PlannedWrite(sidecar, "---\n---\nbody\n", expected_hash=content_hash("---\n---\n")),),
+        post_commit_fanout=False,
+        batch_writer=writer,
+    )
+
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
 
 
 @pytest.mark.usefixtures("owner_scope")

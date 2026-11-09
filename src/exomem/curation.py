@@ -5348,7 +5348,6 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "steps": steps,
         },
         # Only this derivation may carry the private inverse of a fold.
-        allow_records=True,
         allow_fold_inverse=True,
     )
     manifest = _prepare_manifest(root, plan["steps"])

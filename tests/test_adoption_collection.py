@@ -1340,6 +1340,19 @@ def test_a_text_file_and_an_original_with_the_same_bytes_are_each_stored_not_map
     assert stored.read_bytes() == same
 
 
+def test_a_text_file_does_not_map_onto_an_original_that_the_vault_already_stores(tmp_path: Path) -> None:
+    """The vault's earlier Source keeps an original file, so a text file of identical bytes is not its mapped duplicate."""
+    same = b"identical bytes read as text and as a file"
+    vault = _vault(tmp_path, {"Scans/b-scan.png": same, "Notes/a-notes.txt": same})
+    run_id, planned = _import(vault, path="Scans", include=["Scans"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    _run_id, replanned = _import(vault, path="Notes", include=["Notes"])
+
+    [item] = replanned["plan"]["items"]
+    assert (item["form"], item["action"]) == ("text", "copy-as-source")
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_a_raw_protected_source_is_not_rewritten_to_record_an_import_path(tmp_path: Path) -> None:
     """A release grant binds to the protected page's content hash, so the import path stays off it and the outcome says so."""

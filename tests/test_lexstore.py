@@ -2185,8 +2185,16 @@ def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path
     assert lexstore.payload_candidates(tmp_path, digest) == (second,)
 
 
-def test_a_catalogue_from_an_earlier_schema_answers_unavailable_at_once_and_is_rebuilt_behind_the_lookup(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "outdated",
+    [
+        "UPDATE meta SET value = '16' WHERE key = 'schema_version'",
+        "UPDATE meta SET value = 'an-earlier-identity' WHERE key = 'catalog_identity'",
+    ],
+    ids=["earlier-schema", "earlier-semantic-identity"],
+)
+def test_a_catalogue_that_ensure_fresh_would_rebuild_whole_answers_unavailable_at_once_and_is_rebuilt_behind_the_lookup(
+    tmp_path, monkeypatch, outdated
 ):
     """A lookup under a door's writer lease never waits for a vault-sized rebuild; the repair runs in the background."""
     kept = _write_source(tmp_path, "kept", "stored text", original=b"stored original")
@@ -2194,7 +2202,7 @@ def test_a_catalogue_from_an_earlier_schema_answers_unavailable_at_once_and_is_r
     _built(tmp_path)
     assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
     with closing(sqlite3.connect(lexstore.lexical_path(tmp_path))) as conn:
-        conn.execute("UPDATE meta SET value = '16' WHERE key = 'schema_version'")
+        conn.execute(outdated)
         conn.commit()
     lexstore.clear_stores()  # a restarted process finds the earlier release's catalogue
 
