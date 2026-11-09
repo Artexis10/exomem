@@ -10845,19 +10845,31 @@ def op_triage_memory(
         expected_fingerprint: Reviewed fingerprint; mismatch refuses.
         source_path: Source page; required for newly returned relation items.
         decision: Payload for decide-vocabulary.
-        item_id: The id a review reply gives one item; replaces `ref`, `expected_fingerprint` and
-            `source_path`. A stale id refuses with the current one.
+        item_id: The id a review reply gives one item, or a write advisory's review ref; replaces
+            `ref`, `expected_fingerprint` and `source_path`. A stale id refuses with the current one.
     """
     if item_id is not None:
         if ref is not None or expected_fingerprint is not None or source_path is not None:
             raise ValueError(
                 "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
             )
-        bound = review_ids_module.bind(
-            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-        )
-        ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
-        source_path = bound.get("source_path")
+        if corpus_aware_module.is_write_advisory_ref(item_id):
+            # A write advisory is on no queue: its ref is its handle, and the ledger names the
+            # fingerprint it last surfaced with.
+            ref = item_id
+            expected_fingerprint = review_state_module.last_surfaced_fingerprint(
+                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+            )
+            if expected_fingerprint is None:
+                from .cli_ops import OpError
+
+                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+        else:
+            bound = review_ids_module.bind(
+                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+            )
+            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+            source_path = bound.get("source_path")
     if ref is None:
         raise ValueError("INVALID_REVIEW_ACTION: a triage decision requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()

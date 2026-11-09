@@ -268,7 +268,7 @@
     "inputSchema": {
       "properties": {
         "review_item": {
-          "description": "The id that list_review_items returned.",
+          "description": "A list_review_items id, or an advisory ref.",
           "type": "string"
         },
         "decision": {

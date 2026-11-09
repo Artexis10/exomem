@@ -55,9 +55,10 @@ them all. An upload receipt reports its warnings as per-file rows under
 `files` instead, and a mutation recovered from a portable receipt reports the
 count alone because it retains no leaf content. A corpus write advisory includes
 its review ref and complete 24-character signal fingerprint in its warning text;
-triage binds to that exact fingerprint (dismiss requires a reason), and a stale
-fingerprint simply lets the advisory re-emit when the counterpart changes or the
-written page changes the detected signal class.
+`decide_review_item(review_item=<that ref>, decision="dismiss", why=...)` binds the
+fingerprint the server last showed (dismiss requires a reason), and the advisory
+re-emits when the counterpart changes or the written page changes the detected
+signal class.
 A compiled-note write may also carry `structure_suggestion`. Its `kind` is
 `note_cohesion` while the written page has reached a size step and nobody has
 answered that step. It holds `units`, `step_units` and `next_step_units`, the
@@ -166,7 +167,8 @@ Name a specific relation on every edge. A write can answer in two ways.
 - **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
   this write added and that has no page and no entity, with its `connections.create_entity` route.
   Follow the route when the name is a durable referent: stable, recurring and
-  useful beyond this source. Otherwise dismiss it the same way.
+  useful beyond this source. Otherwise dismiss it with
+  `decide_review_item(review_item=<its review ref>, decision="dismiss", why=...)`.
 
 ## Relation disposition on compiled writes
 

@@ -165,8 +165,8 @@ def test_a_dismissed_name_is_not_listed_again_and_raises_no_entity_candidate(
     _as(monkeypatch, "session-a")
     first = _note(call, "Harbour review", "Kestrel", "Salt Ledger")
     kestrel = next(item for item in first["undeclared_referents"]["names"] if item["name"] == "Kestrel")
-    dismissed = call("triage_memory", {
-        "ref": kestrel["review"], "action": "dismiss", "expected_fingerprint": kestrel["fingerprint"],
+    dismissed = call("decide_review_item", {
+        "review_item": kestrel["review"], "decision": "dismiss",
         "why": "intentional: Kestrel is a one-off name in this review.",
     })
     assert dismissed.get("state") == "dismissed", dismissed

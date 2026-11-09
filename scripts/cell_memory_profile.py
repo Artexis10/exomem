@@ -641,7 +641,7 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
 
     import httpx
 
-    from exomem import model_reaper, server
+    from exomem import model_reaper, operation_entries, server
 
     scratch = Path(args.scratch)
     vault = scratch / "vault"
@@ -657,9 +657,11 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
     app = mcp.http_app(stateless_http=True, json_response=True)
     request_id = 0
 
-    async def call(client: httpx.AsyncClient, name: str, arguments: dict) -> dict[str, Any]:
+    async def call(client: httpx.AsyncClient, command: str, arguments: dict) -> dict[str, Any]:
         nonlocal request_id
         request_id += 1
+        # The cell lists only the public tools; spell the grouped command as the tool that carries it.
+        name, arguments = operation_entries.spell_call(command, arguments, "public")
         payload = {
             "jsonrpc": "2.0",
             "id": request_id,

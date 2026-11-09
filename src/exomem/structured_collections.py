@@ -3418,9 +3418,9 @@ def _non_path_reference_error(raw: str) -> CollectionError | None:
         return None
     return CollectionError(
         "INVALID_COLLECTION_PATH",
-        "collection reference must be the collection's `_collection.md` manifest path "
-        "(a title is not a reference)",
-        {"remediation": "pass the manifest path; use the collection's UUID if you have it"},
+        "collection reference must be a collection's title or its `_collection.md` manifest path; "
+        "no collection has this title",
+        {"remediation": "pass an existing collection's title, or its manifest path or UUID"},
     )
 
 

@@ -312,9 +312,9 @@ often this happened, and the writers that would teach the vault, each with the
   `save-conventions` with `why` and the advisory's `expected_hash`. Add under
   `referential.add_cues` or `referential.add_filler` (one word), optionally as
   `{value, why, at, evidence}` with the advisory's `review` ref as evidence.
-- **Neither**: the words were a one-off. `decide_review_item` with the `review`
-  ref, `action="dismiss"`, a `why` and the `fingerprint`; it stays quiet until
-  new misses arrive. `review/family/activation-naming` quiets the kind.
+- **Neither**: the words were a one-off. `decide_review_item(review_item=<the
+  `review` ref>, decision="dismiss", why=...)`; it stays quiet until new
+  misses arrive. `review/family/activation-naming` quiets the kind.
 
 A stale hash refuses the write: re-read and decide again. To undo a learned
 name, edit it out of `learned_aliases`. To undo a registry change,

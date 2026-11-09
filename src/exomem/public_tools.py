@@ -865,7 +865,7 @@ def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class DecideReviewItem(Wire):
-    review_item: str = Field(description="The id that list_review_items returned.")
+    review_item: str = Field(description="A list_review_items id, or an advisory ref.")
     decision: Literal["accept", "dismiss", "snooze", "reopen"]
     until: str | None = Field(default=None, description="snooze: YYYY-MM-DD.")
     why: str | None = None

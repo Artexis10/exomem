@@ -501,8 +501,8 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 # Read the running image's registry and configured discovery shape; command names can share a public rendering.
 CLOUD_DISCOVERY_POLICY_COMMAND = (
     "import json,os;from exomem.commands import product_commands_for;"
-    "from exomem.command_surface import listed_names;from exomem.server import _tool_shape_from_environment;"
-    "from exomem import cloud_origin;shape=_tool_shape_from_environment();tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
+    "from exomem.command_surface import DEFAULT_TOOL_SHAPE,listed_names;"
+    "from exomem import cloud_origin;shape=DEFAULT_TOOL_SHAPE;tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
     "personal=product_commands_for('mcp',expose_tier2=tier2);"
     "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.upload_enabled());"
     "names=lambda commands:{name for command in commands for name in listed_names(command,shape)};"

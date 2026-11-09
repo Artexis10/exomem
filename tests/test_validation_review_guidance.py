@@ -1,8 +1,6 @@
 """A caller can finish an evidence-based preview without recording its assessment."""
 
 import pytest
-import test_single_purpose_tools_mcp as pilot_mcp
-from test_single_purpose_tools_mcp import _session
 
 from exomem import (
     activation_manifest,
@@ -12,17 +10,10 @@ from exomem import (
     vault,
 )
 
-build = pilot_mcp.build
 
-
-def test_preview_tools_explain_nonpersisting_review_without_requiring_a_skill(build, vault):
-    async def scenario(client):
-        return {tool.name: tool for tool in await client.list_tools()}
-
-    tools = _session(build(), scenario)
+def test_preview_review_guidance_reaches_an_agent_without_requiring_a_skill(vault):
+    """The bootstrap and the concise contract carry it; the 28 KB tool definitions do not."""
     guidance = semantic_authoring.EXISTING_VALIDATION_GUIDANCE
-    assert guidance in tools["prepare_note"].description
-    assert guidance in tools["browse_memory"].description
     bootstrap = commands.op_bootstrap(vault, profile="compact", section="authoring")
     assert bootstrap["semantic_authoring"]["validation_review"] == guidance
     assert guidance in semantic_authoring.render_concise()

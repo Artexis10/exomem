@@ -221,9 +221,10 @@ shorter list means the remainder was trimmed. Upload receipts carry their
 warnings as per-file rows under `files`, and a terminal rebuilt from a portable
 receipt reports only the count, since that receipt retains no leaf content.
 Corpus write advisories include a review ref and complete 24-character signal
-fingerprint in their warning text. Triage binds to that exact fingerprint (dismiss
-requires a reason); a stale fingerprint simply lets the advisory re-emit when the
-counterpart changes or the written page changes the detected signal class.
+fingerprint in their warning text. `decide_review_item(review_item=<that ref>,
+decision="dismiss", why=...)` binds the fingerprint the server last showed (dismiss
+requires a reason); the advisory re-emits when the counterpart changes or the
+written page changes the detected signal class.
 
 A compiled-note write may additionally return `structure_suggestion` with `kind`
 `note_cohesion` while the written page has reached a size step and that step is
