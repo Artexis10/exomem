@@ -407,26 +407,6 @@ def test_a_visible_page_titled_like_a_withheld_path_is_no_oracle_for_that_path(
     assert "Visible text." in answers["with"]["body"]
 
 
-def test_a_reply_that_lists_pages_by_path_keeps_one_form_throughout(tmp_path: Path) -> None:
-    root = _materialize(
-        tmp_path / "vault",
-        {
-            f"{NOTES}/alpha.md": _page("Alpha", "First page.", type="insight"),
-            f"{NOTES}/beta.md": _page("Beta", "Second page.", type="insight"),
-        },
-        "external",
-    )
-    alpha, beta = f"{NOTES}/alpha.md", f"{NOTES}/beta.md"
-    # The shape an accepted relation returns: the source page, the target, and the edit it made.
-    accepted = {"accepted": True, "path": alpha, "from": alpha, "to": beta, "edit": {"path": alpha}}
-    # A write that holds nothing else names its page by title and id.
-    saved = {"user_summary": f"Saved -> {alpha}", "path": alpha, "after_hash": "0" * 64}
-
-    assert page_names.name_released_reply(root, accepted) == accepted
-    named = page_names.name_released_reply(root, saved)
-    assert named["title"] == "Alpha" and "path" not in named
-
-
 def test_a_path_a_title_and_a_short_id_name_pages_in_that_order(tmp_path: Path) -> None:
     root = _materialize(
         tmp_path / "vault",

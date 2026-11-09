@@ -363,26 +363,7 @@ def _id_as_written(identity: PageIdentity, reply: Mapping[str, Any]) -> str:
     return identity.id
 
 
-def _lists_unnamed_pages(reply: Mapping[str, Any]) -> bool:
-    """Whether a nested row of `reply` holds a `path` that this pass does not name.
-
-    `diagnostics` keeps paths by design and `source` is named below, so neither counts. A reply that
-    named its primary page and left such a row in path form would use two forms; it keeps one.
-    """
-
-    def holds_path(value: Any) -> bool:
-        if isinstance(value, Mapping):
-            return "path" in value or any(holds_path(inner) for inner in value.values())
-        return isinstance(value, list) and any(holds_path(inner) for inner in value)
-
-    return any(
-        holds_path(value) for key, value in reply.items() if key not in {"diagnostics", "source"}
-    )
-
-
 def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
-    if _lists_unnamed_pages(reply):
-        return reply
     source = reply.get("source")
     path = reply.get("path")
     paths = reply.get("paths")
