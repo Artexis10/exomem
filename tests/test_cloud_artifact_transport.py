@@ -27,7 +27,7 @@ FILE = {"file_id": "file-one", "download_url": "https://files.example/a?secret=y
 DATA = b"broker-owned original bytes"
 
 
-def _cloud(monkeypatch: pytest.MonkeyPatch, operation="preserve_artifacts") -> None:
+def _cloud(monkeypatch: pytest.MonkeyPatch, operation="save_evidence") -> None:
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "cell-one")
     monkeypatch.setenv("EXOMEM_CLOUD_ARTIFACT_BROKER_URL", "http://10.0.0.7:8767")
@@ -47,7 +47,7 @@ class _BrokerConnection:
         self.body = io.BytesIO(DATA)
 
     def request(self, _method, _target, body, headers):
-        assert json.loads(body)["operation"] in {"preserve_artifacts", "capture_source"}
+        assert json.loads(body)["operation"] in {"save_evidence", "save_source"}
         assert headers["Authorization"].startswith("Bearer ")
 
     def getresponse(self):
@@ -69,7 +69,7 @@ class _BrokerConnection:
         pass
 
 
-@pytest.mark.parametrize("operation", ["preserve_artifacts", "capture_source"])
+@pytest.mark.parametrize("operation", ["save_evidence", "save_source"])
 def test_cloud_preservation_stores_broker_bytes_without_cell_public_dns(vault: Path, source_schema, monkeypatch: pytest.MonkeyPatch, operation) -> None:
     """Catch the advertised Cloud handle path trying forbidden local DNS."""
     _cloud(monkeypatch, operation)
@@ -82,7 +82,7 @@ def test_cloud_preservation_stores_broker_bytes_without_cell_public_dns(vault: P
     monkeypatch.setattr(socket, "getaddrinfo", denied_dns)
     from exomem import cloud_artifact_transport as transport
     monkeypatch.setattr(transport, "_PrivateConnection", _BrokerConnection)
-    result = (commands.op_preserve_artifacts(vault, scope="case", category="raw", files=[FILE]) if operation == "preserve_artifacts" else commands.op_capture_source(vault, source_schema, title="Original file", source_type="research-report", files=[FILE]))
+    result = (commands.op_preserve_artifacts(vault, scope="case", category="raw", files=[FILE]) if operation == "save_evidence" else commands.op_capture_source(vault, source_schema, title="Original file", source_type="research-report", files=[FILE]))
     assert attempted == [], "Cloud preservation attempted forbidden cell DNS"
     row = result["files"][0]
     assert row["outcome"] == "stored", result
@@ -132,11 +132,11 @@ def broker_authority():
     app = broker.ArtifactBroker(pem)
     now = int(time.time() * 1000)
     claims = {
-        "v": 1, "aud": "exomem-artifact-broker", "sub": "cell-one", "op": "preserve_artifacts",
+        "v": 1, "aud": "exomem-artifact-broker", "sub": "cell-one", "op": "save_evidence",
         "jti": str(uuid.uuid4()), "issued_ms": now, "exp": now // 1000 + 60,
         "handles": [descriptor_digest(FILE)] * 2, "max_files": 8, "max_bytes": 104857600,
     }
-    body = {"file": FILE, "index": 0, "cell": "cell-one", "operation": "preserve_artifacts"}
+    body = {"file": FILE, "index": 0, "cell": "cell-one", "operation": "save_evidence"}
     return app, key, claims, body
 
 
@@ -149,7 +149,7 @@ def test_broker_refuses_altered_authority_before_fetch(broker_authority, changed
     elif changed == "cell":
         body["cell"] = "another-cell"
     elif changed == "operation":
-        body["operation"] = "capture_source"
+        body["operation"] = "save_source"
     elif changed == "descriptor":
         body["file"] = {**FILE, "download_url": "https://elsewhere.example/secret"}
     elif changed == "expired":

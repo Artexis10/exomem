@@ -630,7 +630,13 @@ _REMAINING = {
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
-    "triage_memory": (None, (_row("decision", "triage_memory", verb="saved"),)),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+    "triage_memory": (None, (
+        _row("decision", "triage_memory", verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        # The family, envelope and vocabulary decisions name a kind of signal or a request, not one item, so no short id reaches them.
+        _row("family", "triage_memory", ("ref", "action", "until", "why"), ("ref", "action"), kind="set-family", verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("envelope", "triage_memory", ("ref", "action"), ("ref", "action"), kind="set-envelope", verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("vocabulary-decision", "triage_memory", ("ref", "action", "decision"), ("ref", "decision"), kind="decide-vocabulary", constraints=(_literal("action", "decide-vocabulary", implied=True),), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+    )),
     "review_item_context": (None, (_row("item-context", "read_review"),)),
     "review_memory": ("mode", (
         _row("attention", "read_review", ("categories", "limit", "state")),

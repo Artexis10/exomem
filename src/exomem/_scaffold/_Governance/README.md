@@ -22,9 +22,9 @@ Every document carries `governance_version: 1` and an immutable `id`
 error — the last known-good policy stays in effect until it's fixed. An
 unrecognized file under this folder is ignored with a warning, not an error.
 
-Use `read_governance` to inspect policy and `change_governance` to propose,
+Use `inspect_memory` to inspect policy and `manage_memory` to propose,
 review, commit, suspend, resume, or undo policy. REST and CLI retain the grouped
-`govern_memory` command. On an enrolled vault these YAML files are pending source until a reviewed
+`manage_memory` command. On an enrolled vault these YAML files are pending source until a reviewed
 commit activates one immutable policy/projector/catalog tuple; a direct edit does
 not silently replace the active tuple.
 

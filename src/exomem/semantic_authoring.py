@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 10
+AUTHORING_CONTRACT_VERSION = 11
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 #: What the compact bootstrap core serves about page status. It leaves out the migration note for a
@@ -330,7 +330,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Inspect affected claims and evidence. Distinguish attributed accounts from "
             "established facts. Correct suitable existing units with guarded writers, justified "
             "verdicts and exact links; verify current state. Refutation alone changes neither "
-            "lifecycle nor rank. Writers retain prior interpretations; request bootstrap with "
+            "lifecycle nor rank. Writers retain prior interpretations; request read_instructions with "
             "profile=full for history guidance."
         ),
         "correction_detail": (
@@ -338,8 +338,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "historical proposition and author its verdict; add a distinct corrective unit "
             "when useful. Refutation and contradiction do not imply supersession or reduce "
             "rank. The semantic writer retains prior interpretations atomically. "
-            "Read revision_history with read_memory(include_history=true), optionally for "
-            "unit_ref, using history_limit and history_continuation. When it carries "
+            "Read revision_history with read_page(part=history), optionally for "
+            "unit_ref, using history_limit and history_continuation in options. When it carries "
             "lookup=stale, repeat the same call shortly instead of reading absence or paging "
             "on. Existing history remains "
             "the page's operation log. Entities and legacy pages use their existing edit owner; "
@@ -686,7 +686,7 @@ def render_concise(
 
     placement_rule = _placement_rule(minimum["placement_rule"], DEFAULT_TOOL_SHAPE)
     routes = {**contract.routes, "single_semantic_unit": tools_text("observe_memory", DEFAULT_TOOL_SHAPE, "write"),
-              "tier_2": "change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
+              "tier_2": "manage_memory `files.create` and `files.append` receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits."}
     findings = contract.findings
     portable = contract.portable_categories
     portable_keys = ", ".join(f"`{key}`" for key in portable["core_keys"])
@@ -743,8 +743,6 @@ def render_concise(
         f"{findings['empty_rich_unit']['remediation']}\n"
         f"- Exact applicability: obtain `{call_text('bootstrap', {'profile': 'compact', 'section': 'authoring'}, DEFAULT_TOOL_SHAPE)}` and read `semantic_authoring.minimum_semantic_unit` "
         "for current structural applicability and the status-class rule. "
-        "If the exposed bootstrap schema lacks `section`, use "
-        f"`{call_text('bootstrap', {'profile': 'full'}, DEFAULT_TOOL_SHAPE)}` instead; released profiles reject section arguments. "
         f"Apply `compiled_intent(after_state) = {minimum['compiled_intent']}`. "
         f"Shipped compiled types and their default folders: {destinations}. More may be registered; "
         f"`{call_text('schema_memory', {'subject': 'note-types', 'operation': 'inspect'}, DEFAULT_TOOL_SHAPE)}` lists the live set. "

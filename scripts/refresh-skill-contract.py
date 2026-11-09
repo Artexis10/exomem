@@ -55,7 +55,7 @@ def main() -> None:
     end = "# END GENERATED NEXT ACTION COMPATIBILITY"
     before, rest = text.split(start, 1)
     _, after = rest.split(end, 1)
-    moves = read_next_action.templates("`recall_context`", "`read_memory`", "`search_memory`")
+    moves = read_next_action.templates("`recall_context`", "`read_page`", "`search_memory`")
     changes[hook] = before + start + "_COMPAT_NEXT_ACTION = " + pprint.pformat(moves, width=100) + "\n" + end + after
     stale = [path for path, text in changes.items() if path.read_text(encoding="utf-8") != text]
     if args.check:

@@ -50,7 +50,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "episode_memory": "episodes", "compile_source": "sources", "process_media": "media",
     "read_media": "media", "review_memory": "review", "review_item_context": "review",
     "connect_memory": "connections", "adopt_vault": "imports", "adoption_studio": "imports",
-    "maintain_memory": "maintenance", "schema_memory": "schema", "govern_memory": "governance",
+    "maintain_memory": "maintenance", "triage_memory": "review", "schema_memory": "schema", "govern_memory": "governance",
     "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
     "observe_memory": "observations", "bootstrap": "instructions",
 }
@@ -75,6 +75,22 @@ _KIND_NAMES: dict[tuple[str, str], str] = {  # nosemgrep: ep-word-dict -- the cl
     ("review_memory", "question"): "question", ("review_item_context", "item-context"): "item_context",
     ("review_memory", "write-advisory-result"): "advisory_result",
 }
+
+
+def _triage_kind(arguments: Mapping[str, Any]) -> str:
+    """The kind of a `triage_memory` call. The leaf tells them apart by the namespace of `ref`, which it owns."""
+    from . import envelope, review_state
+
+    ref = str(arguments.get("ref") or "")
+    if arguments.get("action") == "decide-vocabulary":
+        return "decide-vocabulary"
+    if envelope.is_envelope_ref(ref):
+        return "set-envelope"
+    return "set-family" if review_state.is_family_ref(ref) else "decision"
+
+
+#: Grouped commands whose renderings have no selector but several kinds: the kind a call stands for.
+_KIND_OF_CALL: dict[str, Any] = {"triage_memory": _triage_kind}  # nosemgrep: ep-word-dict -- the one grouped command whose kinds its own ref namespaces select.
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +281,10 @@ class PublicSurface:
             selector = rendering.selector
             kind = arguments.get(selector) if selector else None
             fields = {key: value for key, value in arguments.items() if key != selector}
+            named = _KIND_OF_CALL[command](arguments) if command in _KIND_OF_CALL else None
             variant = next(
                 (entry for entry in rendering.variants
-                 if (selector is None or entry.action == kind)
+                 if (entry.kind == named if named is not None else selector is None or entry.action == kind)
                  and all(replace(item, implied=False).matches(fields) for item in entry.constraints)),
                 None,
             )
@@ -569,7 +586,7 @@ def write_selectors() -> tuple[str, ...]:
     surface = public_surface()
     selectors = {name for name, tool in surface.tools.items() if tool.effect == "write" and tool.captures}
     for op in surface.doors[DOORS["write"]].values():
-        operations = operation_entries.OPERATIONS.get(op.command)
+        operations = operation_entries.register_operations(op.command)
         if operations is not None and operations.capture_write:
             selectors.add(f"{op.door}:{op.name}")
     return tuple(sorted(selectors))

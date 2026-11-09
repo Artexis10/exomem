@@ -753,11 +753,13 @@ class ListReviewItems(Wire):
         "due", "activation", "stale", "contradiction", "unprocessed_sources", "unlinked",
         "relation_suggestions", "imports", "upkeep", "plan_progress", "vocabulary", "procedure_approvals",
     ] | None = Field(default=None, description="One queue; due items by default.")
+    categories: list[str] | None = Field(default=None, description="Keep only these finding categories, or upkeep families.")
     limit: int | None = None
 
 
 def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
-    return "review_memory", {"mode": REVIEW_QUEUES[wire.get("queue") or "due"], **_given({"limit": wire.get("limit")})}
+    return "review_memory", {"mode": REVIEW_QUEUES[wire.get("queue") or "due"],
+                             **_given({"categories": wire.get("categories"), "limit": wire.get("limit")})}
 
 
 class DecideReviewItem(Wire):
@@ -767,6 +769,14 @@ class DecideReviewItem(Wire):
     why: str | None = None
     relation: str | None = Field(default=None, description="accept: the relation to record, when the suggestion offers several.")
     detail: Detail | None = _DETAIL
+
+
+def _spell_decision(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The wire call of a decision on one review item; a family, envelope or vocabulary decision is a door operation."""
+    if arguments.get("item_id") is None or arguments.get("action") not in ("dismiss", "snooze", "reopen"):
+        return None
+    return {"review_item": arguments["item_id"], "decision": arguments["action"],
+            **_given({"until": arguments.get("until"), "why": arguments.get("why"), "detail": arguments.get("response_detail")})}
 
 
 def _decide_review_item(wire: dict[str, Any], ctx: Context) -> Translated:
@@ -890,7 +900,8 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  derived=frozenset({"item_key", "expected_item_version", "expected_container_hash"}))],
           destructive=True,
           example={"collection": "Workouts", "record": "b3k9q2x.7mna", "changes": {"distance_km": 12.4}, "why": "Watch sync was wrong"},
-          claims=(("record_memory", "update"),)),
+          claims=(("record_memory", "update"),),
+          captures=True),
     _tool("query_plan_items", "Query plan items",
           "Read the person's Planning. Without `collection`, list the plan collections; with one, filter its items.",
           QueryPlanItems, "read", _query_collection("plan_memory", "query_plan_items", "plan_id"),
@@ -911,7 +922,8 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  derived=frozenset({"plan_id", "expected_item_version", "expected_container_hash", "transition"}))],
           destructive=True,
           example={"collection": "Launch plan", "plan_item": "p3x9t2k.7mna", "why": "Draft finished", "status": "done"},
-          claims=(("plan_memory", "update"), ("plan_memory", "triage"))),
+          claims=(("plan_memory", "update"), ("plan_memory", "triage")),
+          captures=True),
     _tool("list_review_items", "List review items",
           "List what needs the person's review: due items by default, or one queue.",
           ListReviewItems, "read", _list_review_items,
@@ -920,7 +932,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("decide_review_item", "Decide review item",
           "Record the person's decision on one review item. accept applies to a relation suggestion.",
           DecideReviewItem, "write", _decide_review_item,
-          [Route("triage_memory", inverse={"item_id": "review_item", "action": "decision", "response_detail": "detail"}),
+          [Route("triage_memory", reverse=_spell_decision),
            Route("connect_memory", when={"operation": "accept-relation"},
                  inverse={"item_id": "review_item", "requested_relation": "relation", "response_detail": "detail"},
                  add={"decision": "accept"})],

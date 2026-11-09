@@ -31,8 +31,7 @@ param(
     [string]$PackageVersion = "",
     [ValidateSet("auto", "always", "never")]
     [string]$CudaTorch = "auto",
-    [switch]$ResumeStoppedTransition,
-    [switch]$LegacyMcpCompat
+    [switch]$ResumeStoppedTransition
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +59,6 @@ if (-not $isAdmin) {
     if ($Release) { $relaunchArgs += "-Release" }
     if ($ServiceRoot) { $relaunchArgs += @("-ServiceRoot", "`"$ServiceRoot`"") }
     if ($PackageVersion) { $relaunchArgs += @("-PackageVersion", "`"$PackageVersion`"") }
-    if ($LegacyMcpCompat) { $relaunchArgs += "-LegacyMcpCompat" }
     if ($ResumeStoppedTransition) { $relaunchArgs += "-ResumeStoppedTransition" }
     Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
     exit
@@ -162,9 +160,6 @@ function Read-DotenvMap {
             }
             $map[$name] = $value
         }
-    }
-    if ($LegacyMcpCompat) {
-        $map["EXOMEM_MCP_LEGACY_COMPAT"] = "1"
     }
     return $map
 }
