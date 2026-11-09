@@ -11,9 +11,10 @@ import base64
 import datetime as dt
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import access, privacy_log, reserved_paths
 from .collection_store import ownership
@@ -23,6 +24,9 @@ from .vault import (
     parse_frontmatter,
     resolve_under_vault,
 )
+
+if TYPE_CHECKING:
+    from .vault_store.read import PageMeta
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +143,7 @@ def list_directory(
         resolved_path = ""
     else:
         try:
-            resolution = resolve_under_vault(vault_root, path, must_exist=True, return_details=True)
+            resolution = _resolve_folder(vault_root, path, return_details=True)
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
         assert isinstance(resolution, VaultPathResolution)
@@ -163,9 +167,7 @@ def list_directory(
                 code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
             )
         try:
-            _target_abs, rel_path = resolve_under_vault(
-                vault_root, path, must_exist=True, must_be_dir=True
-            )
+            _target_abs, rel_path = _resolve_folder(vault_root, path, must_be_dir=True)
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
 
@@ -232,26 +234,173 @@ def list_directory(
         truncated = len(chosen) > limit
         return chosen[:limit]
 
+    # In a store-mode vault the store lists its pages and the folders that hold them, and a file at
+    # a page's path is only the projection of it: the walk of the disk adds the rest.
+    stored = _stored_listing(vault_root, rel_path, recursive)
+    #: Every name that the walk of the disk offered, and the page's names that only the store has.
+    disk_names: set[str] = set()
+    stored_only: list[str] = []
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None if limit is None else page
+
+    if stored is not None and limit is not None:
+
+        def merged(candidates: list[tuple[str, str]]) -> list[str]:
+            disk_names.update(name for name, _kind in candidates)
+            offered = [c for c in candidates if not stored.projects(child_path(c[0]), c[1])]
+            extra = [c for c in stored.candidates if c[0] not in disk_names]
+            chosen = page(offered + extra)
+            stored_only.extend(name for name in chosen if name not in disk_names)
+            return [name for name in chosen if name in disk_names]
+
+        select = merged
+
     try:
         held_entries = reserved_paths.list_generic_tree(
-            vault_root, rel_path or ".", recursive=recursive,
-            select=None if limit is None else page,
+            vault_root, rel_path or ".", recursive=recursive, select=select,
         )
-    except reserved_paths.ReservedPathLeafError:
-        raise ListDirectoryError(
-            code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
-        ) from None
+    except reserved_paths.ReservedPathLeafError as error:
+        # Only a folder that the disk lacks may be listed from the store: a reserved or unsafe
+        # folder is refused as it always was.
+        if stored is None or error.code != "MISSING" or not stored.candidates:
+            raise ListDirectoryError(
+                code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
+            ) from None
+        held_entries = ()
+        if select is not None:
+            select([])
 
     entries = [
         _entry_for_held(held_entry, child_path(held_entry.relative_path))
         for held_entry in held_entries
         # A page's entries were decided while it was chosen.
-        if limit is not None
-        or listed(held_entry.relative_path, held_entry.identity.kind == "directory")
+        if (
+            stored is None
+            or not stored.projects(child_path(held_entry.relative_path), held_entry.identity.kind)
+        )
+        and (
+            limit is not None
+            or listed(held_entry.relative_path, held_entry.identity.kind == "directory")
+        )
     ]
+    if stored is not None:
+        if limit is None:
+            disk_names = {held_entry.relative_path for held_entry in held_entries}
+            stored_only = [
+                name
+                for name, kind in stored.candidates
+                if name not in disk_names and listed(name, kind == "directory")
+            ]
+        entries.extend(stored.entry(name, child_path(name)) for name in stored_only)
     entries.sort(key=lambda e: entry_sort_key(e.type, e.path))
 
     return ListDirectoryResult(path=rel_path, entries=entries, truncated=truncated)
+
+
+def _resolve_folder(vault_root: Path, path: str, **options):
+    """``resolve_under_vault`` for a folder that must exist: the store's folders exist as well as the disk's."""
+    try:
+        return resolve_under_vault(vault_root, path, must_exist=True, **options)
+    except VaultPathError as error:
+        if error.code != "NOT_FOUND":
+            raise
+        found = resolve_under_vault(vault_root, path, return_details=True)
+        assert isinstance(found, VaultPathResolution)
+        if not _store_holds_folder(vault_root, found.resolved_relative):
+            raise
+        return resolve_under_vault(vault_root, path, **options)
+
+
+def _store_holds_folder(vault_root: Path, rel: str) -> bool:
+    """Whether the vault is in store mode and its store holds a page below this folder."""
+    from .vault_store import mode, read
+
+    if not mode.store_mode_for_reads(vault_root):
+        return False
+    with read.snapshot(vault_root) as view:
+        return next(view.children(rel), None) is not None
+
+
+@dataclass(frozen=True)
+class _StoredListing:
+    """What the store lists below one folder of a store-mode vault."""
+
+    #: ``(name relative to the folder, "file" or "directory")``, for the pages and the folders that hold them.
+    candidates: list[tuple[str, str]]
+    metas: dict[str, PageMeta]
+
+    def projects(self, vault_rel: str, kind: str) -> bool:
+        """Whether a file of the disk lies at a path that the store owns: its projection, or a stray."""
+        from .vault_store import ownership
+
+        return kind != "directory" and ownership.classify(vault_rel) is ownership.Ownership.PAGE
+
+    def entry(self, name: str, rel_path: str) -> DirectoryEntry:
+        meta = self.metas.get(name)
+        if meta is None:  # a folder that holds stored pages has no file of its own
+            return DirectoryEntry(
+                name=name.rsplit("/", 1)[-1], type="directory", path=rel_path,
+                size_bytes=None, updated=None,
+            )
+        fm_type: str | None = None
+        if meta.frontmatter_json:
+            found = json.loads(meta.frontmatter_json).get("type")
+            fm_type = str(found) if found else None
+        return DirectoryEntry(
+            name=name.rsplit("/", 1)[-1], type="file", path=rel_path, size_bytes=meta.size,
+            updated=dt.datetime.fromtimestamp(meta.mtime_ns / 1e9).date().isoformat(),
+            frontmatter_type=fm_type,
+        )
+
+
+def _stored_listing(vault_root: Path, folder: str, recursive: bool) -> _StoredListing | None:
+    """The store's pages and folders below ``folder`` ("" for the vault root), or None in a file-mode vault.
+
+    A page under a reserved path is left out, as the walk of the disk leaves out its file.
+    """
+    from .vault_store import mode, read
+
+    if not mode.store_mode_for_reads(vault_root):
+        return None
+    prefix = f"{folder.rstrip('/')}/" if folder else ""
+    metas: dict[str, PageMeta] = {}
+    folders: set[str] = set()
+    with read.snapshot(vault_root) as view:
+        if recursive:
+            for meta in view.pages(prefix):
+                name = meta.path[len(prefix):]
+                if reserved_paths.classify_logical(meta.path).blocked:
+                    continue
+                metas[name] = meta
+                parts = name.split("/")
+                folders.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+        else:
+            for child in view.children(folder):
+                child_rel = prefix + child.name
+                if reserved_paths.classify_logical(child_rel).blocked:
+                    continue
+                if child.is_dir:
+                    folders.add(child.name)
+                else:
+                    page_meta = view.page_meta(child_rel)
+                    if page_meta is not None:
+                        metas[child.name] = page_meta
+    candidates = [(name, "file") for name in metas] + [(name, "directory") for name in folders]
+    return _StoredListing(candidates, metas)
+
+
+def _names_with_stored(
+    vault_root: Path, folder: str, held: tuple[tuple[str, str], ...]
+) -> tuple[tuple[str, str], ...]:
+    """The disk's ``(path, kind)`` names below ``folder``, with the store's pages in place of their files."""
+    stored = _stored_listing(vault_root, folder, recursive=True)
+    if stored is None:
+        return held
+    prefix = f"{folder.rstrip('/')}/" if folder else ""
+    kept = tuple(
+        (name, kind) for name, kind in held if not stored.projects(prefix + name, kind)
+    )
+    present = {name for name, _kind in kept}
+    return kept + tuple(c for c in stored.candidates if c[0] not in present)
 
 
 def _listable(parts: list[str], include_hidden: bool) -> bool:
@@ -280,7 +429,7 @@ def _withheld_target(
     walk stops at the first visible one.
     """
     if is_dir is None:
-        is_dir = (Path(vault_root) / rel_path).is_dir()
+        is_dir = (Path(vault_root) / rel_path).is_dir() or _store_holds_folder(vault_root, rel_path)
     if not is_dir:
         return not keep(rel_path)
     cached = collapsed.get(rel_path)
@@ -293,6 +442,7 @@ def _withheld_target(
         held = reserved_paths.list_generic_names(vault_root, rel_path or ".", recursive=True)
     except reserved_paths.ReservedPathLeafError:
         held = ()
+    held = _names_with_stored(vault_root, rel_path, held)
     for relative_path, kind in held:
         if kind == "directory":
             continue

@@ -128,8 +128,22 @@ def unreadable_or_absent(
     return GetError(code=code, reason=reason)
 
 
+def _exists(vault_root: Path, rel: str) -> bool:
+    """Whether a page is at ``rel``: the store's page in a store-mode vault, else the file."""
+    from .vault_store import read
+
+    try:
+        if read.owned_meta(vault_root, rel) is not None:
+            return True
+    except FileNotFoundError:
+        return False
+    return (vault_root / rel).exists()
+
+
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     """Normalize, resolve, and bind one direct read to an immutable snapshot."""
+
+    from .vault_store import read
 
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
@@ -143,7 +157,7 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if len(named) > 1 and not (vault_root / rel).exists() and (vault_root / named[1]).exists():
+        if len(named) > 1 and not _exists(vault_root, rel) and _exists(vault_root, named[1]):
             rel = named[1]
 
         try:
@@ -178,25 +192,33 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # filesystem (Linux ext4) -- and refuses outright rather than guess
         # if two physical spellings collide; `physical=True` below then opens
         # exactly that confirmed spelling instead of re-normalizing it away.
-        with call_spans.span("read.prepare.resolve_physical"):
-            physical_relative = reserved_paths.resolve_physical_relative(
-                vault_root, resolution.resolved_relative
-            )
-        with call_spans.span("read.prepare.inspect"):
-            expected_identity = reserved_paths.inspect_generic_file(
-                vault_root, physical_relative, physical=True
-            )
-        with call_spans.span("read.prepare.held_read"):
-            snapshot = reserved_paths.read_generic_bytes(
-                vault_root, physical_relative, physical=True
-            )
-        if snapshot.identity != expected_identity:
-            raise unreadable_or_absent(
-                vault_root,
-                (resolution.relative, resolution.resolved_relative),
-                missing_path,
-                "file changed while being read",
-            )
+        if read.serves(vault_root, resolution.resolved_relative):
+            # The store holds the page's exact bytes and reads them in one snapshot: there is no
+            # file to find under another spelling and no file identity to prove unchanged.
+            with call_spans.span("read.prepare.stored_read"):
+                snapshot = reserved_paths.read_generic_bytes(
+                    vault_root, resolution.resolved_relative, physical=True
+                )
+        else:
+            with call_spans.span("read.prepare.resolve_physical"):
+                physical_relative = reserved_paths.resolve_physical_relative(
+                    vault_root, resolution.resolved_relative
+                )
+            with call_spans.span("read.prepare.inspect"):
+                expected_identity = reserved_paths.inspect_generic_file(
+                    vault_root, physical_relative, physical=True
+                )
+            with call_spans.span("read.prepare.held_read"):
+                snapshot = reserved_paths.read_generic_bytes(
+                    vault_root, physical_relative, physical=True
+                )
+            if snapshot.identity != expected_identity:
+                raise unreadable_or_absent(
+                    vault_root,
+                    (resolution.relative, resolution.resolved_relative),
+                    missing_path,
+                    "file changed while being read",
+                )
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "AMBIGUOUS_PATH":
             # Only a caller who may see the page learns it has two spellings;
