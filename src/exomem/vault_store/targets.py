@@ -9,6 +9,7 @@ the disk for the rest. A writer whose store form does not exist yet refuses thro
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 from .. import vault
 from . import availability, mode, ownership, read
@@ -58,43 +59,70 @@ def holds_pages_under(vault_root: Path, folder: str) -> bool:
         return next(view.pages(f"{folder}/"), None) is not None
 
 
-def inbound_links(vault_root: Path, rel: str) -> list[vault.InboundLink]:
-    """The links to the stored page ``rel``, as ``find_inbound_wikilinks`` gives, from the store.
+class InboundCheck(NamedTuple):
+    """The links to a stored page, and the linking pages that its delete commit must bind.
 
-    The disk form walks the vault's files, and a page that a commit stored has none until the
-    projector writes it, so it cannot see a link that the last commit added. The graph rows are
-    derived in each commit, so they name the linking pages as of the current revision; each linking
-    page's stored bytes then give the line. A link that the graph resolved by a form the line scan
-    does not match (a title, an alias) is reported at line 0 with no context, never dropped.
+    ``unimported`` holds the links from files in the Knowledge Base that the store has no page
+    for. No policy covers such a file yet, so the publication filter would hide it from every
+    caller; the caller counts it without that filter.
+    """
+
+    links: list[vault.InboundLink]
+    unimported: list[vault.InboundLink]
+    bound: frozenset[str]
+
+
+def inbound_links(vault_root: Path, rel: str) -> InboundCheck:
+    """The links to the stored page ``rel``, from the store and from the files, each counted once.
+
+    Neither source sees the whole vault. The graph rows are derived in each commit, so they name
+    the linking pages as of the current revision, including a page that has no file yet; they hold
+    nothing for a note that nothing has imported. The file index finds a note outside the store's
+    pages, as file mode does, and misses a page that has no file. A page that the store holds is
+    read from the store, and its file is only a projection, which may trail it. A graph source with
+    no stored page comes from the index or, failing that, is reported at line 0 (a link by title or
+    alias), never dropped. A file in the Knowledge Base that the store holds no page for is read
+    off the disk, because the index reads it through the store and skips it; a bare ``[[name]]``
+    in it counts even when another page shares the name. A file that a queued delete has not
+    removed yet counts until the projector catches up. Each wrong count costs one ``force_orphan``.
+    ``bound`` is every graph source: the commit refuses a source outside it.
     """
     forms = set(vault._inbound_target_forms(rel)[1:])
-    links: list[vault.InboundLink] = []
-    with read.snapshot(vault_root) as view:
-        for source in sorted(view.inbound_sources(rel)):
-            page = view.page(source)
-            text = "" if page is None else page.body.decode("utf-8", errors="replace")
-            found = [
-                vault.InboundLink(source, line, context, raw)
-                for line, context, raw in vault._scan_wikilinks(text)
-                if vault._inbound_bucket_key(raw) in forms
-            ]
-            links.extend(found or [vault.InboundLink(source, 0, "", "")])
-    return links
-
-
-def disk_inbound_links(vault_root: Path, rel: str) -> list[vault.InboundLink]:
-    """The links to ``rel`` from pages that the store does not own, found as file mode finds them.
-
-    A note outside the Knowledge Base or in a dot folder is on disk only, so no graph row names it
-    and ``inbound_links`` cannot see it, while file mode counts it. A source that does not resolve
-    stays in the list: a link counted wrongly costs one ``force_orphan``, a link dropped wrongly
-    orphans a reader.
-    """
     # The stored page may have no file yet, and the index reads a bare `[[name]]` by counting files.
-    found = vault.find_inbound_wikilinks(
+    on_disk = vault.find_inbound_wikilinks(
         vault_root, rel, target_has_no_file=not (Path(vault_root) / rel).exists()
     )
-    return [link for link in found if not owns_any(vault_root, files=(link.path,))]
+
+    def matching(source: str, text: str) -> list[vault.InboundLink]:
+        return [
+            vault.InboundLink(source, line, context, raw)
+            for line, context, raw in vault._scan_wikilinks(text)
+            if vault._inbound_bucket_key(raw) in forms
+        ]
+
+    links: list[vault.InboundLink] = []
+    unimported: list[vault.InboundLink] = []
+    with read.snapshot(vault_root) as view:
+        sources = view.inbound_sources(rel)
+        for source in sorted(sources):
+            page = view.page(source)
+            if page is not None:
+                text = page.body.decode("utf-8", errors="replace")
+                links.extend(matching(source, text) or [vault.InboundLink(source, 0, "", "")])
+        links.extend(link for link in on_disk if view.page_meta(link.path) is None)
+        for path in vault.walk_vault_md(vault_root):
+            source = vault.relative_posix(path, Path(vault_root))
+            if (
+                ownership.classify(source) is ownership.Ownership.PAGE
+                and view.page_meta(source) is None
+            ):
+                try:
+                    unimported.extend(matching(source, path.read_text("utf-8", errors="replace")))
+                except OSError:
+                    continue
+    shown = {link.path for link in links}
+    links.extend(vault.InboundLink(source, 0, "", "") for source in sorted(sources - shown))
+    return InboundCheck(links, unimported, frozenset(sources))
 
 
 def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:

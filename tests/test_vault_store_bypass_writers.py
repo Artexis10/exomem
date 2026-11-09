@@ -203,6 +203,44 @@ def test_delete_of_a_page_that_a_note_outside_the_knowledge_base_links_to_refuse
     assert tree(served) == before
 
 
+def test_delete_of_a_page_that_a_note_on_disk_in_the_knowledge_base_links_to_refuses(served):
+    """A store delete that ignores a note in the Knowledge Base that nothing has imported yet."""
+    store_gamma(served)
+    mine = served / "Knowledge Base/Notes/Mine.md"
+    mine.write_text("---\ntitle: Mine\ntype: note\n---\n\nSee [[Gamma]].\n", encoding="utf-8")
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS"
+    assert "Knowledge Base/Notes/Mine.md:6" in refused.value.reason
+    assert revision(served) == start
+    assert tree(served) == before
+
+
+def test_a_note_outside_the_knowledge_base_that_a_batch_committed_counts_once(served):
+    """A link that the graph rows and the file scan both report, counted twice in the result."""
+    store_gamma(served)
+    vault_module.batch_atomic_write(
+        [planned(served, "Inbox/daily.md", "Today\n\nAsked about [[Gamma]].\n", create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS"
+    assert "has 1 inbound wikilink(s)" in refused.value.reason
+    assert "Inbox/daily.md:3" in refused.value.reason
+
+    forced = delete_file.delete_file(served, path=GAMMA, confirm=True, force_orphan=True)
+
+    assert forced.inbound_link_count == 1
+
+
 def test_delete_of_a_stored_page_that_is_not_utf8_still_trashes_it(served, writer):
     """A store delete that fails with a bare AssertionError on bytes that file mode deletes."""
     latin = "Knowledge Base/Notes/Latin.md"
