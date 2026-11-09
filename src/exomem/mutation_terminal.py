@@ -289,6 +289,9 @@ def _without_graph_rebuild_handoff(result: Any) -> Any:
 #: for one release, reporting `already_stored` as `stored`, so a reader that
 #: needs to tell a fresh commit from a duplicate reads `state`.
 _ARTIFACT_STATES = frozenset({"stored", "already_stored", "failed"})
+#: How many families, and how many characters of a `fields_not_applied` value, one projected row carries.
+_FAMILIES_SHOWN = 64
+_NOT_APPLIED_CHARS = 300
 
 
 def _artifact_state(item: Any) -> Any:
@@ -627,6 +630,121 @@ def settled_media_terminal(
     return terminal
 
 
+def is_reused_capture(leaf_result: Any) -> bool:
+    """Whether a capture or file hand-over matched an earlier copy and wrote nothing (`capture_outcome` is a closed protocol value)."""
+    return (
+        isinstance(leaf_result, Mapping)
+        and leaf_result.get("mutated") is False
+        and leaf_result.get("capture_outcome") == "reused"
+    )
+
+
+def as_reused(result: Mapping[str, Any]) -> dict[str, Any]:
+    """`result` marked as a reuse that wrote nothing, which `is_reused_capture` reads: it settles and never commits."""
+    return {**result, "mutated": False, "capture_outcome": "reused"}
+
+
+def reused_capture_terminal(
+    leaf_result: Any,
+    *,
+    request_id: str,
+    receipt_id: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any] | None:
+    """Own a capture that reused an earlier copy: settled, never committed.
+
+    Nothing was written, so the reply states the outcome like any other tool result and carries no
+    graph-sync or durable-write text: there is no write for either to describe. It names the earlier copy.
+    """
+    if not is_reused_capture(leaf_result):
+        return None
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "state": "settled",
+        "status": "settled",
+        "terminal": True,
+        "mutated": False,
+        "request_id": request_id,
+        "receipt_id": receipt_id,
+        "warnings_count": _warning_count(leaf_result),
+        "leaf_result": leaf_result,
+    }
+    terminal.update(_path_projection(leaf_result))
+    if idempotency_key is not None:
+        terminal["idempotency_key"] = idempotency_key
+    return terminal
+
+
+def _duplicate_outcome_projection(outcome: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The bounded earlier-copy fields of a hand-over outcome, or None when one is malformed.
+
+    A hand-over that found its bytes already stored names the earlier artifact (`duplicate_of`) and, for an
+    Evidence page, the families it lists (`families`, `family_added`) and the caller fields it did not take
+    (`fields_not_applied`). A batch row and a file handed over alone carry them alike, so both project them here.
+    A page may list more families than the view carries: the first ones and the total, never an invalid view.
+    """
+
+    def text(value: Any, limit: int) -> bool:
+        return isinstance(value, str) and 0 < len(value) <= limit
+
+    def clipped(value: str | None) -> str | None:
+        return None if value is None else value[:_NOT_APPLIED_CHARS]
+
+    projected: dict[str, Any] = {}
+    if "duplicate_of" in outcome:
+        earlier = outcome["duplicate_of"]
+        if not (
+            isinstance(earlier, Mapping)
+            and set(earlier) == {"path", "ref"}  # nosemgrep: ep-word-set -- the two field names of an earlier-copy pointer, a closed record shape.
+            and text(earlier["path"], 2048)
+            and text(earlier["ref"], 2048)
+        ):
+            return None
+        projected["duplicate_of"] = {"path": earlier["path"], "ref": earlier["ref"]}
+    if "families" in outcome or "family_added" in outcome:
+        listed = outcome.get("families")
+        if not (
+            isinstance(listed, (list, tuple))
+            and listed
+            and all(
+                isinstance(pair, Mapping)
+                and set(pair) == {"scope", "category"}  # nosemgrep: ep-word-set -- the two field names of a family pair, a closed record shape.
+                and text(pair["scope"], 256)
+                and text(pair["category"], 256)
+                for pair in listed
+            )
+            and isinstance(outcome.get("family_added"), bool)
+        ):
+            return None
+        projected["families"] = [
+            {"scope": pair["scope"], "category": pair["category"]} for pair in listed[:_FAMILIES_SHOWN]
+        ]
+        if len(listed) > _FAMILIES_SHOWN:
+            projected["families_total"] = len(listed)
+        projected["family_added"] = outcome["family_added"]
+    if "fields_not_applied" in outcome:
+        differing = outcome["fields_not_applied"]
+        if not (
+            isinstance(differing, (list, tuple))
+            and len(differing) <= 8
+            and all(
+                isinstance(entry, Mapping)
+                and set(entry) == {"field", "provided", "kept"}  # nosemgrep: ep-word-set -- the three field names of a `fields_not_applied` row, a closed record shape.
+                and text(entry["field"], 64)
+                and all(isinstance(value, str) or value is None for value in (entry["provided"], entry["kept"]))
+                for entry in differing
+            )
+        ):
+            return None
+        projected["fields_not_applied"] = [
+            {"field": entry["field"], "provided": clipped(entry["provided"]), "kept": clipped(entry["kept"])}
+            for entry in differing
+        ]
+    return projected
+
+
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     """Keep the bounded client-artifact outcome visible in compact terminals."""
 
@@ -711,16 +829,15 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {field: value[field] for field in fields}
 
-    def duplicate_of(value: Any) -> dict[str, Any] | None:
-        """The bounded identity of the artifact a duplicate resolved to."""
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != {"path", "ref"}
-            or not string(value.get("path"), limit=2048)
-            or not string(value.get("ref"), limit=2048)
-        ):
+    def archive_receipt(value: Any) -> dict[str, Any] | None:
+        """A zip kept as members: its identity and how many blobs this call wrote or restored."""
+        if not isinstance(value, Mapping) or not sha256(value.get("sha256")) or not nonnegative_int(value.get("bytes")):
             return None
-        return {"path": value["path"], "ref": value["ref"]}
+        # The count fields of `archive_members.preserve_members`' receipt protocol.
+        counts = {key: value[key] for key in ("members", "new_blobs", "restored") if key in value}
+        if not counts or not all(nonnegative_int(count) for count in counts.values()):
+            return None
+        return {"sha256": value["sha256"], "bytes": value["bytes"], **counts}
 
     def transcription(value: Any) -> dict[str, Any] | None:
         """Whether a client transcription was recorded with its original."""
@@ -789,12 +906,17 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                         or string(value, limit=300)
                     )
                 }
-            if "duplicate_of" in item:
-                duplicate = duplicate_of(item["duplicate_of"])
-                if duplicate is None:
+            earlier_copy = _duplicate_outcome_projection(item)
+            if earlier_copy is None:
+                projected.append(invalid_row(item, index))
+                continue
+            row.update(earlier_copy)
+            if "archive" in item:
+                archive = archive_receipt(item["archive"])
+                if archive is None:
                     projected.append(invalid_row(item, index))
                     continue
-                row["duplicate_of"] = duplicate
+                row["archive"] = archive
             if "transcription" in item:
                 recorded = transcription(item["transcription"])
                 if recorded is None:
@@ -2094,8 +2216,10 @@ def _user_summary(
     """
     if verb is None or result.get("ok") is not True:
         return None
-    if result.get("status") == "committed":
-        head = verb.capitalize()
+    reused = result.get("status") == "settled" and is_reused_capture(result.get("leaf_result"))
+    if result.get("status") == "committed" or reused:
+        # A reused batch can still hold a failed file, so its rows speak before the settled sentence does.
+        head = f"Already {verb}" if reused else verb.capitalize()
         if (partial := _partial_batch_summary(verb, batch)) is not None:
             return partial
     elif result.get("status") == "replayed":
@@ -2306,7 +2430,14 @@ def project_terminal(
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]
         compact.update(_adoption_control_projection(leaf))
+        apply_result = leaf.get("apply_result")
+        if isinstance(apply_result, Mapping) and type(apply_result.get("skipped_duplicates")) is int:
+            # The agent tells the person how many items the run left unstored because those bytes were already stored.
+            compact["skipped_duplicates"] = apply_result["skipped_duplicates"]
     compact.update(artifact_receipt)
+    if isinstance(leaf, Mapping) and leaf.get("state") == "already_stored":
+        # A file handed over alone has no row; its outcome names the earlier copy and what it did not take.
+        compact.update(_duplicate_outcome_projection(leaf) or {})
     if isinstance(leaf, Mapping) and isinstance(leaf.get("source"), Mapping):
         # Closed text capture outcomes belong to the durable capture protocol.
         from typing import get_args
@@ -2319,6 +2450,11 @@ def project_terminal(
                 key: leaf["source"][key] for key in ("path", "ref")
                 if key in leaf["source"]
             }
+        # What the duplicate check found or could not do: the caller acts on each of these.
+        compact.update(
+            {key: leaf[key] for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable")
+             if key in leaf}
+        )
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(media_projection)

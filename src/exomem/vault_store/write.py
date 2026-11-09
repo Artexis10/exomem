@@ -80,7 +80,17 @@ class PagePut:
 
 @dataclass(frozen=True, slots=True)
 class PageDelete:
+    """A page removed from the store.
+
+    ``on_disk`` says that its file is already gone: the commit drops the file's manifest entry and
+    queues nothing. ``absent_ok`` says that the store may already hold no page there, so that the
+    commit then only settles the path's file: it queues the file's removal, or nothing with
+    ``on_disk``.
+    """
+
     rel: str
+    on_disk: bool = False
+    absent_ok: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +122,40 @@ class BinaryDelete:
 
 
 @dataclass(frozen=True, slots=True)
+class HeldRow:
+    """A held outside change that the commit resolves, named as the caller read its row.
+
+    The commit drops the row, and refuses when no row matches all four fields.
+    """
+
+    rel: str
+    kind: str
+    detected_at: str
+    sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FileSeen:
+    """The person's file at a path as the caller saw it, which the commit records as what the
+    projection manifest saw there: the projector then replaces that file with the stored page.
+
+    ``sha256`` is None when the file was gone, and the commit then drops the manifest entry; the
+    size and modification time then stay None too.
+    """
+
+    rel: str
+    sha256: str | None
+    size: int | None = None
+    mtime_ns: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.sha256 is None) != (self.size is None) or (self.size is None) != (
+            self.mtime_ns is None
+        ):
+            raise ValueError("a seen file has a hash, a size and a time, or none of them")
+
+
+@dataclass(frozen=True, slots=True)
 class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
@@ -119,6 +163,9 @@ class StoreChange:
     folder, say) and that a caller made durable on disk before the commit: the commit derives their
     rows from the file's bytes, so a search sees them at the same revision as the pages. The store
     keeps no page, record or audit row for them.
+
+    ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
+    ``commit`` applies them in the same transaction as the page changes.
     """
 
     origin: Origin
@@ -129,6 +176,8 @@ class StoreChange:
     binaries: tuple[BinaryRecord, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
+    resolves_held: tuple[HeldRow, ...] = ()
+    files_seen: tuple[FileSeen, ...] = ()
     refresh: tuple[str, ...] = ()
 
     @property
@@ -148,6 +197,8 @@ class StoreChange:
         named = (*self.paths, *self.refresh)
         if len(set(named)) != len(named):
             raise ValueError("a store change names a path more than once")
+        if not {seen.rel for seen in self.files_seen} <= set(self.paths):
+            raise ValueError("a store change records a file that it does not change")
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +213,10 @@ class CommitResult:
 class StoreConflict(OpError):
     """A path did not hold what the change expected; nothing was committed."""
 
-    def __init__(self, path: str, reason: str) -> None:
-        super().__init__(CONFLICT, f"{path}: {reason}")
+    def __init__(self, path: str, reason: str, remediation: str | None = None) -> None:
+        super().__init__(CONFLICT, f"{path}: {reason}", remediation)
         self.path = path
+        self.reason = reason
 
 
 def frontmatter_json(body: bytes) -> str | None:
@@ -195,9 +247,10 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
 
     The statements run in this order, so that a kill at any point leaves the old state whole: the
     expectations, the pages, the binary records and the manifest, one audit row per file, the
-    projection intents, and last the revision. One intent stands for each path, and the oldest
-    queue time stays. A move queues one ``move`` intent under its destination path, with the old
-    path in ``from_path``.
+    projection intents, the held rows that the change resolves, the files that it saw and last the
+    revision. One intent stands for each path, and the oldest queue time stays. A move queues one
+    ``move`` intent under its destination path, with the old path in ``from_path``. A held row that
+    changed or went meanwhile rolls the whole commit back.
     """
     _require_owned(change)
     with writer.handle.transaction() as tx:
@@ -213,7 +266,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for put in change.puts:
             _put_page(tx, put, revision, audit)
         for page in change.deletes:
-            _delete_page(tx, page.rel, audit)
+            _delete_page(tx, page, audit)
         for move in change.moves:
             _move_page(tx, move, revision, audit)
         for record in change.binaries:
@@ -224,6 +277,10 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
+        for held in change.resolves_held:
+            _drop_held(tx, held)
+        for seen in change.files_seen:
+            _record_seen(tx, seen, revision)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
@@ -282,6 +339,22 @@ def record_manifest(
         "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
         (rel, sha256, size, mtime_ns, revision),
     )
+
+
+def _drop_held(tx: Connection, held: HeldRow) -> None:
+    dropped = tx.execute(
+        "DELETE FROM store_held WHERE path = ? AND kind = ? AND detected_at = ? AND sha256 IS ?",
+        (held.rel, held.kind, held.detected_at, held.sha256),
+    ).rowcount
+    if dropped != 1:
+        raise StoreConflict(held.rel, "this held item changed while it was resolved")
+
+
+def _record_seen(tx: Connection, seen: FileSeen, revision: int) -> None:
+    if seen.sha256 is None or seen.size is None or seen.mtime_ns is None:
+        tx.execute("DELETE FROM store_manifest WHERE path = ?", (seen.rel,))
+    else:
+        record_manifest(tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision)
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
@@ -371,7 +444,7 @@ class _Trail:
         if queue:
             self.intents[rel] = ("write", None)
 
-    def removed(self, rel: str, sha256: str, *, queue: bool = True) -> None:
+    def removed(self, rel: str, sha256: str | None, *, queue: bool = True) -> None:
         self.record(rel, "delete", sha256)
         self.deleted.append(rel)
         if queue:
@@ -411,12 +484,18 @@ def _clear_queued(tx: Connection, *paths: str) -> None:
     tx.executemany("DELETE FROM store_projection_queue WHERE path = ?", [(path,) for path in paths])
 
 
-def _delete_page(tx: Connection, rel: str, audit: _Trail) -> None:
+def _delete_page(tx: Connection, page: PageDelete, audit: _Trail) -> None:
+    rel = page.rel
     row = tx.execute("SELECT sha256 FROM store_pages WHERE path = ?", (rel,)).fetchone()
-    if row is None:
+    if row is None and not page.absent_ok:
         raise StoreConflict(rel, "the store holds no page to delete")
     tx.execute("DELETE FROM store_pages WHERE path = ?", (rel,))
-    audit.removed(rel, row[0])
+    if page.on_disk:
+        # The file is already gone, so nothing records it and nothing is left to project.
+        tx.execute("DELETE FROM store_manifest WHERE path = ?", (rel,))
+        _clear_queued(tx, rel)
+    # A path with no page leaves a trail row without a hash: only its file's removal was queued.
+    audit.removed(rel, None if row is None else row[0], queue=not page.on_disk)
 
 
 def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> None:

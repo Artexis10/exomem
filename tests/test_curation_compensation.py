@@ -274,3 +274,127 @@ def test_relocation_based_compensation_refuses_without_namespace_lineage(
 
     compensation_root = curation.CurationStore(vault).compensation_root(proposed["run_id"])
     assert not compensation_root.exists()
+
+
+def test_fold_compensation_restores_every_episode_file_and_history_byte_for_byte(
+    vault: Path, earlier_episode
+) -> None:
+    """Undo returns each revision to its path, retires only the step's entries, and leaves the head alone."""
+    import json
+
+    from test_curation_execution import _fold_step
+
+    from exomem import compiled_history
+
+    pages = earlier_episode(5)
+    _seed_note(vault, "compensation-fold-cites", sources=[pages[1].removesuffix(".md")])
+    episode_before = {path: (vault / path).read_bytes() for path in pages}
+    history = vault / compiled_history.history_root()
+    history_before = {path: path.read_bytes() for path in history.rglob("*.json")}
+    directories_before = {path for path in history.rglob("*") if path.is_dir()}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    _apply(vault, proposed)
+    assert len(list(history.rglob("*.json"))) == len(history_before) + 4
+    assert not (vault / pages[0]).exists() and (vault / pages[1]).is_file()
+
+    compensation = curation.propose_compensation(vault, run_id=proposed["run_id"])
+    undone = curation.apply_compensation(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=compensation["plan_id"],
+        expected_plan_fingerprint=compensation["plan_fingerprint"],
+        why="Approved separate compensation plan.",
+    )
+
+    assert undone["phase"] == "compensated"
+    assert {path: (vault / path).read_bytes() for path in pages} == episode_before
+    assert {path: path.read_bytes() for path in history.rglob("*.json")} == history_before
+    # The fold made the directory of each revision's history, and undo removes what ended empty.
+    assert {path for path in history.rglob("*") if path.is_dir()} == directories_before
+    retired = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (vault / "Knowledge Base/_trash").rglob("*.json")
+    ]
+    assert sorted(item["path"] for item in retired if item["operation"] == "episode_fold") == sorted(pages[:-1])
+
+
+@pytest.mark.parametrize("barrier", ["unfold-after-restore", "unfold-after-retire"])
+def test_fold_compensation_cut_midway_resumes_to_the_same_restored_episode(
+    vault: Path, earlier_episode, monkeypatch, barrier: str  # noqa: ANN001
+) -> None:
+    """A cut after a restore or after one entry's retirement resumes without losing or repeating anything."""
+    from test_curation_execution import _fold_step, _ProcessCut
+
+    from exomem import compiled_history
+
+    pages = earlier_episode(4)
+    episode_before = {path: (vault / path).read_bytes() for path in pages}
+    history = vault / compiled_history.history_root()
+    history_before = {path: path.read_bytes() for path in history.rglob("*.json")}
+    proposed = _propose(vault, _fold_step(pages, vault))
+    _apply(vault, proposed)
+    compensation = curation.propose_compensation(vault, run_id=proposed["run_id"])
+
+    def cut(name: str) -> None:
+        if name == barrier:
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        curation.apply_compensation(
+            vault,
+            run_id=proposed["run_id"],
+            plan_id=compensation["plan_id"],
+            expected_plan_fingerprint=compensation["plan_fingerprint"],
+            why="Approved separate compensation plan.",
+        )
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    resumed = curation.resume(vault, run_id=proposed["run_id"], plan_id=compensation["plan_id"])
+
+    assert resumed["phase"] == "compensated"
+    assert {path: (vault / path).read_bytes() for path in pages} == episode_before
+    assert {path: path.read_bytes() for path in history.rglob("*.json")} == history_before
+
+
+def test_duplicate_fold_compensation_restores_every_page_and_original_byte_for_byte(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """Undoing a plan that folded two copies returns both copies, the canonical page and the citing note to their exact bytes."""
+    from duplicate_fixtures import evidence_filing
+    from test_curation_execution import _fold_duplicate_step
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    first = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    second = evidence_filing(vault, "Case", "annexes", "annex-a.png", data)
+    citing = _seed_note(vault, "compensation-dup-cites", sources=[first.removesuffix(".md")])
+    watched = [
+        canonical, first, second, citing,
+        *(page.removesuffix(".md") for page in (canonical, first, second)),
+    ]
+    before = {path: (vault / path).read_bytes() for path in watched}
+    # The atomic writer stages a file at 0600; a vault's pages usually carry the mode their editor gave them.
+    for path in watched:
+        (vault / path).chmod(0o644)
+    modes_before = {path: (vault / path).stat().st_mode for path in watched}
+    proposed = _propose(
+        vault,
+        _fold_duplicate_step(vault, canonical, first, step_id="first"),
+        _fold_duplicate_step(vault, canonical, second, step_id="second"),
+    )
+    _apply(vault, proposed)
+    curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+    assert (vault / canonical).read_bytes() != before[canonical] and not (vault / first.removesuffix(".md")).exists()
+
+    compensation = curation.propose_compensation(vault, run_id=proposed["run_id"])
+    undone = curation.apply_compensation(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=compensation["plan_id"],
+        expected_plan_fingerprint=compensation["plan_fingerprint"],
+        why="Approved separate compensation plan.",
+    )
+    while undone["phase"] != "compensated":
+        undone = curation.resume(vault, run_id=proposed["run_id"], plan_id=compensation["plan_id"])
+
+    assert {path: (vault / path).read_bytes() for path in watched} == before
+    # A guarded rewrite and its undo keep each file's permissions.
+    assert {path: (vault / path).stat().st_mode for path in watched} == modes_before

@@ -1404,12 +1404,12 @@ def requeue_quarantined_graph_paths(vault_root: Path) -> int:
 
 def _quarantine_change_backoff(attempts: int) -> float:
     """Seconds after its last failure before a changed quarantined page is retried."""
-    from . import epistemic_graph
+    from . import backoff, epistemic_graph
 
-    excess = max(0, attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS)
-    return min(
+    return backoff.capped_doubling(
+        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS,
         epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS,
-        epistemic_graph.GRAPH_QUARANTINE_CHANGE_BACKOFF_SECONDS * 2**excess,
+        attempts - epistemic_graph.GRAPH_POISON_ATTEMPTS,
     )
 
 

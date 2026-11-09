@@ -19,7 +19,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from . import deferred_index
+from . import backoff, deferred_index
 
 log = logging.getLogger(__name__)
 
@@ -2590,18 +2590,6 @@ def _pending_visibility_complete(
     )
 
 
-def _backoff_delay(base: float, maximum: float, attempts: int) -> float:
-    """The doubling retry delay after `attempts` failures, from `base` up to `maximum`.
-
-    The exponent stops at the first doubling that reaches `maximum`: an uncapped
-    power overflows the float multiply once a batch has failed about a thousand
-    times, and the failure record that should push its next attempt back never
-    commits, so the batch would retry on every drain pass.
-    """
-    doublings = min(max(0, attempts - 1), math.ceil(math.log2(maximum / base)))
-    return min(maximum, base * 2.0 ** doublings)
-
-
 def _record_recovery_failure(
     vault_root: Path,
     batch_id: str,
@@ -2629,7 +2617,7 @@ def _record_recovery_failure(
                 (batch_id,),
             ).fetchone()
             attempts = (0 if row is None or row[0] is None else int(row[0])) + 1
-            delay = _backoff_delay(base, maximum, attempts)
+            delay = backoff.capped_doubling(base, maximum, attempts - 1)
             connection.execute(
                 "UPDATE derived_batch_components SET "
                 "attempt_count = attempt_count + 1, "
@@ -3199,7 +3187,7 @@ def retry_component(
             if row is None:
                 raise RuntimeError("component claim is no longer current")
             attempts = int(row[0]) + 1
-            delay = _backoff_delay(base, maximum, attempts)
+            delay = backoff.capped_doubling(base, maximum, attempts - 1)
             newest = connection.execute(
                 "SELECT MAX(updated_at) FROM derived_batch_components"
             ).fetchone()[0]

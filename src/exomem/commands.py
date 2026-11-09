@@ -96,6 +96,7 @@ from . import (
 )
 from . import freshness as freshness_module
 from . import get_page as get_page_module
+from . import held_operation as held_operation_module
 from . import import_windows as import_windows_module
 from . import knowledge_packs as knowledge_packs_module
 from . import lifecycle_statuses as lifecycle_statuses_module
@@ -3824,15 +3825,21 @@ def _add_source(
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    reuse: bool = False,
 ) -> dict:
-    """Capture text as a source under an already-resolved kind."""
+    """Capture text as a source under an already-resolved kind.
+
+    `reuse` is `capture_source`'s opt-in to payload reuse. The duplicate lookup and the commit then share
+    one acquisition of the mutation boundary, which a caller that already holds it re-enters.
+    """
     try:
         from .writer_lease import active_manager, active_mutation_request_id
 
         guard = active_manager().mutation_guard(
             vault_root, request_id=active_mutation_request_id(),
-            operation="capture_source_identity", holder_kind="command",
-        ) if source_identity is not None or correction is not None else nullcontext()
+            operation="capture_source_identity" if source_identity is not None or correction is not None else "capture_source_payload",
+            holder_kind="command",
+        ) if source_identity is not None or correction is not None or reuse else nullcontext()
         with guard:
             result = add_module.add(
                 vault_root,
@@ -3850,6 +3857,7 @@ def _add_source(
                 source_identity=source_identity,
                 expected_sha256=expected_sha256,
                 correction=correction,
+                reuse_payload=reuse,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -5393,31 +5401,37 @@ def op_preserve(
         )
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
-    # Same destination-scoped lookup the batch command uses, run before the
-    # write: Evidence is append-only, so the same bytes under the same family
-    # are one fact, and reporting the copy that is already there beats adding a
-    # second one that no later reader can tell apart.
+    # The same lookup the batch command uses, under this command's mutation hold, which also covers the write
+    # below: Evidence is append-only, so the same bytes in any family are one fact, and reporting the copy that is
+    # already there, with the requested family added to its page, beats adding a second copy that no later
+    # reader can tell apart.
+    from . import evidence_reuse
+
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
-    duplicate = preserve_module.find_duplicate_artifact(
-        vault_root, scope=scope, category=category, sha256=digest, raw_protection=raw_protection
+    held = evidence_reuse.reuse(
+        vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection,
+        filename=filename, description=description,
     )
+    duplicate = held.duplicate
     if duplicate is not None:
+        from .mutation_terminal import as_reused
         from .writer_lease import mark_active_mutation_committed
 
-        # Nothing is written, but the call has a terminal answer about canonical
-        # state, so it is marked committed and comes back inside the same
-        # terminal envelope the stored branch gets -- with the same field set,
-        # so one command does not have two response shapes.
-        mark_active_mutation_committed()
         # Nothing is handed to the ledger: this call committed nothing, and the
         # path it resolved to was recorded by the call that did.
-        return duplicate.receipt(
+        receipt = duplicate.receipt(
             size=len(content.encode("utf-8")) if isinstance(content, str) else None,
             # The same derivation the stored branch uses, from the sanitized
             # filename: a name whose sanitized form has a different extension
             # must not yield two content types for one set of bytes.
             content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
         )
+        if duplicate.family_added:
+            # The page gained a family: that edit is a committed write.
+            mark_active_mutation_committed()
+            return receipt
+        # Nothing was written, so the call settles with the request identity and no commit.
+        return as_reused(receipt)
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -5431,6 +5445,10 @@ def op_preserve(
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
+    if not held.available:
+        from . import duplicates as duplicates_module
+
+        payload["warnings"] = [*payload.get("warnings", ()), duplicates_module.unavailable_warning("this text")]
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
 
@@ -8860,15 +8878,24 @@ def op_capture_source(
             source_identity=source_identity,
             expected_sha256=expected_sha256,
             correction=correction,
+            reuse=True,
         )
         out = {"source": source}
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"
+        elif source.get("capture_outcome") == "reused":
+            out["capture_outcome"] = "reused"
+            out["mutated"] = False
         # The terminal reads these from the leaf's top level.
         for key in ("vocabulary_resolution", "vocabulary_receipt"):
             if key in source:
                 out[key] = source[key]
+        # What the duplicate check found moves up, so a reused reply (which the terminal passes through whole)
+        # states it once.
+        for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable"):
+            if key in source:
+                out[key] = source.pop(key)
         source_paths = [source["path"]]
     out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
     if compile_guidance:
@@ -9243,6 +9270,7 @@ def op_preserve_artifacts(
     adoption: _OptionalArtifactAdoption = None,
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
     raw_protection: bool = False,
+    archive: Literal["members"] | None = None,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -9256,6 +9284,7 @@ def op_preserve_artifacts(
         category: One path segment.
         adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Keep originals owner-only until whole-artifact release.
+        archive: Keep a held zip as members; path is an import source_ref.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -9271,6 +9300,7 @@ def op_preserve_artifacts(
             adoption=adoption,
             transcriptions=transcriptions,
             raw_protection=raw_protection,
+            archive=archive,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -10036,6 +10066,8 @@ def op_review_memory(
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "procedure_approvals":
         return procedure_approval_operation_module.listing(vault_root, limit)
+    if mode == held_operation_module.LIST_MODE:
+        return held_operation_module.listing(vault_root, limit)
     if mode == "dispositions":
         return _dispositions_view(vault_root, window_days)
     if mode == "audit":
@@ -10086,7 +10118,7 @@ def op_review_memory(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
-        "plan-progress, procedure_approvals, vocabulary, or write-advisory-result"
+        "plan-progress, procedure_approvals, held, vocabulary, or write-advisory-result"
     )
 
 
@@ -11516,6 +11548,7 @@ def op_maintain_memory(
         "collections-store-adopt-local",
         "collections-store-export",
         "collections-cutover",
+        "held-resolve",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -11552,6 +11585,9 @@ def op_maintain_memory(
     exclude_groups: list[str] | None = None,
     acknowledge_skipped: bool | None = None,
     cursor: str | None = None,
+    path: str | None = None,
+    choice: str | None = None,
+    item_version: str | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
@@ -11566,6 +11602,8 @@ def op_maintain_memory(
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
     collections-cutover only previews the move of every collection to SQLite-only storage;
     the owner applies its plan_id with `exomem collections cutover` on the host.
+    held-resolve settles one held item from read_review mode held: path, choice keep-mine or
+    keep-store, that item's item_version and why.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -11598,11 +11636,16 @@ def op_maintain_memory(
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
         cursor: The next_cursor of the previous page.
+        path: held-resolve: the held item's path.
+        choice: held-resolve: keep-mine or keep-store.
+        item_version: held-resolve: the item's item_version from the held list.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=mode == "curation" and curation_action in {"apply", "resume"},
     )
+    if mode == held_operation_module.RESOLVE_MODE:
+        return held_operation_module.resolve(vault_root, path, choice, item_version, why)
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if exclude_groups is not None and mode != "tag-variants":
@@ -11983,7 +12026,7 @@ def op_maintain_memory(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
-        "collections-store-export, or collections-cutover"
+        "collections-store-export, collections-cutover, or held-resolve"
     )
 
 
