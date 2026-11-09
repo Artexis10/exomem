@@ -152,14 +152,25 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         ):
             rel = named[1]
 
-        try:
-            resolution = resolve_under_vault(vault_root, rel, return_details=True)
-        except VaultPathError as e:
-            raise GetError(
-                code="INVALID_PATH",
-                reason=f"path escapes vault or is unreadable: {e.reason}",
-            ) from None
-        assert isinstance(resolution, VaultPathResolution)
+        # A page that the store serves is read at its store key. Resolving the whole path would
+        # follow a link at the page's own name, to another page's bytes or out of the vault.
+        key = read.served_key(vault_root, rel)
+        if key is not None:
+            resolution = VaultPathResolution(
+                candidate=vault_root / rel,
+                relative=rel,
+                resolved=vault_root / key,
+                resolved_relative=key,
+            )
+        else:
+            try:
+                resolution = resolve_under_vault(vault_root, rel, return_details=True)
+            except VaultPathError as e:
+                raise GetError(
+                    code="INVALID_PATH",
+                    reason=f"path escapes vault or is unreadable: {e.reason}",
+                ) from None
+            assert isinstance(resolution, VaultPathResolution)
 
     # `excluded` paths (_access.yaml) refuse identically to a missing file —
     # never a distinct error, never echoed differently — so the response is

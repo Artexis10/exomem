@@ -428,15 +428,7 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
 
     relative = path.relative_to(root).as_posix()
     if read.serves(root, relative):
-        from ..collection_store.connection import CollectionStoreError
-
-        try:
-            return _load_stored(spec, root, key, relative)
-        except CollectionStoreError as refusal:
-            # A rollback commits the store's file mode before it changes the manifest, so a
-            # process that cached "store" meets a store that no longer serves: its files do.
-            if refusal.code != read.NOT_ACTIVE:
-                raise
+        return _load_stored(spec, root, key, relative)
     stat = _stat_key(path)
     if stat is None:
         # A fresh leaf miss reads no override bytes; only shipped data may return.

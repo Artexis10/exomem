@@ -100,18 +100,26 @@ def test_after_a_migration_each_owned_page_reads_from_the_store_as_it_reads_from
     assert served >= 2, "the vault must hold pages for this check to mean anything"
 
 
-def test_the_resolver_entries_are_the_owned_pages_that_a_disk_walk_reaches(stored):
-    """A store whose resolver entries add or drop a page that the disk walk reaches, so a link
-    resolves to another page, or to none, in store mode."""
-    walked = {
-        (rel, vault_module.title_key_from_bytes(path.read_bytes(), path))
-        for path in vault_module.walk_vault_md(stored)
-        if ownership.classify(rel := path.relative_to(stored).as_posix())
-        is ownership.Ownership.PAGE
-    }
-    with read.snapshot(stored) as view:
-        assert set(view.resolver_entries()) == walked
-    assert len(walked) >= 2, "the vault must hold pages for this check to mean anything"
+def test_the_resolver_of_a_store_mode_vault_holds_what_a_disk_walk_of_the_same_pages_gives(stored):
+    """A resolver that adds or drops a page that the disk walk reaches, so a link resolves to
+    another page, or to none, in store mode."""
+    walked = vault_module.WikilinkResolver.from_entries(
+        stored,
+        (
+            (
+                path.relative_to(stored).as_posix(),
+                vault_module.title_key_from_bytes(path.read_bytes(), path),
+            )
+            for path in vault_module.walk_vault_md(stored)
+        ),
+    )
+    resolver = vault_module.WikilinkResolver(stored)
+    assert (resolver.full_paths, resolver.stems, resolver.titles) == (
+        walked.full_paths,
+        walked.stems,
+        walked.titles,
+    )
+    assert len(resolver.full_paths) >= 2, "the vault must hold pages for this to mean anything"
 
 
 def test_a_page_in_a_vault_with_no_wrapper_folder_still_reads_from_the_store(

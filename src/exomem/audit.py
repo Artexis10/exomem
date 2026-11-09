@@ -2822,7 +2822,7 @@ def _has_non_markdown_collision(vault_root: Path, vault_relative: str, kb_relati
             continue
         for sibling in siblings:
             if (
-                sibling.identity.kind == "file"
+                sibling.kind == "file"
                 and "/" not in sibling.relative_path
                 and Path(sibling.relative_path).stem == candidate.name
                 and Path(sibling.relative_path).suffix.lower() != ".md"

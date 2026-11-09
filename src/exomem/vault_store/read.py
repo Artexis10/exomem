@@ -10,7 +10,7 @@ every other path.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,21 +137,54 @@ class StoreSnapshot:
         ).fetchone()
         return None if row is None else BinaryMeta(*row)
 
-    def resolver_entries(self) -> Iterator[tuple[str, str | None]]:
-        """The ``(path, title key)`` of each stored page that a disk walk would give a resolver.
 
-        It feeds ``WikilinkResolver.from_entries`` and reads every member page's body once, as the
-        disk walk reads every file. A page that the walk skips (an excluded folder, a reserved
-        family, a file that is not Markdown) gives no entry. A Markdown file that the store does
-        not own (a collection layer, a file outside the Knowledge Base folder) is not here either:
-        a resolver adds those entries from the disk walk.
-        """
-        for meta in self.pages():
-            if not _walk_member(meta.path):
-                continue
-            page = self.page(meta.path)
-            title = None if page is None else vault.title_key_from_bytes(page.body, meta.path)
-            yield meta.path, title
+@dataclass(frozen=True, slots=True)
+class Listing:
+    """The store's names below one folder, relative to it."""
+
+    pages: tuple[str, ...]
+    #: The folders that hold at least one listed page.
+    folders: tuple[str, ...]
+
+
+def listing(vault_root: Path, folder: str, recursive: bool) -> Listing:
+    """The store's pages and the folders that hold them below ``folder`` ("" for the vault root).
+
+    A page under a reserved path is left out, as the walk of the disk leaves out its file. A page
+    that a commit stored counts at once, whether or not the projector has written its file. A
+    vault that is not in store mode raises ``VAULT_STORE_NOT_ACTIVE``.
+    """
+    root = _as_path(vault_root)
+    prefix = f"{folder.rstrip('/')}/" if folder else ""
+    pages: list[str] = []
+    folders: set[str] = set()
+    with snapshot(root) as view:
+        if recursive:
+            for meta in view.pages(prefix):
+                if reserved_paths.classify_logical(meta.path).blocked:
+                    continue
+                name = meta.path[len(prefix) :]
+                pages.append(name)
+                parts = name.split("/")
+                folders.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+        else:
+            for child in view.children(folder):
+                if reserved_paths.classify_logical(prefix + child.name).blocked:
+                    continue
+                if child.is_dir:
+                    folders.add(child.name)
+                else:
+                    pages.append(child.name)
+    return Listing(tuple(pages), tuple(sorted(folders)))
+
+
+def holds_folder(vault_root: Path, rel: str) -> bool:
+    """Whether the vault is in store mode and its store holds a page below this folder."""
+    root = _as_path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return False
+    with snapshot(root) as view:
+        return next(view.children(rel), None) is not None
 
 
 def corpus_member(rel: str, scope: str) -> bool:
@@ -266,6 +299,25 @@ def page_exists(vault_root: Path, rel: str) -> bool:
     return (root / rel).exists()
 
 
+def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:
+    """``owned_meta``'s question for one pass over many paths: one query, not one per path.
+
+    The lookup answers None for a path that the store does not serve (the disk decides it), and
+    otherwise whether the store holds the page. It is as of the moment it was made.
+    """
+    root = _as_path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return _not_served
+    with snapshot(root) as view:
+        held = frozenset(row[0] for row in view.connection.execute("SELECT path FROM store_pages"))
+    page = ownership.Ownership.PAGE
+    return lambda rel: rel in held if ownership.classify(rel) is page else None
+
+
+def _not_served(_rel: str) -> None:
+    return None
+
+
 def owned_bytes(vault_root: Path, rel: str) -> bytes | None:
     """``owned_page``'s bytes: the stored page when the store serves ``rel``, else None."""
     page = owned_page(vault_root, rel)
@@ -293,10 +345,38 @@ def owned_page_at(vault_root: Path, path: Path) -> StoredPage | None:
         return None
     if not mode.store_mode_for_reads(root):
         return None
+    key = _key_below(root, path)
+    return None if key is None else owned_page(root, key)
+
+
+def _key_below(root: Path, path: Path) -> str | None:
+    """The vault path that the file at ``path`` names: its folders resolved, its own name never.
+
+    None for a folder spelling and for a path whose folders lead out of the vault.
+    """
     if path.name in ("", ".", ".."):
         return None  # a folder spelling, not a file's name: the store holds no page there
     try:
-        resolved = (path.parent.resolve() / path.name).relative_to(root.resolve()).as_posix()
+        return (path.parent.resolve() / path.name).relative_to(root.resolve()).as_posix()
     except ValueError:
         return None
-    return owned_page(root, resolved)
+
+
+def served_key(vault_root: Path, rel: str) -> str | None:
+    """The store key of the page that vault path ``rel`` names, if the store serves and holds it.
+
+    ``owned_page_at``'s rule for a caller that holds a vault path. The folders of ``rel`` resolve:
+    a folder link inside the vault names the page it reaches and one that leads out names none. The
+    page's own name never resolves: a link at a stored page's path is a stray projection, not the
+    page, so it names neither its target nor an escape. None means the disk decides.
+    """
+    root = _as_path(vault_root)
+    if not serves(root, rel):
+        return None
+    key = _key_below(root, root / rel)
+    if key is None:
+        return None
+    try:
+        return key if owned_meta(root, key) is not None else None
+    except FileNotFoundError:
+        return None

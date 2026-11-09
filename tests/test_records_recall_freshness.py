@@ -130,14 +130,15 @@ def test_cold_checkpoint_retries_when_access_policy_changes_during_projection(
         lambda _root: ("test-policy", state["fingerprint"]),
     )
 
-    def candidate(_root: Path, _path: Path) -> bool:
+    def admitted(_root: Path, paths):
+        # The access policy changes during admission; only the "before" policy admits.
         eligible = state["fingerprint"] == "before"
         if state["switch"]:
             state["fingerprint"] = "after"
             state["switch"] = False
-        return eligible
+        return iter(list(paths) if eligible else [])
 
-    monkeypatch.setattr(recall_policy, "is_recall_candidate", candidate)
+    monkeypatch.setattr(recall_policy, "iter_recall_markdown", admitted)
 
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 

@@ -336,8 +336,9 @@ def classify_proposed_sibling(artifact_path: str, *, artifact_sha256: str,
 
 def _dataset_cards(vault_root, artifact_path: str):
     try:
+        # A card's file identity is bound below, and a stored page has none to bind.
         entries = reserved_paths.list_generic_tree(
-            vault_root, kb_dirname(), recursive=True
+            vault_root, kb_dirname(), recursive=True, stored=False
         )
     except reserved_paths.ReservedPathLeafError as error:
         raise CompanionClassificationError("companion_unsafe") from error

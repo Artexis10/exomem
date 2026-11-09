@@ -17,8 +17,8 @@ from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 
 from exomem import __main__ as cli
+from exomem import commands, get_page, lexstore, list_directory, project_keys, warmup
 from exomem import find as find_module
-from exomem import get_page, lexstore, list_directory, project_keys, warmup
 from exomem import vault as vault_module
 from exomem.vault_store import ownership, write
 from exomem.vocabulary import registry
@@ -47,32 +47,68 @@ def corpus_pages(root):
 def answers(root, generated):
     """What find, get_page, a listing and the corpus say about the vault, as plain data."""
     hits = find_module.find(root, query="lighthouse", limit=15, graph=False, rerank=False)
+    # The full recall tool: its default graph and hybrid ranking read each page via the page cache.
+    asked = commands.op_ask_memory(root, query="lighthouse", limit=15)
     pages = [
         get_page.get_page(root, path=rel)
         for rel in (ALPHA, *(generated_page(index)[0] for index in generated))
     ]
     listing = list_directory.list_directory(root, path="Knowledge Base/Notes/Gen")
+    notes = {
+        limit: sorted(
+            (
+                entry.as_dict()
+                for entry in list_directory.list_directory(
+                    root, path="Knowledge Base/Notes", limit=limit
+                ).entries
+            ),
+            key=lambda entry: entry["name"],
+        )
+        for limit in (None, 50)
+    }
     return {
         "find": [(hit.path, hit.title, hit.excerpt) for hit in hits],
+        "ask": [(hit["path"], hit["title"], hit["excerpt"]) for hit in asked],
         "pages": [(page.content, page.content_hash) for page in pages],
         "listing": sorted(
             (entry.as_dict() for entry in listing.entries), key=lambda entry: entry["name"]
         ),
+        "notes": notes,
         "corpus": sorted(corpus_pages(root)),
     }
 
 
-def poison_every_owned_page(root):
-    for owned in ownership.iter_owned(root):
-        if owned.ownership is ownership.Ownership.PAGE:
-            (root / owned.rel).write_bytes(SENTINEL)
+#: The states a projected file takes when the store is the page: wrong bytes, none, or a link.
+DAMAGE = ("poisoned", "deleted", "a link into the vault", "a link out of the vault")
 
 
-def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_file_is_poisoned(
-    stored, writer  # noqa: F811
+def damage_every_owned_projection(root, damage):
+    owned = [
+        item.rel
+        for item in ownership.iter_owned(root)
+        if item.ownership is ownership.Ownership.PAGE
+    ]
+    inside = root / "Decoy.md"
+    inside.write_bytes(SENTINEL)
+    outside = root.parent / "outside.md"
+    outside.write_bytes(SENTINEL)
+    for rel in owned:
+        path = root / rel
+        if damage == "poisoned":
+            path.write_bytes(SENTINEL)
+            continue
+        path.unlink()
+        if damage != "deleted":
+            path.symlink_to(inside if damage == "a link into the vault" else outside)
+
+
+@pytest.mark.parametrize("damage", DAMAGE)
+def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_file_is_damaged(
+    stored, writer, damage  # noqa: F811
 ):
-    """A reader that still takes the file for the page: a stale projection, or one that a failed
-    projector left half-written, reaches the person who asks, and the store's page does not."""
+    """A reader that still takes the file for the page: a stale projection, one that a failed
+    projector left half-written, a missing one or a link at the page's name reaches the person who
+    asks (or drops the page from them), and the store's page does not."""
     for index in range(GENERATED):
         rel, body = generated_page(index)
         write.commit(writer, put(rel, body))
@@ -80,10 +116,13 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
     find_module.clear_cache()
     before = answers(stored, sampled)
     assert len(before["find"]) >= 2, "find must have answers for this check to mean anything"
+    assert len(before["ask"]) >= 2, "ask_memory must have answers for this check to mean anything"
     assert len(before["listing"]) == GENERATED
     assert len(before["corpus"]) >= GENERATED + 2
+    for listed in before["notes"].values():
+        assert {"Alpha.md", "Beta.md", "diagram.bin", "Gen"} <= {entry["name"] for entry in listed}
 
-    poison_every_owned_page(stored)
+    damage_every_owned_projection(stored, damage)
     find_module.clear_cache()
     after = answers(stored, sampled)
 
@@ -195,5 +234,42 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
     backend.start_runtime()
 
     assert not (stored / NEW).exists()
-    assert backend.corpus_size() == {**backend.corpus_size(), "notes": notes + 1, "known": True}
+    after = backend.corpus_size()
+    assert (after["notes"], after["known"]) == (notes + 1, True)
     assert started == []
+
+
+def test_a_store_mode_listing_shows_a_disk_folder_only_for_a_binary_or_a_stored_page(
+    stored, writer  # noqa: F811
+):
+    """A listing that takes every folder on disk for a folder of the vault: a stray Markdown file at
+    a path that the store owns is no page, so its folder is not there, and one that holds a binary
+    or a stored page is."""
+    notes = stored / "Knowledge Base/Notes"
+    (notes / "Stray").mkdir()
+    (notes / "Stray/stray.md").write_bytes(b"a file that the store never held\n")
+    (notes / "Pictures").mkdir()
+    (notes / "Pictures/photo.bin").write_bytes(b"\x00\x01")
+    write.commit(writer, put("Knowledge Base/Notes/Fresh/Page.md", EDITED))
+
+    listing = list_directory.list_directory(stored, path="Knowledge Base/Notes", recursive=True)
+    names = {entry.path.removeprefix("Knowledge Base/Notes/") for entry in listing.entries}
+
+    assert {"Pictures", "Pictures/photo.bin", "Fresh", "Fresh/Page.md"} <= names
+    assert not {name for name in names if name.startswith("Stray")}
+
+
+def test_a_broken_state_root_leaves_a_file_vault_a_vault_and_a_bare_folder_not_one(
+    stored  # noqa: F811
+):
+    """A vault probe that asks the store before the disk: a broken state root then fails every
+    start of a vault whose sentinel is on disk, or raises for a directory that is no vault."""
+    from exomem import state_migration, state_paths
+
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(stored))
+    manifest.write_bytes(b"not a manifest")
+
+    assert vault_module._is_vault(stored)
+    for sentinel in stored.rglob(vault_module._SCHEMA_SENTINEL):
+        sentinel.unlink()
+    assert not vault_module._is_vault(stored)

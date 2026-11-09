@@ -485,16 +485,21 @@ def _is_vault(path: Path) -> bool:
     at all, so a vault has to stay a vault across the move in both directions --
     one that has migrated, and one that never will.
     """
-    from .vault_store import read
-
-    if (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists():
+    if (
+        (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
+        or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
+    ):
         return True
     # A store-mode vault keeps the legacy sentinel page in its store, and its file may be absent.
+    from . import state_migration
+    from .vault_store import read
+
     try:
         return read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
-    except ValueError:
-        # Callers probe every ancestor of a path, and one that holds its own state root (the
-        # filesystem root, say) is refused placement: such a directory cannot be a store-mode vault.
+    except (ValueError, OSError, state_migration.StateMigrationManifestError):
+        # Callers probe every ancestor of a path. One that holds its own state root (the filesystem
+        # root, say) is refused placement, and a broken state root cannot prove a vault: both mean
+        # "not a vault", and file mode is as it was.
         return False
 
 
@@ -8382,43 +8387,33 @@ class WikilinkResolver:
         return resolver
 
     def _build(self) -> None:
-        from .vault_store import mode
-
-        if mode.store_mode_for_reads(self.vault_root):
-            self._build_from_store()
-            return
-        vault_resolved = self.vault_root.resolve()
-        for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
-            request_budget.checkpoint()
-            try:
-                rel = md.resolve().relative_to(vault_resolved).as_posix()
-            except ValueError:
-                continue
-            self._add_entry(rel, self._read_title_lower(md))
-
-    def _build_from_store(self) -> None:
-        """Build from the store's pages, plus the Markdown files that the store does not own.
-
-        The store holds every page that it owns, so a file at an owned path is its projection or a
-        stray and is left out. The walk of the disk adds a collection layer and a file outside the
-        Knowledge Base folder, which the store does not own.
-        """
+        from . import find_corpus
         from .vault_store import ownership, read
 
-        with read.snapshot(self.vault_root) as view:
-            entries = list(view.resolver_entries())
-        vault_resolved = self.vault_root.resolve()
-        for md in walk_vault_md(self.vault_root):
-            request_budget.checkpoint()
-            try:
-                rel = md.resolve().relative_to(vault_resolved).as_posix()
-            except ValueError:
-                continue
-            if ownership.classify(rel) is not ownership.Ownership.PAGE:
-                entries.append((rel, self._read_title_lower(md)))
-        for rel, title in sorted(entries, key=lambda entry: entry[0]):
-            request_budget.checkpoint()
-            self._add_entry(rel, title)
+        root = self.vault_root
+        # A store-mode vault's corpus holds the store's pages and the files that it does not own.
+        corpus = find_corpus.corpus_paths(root, "vault", lambda: walk_vault_md(root))
+        # One snapshot reads each stored page's body once, as the walk of the disk reads each file.
+        with (
+            read.snapshot(root)
+            if isinstance(corpus, find_corpus.StoreCorpus)
+            else contextlib.nullcontext()
+        ) as view:
+            for md in sorted(corpus, key=lambda item: item.as_posix()):
+                request_budget.checkpoint()
+                try:
+                    # The path's own spelling: the walk yields no link, and a stored page's file may
+                    # be one, which `resolve()` would follow to another page.
+                    rel = relative_posix(md, root)
+                except ValueError:
+                    continue
+                if view is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
+                    page = view.page(rel)
+                    if page is None:
+                        continue  # deleted since the corpus was listed
+                    self._add_entry(rel, title_key_from_bytes(page.body, rel))
+                else:
+                    self._add_entry(rel, self._read_title_lower(md))
 
     @classmethod
     def from_maps(

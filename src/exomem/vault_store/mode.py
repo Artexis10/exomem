@@ -76,14 +76,20 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
 
     Activation and rollback run offline, and each changes the manifest, so a reader may keep its answer
-    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window is
-    never kept, and a manifest or store that cannot be read raises as ``state`` does. The write refusal
-    in ``availability`` does not use this: it asks ``store_mode_active`` every time.
+    while the manifest's stat signature holds: one stat per read in place of a parse. A kept "store"
+    is checked against the store's own row, which a rollback changes before the manifest. A crash
+    window is never kept, and a manifest or store that cannot be read raises as ``state`` does. The
+    write refusal in ``availability`` does not use this: it asks ``store_mode_active`` every time.
     """
     key = (os.fspath(vault_root), state_paths._placement_environment())
     cached = _READ_MODES.get(key)
     if cached is not None and _manifest_signature(cached[0]) == cached[1]:
-        return cached[2]
+        if not cached[2] or _row_says_store(vault_root):
+            return cached[2]
+        # A rollback commits the store's file mode before it changes the manifest. A reader that
+        # kept "store" meets that window with a store that no longer serves: the vault serves from
+        # its files until the interrupted command runs again, so the kept answer goes.
+        _READ_MODES.pop(key, None)
     manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault_root))
     # The signature comes before the read, so a manifest replaced between them is read again next call.
     signature = _manifest_signature(manifest)
@@ -93,6 +99,16 @@ def store_mode_for_reads(vault_root: Path) -> bool:
             _READ_MODES.clear()
         _READ_MODES[key] = (manifest, signature, current == STORE_MODE)
     return current == STORE_MODE
+
+
+def _row_says_store(vault_root: Path) -> bool:
+    """Whether the store's own mode row still says ``store``: one read on a pooled reader."""
+    from ..collection_store import runtime
+
+    path = connection.store_path(vault_root)
+    with connection.store_reader(path, runtime.reader_pool(vault_root, path)) as reader:
+        row = reader.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
+    return row is not None and row[0] == STORE_MODE
 
 
 def _stored_mode(vault_root: Path) -> str | None:
