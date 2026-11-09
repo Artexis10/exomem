@@ -34,7 +34,7 @@
 
 ## 6. Embeddings, Cloud and Windows
 
-- [ ] 6.1 Key vector rows by page hash and store revision; keep the semantic drain asynchronous.
+- [x] 6.1 Key vector rows by page hash and store revision; keep the semantic drain asynchronous.
 - [ ] 6.2 Let a Cloud cell run without per-write projection and export Markdown on request.
 - [ ] 6.3 Run the acceptance set on native Windows/NTFS.
 
