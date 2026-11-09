@@ -16,6 +16,7 @@ import dataclasses
 import hashlib
 import json
 import shutil
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -59,8 +60,10 @@ from exomem.collection_store import (
     capability,
     connection,
     conversion,
+    derived_rows,
     edit_back,
     references,
+    replica,
     runtime,
     summary,
     typed_storage,
@@ -209,11 +212,19 @@ def test_a_cutover_moves_every_collection_to_sqlite_only_storage_and_keeps_every
         **bodies, SAMPLES_PATH: 0, DATASET: None}
 
     backup = backup_file(tmp_path)
+    derived = derived_rows.path(connection.store_path(root))
+    fingerprint = {"size_bytes": derived.stat().st_size, "sha256": hashlib.sha256(derived.read_bytes()).hexdigest(),
+                   "copied": False}
     assert apply(root, preview["plan_id"], backup) == 0, capsys.readouterr().err
     receipt = printed(capsys)
     assert receipt["phase"] == "complete"
     # The backup was taken before any step and still verifies.
     assert hashlib.sha256(backup.read_bytes()).hexdigest() == receipt["backup"]["sha256"]
+    # The derived rows rebuild from their preserved sources (the state-loss test below proves it), so the
+    # backup names their file by size and digest and copies nothing beside the store.
+    assert {name: receipt["backup"]["derived"][name] for name in fingerprint} == fingerprint
+    assert Path(receipt["backup"]["derived"]["path"]).resolve() == derived.resolve()
+    assert [found.name for found in backup.parent.iterdir()] == [backup.name]
     done = {row["path"]: row for row in receipt["collections"]}
     assert set(done) == {*CONVERTED, SAMPLES_PATH}
     assert all(row["parity"]["status"] == "held" and row["projection"] == "ready" for row in done.values()), done
@@ -312,6 +323,36 @@ def test_a_records_collection_with_a_presentation_table_converts_and_keeps_its_c
         assert call(root, "record_memory", action="query", collection=OBSERVED)["rows"] == before
     finally:
         service.stop()
+
+
+def test_a_cutover_whose_last_hand_back_outlasts_one_mutation_timeout_still_finishes(
+        env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
+    """Defect: the apply converts every collection, then exits 1 with COLLECTION_STORE_FLUSH_PENDING,
+    because the offline owner hands a large store back with one mutation's timeout to publish it."""
+    root = legacy_vault(env)
+    shutil.rmtree((root / X3).parent)
+    assert migrate(root, "apply") == 0
+    monkeypatch.setattr(capability, "RELEASED", RELEASED)
+    monkeypatch.setattr(runtime, "PUBLISH_INTERVAL_SECONDS", 0.1)
+    service = start_service(root)
+    try:
+        _until(lambda: all(settled(root, cid) for cid in (CID, OTHER, LEDGER_ID)), 30)
+    finally:
+        service.stop()
+    assert cutover(root, "--dry-run") == 0
+    plan_id = printed(capsys)["plan_id"]
+    # A replica publication that takes longer than one mutation's timeout, as a large store's does.
+    monkeypatch.setenv("EXOMEM_MUTATION_TIMEOUT", "1")
+    publish = replica.publish_replica
+
+    def slow(*args, **kwargs):
+        time.sleep(1.5)
+        return publish(*args, **kwargs)
+
+    monkeypatch.setattr(replica, "publish_replica", slow)
+    assert apply(root, plan_id, backup_file(tmp_path)) == 0, capsys.readouterr().err
+    assert printed(capsys)["phase"] == "complete"
+    assert view_mode(root, CID) == "summary"
 
 
 def test_a_cutover_cut_after_any_step_resumes_from_its_record_and_repeats_nothing(

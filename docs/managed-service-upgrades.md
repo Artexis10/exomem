@@ -717,6 +717,30 @@ a store from an earlier release. Back up the store with the earlier release
 before the upgrade, as "A release that changes the collection store's schema" in
 `docs/deployment.md` describes.
 
+### A supervisor older than the vault's state
+
+A worker records each optional state format that it uses in the vault's state
+manifest, for example the schema of a migrated collection store. The supervisor
+runs from the launcher venv, which a seamless upgrade does not replace. A
+supervisor whose release predates such a format cannot read the state
+manifest, so it cannot verify any upgrade target.
+
+A supervisor that has this check reports the case under `upgrade_blocker` in
+`--status`. The staging operator then refuses before it stages a release, and
+the supervisor refuses an upgrade request with the same message. The message
+names the supervisor's release and the formats that it does not recognize. The
+current worker keeps serving.
+
+A supervisor without the check refuses the same upgrade with "target
+interpreter verification failed; current admission unchanged".
+
+To recover in both cases:
+
+1. Install the serving release into the launcher venv through the offline maintenance described above.
+2. Run `bash scripts/upgrade.sh` again with the release you want.
+
+The upgrade then runs, and `--status` shows `upgrade_blocker` as `null`.
+
 ### Moving file collections into the store at a handoff
 
 From the release that enables `collections-migrate-v1`, a seamless upgrade can

@@ -363,8 +363,8 @@ def test_typed_graph_lane_clears_golden_expectations(
             f"authored relation {spec['relation_type']!r} from {spec['ideal']} to "
             f"{spec['typed_neighbor']} not found via neighbors_for: {neighbors}"
         )
-        assert typed[0].family not in ("", "link"), (
-            f"typed relation resolved to an unregistered/link family: {typed[0]}"
+        assert typed[0].typed, (
+            f"typed relation resolved to an unregistered or plain-link relation: {typed[0]}"
         )
 
         # (2) End-to-end recall still clears the golden expectation.
