@@ -566,6 +566,28 @@ def test_the_preview_names_a_manifest_that_summary_mode_cannot_carry_and_the_app
     assert not backup.exists() and view_mode(root, CID) == "items" and item_files(root, WORK) == files
 
 
+def test_a_saved_view_the_collection_already_cannot_serve_warns_and_does_not_block_the_cutover(
+        env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
+    """Defect: one stale saved view, here a filter on a value the field no longer allows, blocked the
+    whole vault's cutover, though the conversion changes only storage and leaves the view as it was."""
+    root = vault_with_every_shape(env, monkeypatch)
+    manifest = root / KEPT_PATH
+    text = manifest.read_text().replace(
+        "    count: {type: integer}\n", "    count: {type: integer}\n    stage: {type: enum, enum: [open, done]}\n")
+    manifest.write_text(text[:-len("---\n")] + (
+        "views:\n  stale:\n    query: {filters: [{column: stage, op: eq, value: archived}], limit: 12}\n---\n"))
+    stop_writer()
+
+    code = cutover(root, "--dry-run")
+    preview = printed(capsys)
+    assert (code, preview["blockers"]) == (0, []), json.dumps(preview["blockers"])
+    [kept] = [row for row in preview["collections"] if row["path"] == KEPT_PATH]
+    # The plan names the stale view, so the owner can fix it after the cutover.
+    assert [(found["code"], found["location"]) for found in kept["warnings"]] == [("INVALID_SAVED_VIEW", "views.stale")]
+    assert apply(root, preview["plan_id"], backup_file(tmp_path)) == 0, capsys.readouterr().err
+    assert view_mode(root, KEPT) == "summary"
+
+
 def test_a_cutover_never_writes_its_backup_over_a_file(
         env, monkeypatch, capsys, tmp_path):  # noqa: F811 - the imported fixture, by name
     """Defect: the backup replaces the file that --backup-to names, such as the owner's own copy."""
