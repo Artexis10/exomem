@@ -27,7 +27,10 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: 
     from .media_types import RAW_EXTS
 
     extension = (suffix if suffix is not None else Path(path).suffix).lower()
-    if extension in RAW_EXTS:
+    # LibRaw chooses its parser from the bytes, and also decodes headerless sensor dumps by their
+    # length, so only a DNG, which a TIFF directory declares, may reach it. A phone or photo export
+    # often saves its JPEG rendering under a raw extension: those bytes take the decoders below.
+    if extension in RAW_EXTS and _is_dng(path):
         return _open_raw(path, max_pixels)
     # HEIC is the image registry's supported HEIF extension; other formats need only Pillow.
     if extension == ".heic":
@@ -68,10 +71,6 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
                 "download the original with transfer_artifact operation=download"
             ) from error
         raise ImportError("Camera raw decoding requires rawpy; install exomem[image-codecs]") from error
-    # LibRaw chooses its parser from the bytes, and also decodes headerless sensor dumps by their
-    # length. Only a DNG, which a TIFF directory declares, may reach it.
-    if not _is_dng(path):
-        raise OSError("the file is not a DNG camera raw")
     limit = max_pixels if max_pixels is not None else (
         2 * Image.MAX_IMAGE_PIXELS if Image.MAX_IMAGE_PIXELS else None
     )
