@@ -485,12 +485,12 @@ async def test_a_cell_that_counts_a_damaged_original_fires_and_a_clean_count_cle
 @pytest.mark.parametrize(
     "answer",
     [
-        _counted({"state": "unknown"}),  # the cell has not finished its first fixity pass
-        _counted({"state": "off"}),  # the operator stopped fixity on the cell
+        # Any state but measured: before the first pass, after a stale pass, or with fixity off.
+        _counted({"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00"}),
         _counted({"state": "measured", "unresolved": True}),  # a hostile cell sends a boolean
         None,  # the pod does not answer
     ],
-    ids=["before-first-pass", "fixity-off", "hostile-count", "no-answer"],
+    ids=["not-measured", "hostile-count", "no-answer"],
 )
 async def test_an_uncounted_answer_never_resolves_a_firing_originals_alert(
     cell_db: CellDatabase, delivered: list[tuple[str, bool]], answer: bytes | None

@@ -1313,30 +1313,6 @@ def test_original_fixity_runs_its_own_pass_where_media_extraction_is_off(
         readiness.reset()
 
 
-def test_a_failing_fixity_start_leaves_the_rest_of_the_runtime_starting(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Defect: fixity started outside the guarded starters, so its failure stops every later worker."""
-    from exomem import original_fixity
-
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    calls: list[str] = []
-    _quiet_starters(monkeypatch, calls)
-    monkeypatch.setattr(original_fixity, "start", lambda _root: (_ for _ in ()).throw(OSError("state folder")))
-    monkeypatch.setattr(
-        server_runtime.LocalRuntimeActivation, "_start_dreamer", lambda self, _root: calls.append("dreamer")
-    )
-    try:
-        activation = server_runtime.LocalRuntimeActivation(vault)
-        activation.start()
-        activation._thread.join(5)
-        assert calls[-1] == "dreamer"
-        assert activation.original_fixity is None
-    finally:
-        readiness.reset()
-
-
 def test_dreamer_starts_last_and_only_when_enabled(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

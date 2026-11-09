@@ -78,8 +78,9 @@ POOL_BLOB = "pool_blob"
 STORED_ORIGINAL = "stored_original"
 LOCAL_IMPORT = "local_import"
 IMPORT_AGAIN = "import_again"  # a text original's outside file, which only a new import brings back
+VAULT_STORE = "vault_store"  # in store mode, the store's own page, which still fences the expected text
 # The copies whose path is a vault path; the others name a file outside the vault.
-_VAULT_COPIES = (MEDIA_STORE, POOL_BLOB, STORED_ORIGINAL)
+_VAULT_COPIES = (MEDIA_STORE, POOL_BLOB, STORED_ORIGINAL, VAULT_STORE)
 
 # The readiness block's states: a count after a pass, none before one, or none because it is off.
 SIGNAL_MEASURED = "measured"
@@ -274,7 +275,7 @@ def _bindings(vault: Path) -> Iterator[_Found]:
 
     These are the walks that already exist; none reads a derived index.
     """
-    from . import adopt, adoption_plan, archive_members, media_store
+    from . import adoption_plan, archive_members, media_store
     from .backfill import iter_kb_files
     from .vault import kb_root
 
@@ -295,14 +296,8 @@ def _bindings(vault: Path) -> Iterator[_Found]:
             yield _Found((family / member["blob"]).as_posix(), member["sha256"], BLOB, relative, member["bytes"],
                          False, False)
     for entry in adoption_plan.read_import_index(vault):
-        if not originals.is_sha256(entry.original_sha256):
-            continue
-        try:
-            with reserved_paths.open_generic_binary(vault, entry.path, physical=True) as source:
-                page = source.stream.read().decode("utf-8")
-        except (UnicodeError, reserved_paths.ReservedPathLeafError):
-            continue
-        if adopt.text_source_body(page) is not None:  # an artifact Source has a sidecar binding instead
+        # The parsed front matter decides, never the page body: a damaged fence must stay a text original.
+        if originals.is_sha256(entry.original_sha256) and entry.bound_original is None:
             yield _Found(entry.path, str(entry.original_sha256), TEXT, entry.path, None, False, False)
 
 
@@ -333,23 +328,57 @@ def walk(vault: Path) -> int:
     return len(found)
 
 
-def _still_bound(vault: Path, row: Row) -> bool:
-    """Whether the row's binding still names its path and hash."""
-    from . import adoption_plan, archive_members
+def _still_bound(vault: Path, row: Row, reads: _Reads | None = None) -> bool | None:
+    """Whether the row's binding still names its path and hash; None when the binding could not be read.
+
+    `reads` lends a pass's manifests read once; a check under the vault guard passes none and reads afresh.
+    """
+    from . import adoption_plan
 
     if row.kind == FILE:
         try:
             return originals.original_state(vault, row.path).binary_sha256 == row.sha256
-        except (ValueError, reserved_paths.ReservedPathLeafError):
+        except ValueError:
             return False
+        except reserved_paths.ReservedPathLeafError as error:
+            return False if error.code == "MISSING" else None
     if row.kind == BLOB:
-        manifest = archive_members.read_manifest(vault, row.binding)
+        manifest = (reads or _Reads(vault)).manifest(row.binding)
+        if manifest is None:
+            # A manifest still on disk that does not read as one may be a passing refusal.
+            return None if os.path.lexists(vault / row.binding) else False
         family = PurePosixPath(row.binding).parent
-        return manifest is not None and any(
-            member["sha256"] == row.sha256 and (family / member["blob"]).as_posix() == row.path
-            for member in manifest.members)
-    entry = adoption_plan.read_import_entry(vault, vault / row.path)
-    return entry is not None and entry.original_sha256 == row.sha256
+        return any(member["sha256"] == row.sha256 and (family / member["blob"]).as_posix() == row.path
+                   for member in manifest.members)
+    try:
+        entries = adoption_plan.page_import_entries(vault, vault / row.path)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        missing = isinstance(error, FileNotFoundError) or getattr(error, "code", None) == "MISSING"
+        return False if missing else None
+    return any(entry.original_sha256 == row.sha256 and entry.bound_original is None for entry in entries)
+
+
+class _Reads:
+    """What one pass reads once however many rows ask: member manifests and the import journals."""
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self.manifests: dict[str, Any] = {}
+        self.journals: list[tuple[Path, str, int]] | None = None
+
+    def manifest(self, binding: str) -> Any:
+        from . import archive_members
+
+        if binding not in self.manifests:
+            self.manifests[binding] = archive_members.read_manifest(self.vault, binding)
+        return self.manifests[binding]
+
+    def recorded_files(self) -> list[tuple[Path, str, int]]:
+        from . import local_import
+
+        if self.journals is None:
+            self.journals = list(local_import.recorded_files(self.vault))
+        return self.journals
 
 
 # --- reading payloads --------------------------------------------------------------------------
@@ -454,16 +483,9 @@ class PassResult:
     rescheduled: int = 0
 
 
-def budget_for(rows: Iterable[Row], *, interval: float, cycle: float) -> int:
+def budget_for(sizes: Iterable[int], *, interval: float, cycle: float) -> int:
     """The re-hash budget of one pass: the local bytes times its share of the cycle, with a floor."""
-    local = sum(_size(row) for row in rows if row.state not in (EVICTED, MISSING))
-    return max(BUDGET_FLOOR_BYTES, int(local * interval / cycle))
-
-
-def _size(row: Row) -> int:
-    if row.size is not None:
-        return row.size
-    return row.identity.size if row.identity is not None else 0
+    return max(BUDGET_FLOOR_BYTES, int(sum(sizes) * interval / cycle))
 
 
 def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = None) -> PassResult:
@@ -477,14 +499,17 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
         credit = int(_meta(connection).get("credit", 0))
         _set_meta(connection, pass_started_at=time.time())
     pace = _Pace(rate if rate is not None else read_rate())
+    reads = _Reads(vault)
     result = PassResult()
-    changed: list[Row] = []
-    steady: list[Row] = []
+    # Each present original with the size its presence check found: what its hash reads from disk,
+    # a whole page for a text original and the compressed blob for a member.
+    changed: list[tuple[Row, int]] = []
+    steady: list[tuple[Row, int]] = []
     for row in foreground_priority.yielding(rows):
         try:
             info = os.lstat(vault / row.path)
         except FileNotFoundError:
-            _absent(vault, row, result)
+            _absent(vault, row, result, reads)
             continue
         except OSError:
             result.unreadable += 1
@@ -496,25 +521,27 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
             # The media store brought it back after checking its digest; it waits for its turn like any other.
             row = replace(row, state=UNVERIFIED)
             _record(vault, row, state=UNVERIFIED, identity=row.identity)
-        if row.state == MISSING or (row.identity is not None and Identity.of(info) != row.identity):
-            changed.append(row)
-        else:
-            steady.append(row)
-    for row in changed:
-        result.changed_bytes += _verify(vault, row, pace, result)
-    result.budget_bytes = budget if budget is not None else budget_for(rows, interval=pass_seconds(),
-                                                                        cycle=cycle_seconds())
+        moved = row.state == MISSING or (row.identity is not None and Identity.of(info) != row.identity)
+        (changed if moved else steady).append((row, info.st_size))
+    for row, size in changed:
+        if _verify(vault, row, pace, result, reads):
+            result.changed_bytes += size
+    result.budget_bytes = budget if budget is not None else budget_for(
+        (size for _row, size in changed + steady), interval=pass_seconds(), cycle=cycle_seconds())
     available, carried = result.budget_bytes + credit, 0
-    for row in sorted(steady, key=lambda item: (item.state != UNVERIFIED, item.verified_at or 0.0, item.path)):
-        if result.rehashed_bytes + _size(row) > available:
+    for row, size in sorted(steady, key=lambda item: (item[0].state != UNVERIFIED, item[0].verified_at or 0.0,
+                                                      item[0].path)):
+        if result.rehashed_bytes + size > available:
             # An original larger than one budget banks this pass's budget, so a later pass can afford it.
             carried = available if result.rehashed_bytes == 0 else 0
             break
-        result.rehashed_bytes += _verify(vault, row, pace, result)
+        if _verify(vault, row, pace, result, reads):
+            result.rehashed_bytes += size
     with closing(_connect(vault)) as connection, connection:
         unresolved = connection.execute(
             f"SELECT COUNT(*) FROM originals WHERE state IN ({_marks(UNRESOLVED)})", UNRESOLVED).fetchone()[0]
-        _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved)
+        _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved,
+                  unreadable=result.unreadable, rescheduled=result.rescheduled)
     return result
 
 
@@ -526,35 +553,39 @@ def _count(result: PassResult, state: str) -> None:
     result.outcomes[state] = result.outcomes.get(state, 0) + 1
 
 
-def _absent(vault: Path, row: Row, result: PassResult) -> None:
+def _absent(vault: Path, row: Row, result: PassResult, reads: _Reads) -> None:
     if row.state in (EVICTED, MISSING):
         _count(result, row.state)  # Reading an evicted original would download it, and the store holds it.
         return
-    if not _still_bound(vault, row):
+    bound = _still_bound(vault, row, reads)
+    if bound is None:
+        result.rescheduled += 1  # The binding could not be read; the next pass asks again.
+        return
+    if not bound:
         _retire(vault, row)
         return
     if row.kind == FILE and originals.original_state(vault, row.path).state == "evicted":
         _record(vault, row, state=EVICTED, identity=row.identity)
         _count(result, EVICTED)
         return
-    _record(vault, row, state=MISSING, identity=row.identity, route=_copies(vault, row))
+    _record(vault, row, state=MISSING, identity=row.identity, route=_copies(vault, row, reads))
     _count(result, MISSING)
 
 
-def _verify(vault: Path, row: Row, pace: _Pace, result: PassResult) -> int:
-    """Hash one original and act on the answer; return the payload bytes read."""
+def _verify(vault: Path, row: Row, pace: _Pace, result: PassResult, reads: _Reads) -> bool:
+    """Hash one original and act on the answer; return whether its file was read."""
     try:
         hashed = _hash(vault, row, pace)
     except _Absent:
-        _absent(vault, row, result)
-        return 0
+        _absent(vault, row, result, reads)
+        return False
     except _Unreadable:
         result.unreadable += 1
-        return 0
+        return False
     if hashed.sha256 == row.sha256:
         _record(vault, row, state=VERIFIED, identity=hashed.identity, size=hashed.size, verified=True)
         _count(result, VERIFIED)
-        return hashed.size
+        return True
     cause = UNKNOWN_CAUSE if row.identity is None else (CORRUPTED if hashed.identity == row.identity else EDITED)
     confirmed = _confirm_damage(vault, row, hashed)
     if confirmed is None:
@@ -567,26 +598,24 @@ def _verify(vault: Path, row: Row, pace: _Pace, result: PassResult) -> int:
                 route=_text_route(vault, row), verified=True)
         _count(result, CORRUPT_NO_COPY)
     else:
-        _repair(vault, row, hashed, cause, pace, result)
-    return hashed.size
-
-
-def _guard(vault: Path, operation: str):
-    from .writer_lease import get_manager
-
-    return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
+        _repair(vault, row, hashed, cause, pace, result, reads)
+    return True
 
 
 def _confirm_damage(vault: Path, row: Row, hashed: _Hashed) -> bool | None:
-    """Under the vault guard: whether the hashed file is unchanged and its binding still names the hash.
+    """Serialized with governed writes: whether the hashed file is unchanged and its binding still names the hash.
 
     False when the binding moved on, so a governed write explains the change. None when the guard
-    is busy or the file changed again; the next pass decides then.
+    is busy, the binding cannot be read, or the file changed again; the next pass decides then.
+    The check writes nothing, so it takes the consistency guard, which claims no writer authority.
     """
+    from .writer_lease import get_manager
+
     try:
-        with _guard(vault, "original_fixity_check"):
-            if not _still_bound(vault, row):
-                return False
+        with get_manager().consistency_guard(vault, operation="original_fixity_check", holder_kind="background"):
+            bound = _still_bound(vault, row)
+            if not bound:
+                return bound
             return True if _version(vault, row) == hashed.version else None
     except (OpError, _Absent, _Unreadable):
         return None
@@ -599,10 +628,12 @@ class _Changed(Exception):
     """The file or its binding changed after the hash; nothing moves."""
 
 
-def _copies(vault: Path, row: Row) -> list[dict[str, str]]:
-    """The copies that may hold the row's bytes, in the order a restore tries them (D5). This reads none."""
-    from . import local_import
+def _copies(vault: Path, row: Row, reads: _Reads) -> list[dict[str, str]]:
+    """The candidate copies that may hold the row's bytes, in the order a restore tries them (D5).
 
+    This reads no candidate: a restore hashes one before it uses it. A candidate whose recorded size
+    is not the row's cannot hold its bytes, so it is left out.
+    """
     found: list[dict[str, str]] = []
     if row.kind == FILE and row.stored:
         snapshot = originals.original_state(vault, row.path)
@@ -611,27 +642,68 @@ def _copies(vault: Path, row: Row) -> list[dict[str, str]]:
     with closing(_connect(vault)) as connection:
         others = connection.execute(
             f"SELECT kind, path FROM originals WHERE sha256 = ? AND path != ? AND kind IN (?, ?)"
-            f" AND state IN ({_marks(_PRESENT)}) ORDER BY kind = ?, path",
-            (row.sha256, row.path, BLOB, FILE, *_PRESENT, FILE)).fetchall()
+            f" AND state IN ({_marks(_PRESENT)}) AND (size IS NULL OR ? IS NULL OR size = ?) ORDER BY kind = ?, path",
+            (row.sha256, row.path, BLOB, FILE, *_PRESENT, row.size, row.size, FILE)).fetchall()
     found.extend({"source": POOL_BLOB if kind == BLOB else STORED_ORIGINAL, "path": path} for kind, path in others)
-    for outside, sha256, _size_then in local_import.recorded_files(vault):
-        if sha256 == row.sha256 and outside.is_file():
+    for outside, sha256, size_then in reads.recorded_files():
+        if sha256 == row.sha256 and row.size in (None, size_then) and _outside_size(outside) == size_then:
             found.append({"source": LOCAL_IMPORT, "path": str(outside)})
     return found
 
 
-def _text_route(vault: Path, row: Row) -> list[dict[str, str]]:
-    from . import adoption_plan
+def _outside_size(path: Path) -> int | None:
+    """The size of a plain file outside the vault, or None when it is gone or is not one."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
 
-    entry = adoption_plan.read_import_entry(vault, vault / row.path)
-    return [{"source": IMPORT_AGAIN, "path": str(entry.imported_from)}] if entry is not None else []
+
+def _text_route(vault: Path, row: Row) -> list[dict[str, str]]:
+    """Where a text original may still be: the store's own page in store mode, then each file it came from."""
+    from . import adopt, adoption_plan
+    from .vault_store import read as store_read
+
+    route: list[dict[str, str]] = []
+    try:
+        stored = store_read.owned_bytes(vault, row.path)  # None outside store mode
+        text = adopt.text_source_body(stored.decode("utf-8")) if stored is not None else None
+    except (OSError, sqlite3.Error, ValueError, RuntimeError):  # RuntimeError: a store refusal; the route is advice
+        text = None
+    if text is not None and hashlib.sha256(text.encode("utf-8")).hexdigest() == row.sha256:
+        route.append({"source": VAULT_STORE, "path": row.path})
+    entries = adoption_plan.read_import_entries(vault, vault / row.path)
+    route.extend({"source": IMPORT_AGAIN, "path": path}
+                 for path in dict.fromkeys(str(entry.imported_from) for entry in entries))
+    return route
 
 
 def clear_staging(vault: Path) -> None:
-    """Remove the staged copies that a stopped process left; only this module writes them."""
+    """Remove what a stopped process left: staged copies in private state, and restore temporaries in the vault.
+
+    A restore notes each temporary's name before it writes one, so a name noted here may name no file.
+    Only a name in the reserved publish namespace is removed, so a damaged note cannot name an original.
+    """
+    from . import media_store
+
     folder = table_path(vault).parent
     for leftover in folder.glob("*.part") if folder.is_dir() else ():
         leftover.unlink(missing_ok=True)
+    if not table_path(vault).is_file():
+        return
+    with closing(_connect(vault)) as connection:
+        noted = _meta(connection).get("temporaries", [])
+    gone = [entry for entry in noted
+            if held_fs.is_publish_temporary(entry[1]) and media_store._remove_temporary(vault, *entry)]
+    _note_temporaries(vault, [], gone)
+
+
+def _note_temporaries(vault: Path, add: list[list[str]], drop: list[list[str]]) -> None:
+    """Keep the list of restore temporaries: `[original path, temporary name]` pairs."""
+    with closing(_connect(vault)) as connection, connection:
+        noted = [entry for entry in _meta(connection).get("temporaries", []) if entry not in drop]
+        _set_meta(connection, temporaries=[*noted, *(entry for entry in add if entry not in noted)])
 
 
 @contextmanager
@@ -686,9 +758,10 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
     yield sink
 
 
-def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult) -> None:
+def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
+            reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
-    for copy in _copies(vault, row):
+    for copy in _copies(vault, row, reads):
         staged = _stage(vault, row, copy, pace)
         if staged is None:
             continue
@@ -698,10 +771,12 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
         except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
-            # Damaged and unchanged, with a copy the owner can use: the state that asks for their action.
-            log.warning("original fixity: a restore failed: %s", type(error).__name__)
-            _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, route=[copy],
-                    verified=True)
+            # The copy verified but could not be put in place. The row keeps its last identity and
+            # verification time, so the next pass finds it changed or due, and tries again.
+            code = getattr(error, "code", None) or type(error).__name__
+            log.warning("original fixity: a restore failed: %s", code)
+            _record(vault, row, state=CORRUPT_NO_COPY, identity=row.identity, cause=cause,
+                    route=[{**copy, "code": str(code)}])
             _count(result, CORRUPT_NO_COPY)
             return
         finally:
@@ -729,60 +804,75 @@ def _after_restore(vault: Path, row: Row) -> None:
 def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -> Identity:
     """Put the verified bytes in place of the damaged original, and the changed bytes in Trash.
 
-    Both copies are written beside the original, outside the vault guard. Under the guard the file
-    and its binding are checked again, the changed bytes move to Trash with their metadata, and the
-    verified bytes replace the original in one rename. Returns the restored file's stat identity.
+    Both copies are written beside the original, outside the vault guard, under names noted first so
+    that a stopped process's are swept at the next start. Under the guard the file and its binding are
+    checked again and the changed bytes move to Trash with their metadata. The file is checked once
+    more, and the verified bytes replace it in one rename. Returns the restored file's stat identity.
+    The Trash move comes first, so a failed replace never loses the changed bytes.
     """
+    from . import media_store
     from .delete_file import free_trash_path, planned_trash_path
 
     target = PurePosixPath(row.path)
     now = dt.datetime.now()
     planned = Path(planned_trash_path(vault, row.path, now))
     damaged_name, restored_name = held_fs.publish_temporary_name(), held_fs.publish_temporary_name()
+    noted = [[row.path, damaged_name], [row.path, restored_name]]
+    _note_temporaries(vault, noted, [])
     written: dict[str, held_fs.StableIdentity] = {}
-    with held_fs.acquire(vault).require() as filesystem, \
-            filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
-        try:
-            with filesystem.file(parent, target.name).require() as damaged:
-                if damaged.version() != hashed.version:
-                    raise _Changed
-                filesystem.copy(damaged, parent, damaged_name).require()
-                written[damaged_name] = _identity_of(filesystem, parent, damaged_name)
-                if damaged.version() != hashed.version:
-                    raise _Changed
-            with filesystem.file(parent, restored_name, access="write", create=True, exclusive=True).require() as fresh:
-                written[restored_name] = fresh.identity  # known before the write, so a failed one is still removed
-                filesystem.write(fresh, held_fs.Chunks(open=lambda: _file_parts(staged))).require()
-                written[restored_name] = fresh.identity
-            with _guard(vault, "original_fixity_restore"):
-                if not _still_bound(vault, row):
-                    raise _Changed
+    try:
+        with held_fs.acquire(vault).require() as filesystem, \
+                filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
+
+            def unchanged() -> None:
                 with filesystem.file(parent, target.name).require() as current:
                     if current.version() != hashed.version:
                         raise _Changed
-                with filesystem.parent(planned.parent.as_posix(), create=True, access="mutate").require() as folder:
-                    leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
-                    metadata = {
-                        "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
-                        "reason": "original_fixity", "cause": cause,
-                        "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
-                    }
-                    held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
-                                          json.dumps(metadata, indent=2).encode("utf-8")).require()
-                    _rename(filesystem, parent, damaged_name, written, folder, leaf)
-                    filesystem.flush_directory(folder).require()
-                _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
-                filesystem.flush_directory(parent).require()
-                with _open(vault, row) as placed:
-                    return Identity.of(os.fstat(placed.stream.fileno()))
-        finally:
-            for name, identity in written.items():
-                with suppress(held_fs.HeldFsError, OSError):
-                    leftover = filesystem.file(parent, name, access="mutate")
-                    if leftover.ok:
-                        with leftover.require() as residue:
-                            if residue.identity == identity:
-                                filesystem.unlink(residue).require()
+
+            try:
+                with filesystem.file(parent, target.name).require() as damaged:
+                    if damaged.version() != hashed.version:
+                        raise _Changed
+                    filesystem.copy(damaged, parent, damaged_name).require()
+                    written[damaged_name] = _identity_of(filesystem, parent, damaged_name)
+                    if damaged.version() != hashed.version:
+                        raise _Changed
+                with filesystem.file(parent, restored_name, access="write", create=True,
+                                     exclusive=True).require() as fresh:
+                    written[restored_name] = fresh.identity  # known before the write, so a failed one is removed
+                    filesystem.write(fresh, held_fs.Chunks(open=lambda: _file_parts(staged))).require()
+                    written[restored_name] = fresh.identity
+                with media_store._guard(vault, "original_fixity_restore"):
+                    if not _still_bound(vault, row):
+                        raise _Changed
+                    unchanged()
+                    with filesystem.parent(planned.parent.as_posix(), create=True,
+                                           access="mutate").require() as folder:
+                        leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
+                        metadata = {
+                            "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
+                            "reason": "original_fixity", "cause": cause,
+                            "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
+                        }
+                        held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
+                                              json.dumps(metadata, indent=2).encode("utf-8")).require()
+                        _rename(filesystem, parent, damaged_name, written, folder, leaf)
+                        filesystem.flush_directory(folder).require()
+                    unchanged()  # A write outside Exomem since the first check keeps its bytes.
+                    _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
+                    filesystem.flush_directory(parent).require()
+                    with _open(vault, row) as placed:
+                        return Identity.of(os.fstat(placed.stream.fileno()))
+            finally:
+                for name, identity in written.items():
+                    with suppress(held_fs.HeldFsError, OSError):
+                        leftover = filesystem.file(parent, name, access="mutate")
+                        if leftover.ok:
+                            with leftover.require() as residue:
+                                if residue.identity == identity:
+                                    filesystem.unlink(residue).require()
+    finally:
+        _note_temporaries(vault, [], noted)
 
 
 def _identity_of(filesystem, parent, name: str) -> held_fs.StableIdentity:
@@ -818,10 +908,16 @@ def _when(value: float | None) -> str | None:
     return dt.datetime.fromtimestamp(value, dt.UTC).isoformat() if value else None
 
 
-def readiness(vault: Path | None) -> dict[str, object]:
-    """The content-free readiness block: the count of unresolved originals, `unknown` before a pass, or `off`.
+def _stale(meta: dict[str, Any]) -> bool:
+    """Whether the last finished pass is older than three pass intervals: a stopped thread's count is no answer."""
+    return time.time() - float(meta["pass_at"]) > 3 * pass_seconds()
 
-    It carries no path, name or hash, and never makes a cell unready (D9).
+
+def readiness(vault: Path | None) -> dict[str, object]:
+    """The content-free readiness block: the count of unresolved originals, `unknown`, or `off`.
+
+    `unknown` holds before the first pass and when the last pass is stale; a stale answer also carries
+    `last_pass_at`. It carries no path, name or hash, and never makes a cell unready (D9).
     """
     if disabled():
         return {"state": SIGNAL_OFF}
@@ -835,13 +931,17 @@ def readiness(vault: Path | None) -> dict[str, object]:
         return {"state": SIGNAL_UNKNOWN}
     if "pass_at" not in meta or not isinstance(meta.get("unresolved"), int):
         return {"state": SIGNAL_UNKNOWN}
+    if _stale(meta):
+        return {"state": SIGNAL_UNKNOWN, "last_pass_at": _when(meta["pass_at"])}
     return {"state": SIGNAL_MEASURED, "unresolved": meta["unresolved"]}
 
 
 def status(vault: Path | None) -> dict[str, object]:
     """The `originals` block of `exomem status`: counts by state, or `unknown` before the first pass.
 
-    A pass that started and has not finished marks the counts partial. An unknown count is never zero.
+    A pass that started and has not finished marks the counts partial; a stale last pass reads `unknown`
+    with its time. The last pass's unreadable and rescheduled originals are shown beside the counts,
+    because neither reaches a state. An unknown count is never zero.
     """
     if disabled():
         return {"state": SIGNAL_OFF}
@@ -858,48 +958,65 @@ def status(vault: Path | None) -> dict[str, object]:
         return {"state": SIGNAL_UNKNOWN, "code": "ORIGINAL_FIXITY_UNREADABLE"}
     if "pass_at" not in meta:
         return {"state": SIGNAL_UNKNOWN}
+    if _stale(meta):
+        return {"state": SIGNAL_UNKNOWN, "last_pass_at": _when(meta["pass_at"])}
     return {
         "state": SIGNAL_MEASURED,
         "coverage": "partial" if meta.get("pass_started_at", 0) > meta["pass_at"] else "complete",
         "counts": {state: counts.get(state, 0) for state in _STATES},
         "last_pass_at": _when(meta["pass_at"]),
+        "last_pass_unreadable": meta.get("unreadable"),
+        "last_pass_rescheduled": meta.get("rescheduled"),
         "last_walk_at": _when(meta.get("walk_at")),
         "oldest_verification_at": _when(oldest),
     }
 
 
-_FIX = {
-    RESTORED: "Nothing to do: the original was restored from the copy in the route, and its changed bytes "
-              "are in Trash. This item clears at the original's next verification.",
-    MISSING: "Copy a source from the route back to the path, or restore the file from a backup. Exomem does "
-             "not restore a deleted original itself, because the deletion may be deliberate.",
-    CORRUPT_NO_COPY: "Restore the file from a backup, or follow the route. Exomem changed nothing.",
-}
+def _fix(state: str) -> str:
+    """What the owner does about a reported original, computed now so the cycle it names is the configured one."""
+    if state == RESTORED:
+        return ("Nothing to do: the original was restored from the copy in the route, and its changed bytes are "
+                "in Trash. This item clears when the check verifies the original again, which takes up to one "
+                f"verification cycle ({cycle_seconds() / 86400:g} days).")
+    if state == MISSING:
+        return ("Each route entry is a candidate copy that Exomem has not read. Check that its SHA-256 matches, "
+                "then copy it back to the path, or restore the file from a backup. Exomem does not restore a "
+                "deleted original itself, because the deletion may be deliberate.")
+    return ("Restore the file from a backup, or copy a candidate from the route after checking its SHA-256. "
+            "An entry with a code verified but could not be put in place, and the next pass tries it again. "
+            "A vault_store entry is the store's own page: settle the held item with keep-store. "
+            "The original is as Exomem found it.")
 
 
 def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
     """One finding for each restored, missing or damaged original; read-only.
 
-    Returns the findings and None, or no findings and "unknown" when the table cannot be read.
-    No table yet means no recorded damage, which is complete.
+    Returns the findings and None when the last pass is current. Coverage is "unknown" when fixity
+    is off, before the first pass finishes, when the last pass is stale, or when the table cannot
+    be read; the findings recorded so far still come back.
     """
     from .audit import AuditFinding
     from .governance import egress
 
+    if disabled():
+        return [], "unknown"
     try:
         connection = _reader(Path(vault))
         if connection is None:
-            return [], None
+            return [], "unknown"
         with closing(connection):
+            meta = _meta(connection)
             rows = [Row.of(values) for values in connection.execute(
                 f"SELECT {_ROW_COLUMNS} FROM originals WHERE state IN ({_marks(REPORTED)}) ORDER BY path", REPORTED)]
     except (sqlite3.Error, OSError, ValueError):
         return [], "unknown"
+    coverage = "unknown" if "pass_at" not in meta or _stale(meta) else None
     # An outside path names the owner's own filesystem; another audience receives only the kind of copy.
     restricted = bool(rows) and egress.visible_page_filter(Path(vault)) is not None
 
     def route(row: Row) -> list[dict[str, str]]:
-        return [copy if copy["source"] in _VAULT_COPIES or not restricted else {"source": copy["source"]}
+        return [copy if copy["source"] in _VAULT_COPIES or not restricted
+                else {key: value for key, value in copy.items() if key != "path"}
                 for copy in row.route]
 
     return [
@@ -911,12 +1028,12 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
             paths=list(dict.fromkeys(
                 [row.path, *(copy["path"] for copy in row.route if copy["source"] in _VAULT_COPIES)])),
             detail=f"stored original {row.path} is {row.state}" + (f" ({row.cause})" if row.cause else ""),
-            proposed_fix=_FIX[row.state],
-            meta={"original_path": row.path, "state": row.state, "cause": row.cause,
+            proposed_fix=_fix(row.state),
+            meta={"original_path": row.path, "kind": row.kind, "state": row.state, "cause": row.cause,
                   "expected_sha256": row.sha256, "route": route(row)},
         )
         for row in rows
-    ], None
+    ], coverage
 
 
 # --- the thread --------------------------------------------------------------------------------
@@ -963,15 +1080,18 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
 def _run(vault: Path) -> None:
     try:
         clear_staging(vault)
-    except OSError:
+    except Exception:  # noqa: BLE001 - a leftover temporary costs disk space, never a verification
         log.warning("original fixity: leftover staged copies stayed", exc_info=True)
     walked_at: float | None = None
     while not _stop.is_set():
         try:
             with foreground_priority.bulk(stop=_stop):
                 if walked_at is None or time.time() - walked_at >= walk_seconds():
-                    walk(vault)
-                    walked_at = time.time()
+                    try:
+                        walk(vault)
+                        walked_at = time.time()
+                    except Exception:  # noqa: BLE001 - a failed walk keeps the table it has; the pass still runs
+                        log.warning("original fixity walk failed; it runs again at the next interval", exc_info=True)
                 run_pass(vault)
         except foreground_priority.BulkCancelled:
             return

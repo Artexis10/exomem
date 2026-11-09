@@ -487,17 +487,19 @@ cellctl reads the count from the same readiness answer as
 [Cell recall lagging](#cell-recall-lagging): `originals.state` and
 `originals.unresolved`. The answer names no file. A cell reads `unknown` before
 its first fixity pass, and `off` while `EXOMEM_DISABLE_ORIGINAL_FIXITY=1` is set.
-Either keeps that cell's last reading, so the alert cannot resolve until every
-serving cell has a `measured` reading.
+It also reads `unknown`, with `originals.last_pass_at`, when its last pass is
+older than three pass intervals. Each of these keeps that cell's last reading,
+so the alert cannot resolve until every serving cell has a `measured` reading.
 
 1. List the cells that fire: `kubectl -n exomem-cloud logs deployment/cellctl | grep cell-originals-damaged`.
 2. Set `CELL_ID` to a listed cell, then read the pod's IP and node: `kubectl -n "exo-cell-$CELL_ID" get pod cell-0 --output wide`.
 3. On that node, read the count: `curl --silent --max-time 10 "http://<pod IP>:8766/health/ready"`. Expect `originals.unresolved` above zero.
-4. Tell the owner. Their attention items name each original, its state and the copies the cell found.
+4. Tell the owner. Their attention items name each original, its state and the candidate copies the cell found.
 5. If the owner asks for a backed-up copy, follow [Restore one original](cloud-operator-restore.md#restore-one-original).
 
-Expected result: the cell's readiness shows `originals.unresolved` `0`, and a
-`RESOLVED: cell-originals-damaged` email follows within a few minutes.
+Expected result: after the cell's next fixity pass, up to one hour, the cell's
+readiness shows `originals.unresolved` `0`. A `RESOLVED: cell-originals-damaged`
+email follows within a few minutes of that pass.
 
 ## Move a cell to a new claim
 

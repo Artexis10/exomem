@@ -272,6 +272,8 @@ def test_cellctl_counts_damaged_originals_from_an_answer_that_names_no_file_and_
     damaged = answer({"state": "measured", "unresolved": 2, "path": "Evidence/must-not-leak.pdf"})
     clean = answer({"state": "measured", "unresolved": 0})
     before_first_pass = answer({"state": "unknown"})
+    # A stale pass keeps its time but never its old count.
+    stale = answer({"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00", "unresolved": 3})
 
     assert damaged["status"] == "ready"
     assert damaged["originals"] == {"state": "measured", "unresolved": 2}
@@ -279,6 +281,8 @@ def test_cellctl_counts_damaged_originals_from_an_answer_that_names_no_file_and_
     assert cell_readiness.originals_verdict(json.dumps(damaged).encode()) is True
     assert cell_readiness.originals_verdict(json.dumps(clean).encode()) is False
     assert cell_readiness.originals_verdict(json.dumps(before_first_pass).encode()) is None
+    assert stale["originals"] == {"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00"}
+    assert cell_readiness.originals_verdict(json.dumps(stale).encode()) is None
 
 
 def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:

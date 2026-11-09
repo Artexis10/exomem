@@ -33,6 +33,7 @@ from . import (
     import_stage,
     markdown_regions,
     note_types,
+    originals,
     reserved_paths,
     source_taxonomy,
 )
@@ -96,6 +97,9 @@ class EarlierImport:
     # `imported_from` as written. Two originals whose names differ only in Unicode
     # normalisation share every normalised field; only this spelling tells them apart.
     spelled_from: str | None = None
+    # The file that the page's sidecar fields bind (an artifact Source), or None for a text
+    # Source, which fences its original instead.
+    bound_original: str | None = None
 
 
 def _collection_spelling(path: str | None, collection_path: str | None) -> str | None:
@@ -158,6 +162,7 @@ def earlier_import_of(
         captured=captured,
         aliases=tuple(planned.get("aliases") or ()),
         spelled_from=planned["original_path"],
+        bound_original=planned.get("artifact_path") or None,
     )
 
 
@@ -254,17 +259,23 @@ def mapping_fields(frontmatter: Mapping[str, Any], mapping: Mapping[str, str]) -
 def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
     """The earlier imports a Source page records: its first path, then each `also_imported_from` path.
 
-    A page that names no original and no mapping gives none.
+    A page that names no original and no mapping, or that cannot be read, gives none.
     """
     try:
-        frontmatter = _leading_frontmatter(root, page)
+        return page_import_entries(root, page)
     except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
         return []
+
+
+def page_import_entries(root: Path, page: Path) -> list[EarlierImport]:
+    """`read_import_entries`, except that a page it cannot read raises the refusal instead of giving none."""
+    frontmatter = _leading_frontmatter(root, page)
     if frontmatter is None:
         return []
     rel = page.relative_to(root).as_posix()
     captured = str(frontmatter.get("captured") or "")
     digest = _text_field(frontmatter.get("original_sha256"))
+    bound = originals.bound_path(frontmatter)
     entries: list[EarlierImport] = []
     spelled_from = frontmatter.get("imported_from")
     imported_from = _text_field(spelled_from)
@@ -282,6 +293,7 @@ def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
                     nfc(a) for a in aliases if isinstance(a, str) and a.strip()
                 ) if isinstance(aliases, list) else (),
                 spelled_from=spelled_from,
+                bound_original=bound,
             )
         )
     for mapped in recorded_mappings(frontmatter):
@@ -295,6 +307,7 @@ def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
                 captured=captured,
                 aliases=(),
                 spelled_from=mapped["imported_from"],
+                bound_original=bound,
             )
         )
     return entries

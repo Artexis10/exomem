@@ -65,6 +65,17 @@ def _member_blob(vault: Path, data: bytes = TRANSCRIPT) -> Path:
     return next(family.rglob(f"{hashlib.sha256(data).hexdigest()}.gz"))
 
 
+def _text_source(vault: Path) -> Path:
+    """Write an imported text Source page that fences its original; return the page."""
+    text = "Meeting notes from the gauge survey.\nThe river rose overnight.\n"
+    data = text.encode()
+    planned = {"title": "Gauge survey", "original_path": "Notes/gauge-survey.md",
+               "original_sha256": hashlib.sha256(data).hexdigest(), "original_bytes": len(data)}
+    page = vault / "Knowledge Base" / "Sources" / "Gauge survey.md"
+    page.write_text(adopt.render_text_source(planned, text, date_iso="2026-11-01", collection=None))
+    return page
+
+
 def _trash(vault: Path) -> dict[str, bytes]:
     root = vault / "Knowledge Base" / "_trash"
     return {path.name: path.read_bytes() for path in root.rglob("*") if path.is_file()} if root.is_dir() else {}
@@ -174,16 +185,15 @@ def test_an_evicted_original_is_never_downloaded(vault: Path, selected_store, mo
     original_fixity.walk(vault)
     original_fixity.run_pass(vault)
     assert media_store.evict(vault, original)
-    reads: list[str] = []
-    for name in ("open_original", "write_stored_original"):
-        real = getattr(media_store, name)
-        monkeypatch.setattr(media_store, name,
-                            lambda *args, _real=real, _name=name, **kwargs: (reads.append(_name), _real(*args, **kwargs))[1])
+    opened: list[Path] = []
+    real_store_for = media_store.store_for
+    # Every read of the store, a download included, starts by opening it.
+    monkeypatch.setattr(media_store, "store_for", lambda vault: (opened.append(vault), real_store_for(vault))[1])
 
     assert original_fixity.run_pass(vault).outcomes == {"evicted": 1}
     assert original_fixity.run_pass(vault).outcomes == {"evicted": 1}
 
-    assert reads == []
+    assert opened == []
     assert not original.exists()
     assert _findings(vault) == []
 
@@ -193,13 +203,22 @@ def test_a_pass_rehashes_unchanged_originals_only_within_its_budget_oldest_first
         _stored(vault, category, TRANSCRIPT.replace(b"side A", category.encode().ljust(6)))
     original_fixity.walk(vault)
 
+    def verified_at() -> dict[str, float | None]:
+        with contextlib.closing(sqlite3.connect(original_fixity.table_path(vault))) as table:
+            return dict(table.execute("SELECT path, verified_at FROM originals"))
+
     first = original_fixity.run_pass(vault, budget=2 * len(TRANSCRIPT))
+    after_first = verified_at()
     second = original_fixity.run_pass(vault, budget=2 * len(TRANSCRIPT))
+    after_second = verified_at()
 
     assert (first.rehashed_bytes, first.outcomes) == (2 * len(TRANSCRIPT), {"verified": 2})
-    # The original the first pass left unverified goes first, then the oldest verification.
     assert (second.rehashed_bytes, second.outcomes) == (2 * len(TRANSCRIPT), {"verified": 2})
-    assert original_fixity.status(vault)["counts"]["unverified"] == 0
+    # The original the first pass left unverified goes first, then the oldest verification.
+    [left] = [path for path, when in after_first.items() if when is None]
+    oldest, newest = sorted((path for path in after_first if path != left), key=lambda path: after_first[path])
+    assert after_second[newest] == after_first[newest]
+    assert after_second[left] is not None and after_second[oldest] > after_first[oldest]
 
 
 def test_a_changed_original_is_hashed_even_when_the_budget_is_spent(vault: Path) -> None:
@@ -245,7 +264,7 @@ def test_an_edit_and_storage_damage_are_told_apart_and_both_restored(vault: Path
     assert original.read_bytes() == TRANSCRIPT
 
 
-def test_a_write_racing_the_restore_is_kept_and_the_restore_waits(vault: Path, monkeypatch) -> None:
+def test_a_write_during_a_restore_is_kept_and_the_restore_is_left_to_the_next_pass(vault: Path, monkeypatch) -> None:
     original = _stored(vault, "Recordings")
     _stored(vault, "Spares")
     original_fixity.walk(vault)
@@ -284,13 +303,9 @@ def test_the_changed_bytes_of_a_raw_protected_original_keep_their_protection_in_
 
 
 def test_a_damaged_text_original_is_reported_and_its_source_page_is_never_written(vault: Path) -> None:
-    text = "Meeting notes from the gauge survey.\nThe river rose overnight.\n"
-    data = text.encode()
-    planned = {"title": "Gauge survey", "original_path": "Notes/gauge-survey.md",
-               "original_sha256": hashlib.sha256(data).hexdigest(), "original_bytes": len(data)}
-    page = vault / "Knowledge Base" / "Sources" / "Gauge survey.md"
-    page.write_text(adopt.render_text_source(planned, text, date_iso="2026-11-01", collection=None))
-    _stored(vault, "Notes", data)  # a file with the same bytes, which must never overwrite the page
+    page = _text_source(vault)
+    # A file with the same bytes, which must never overwrite the page.
+    _stored(vault, "Notes", b"Meeting notes from the gauge survey.\nThe river rose overnight.\n")
     original_fixity.walk(vault)
     assert original_fixity.run_pass(vault).outcomes == {"verified": 2}
 
@@ -304,19 +319,96 @@ def test_a_damaged_text_original_is_reported_and_its_source_page_is_never_writte
     assert finding.meta["route"] == [{"source": "import_again", "path": "Notes/gauge-survey.md"}]
 
 
-def test_status_reads_unknown_until_the_first_pass_and_off_with_the_switch(vault: Path, monkeypatch) -> None:
+def test_a_line_added_after_a_text_original_s_fence_stays_reported_across_the_next_walk(vault: Path) -> None:
+    page = _text_source(vault)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+
+    page.write_bytes(page.read_bytes() + b"An afterthought typed below the fence.\n")
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault, budget=0)
+
+    [finding] = _findings(vault)
+    assert (finding.meta["state"], finding.path) == ("corrupt_no_copy", page.relative_to(vault).as_posix())
+
+
+def test_a_linked_note_never_stops_the_walk_or_the_pass(vault: Path) -> None:
+    _stored(vault, "Recordings")
+    notes = vault / "Knowledge Base"
+    (notes / "Tide log.md").write_text("# Tide log\n\nHigh water at 06:10.\n")
+    (notes / "Tide log link.md").symlink_to(notes / "Tide log.md")
+    (notes / "Gauge log.md").write_text("# Gauge log\n\nThe gauge read 2.4 m.\n")
+    os.link(notes / "Gauge log.md", notes / "Gauge log copy.md")
+
+    assert original_fixity.walk(vault) == 1
+    assert original_fixity.run_pass(vault).outcomes == {"verified": 1}
+
+
+def test_a_restore_that_cannot_put_its_copy_in_place_tries_again_at_the_next_pass(vault: Path) -> None:
+    original = _stored(vault, "Recordings")
+    _stored(vault, "Spares")
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    trash = vault / "Knowledge Base" / "_trash"
+    trash.write_bytes(b"")  # a file where the Trash folder goes, so the changed bytes have nowhere to go
+
+    original.write_bytes(DAMAGED)
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+
+    assert original.read_bytes() == DAMAGED
+    [finding] = _findings(vault)
+    [copy] = finding.meta["route"]
+    assert (copy["source"], bool(copy.get("code"))) == ("stored_original", True)
+    trash.unlink()
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+    assert original.read_bytes() == TRANSCRIPT
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")
+def test_a_binding_that_cannot_be_read_keeps_its_original_for_the_next_pass(vault: Path) -> None:
+    blob = _member_blob(vault)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+    manifest = next(family.rglob(f"*{archive_members.MANIFEST_SUFFIX}"))
+
+    blob.unlink()
+    manifest.chmod(0)
+    try:
+        result = original_fixity.run_pass(vault, budget=0)
+    finally:
+        manifest.chmod(0o644)
+
+    assert (result.rescheduled, result.outcomes) == (1, {})
+    assert original_fixity.status(vault)["last_pass_rescheduled"] == 1
+    assert original_fixity.run_pass(vault, budget=0).outcomes.get("missing") == 1
+
+
+def test_status_reads_unknown_until_the_first_pass_when_stale_and_off_with_the_switch(
+    vault: Path, monkeypatch
+) -> None:
     _stored(vault, "Recordings")
     assert original_fixity.status(vault) == {"state": "unknown"}
     assert original_fixity.readiness(vault) == {"state": "unknown"}
+    assert original_fixity.attention_findings(vault) == ([], "unknown")
 
     original_fixity.walk(vault)
     original_fixity.run_pass(vault)
     status = original_fixity.status(vault)
     assert (status["state"], status["coverage"], status["counts"]["verified"]) == ("measured", "complete", 1)
 
+    # A thread that stopped long ago leaves its last count, which is no answer now.
+    with contextlib.closing(sqlite3.connect(original_fixity.table_path(vault))) as table, table:
+        table.execute("UPDATE meta SET value = '1000.0' WHERE key = 'pass_at'")
+    stale = {"state": "unknown", "last_pass_at": "1970-01-01T00:16:40+00:00"}
+    assert (original_fixity.status(vault), original_fixity.readiness(vault)) == (stale, stale)
+    assert original_fixity.attention_findings(vault) == ([], "unknown")
+
     monkeypatch.setenv("EXOMEM_DISABLE_ORIGINAL_FIXITY", "1")
     assert original_fixity.status(vault) == {"state": "off"}
     assert original_fixity.readiness(vault) == {"state": "off"}
+    assert original_fixity.attention_findings(vault) == ([], "unknown")
     assert original_fixity.start(vault) is None
 
 
@@ -390,12 +482,7 @@ def test_another_audience_never_receives_the_path_of_a_copy_outside_the_vault(va
 
     from exomem.governance.principal import request_scope
 
-    text = "Meeting notes from the gauge survey.\nThe river rose overnight.\n"
-    data = text.encode()
-    planned = {"title": "Gauge survey", "original_path": "Notes/gauge-survey.md",
-               "original_sha256": hashlib.sha256(data).hexdigest(), "original_bytes": len(data)}
-    page = vault / "Knowledge Base" / "Sources" / "Gauge survey.md"
-    page.write_text(adopt.render_text_source(planned, text, date_iso="2026-11-01", collection=None))
+    page = _text_source(vault)
     original_fixity.walk(vault)
     original_fixity.run_pass(vault)
     page.write_bytes(page.read_bytes().replace(b"rose overnight", b"fell overnight"))

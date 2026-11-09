@@ -453,8 +453,8 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             snapshot = original_state(vault, relative)
             if snapshot.sidecar_path == sidecar and snapshot.binary_sha256 is not None:
                 yield snapshot
-        except (UnicodeError, ValueError):
-            continue
+        except (UnicodeError, ValueError, reserved_paths.ReservedPathLeafError):
+            continue  # A note or an original that is not a plain file, such as a link, is not a binding to trust.
 
 
 def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
