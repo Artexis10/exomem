@@ -523,13 +523,13 @@ For observed-state corrections, follow the independent Records discovery route i
 `references/planning-records.md`; Note recall alone does not search structured items.
 A surface without the required edit owner reports that limit; it does not invent another home.
 
-### Updating one unit with `add_observation`
+### Updating one unit with `edit_note`
 
-An update rebuilds the whole unit. `verdict`, `check_by` and `id` are
-preserve-on-omit (pass an empty string to clear `verdict` or `check_by`), and
-metadata rows the tool does not own are carried through. `tags`, `context` and
-`relations` are replace-on-omit: omitting one clears it, so resend what should
-stay. `verdict` is a categorical epistemic outcome (abandoned, confirmed,
-inconclusive, qualified, refuted), never a confidence score. `edit_note` with
+An update rebuilds the whole unit. `verdict`, `check_by` and the unit id persist
+(`edit_note` carries none of them), and metadata rows the tool does not own are
+carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
+clears it, so resend what should stay. `verdict` is a categorical epistemic outcome
+(abandoned, confirmed, inconclusive, qualified, refuted), never a confidence score;
+`add_observation` sets it on a new unit. `edit_note` with
 `action="edit_observation"` or `"remove_observation"` takes the unit id as `observation`;
 the server checks the unit version and refuses a stale id with the current one.

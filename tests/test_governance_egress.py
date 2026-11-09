@@ -3082,6 +3082,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "select": False,
             "plan": False,
             "apply": False,
+            "file": False,
             "cancel": False,
             "finish": False,
             "work-item": True,
@@ -3124,6 +3125,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "collections-store-export": True,
             # Preview only: the owner applies its plan_id with the CLI, offline.
             "collections-cutover": True,
+            # Resolving a held item writes the store: keep-mine or keep-store.
+            "held-resolve": False,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}

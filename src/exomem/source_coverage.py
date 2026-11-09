@@ -187,6 +187,36 @@ CAPTURE_HEADING = "## Capture"
 _FENCES = ("```", "~~~")
 
 
+def fence_for(text: str) -> str:
+    """The shortest run of backticks, at least three, that `text` does not contain."""
+    run = 3
+    while "`" * run in text:
+        run += 1
+    return "`" * run
+
+
+def fenced_capture(page: str) -> str | None:
+    """The original text that an imported text Source fences, or None when the page is not in that format.
+
+    The inverse of the import page format. The page ends with the closing fence, a run of backticks that the text
+    cannot hold, so the text cannot hold the opening line (`## Capture`, a blank line, the fence) either: the last
+    opening line before the closing fence is the real one. A page that later back-references changed in its front
+    matter still parses, because the text sits after it. Nothing is trimmed, so a CRLF, a missing final newline and an
+    empty text come back exactly.
+    """
+    if not page.endswith("\n"):
+        return None
+    head = page[:-1]
+    fence = head[len(head.rstrip("`")):]
+    if len(fence) < 3 or not head[: -len(fence)].endswith("\n"):
+        return None
+    head = head[: -len(fence) - 1]
+    opening = f"\n{CAPTURE_HEADING}\n\n{fence}\n"
+    at = head.rfind(opening)
+    text = None if at == -1 else head[at + len(opening):]
+    return text if text is not None and fence_for(text) == fence else None
+
+
 def _captured_text(body: str) -> str:
     """The first `_SCAN_CHARS` of a Source's captured text, after its `## Capture` heading.
 

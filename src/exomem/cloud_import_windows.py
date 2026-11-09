@@ -19,6 +19,7 @@ from pathlib import Path
 
 import httpx2
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from . import adoption_run, import_selection, import_stage, media_capacity
 from .cell_init import _ensure_private_directory
@@ -26,6 +27,7 @@ from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
 from .cloud_import_client import (
     _STOP_ON_CLOUD,
+    CHECKPOINT_RECORD,
     PREFLIGHT,
     REGISTER,
     CloudImportClientConfig,
@@ -34,6 +36,7 @@ from .cloud_import_client import (
     _coded,
     _Where,
     import_source,
+    lands_declared,
     safe_code,
     server_code,
 )
@@ -50,10 +53,30 @@ WAIT_POLL_SECONDS = 30
 WAIT_LIMIT_SECONDS = 7200
 LIST_LIMIT = 50
 GIB = 1 << 30
+# Filing a window to its end gives up on a window whose replies show no movement this many times in a row: no count
+# moved, and the page's position (its number, its phase and the files planned) stayed the same.
+FILING_STALL_CALLS = 5
+# The states of the cell's `file` reply, from the module that builds it.
+WORKING, STOPPED, DONE = adoption_run.FILING_STATES
+# The CLI's own state for a `file` call that the cell refused with an error; no `file` reply has it.
+CALL_ERROR = "error"
+# The cell reconciles a `file` call whose outcome it could not report only under the same call, so the CLI repeats that
+# call: once after an unknown outcome, and after a wait while the acknowledgement is pending. The codes are the writer
+# lease's own; `cli_ops` names them only as keys of its private remediation table, so there is no name to import.
+_REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"})  # nosemgrep: ep-word-set -- the cell's closed outcome codes.
+_REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
+# The code with which a cell refuses an action that it does not know.
+_UNKNOWN_ACTION = "INVALID_MODE"
+# The code that the CLI gives a tool error, because the transport carries no code of the cell's own.
+_TOOL_ERROR = "TOOL_ERROR"
 
 OFFLOADABLE, RESIDENT, TEXT = media_capacity.OFFLOADABLE, media_capacity.RESIDENT, media_capacity.TEXT
 # D12 order: offloadable artifacts, resident artifacts, then text, each in path order.
 _CLASS_ORDER = {OFFLOADABLE: 0, RESIDENT: 1, TEXT: 2}
+
+
+class FilingUnavailable(Exception):
+    """The cell does not file in one call (an older cell refuses `file`), so the staged windows wait for an assistant."""
 
 
 class Cell:
@@ -65,6 +88,10 @@ class Cell:
 
     async def acknowledge(self, import_id: str, paths: list[str]) -> dict:
         raise NotImplementedError
+
+    async def file(self, path: str, *, collection: str | None = None, continuation: str | None = None) -> dict:
+        """One `file` call on a staged window; a cell that cannot file in one call raises FilingUnavailable."""
+        raise FilingUnavailable
 
 
 class McpCell(Cell):
@@ -97,6 +124,32 @@ class McpCell(Cell):
 
     async def acknowledge(self, import_id: str, paths: list[str]) -> dict:
         return await self._call({"action": "acknowledge", "import_id": import_id, "paths": paths})
+
+    async def file(self, path: str, *, collection: str | None = None, continuation: str | None = None) -> dict:
+        arguments = {"action": "file", "path": path, "collection": collection, "continuation": continuation}
+        try:
+            return await self._call({key: value for key, value in arguments.items() if value is not None})
+        except ToolError as error:
+            # An older cell refuses the unknown action in argument validation, which reaches the client as a tool error.
+            if await self._lacks_file():
+                raise FilingUnavailable from error
+            return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
+
+    async def _lacks_file(self) -> bool:
+        """Whether the cell's published schema lists the kinds of `import_memory`, and `file` is not one of them.
+
+        A schema that cannot be read, or that lists no kinds, proves nothing, so the caller keeps the error as a stop.
+        """
+        kinds: set[str] = set()
+        try:
+            for tool in await self._client.list_tools():
+                operation = ((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}
+                for variant in (operation.get("oneOf") or operation.get("anyOf") or ()) if tool.name == "import_memory" else ():
+                    kind = ((variant if isinstance(variant, dict) else {}).get("properties") or {}).get("kind") or {}
+                    kinds.update([kind["const"]] if "const" in kind else kind.get("enum") or ())
+        except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the action
+            return False
+        return bool(kinds) and "file" not in kinds
 
 
 @dataclass(frozen=True)
@@ -177,6 +230,57 @@ class Reading:
                       | ({self.bounds_why} if self.bounds is None else set()))
 
 
+def _bounded(reason: object) -> str | None:
+    """A cell's reason, stripped and of bounded length, or None when it gives none."""
+    return (reason.strip()[:400] or None) if isinstance(reason, str) else None
+
+
+@dataclass(frozen=True)
+class FilingReply:
+    """A `file` reply, as far as the CLI reads it: where filing stands, the counts, and what only the person can do.
+
+    `state` is one of the cell's `FILING_STATES`, or `CALL_ERROR` when the cell refused the call. `counts` follow
+    `FILING_COUNTS`. `position` is the page's position as the cell reports it, compared whole to see movement.
+    """
+
+    state: str
+    continuation: str | None
+    counts: tuple[int, ...]
+    position: str
+    code: str | None
+    reason: str | None
+    needs: frozenset[str]
+
+    def count(self, name: str) -> int:
+        return self.counts[adoption_run.FILING_COUNTS.index(name)]
+
+    @classmethod
+    def refused(cls, code: str | None, reason: object) -> FilingReply:
+        return cls(CALL_ERROR, None, (), "", code, _bounded(reason), frozenset())
+
+    @classmethod
+    def of(cls, reply: dict) -> FilingReply:
+        """Only a refusal of the action itself is an older cell; any other error, or a reply this CLI cannot read, is a stop."""
+        # A current cell refuses with `{"error": {...}}` alone; an older cell, and this CLI's tool-error path, add `success`.
+        error = reply.get("error")
+        if reply.get("success") is False or isinstance(error, dict):
+            error = error if isinstance(error, dict) else {}
+            code = safe_code(error.get("code"))
+            if code == _UNKNOWN_ACTION:
+                raise FilingUnavailable
+            return cls.refused(code, error.get("message"))
+        progress, stop = reply.get("progress"), reply.get("stop")
+        if reply.get("filing") not in adoption_run.FILING_STATES or not isinstance(progress, dict) or any(
+                type(progress.get(name)) is not int for name in adoption_run.FILING_COUNTS):
+            return cls.refused("FILING_REPLY_UNREADABLE", "the reply lacks the state or the counts of a file reply")
+        stop = stop if isinstance(stop, dict) else {}
+        person = reply.get("person") if isinstance(reply.get("person"), list) else []
+        return cls(reply["filing"], reply.get("continuation") if isinstance(reply.get("continuation"), str) else None,
+                   tuple(progress[name] for name in adoption_run.FILING_COUNTS),
+                   json.dumps(progress.get("page"), sort_keys=True), safe_code(stop.get("code")), _bounded(stop.get("reason")),
+                   frozenset(item["need"] for item in person if isinstance(item, dict) and isinstance(item.get("need"), str)))
+
+
 @dataclass
 class Member:
     path: str
@@ -227,6 +331,12 @@ class Member:
 #     record is about to forget its ID. The CLI then waits until Cloud ends the attempt, and at register it renews (rule b).
 #     It cancels only an ID that the series record holds, and it waits only on its own cancel: a row that someone else
 #     cancelled follows rules (c) and (d).
+# (g) The window's attempt lands its declared paths, whatever the source holds now, when a rerun resumes a checkpoint
+#     that holds the encrypted copy or its completed upload, or when Cloud holds the attempt's whole upload. So the
+#     record keeps every declared path, also when a change at the source empties the window. With no copy to resume,
+#     nothing is left to send, so the run stops until Cloud ends the import. When a window lands, each declared path that
+#     changed or vanished since the series recorded it landed with its content from before the change: the run reports
+#     it so, whenever the change came.
 
 
 @dataclass
@@ -238,6 +348,8 @@ class SentWindow:
     cost: int = 0
     # The import IDs of earlier attempts that ended terminally or declared another member set. A receipt for one lands the window.
     attempts: list[str] = field(default_factory=list)
+    # Rule (g): the paths that differed from the series record when the window landed, so they landed with their old content.
+    changed: list[str] = field(default_factory=list)
 
     def ids(self) -> list[str]:
         return [*self.attempts, *([self.import_id] if self.import_id else [])]
@@ -324,10 +436,21 @@ class _Run:
     """One series: its record, the cell and the Cloud API. A run keeps the state that its steps share."""
 
     def __init__(self, series: Series, record: Path, source: Path, config: CloudImportClientConfig, *, cell: Cell, api,
-                 uploads, limits: dict | None, progress: Progress, poll_seconds: float, sleep, clock, on_landed=None):
+                 uploads, limits: dict | None, progress: Progress, poll_seconds: float, sleep, clock, on_landed=None,
+                 file: bool = False, collection: str | None = None):
         self.series, self.record, self.source, self.config = series, record, source, config
+        self.members = {member.path: member for member in series.members}
         self.cell, self.api, self.uploads, self.limits, self.progress = cell, api, uploads, limits, progress
         self.sleep, self.clock, self.on_landed = sleep, clock, on_landed
+        # Filing: the CLI files each landed window through the cell's `file`. `unfiled` maps a landed window's import ID to
+        # the continuation of its last `file` reply. `marks` keeps a window's last counts and page position, and
+        # `stopped` its last stop code.
+        self.filing, self.collection = file, collection
+        self.unfiled: dict[str, str | None] = {}
+        self.marks: dict[str, tuple[tuple[int, ...], str]] = {}
+        self.stopped: dict[str, str] = {}
+        self.finished_windows: dict[str, FilingReply] = {}
+        self.refusal: str | None = None
         # No wait outlasts a demand's renewal interval, so a waiting sender renews its demand in time.
         self.poll = min(poll_seconds, DEMAND_RENEWAL_SECONDS)
         self.shown: str | None = None
@@ -339,6 +462,11 @@ class _Run:
         """The members that no window holds yet."""
         planned = {path for window in self.series.windows for path in window.paths} | set(self.series.skipped)
         return [member for member in self.series.members if member.path not in planned]
+
+    def unchanged(self, path: str) -> import_selection.Kept | None:
+        """The member as the source holds it now, or None when it changed or vanished since the series recorded it."""
+        member, fresh = self.members[path], _kept_now(self.source, self.members[path])
+        return fresh if fresh is not None and (fresh.size, fresh.mtime_ns) == (member.size, member.mtime_ns) else None
 
     def stop(self, code: str, message: str) -> Stopped:
         """Every stop says that the members not yet sent are not in Exomem."""
@@ -358,7 +486,112 @@ class _Run:
         self.say_once(f"Waiting: {reason}")
         if self.clock() - since >= WAIT_LIMIT_SECONDS:
             raise self.stop("WAIT_TIMED_OUT", f"the series waited {WAIT_LIMIT_SECONDS // 3600} hours and created no window; last reason: {reason}")
+        if await self.file_windows():  # Filing moved, so room may have opened: read the budget again before sleeping.
+            return
         await self.sleep(self.poll)
+
+    # -- filing
+
+    def _number(self, import_id: str) -> int:
+        return 1 + next((n for n, window in enumerate(self.series.windows) if import_id in window.ids()), -1)
+
+    def seed_unfiled(self, reading: Reading) -> None:
+        """Windows of this series that the cell holds landed with members left to file: a rerun carries on filing them.
+
+        A window whose filing is done is left out: its members that stay are the person's to review, not more filing.
+        """
+        mine = {import_id for window in self.series.windows for import_id in window.ids()}
+        for record in reading.windows:
+            if record.get("import_id") in mine and record.get("state") == import_stage.WINDOW_LANDED \
+                    and (record.get("unfiled") or {}).get("count") != 0 and record.get("filing_done") is not True:
+                self.unfiled.setdefault(record["import_id"], None)
+
+    async def _file_call(self, import_id: str) -> FilingReply:
+        """One `file` call on a landed window, repeated exactly when the cell could not report its outcome, as the cell asks."""
+        path, continuation = f"{import_stage.STAGE_DIR}/{import_id}", self.unfiled[import_id]
+
+        async def call() -> FilingReply:
+            try:
+                reply = await self.cell.file(path, collection=self.collection, continuation=continuation)
+            except FilingUnavailable:
+                raise
+            except Exception as error:  # noqa: BLE001 -- a call that fails on the way stops this window only; it keeps its place
+                return FilingReply.refused(_coded(_Where(WINDOWS, import_id), error).code,
+                                           "the file call failed before the cell's answer arrived")
+            return FilingReply.of(reply)
+
+        reply = await call()
+        if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+            reply = await call()
+        waits = 0
+        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+            await self.sleep(self.poll)
+            reply = await call()
+            waits += 1
+        return reply
+
+    def _say_stop(self, import_id: str, reply: FilingReply) -> None:
+        """Say why filing a window stopped, once for each code: the cell's code and reason, and what frees space."""
+        code = reply.code or "no code"
+        if self.stopped.get(import_id) != code:
+            self.progress.say(f"Filing window {self._number(import_id)} stopped ({code})"
+                              + (f": {reply.reason}" if reply.reason else ".")
+                              + (" Free space on the cell, then run the command again to carry on." if "free_space" in reply.needs else ""))
+        self.stopped[import_id] = code
+
+    async def file_windows(self, *, to_the_end: bool = False) -> bool:
+        """Call the cell's `file` on each landed window, once while the series waits and until it stops at the end.
+
+        Filing frees room on the cell, so a waiting series files before it sleeps. A stopped window keeps its
+        continuation, and the next call carries on from it. Returns whether any window's counts moved.
+        """
+        moved = False
+        for import_id in list(self.unfiled):
+            same = 0
+            while self.filing and import_id in self.unfiled:
+                try:
+                    reply = await self._file_call(import_id)
+                except FilingUnavailable:
+                    self.filing = False
+                    self.refusal = ("The cell refused the file call, so it does not file an upload in one call yet. "
+                                    "The staged windows wait for your assistant to file them.")
+                    self.progress.say(self.refusal)
+                    return moved
+                if reply.state == CALL_ERROR:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+                    # The cell refused the call, or the call failed on the way: the window keeps its continuation for the
+                    # next pass, or for a rerun after this one ends.
+                    self._say_stop(import_id, reply)
+                    break
+                previous = self.marks.get(import_id)
+                counted = previous is None or reply.counts != previous[0]
+                moved = moved or counted
+                same = 0 if counted or reply.position != previous[1] else same + 1
+                self.marks[import_id] = (reply.counts, reply.position)
+                self.unfiled[import_id] = reply.continuation
+                if reply.state == DONE:
+                    del self.unfiled[import_id]
+                    self.stopped.pop(import_id, None)
+                    self.finished_windows[import_id] = reply
+                    moved = True
+                    skipped = reply.count("skipped_duplicates")
+                    duplicates = f"{skipped:,} duplicate{'' if skipped == 1 else 's'} skipped, " if skipped else ""
+                    self.progress.say(f"Filed window {self._number(import_id)}: {reply.count('filed'):,} files filed, "
+                                      f"{duplicates}{reply.count('failed'):,} failed.")
+                elif reply.state == STOPPED:
+                    self._say_stop(import_id, reply)
+                    if reply.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
+                        del self.unfiled[import_id]
+                    break
+                else:
+                    self.stopped.pop(import_id, None)
+                    if not to_the_end:
+                        break
+                    if same >= FILING_STALL_CALLS:
+                        self.stopped[import_id] = "FILING_STALLED"
+                        del self.unfiled[import_id]
+                        self.progress.say(f"Filing window {self._number(import_id)} made no progress in {same} calls; "
+                                          "it stays staged on the cell.")
+        return moved
 
     # -- one window
 
@@ -426,23 +659,26 @@ class _Run:
 
     async def send(self, window: SentWindow) -> None:
         """Send one window; a window that the Job refuses for space is dropped, so the loop plans it again smaller."""
-        kept, gone = [], []
-        for path in window.paths:
-            member = next(m for m in self.series.members if m.path == path)
-            fresh = _kept_now(self.source, member)
-            if fresh is None or (fresh.size, fresh.mtime_ns) != (member.size, member.mtime_ns):
-                gone.append(path)
-            else:
-                kept.append(fresh)
-        checkpoint = self.record.parent / window.dir
-        if gone:  # The window keeps its import ID (rule a); the create decides.
+        number, checkpoint = self.series.windows.index(window) + 1, self.record.parent / window.dir
+        fresh = {path: self.unchanged(path) for path in window.paths}
+        kept, gone = [item for item in fresh.values() if item is not None], [path for path, item in fresh.items() if item is None]
+        # Rule (g): a copy that the rerun resumes lands the declared paths, so the window keeps them all.
+        copy = bool(gone) and lands_declared(checkpoint)
+        row = await self._own_row(window.import_id) if gone and not copy else None
+        if row is not None and _uploaded(row):  # Rule (g): only Cloud holds the declared paths, so nothing is left to send.
+            message = (f"Cloud import {window.import_id} holds the whole upload of window {number}, with the content from before a "
+                       f"change at the source ({len(gone):,} files: {_listed(gone)}), and its state is "
+                       f"{safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell receives it or Cloud ends it")
+            if _holds_cell(row):  # Cloud refuses to cancel a row that no longer holds the cell.
+                message += f". To end it now, {_STOP_ON_CLOUD}; the changed files are then not sent"
+            raise self.stop("WINDOW_IMPORTING", message)
+        if gone and not copy:  # The window keeps its import ID (rule a); the create decides.
             # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
             window.paths = [item.rel for item in kept]
             self.series.skipped.extend(gone)
             self.progress.say(f"Not sent, because the source file changed or vanished since the series began ({len(gone):,}); "
                               "keep the source: " + _listed(gone))
             if not kept:
-                row = await self._own_row(window.import_id)
                 if row is not None and _unsent(row):  # Rule (f): settle the attempt before the record forgets its ID.
                     await self._cancel(window.import_id)
                 shutil.rmtree(checkpoint, ignore_errors=True)  # The record forgets the window, so no run uses its copy again.
@@ -450,7 +686,8 @@ class _Run:
                 self.series.write(self.record)
                 return
             self.series.write(self.record)
-        self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
+        self.progress.say(f"Sending window {number}: {len(window.paths):,} files, "
+                          f"{human_bytes(sum(self.members[path].size for path in window.paths))}.")
         renewed, result = False, None
         while True:
             try:
@@ -551,10 +788,17 @@ class _Run:
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window drops its checkpoint, and a landed window of a resend clears its members from the old residual records, once."""
+        if window.state == "landed":  # Rule (g), once, whichever way the window landed.
+            window.changed = [path for path in window.paths if self.unchanged(path) is None]
+            if window.changed:
+                self.progress.say(f"Window {self.series.windows.index(window) + 1} landed with the content from before a change at "
+                                  f"the source ({len(window.changed):,}); keep the source: " + _listed(window.changed))
         # The client removes the copy only when the window lands through it; a window that lands on the cell's record lands here too.
         shutil.rmtree(self.record.parent / window.dir, ignore_errors=True)
         if self.on_landed is not None and window.state == "landed":
             await self.on_landed(window)
+        if self.filing and window.import_id not in self.finished_windows:
+            self.unfiled.setdefault(window.import_id, None)
         window.state = "settled"
         self.series.write(self.record)
 
@@ -573,6 +817,8 @@ class _Run:
     async def drive(self) -> dict:
         reading = await self.read()
         await self.reconcile(reading)
+        if self.filing:
+            self.seed_unfiled(reading)
         since = self.clock()
         while pool := self.unplanned():
             reading = await self.read()
@@ -657,7 +903,7 @@ class _Run:
         checkpoint = self.record.parent / window.dir
         row = await self._own_row(window.import_id)
         if row is None:
-            if (checkpoint / "checkpoint.json").exists():
+            if (checkpoint / CHECKPOINT_RECORD).exists():
                 shutil.rmtree(checkpoint)
                 self.progress.say(f"Cloud cannot show import {window.import_id} of window {self.series.windows.index(window) + 1}, "
                                   "so its checkpoint is stale; sending the window afresh.")
@@ -697,19 +943,34 @@ class _Run:
         return True
 
     async def finish(self) -> dict:
+        await self.file_windows(to_the_end=True)
         final = await self.cell.status()
         keep = Reading.of(final).keep_source
-        if self.series.skipped:
-            cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
-            keep = {"keep": True, "message": f"{cell_says} {len(self.series.skipped):,} files were not sent."}
-        if keep is None or keep.get("keep"):
-            self.progress.say("The upload is done and filing continues. " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
-        else:
-            self.progress.say("Every member is filed and discarded, so you no longer need to keep the source folder.")
         landed = [window for window in self.series.windows if window.state != "open"]
-        return {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
-                "import_ids": [window.import_id for window in landed], "keep_source": keep,
-                "not_sent": list(self.series.skipped)}
+        before = [path for window in landed for path in window.changed]
+        if self.series.skipped or before:
+            # Only the source holds the current content of a member that was not sent or that landed from before a change.
+            cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
+            notes = [f"{len(self.series.skipped):,} files were not sent."] if self.series.skipped else []
+            notes += [f"{len(before):,} files were sent with their content from before a change at the source."] if before else []
+            keep = {"keep": True, "message": " ".join([cell_says, *notes])}
+        waiting = sorted(set(self.unfiled) | set(self.stopped))
+        if keep is None or keep.get("keep"):
+            # The cell did not take every window to the end of filing when this run filed, so it says what is left.
+            lead = "The upload is done." if self.filing and not waiting else "The upload is done and filing continues."
+            self.progress.say(lead + " " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
+        else:
+            self.progress.say("Every member is filed" + ("" if self.filing else " and discarded") + ", so you no longer need to keep the source folder.")
+        result = {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
+                  "import_ids": [window.import_id for window in landed], "keep_source": keep,
+                  "not_sent": list(self.series.skipped), "sent_before_change": before}
+        if self.filing or self.refusal:
+            finished = self.finished_windows.values()
+            result["filing"] = {"filed": sum(reply.count("filed") for reply in finished),
+                                "skipped_duplicates": sum(reply.count("skipped_duplicates") for reply in finished),
+                                "failed": sum(reply.count("failed") for reply in finished),
+                                "windows_done": len(self.finished_windows), "windows_waiting": len(waiting)}
+        return result
 
 
 def _holds_cell(row: dict) -> bool:
@@ -728,6 +989,12 @@ def _unsent(row: dict) -> bool:
     """Rule (f): Cloud holds the attempt, and its upload never completed, so no receipt can come from it."""
     # The Cloud import protocol fixes these states: Cloud keeps `requested` and `key_ready` until the upload completes.
     return row["requested_state"] == "requested" and row["observed_state"] == "key_ready"
+
+
+def _uploaded(row: dict) -> bool:
+    """Rule (g): Cloud holds the attempt's whole upload and has not ended it, so it imports the declared member set."""
+    # The Cloud import protocol fixes `uploaded`: Cloud sets it when the upload completes.
+    return row["requested_state"] == "uploaded" and not _ended(row)
 
 
 def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
@@ -780,14 +1047,18 @@ def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,
                         include_hidden: bool = False, use_gitignore: bool = True, progress: Progress | None = None,
                         poll_seconds: float = WAIT_POLL_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
-                        resend_residual: bool = False) -> dict:
-    """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring."""
+                        resend_residual: bool = False, file: bool = False, collection: str | None = None) -> dict:
+    """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring.
+
+    `file` also files each landed window through the cell's `file`, while the series waits and at its end; a cell that
+    refuses `file` leaves the windows staged, as before. The CLI turns it on by default. It never discards.
+    """
     progress, source, checkpoint = progress or Progress(), source.resolve(), checkpoint.resolve()
     where, held = _Where(WINDOWS), []
     try:
         return await _import_folder(source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=include_hidden,
                                     use_gitignore=use_gitignore, progress=progress, poll_seconds=poll_seconds, sleep=sleep,
-                                    clock=clock, resend=resend_residual, held=held)
+                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection)
     except Stopped:
         raise
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
@@ -800,7 +1071,7 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
 
 
 async def _import_folder(source, config, checkpoint, *, cell, api, uploads, include_hidden, use_gitignore, progress,
-                         poll_seconds, sleep, clock, resend, held) -> dict:
+                         poll_seconds, sleep, clock, resend, held, file, collection) -> dict:
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
@@ -821,7 +1092,7 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     limits = response.json().get("limits")
     options = {"include_hidden": include_hidden, "use_gitignore": use_gitignore}
     settings = {"cell": cell, "api": api, "uploads": uploads, "limits": limits, "progress": progress,
-                "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock}
+                "poll_seconds": poll_seconds, "sleep": sleep, "clock": clock, "file": file, "collection": collection}
     if resend:
         return await _resend(source, config, checkpoint, record, series, options, settings, held)
     run = _Run(series, record, source, config, **settings) if series is not None else None

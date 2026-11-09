@@ -1,8 +1,10 @@
 """`episode_memory`: record a bounded recap, bind it, and inspect the ledger.
 
-One leaf behind MCP, REST and the CLI. `record` writes one canonical recap per
-content change through the ordinary Source writer and binds it to the caller's
-own episode ledger by the writer's receipt; `inspect` reads that ledger back.
+One leaf behind MCP, REST and the CLI. `record` writes one canonical recap page
+per episode through the ordinary Source writer, rewrites it in place when the
+recap changes (keeping the previous bytes in compiled history), and binds it to
+the caller's own episode ledger by the writer's receipt; `inspect` reads that
+ledger back.
 A record accepts no curation leaves, proposals or dispositions: those belong to
 the typed candidate actions, pinned in `test_episode_workflow.py`.
 """
@@ -10,6 +12,7 @@ the typed candidate actions, pinned in `test_episode_workflow.py`.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 import threading
@@ -23,7 +26,11 @@ from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import (
+    add as add_module,
+)
+from exomem import (
     commands,
+    compiled_history,
     curation,
     episode_capture,
     episode_memory,
@@ -31,15 +38,19 @@ from exomem import (
     episode_recovery,
     memory_refs,
     query_data,
+    registry_history,
     server,
+    temporal,
     working_set,
 )
 from exomem import schema as schema_module
+from exomem import vault as vault_module
 from exomem.__main__ import main as cli_main
 from exomem.episode_model import EpisodeError
 from exomem.governance import egress
 from exomem.governance.principal import (
     RequestPrincipal,
+    effective_principal,
     owner_principal,
     request_scope,
 )
@@ -333,41 +344,167 @@ def test_a_retry_yields_one_page_and_one_revision(vault: Path) -> None:
     assert len(_episodes(vault)) == 1
 
 
-def test_a_changed_record_yields_a_second_page_and_revision_two(vault: Path) -> None:
+def _history_files(vault: Path) -> list[Path]:
+    return sorted((vault / compiled_history.history_root()).rglob("*.json"))
+
+
+def _prior_source(vault: Path, page_path: str) -> list[str]:
+    """The retained previous page texts, newest entry first."""
+    history = commands.op_read_memory(vault, path=page_path, include_history=True)["revision_history"]
+    return [entry["prior"]["source"] for entry in history["revisions"]]
+
+
+def _prior_summaries(vault: Path, page_path: str) -> list[str]:
+    """The summary line of each retained previous page, newest entry first."""
+    return [next(line for line in text.splitlines() if line.startswith("summary: ")) for text in _prior_source(vault, page_path)]
+
+
+def test_three_recaps_keep_one_page_and_two_history_entries(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second page would split the episode's citations, and a revision that kept no history
+    would lose what the earlier recap said, so the page changes only with its previous bytes retained."""
+    summaries = [
+        "Chose the brass lamp; delivery date still open.",
+        "Chose the brass lamp; delivery booked for Friday.",
+        "Chose the brass lamp; delivery moved to Monday.",
+    ]
+    revised_at: list[dt.datetime] = []
+    real_revise = episode_memory.revise_page
+
+    def note_time(*args, when, **kwargs):  # noqa: ANN002, ANN003
+        revised_at.append(when)
+        return real_revise(*args, when=when, **kwargs)
+
+    monkeypatch.setattr(episode_memory, "revise_page", note_time)
+    with request_scope(owner_principal(surface="mcp")):
+        results = [_record(vault, summary=summary) for summary in summaries]
+        page, = _episodes(vault)
+        path = page.relative_to(vault).as_posix()
+        assert {result["source"]["path"] for result in results} == {path}
+        # The page stays the first recap's filing, and says when it was last rewritten.
+        first_filed = next(
+            line for line in _prior_source(vault, path)[-1].splitlines() if line.startswith("captured: ")
+        )
+        assert first_filed in page.read_text(encoding="utf-8")
+        assert _frontmatter(page)["updated"] == temporal.stamp(revised_at[-1])
+        assert len({result["source"]["ref"] for result in results}) == 1
+        assert [result["revision"] for result in results] == [1, 2, 3]
+        assert _frontmatter(page)["summary"] == summaries[2]
+        assert "status" not in _frontmatter(page)
+        assert len(_history_files(vault)) == 2
+        # Each recap reaches the log as a new page did before the page was revised in place.
+        log = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+        assert log.count(f"add | {path.removeprefix('Knowledge Base/').removesuffix('.md')}") == 3
+        # Newest entry first: the second recap's page, then the first recap's.
+        assert _prior_summaries(vault, path) == [f"summary: {summaries[1]}", f"summary: {summaries[0]}"]
+
+        # The same recap again writes nothing.
+        bytes_before = {file: file.read_bytes() for file in (page, *_history_files(vault))}
+        repeat = _record(vault, summary=summaries[2])
+        assert (repeat["idempotent"], repeat["revision"]) == (True, 3)
+        assert {file: file.read_bytes() for file in (page, *_history_files(vault))} == bytes_before
+
+        # A history entry that cannot be created fails the revision and leaves the page as it was.
+        real_publish = vault_module.held_fs.publish_bytes
+        published: list[str] = []
+
+        def fail_history_leaf(filesystem, parent, leaf, *args, **kwargs):  # noqa: ANN002, ANN003
+            if leaf.endswith(".json") and registry_history.VERSION_RE.match(leaf.removesuffix(".json")):
+                raise OSError("injected history write failure")
+            published.append(leaf)
+            return real_publish(filesystem, parent, leaf, *args, **kwargs)
+
+        monkeypatch.setattr(vault_module.held_fs, "publish_bytes", fail_history_leaf)
+        with pytest.raises((OSError, vault_module.BatchWriteError)):
+            _record(vault, summary="Chose the brass lamp; delivery moved to Tuesday.")
+        monkeypatch.undo()
+    assert {file: file.read_bytes() for file in (page, *_history_files(vault))} == bytes_before
+
+
+def test_a_changed_record_revises_a_crlf_page_in_place(vault: Path) -> None:
+    """A page a Windows editor saved as CRLF must not come back with two line endings, or refused."""
     with request_scope(owner_principal(surface="mcp")):
         first = _record(vault)
-        second = _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
-
-    assert second["idempotent"] is False
-    assert second["revision"] == 2
-    assert second["source"]["path"] != first["source"]["path"]
-    assert len(_episodes(vault)) == 2
-    old = _frontmatter(vault / first["source"]["path"])
-    assert old["status"] == "superseded"
-    assert "status" not in _frontmatter(vault / second["source"]["path"])
-
-
-def test_a_changed_record_supersedes_a_crlf_revision(vault: Path) -> None:
-    with request_scope(owner_principal(surface="mcp")):
-        first = _record(vault)
-        old = vault / first["source"]["path"]
-        old.write_bytes(old.read_bytes().replace(b"\n", b"\r\n"))
+        page = vault / first["source"]["path"]
+        crlf = page.read_bytes().replace(b"\n", b"\r\n")
+        page.write_bytes(crlf)
         second = _record(vault, summary="The delivery date is now confirmed.")
+        retained, = commands.op_read_memory(
+            vault, path=first["source"]["path"], include_history=True
+        )["revision_history"]["revisions"]
 
+    assert second["source"] == {**first["source"]}
     assert second["revision"] == 2
-    assert _frontmatter(old)["status"] == "superseded"
-    assert "status" not in _frontmatter(vault / second["source"]["path"])
+    raw = page.read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+    summary = vault_module.parse_frontmatter(raw.decode("utf-8"))[0]["summary"]
+    assert summary == "The delivery date is now confirmed."
+    assert retained["prior"]["source"].encode() == crlf
 
 
-def test_a_changed_record_supersedes_through_an_unresolved_vault_root(vault: Path) -> None:
+def test_a_changed_record_revises_through_an_unresolved_vault_root(vault: Path) -> None:
     alias = vault / ".." / vault.name
     with request_scope(owner_principal(surface="mcp")):
         first = _record(vault)
         second = _record(alias, summary="The delivery date is now confirmed.")
 
     assert second["revision"] == 2
-    assert _frontmatter(vault / first["source"]["path"])["status"] == "superseded"
-    assert "status" not in _frontmatter(vault / second["source"]["path"])
+    assert second["source"]["path"] == first["source"]["path"]
+    assert _frontmatter(vault / first["source"]["path"])["summary"] == "The delivery date is now confirmed."
+    assert len(_history_files(vault)) == 1
+
+
+def test_the_recorder_refuses_to_rewrite_any_source_but_its_own_episode_page(vault: Path) -> None:
+    """The recorder is the one writer allowed to rewrite a Source. Pointed at any other
+    Source it must refuse, or it becomes a back door to editing captured evidence."""
+    with request_scope(owner_principal(surface="mcp")):
+        article = add_module.add(
+            vault, schema_module.load_source_schema(vault),
+            content="Captured text of an article.", title="A captured article", source_type="article",
+            url="https://example.com/article",
+        )
+        other_episode = _record(vault, episode="ep-" + "b2" * 16)["source"]["path"]
+        recap = episode_capture.prepare(
+            episode=KEY, subject="Harbor Lamp purchase", summary="A rewritten account.",
+            decided=["Buy the brass Harbor Lamp"], when=dt.datetime.now().astimezone(),
+            audience=effective_principal().audience_id,
+        )
+        for path in (article.path, other_episode):
+            before = (vault / path).read_text(encoding="utf-8")
+            with pytest.raises(EpisodeError, match="EPISODE_PAGE_NOT_REVISABLE"):
+                episode_memory.revise_page(
+                    vault, recap, path=path, expected_hash=vault_module.content_hash(before),
+                    when=dt.datetime.now().astimezone(),
+                )
+            assert (vault / path).read_text(encoding="utf-8") == before
+    assert _history_files(vault) == []
+
+
+def test_a_record_revises_the_live_page_of_an_unfolded_episode_and_leaves_its_old_files(
+    vault: Path, earlier_layout: pytest.MonkeyPatch
+) -> None:
+    """A vault that holds an episode as an earlier release left it, one file per revision with
+    the older ones superseded, must keep working: an upgrade that rewrote, re-marked or skipped
+    those files would lose recaps or break the citations that name them."""
+    with request_scope(owner_principal(surface="mcp")):
+        for index in range(5):
+            live = _record(vault, summary=f"Account number {index}.")["source"]["path"]
+        files_before = {page: page.read_bytes() for page in _episodes(vault)}
+        assert len(files_before) == 5
+        earlier_layout.undo()
+
+        result = _record(vault, summary="The account after the upgrade.")
+        priors = _prior_summaries(vault, live)
+
+    assert result["source"]["path"] == live
+    assert (vault / live).read_bytes() != files_before[vault / live]
+    assert _frontmatter(vault / live)["summary"] == "The account after the upgrade."
+    assert "status" not in _frontmatter(vault / live)
+    untouched = {page: raw for page, raw in files_before.items() if page != vault / live}
+    assert len(untouched) == 4
+    assert {page: page.read_bytes() for page in untouched} == untouched
+    assert priors == ["summary: Account number 4."]
 
 
 def test_one_key_used_by_two_audiences_keeps_separate_ledgers(vault: Path) -> None:
@@ -412,10 +549,10 @@ def _withhold_episodes_from(vault: Path, audience: str) -> None:
     policy._CACHE.clear()
 
 
-def test_another_audience_never_retires_or_replays_the_owners_recap(vault: Path) -> None:
-    """Revisions are grouped per audience, so another audience continuing the
-    same key writes its own history: the owner's recap stays live, byte for
-    byte, and stays the owner's newest revision in recent context."""
+def test_another_audience_never_revises_or_replays_the_owners_recap(vault: Path) -> None:
+    """Pages are grouped per audience, so another audience continuing the same key
+    keeps its own page: the owner's recap stays as written, byte for byte, until the
+    owner revises it, and stays the owner's newest revision in recent context."""
     with request_scope(owner_principal(surface="mcp")):
         owned = _record(vault)
     owner_page = vault / owned["source"]["path"]
@@ -426,16 +563,17 @@ def test_another_audience_never_retires_or_replays_the_owners_recap(vault: Path)
         replay = _record(vault)  # the owner's exact content, replayed
 
     assert owner_page.read_bytes() == before
-    assert "status" not in _frontmatter(owner_page)
     assert other["source"]["path"] != owned["source"]["path"]
     assert other["idempotent"] is False and other["revision"] == 1
+    # The replay revises audience B's own page; it never touches the owner's page.
     assert replay["idempotent"] is False and replay["revision"] == 2
-    assert replay["source"]["path"] not in {owned["source"]["path"], other["source"]["path"]}
-    assert replay["source"]["ref"] != owned["source"]["ref"]
+    assert replay["source"]["path"] == other["source"]["path"]
+    assert replay["source"]["ref"] == other["source"]["ref"] != owned["source"]["ref"]
     mtimes = {
         page.relative_to(vault).as_posix(): page.stat().st_mtime_ns for page in _episodes(vault)
     }
     assert owned["source"]["path"] in working_set._recent_episodes(mtimes, limit=4)
+    other_page_bytes = (vault / other["source"]["path"]).read_bytes()
 
     with request_scope(owner_principal(surface="mcp")):
         inspected = commands.op_episode_memory(
@@ -445,11 +583,10 @@ def test_another_audience_never_retires_or_replays_the_owners_recap(vault: Path)
     assert inspected["revisions"] == [{"revision": 1, "recovery": "available"}]
     assert inspected["latest_source_ref"] == owned["source"]["ref"]
     assert revised["revision"] == 2
-    assert _frontmatter(owner_page)["status"] == "superseded"
-    # Audience B's own live revision (its replay superseded its first) is
-    # untouched by the owner's revision.
-    assert _frontmatter(vault / other["source"]["path"])["status"] == "superseded"
-    assert "status" not in _frontmatter(vault / replay["source"]["path"])
+    assert revised["source"]["path"] == owned["source"]["path"]
+    assert owner_page.read_bytes() != before
+    # Audience B's page is untouched by the owner's revision.
+    assert (vault / other["source"]["path"]).read_bytes() == other_page_bytes
 
 
 def test_an_audience_with_no_client_entry_cannot_record_over_a_withheld_owner_recap(vault: Path) -> None:
@@ -469,55 +606,12 @@ def test_an_audience_with_no_client_entry_cannot_record_over_a_withheld_owner_re
     assert _episodes(vault) == [owner_page]
 
 
-def test_a_clock_step_back_still_orders_the_new_revision_last(
+def test_a_page_that_changed_after_it_was_read_loses_and_is_re_read(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An NTP step, or a second machine running behind, must not make recent
-    context serve the retired revision."""
-    import datetime as dt
-
-    from exomem import episode_memory
-
-    class _Clock(dt.datetime):
-        at = dt.datetime(2026, 9, 23, 12, 0, tzinfo=dt.UTC)
-
-        @classmethod
-        def now(cls, tz=None):
-            return cls.at if tz is None else cls.at.astimezone(tz)
-
-    class _Dt:
-        datetime = _Clock
-        UTC = dt.UTC
-
-    monkeypatch.setattr(episode_memory, "dt", _Dt)
-    with request_scope(owner_principal(surface="mcp")):
-        first = _record(vault)
-        _Clock.at -= dt.timedelta(hours=1)
-        second = _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
-
-    order = {
-        result["source"]["path"]: episode_capture.filename_parts(
-            result["source"]["path"].rsplit("/", 1)[-1]
-        )[1]
-        for result in (first, second)
-    }
-    assert order[second["source"]["path"]] > order[first["source"]["path"]]
-    assert _frontmatter(vault / first["source"]["path"])["status"] == "superseded"
-    mtimes = {
-        page.relative_to(vault).as_posix(): page.stat().st_mtime_ns for page in _episodes(vault)
-    }
-    assert working_set._recent_episodes(mtimes, limit=4) == (second["source"]["path"],)
-
-
-def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Another record commits between this record's read and its write. The
-    compare-and-swap guards the text that was read, so this batch loses, is
-    re-read once, and retires the other record's revision instead of marking
-    the already-retired one a second time and leaving two live."""
-    from exomem import episode_memory
-
+    """Another record rewrites the page between this record's read and its write. The
+    compare-and-swap guards the text that was read, so this batch loses, is re-read once,
+    and revises the other record's page, so the page keeps both earlier texts in history."""
     with request_scope(owner_principal(surface="mcp")):
         first = _record(vault)
     real = episode_memory._revisions
@@ -534,14 +628,13 @@ def test_a_revision_that_changed_after_it_was_read_loses_and_is_re_read(
     monkeypatch.setattr(episode_memory, "_revisions", read_then_interleave)
     with request_scope(owner_principal(surface="mcp")):
         ours = _record(vault, summary="Chose the brass lamp; delivery booked for Friday.")
+        priors = _prior_summaries(vault, first["source"]["path"])
 
     [concurrent] = interleaved
-    live = [page for page in _episodes(vault) if "status" not in _frontmatter(page)]
-    assert [page.relative_to(vault).as_posix() for page in live] == [ours["source"]["path"]]
-    retired_once = _frontmatter(vault / first["source"]["path"])["superseded_by"]
-    assert isinstance(retired_once, str) or len(retired_once) == 1
-    assert concurrent["source"]["path"].removesuffix(".md") in str(retired_once)
-    assert _frontmatter(vault / concurrent["source"]["path"])["status"] == "superseded"
+    page, = _episodes(vault)
+    assert {ours["source"]["path"], concurrent["source"]["path"]} == {page.relative_to(vault).as_posix()}
+    assert _frontmatter(page)["summary"] == "Chose the brass lamp; delivery booked for Friday."
+    assert priors == ["summary: A concurrent account.", "summary: Chose the brass lamp; delivery date still open."]
     assert ours["revision"] == 3
 
 
@@ -1027,7 +1120,7 @@ def test_episode_without_durable_demand_or_fanout_reports_committed_uncertainty(
 
 
 @pytest.mark.parametrize("same_content", [False, True], ids=["changed", "identical"])
-def test_concurrent_initial_episode_records_keep_one_live_revision(
+def test_concurrent_initial_episode_records_keep_one_page(
     vault: Path, tmp_path: Path, same_content: bool
 ) -> None:
     from exomem.writer_lease import LeaseConfig, LeaseManager
@@ -1066,17 +1159,15 @@ def test_concurrent_initial_episode_records_keep_one_live_revision(
         thread.join(timeout=15)
     assert all(not thread.is_alive() for thread in threads)
     assert len(outcomes) == 2 and all(not isinstance(item, BaseException) for item in outcomes)
-    live = [page for page in _episodes(vault) if "status" not in _frontmatter(page)]
-    assert len(live) == 1
+    page, = _episodes(vault)
     if same_content:
         assert sorted(item["idempotent"] for item in outcomes) == [False, True]
         assert {item["revision"] for item in outcomes} == {1}
-        assert len(_episodes(vault)) == 1
     else:
         assert sorted(item["revision"] for item in outcomes) == [1, 2]
         assert all(item["idempotent"] is False for item in outcomes)
         newest = next(item for item in outcomes if item["revision"] == 2)
-        assert live[0] == vault / newest["source"]["path"]
+        assert page == vault / newest["source"]["path"]
 
 
 @pytest.mark.parametrize("fast_ack", [False, True], ids=["ordinary", "fast-ack"])
@@ -1299,7 +1390,7 @@ def test_a_full_episode_ledger_says_so_and_a_retry_does_not_rebind_or_duplicate(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Realistic failure: a long-lived episode stopped binding at its revision cap and the
-    receipt said only `unbound`, with no cause or next step, while later recaps piled up."""
+    receipt said only `unbound`, with no cause or next step, while later recaps kept committing."""
     from exomem import episode_model
 
     monkeypatch.setattr(episode_model, "MAX_INPUT_REVISIONS", 1)
@@ -1315,7 +1406,7 @@ def test_a_full_episode_ledger_says_so_and_a_retry_does_not_rebind_or_duplicate(
     assert retried["idempotent"] is True
     assert retried["ledger"] == "unbound"
     assert retried["source"]["path"] == full["source"]["path"]
-    assert len(_episodes(vault)) == 2
+    assert len(_episodes(vault)) == 1
 
 
 @pytest.mark.parametrize(

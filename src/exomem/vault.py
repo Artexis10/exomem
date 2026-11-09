@@ -292,6 +292,16 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
     }
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+
+
+def is_scan_skipped_runtime_name(name: str) -> bool:
+    """Whether a scan skips this entry at any depth as runtime scratch, not content.
+
+    Batch workspaces, and the entries a held-filesystem capability probe briefly
+    creates (symlink aliases included) in a root it tests, which can lie inside the
+    Knowledge Base. `reserved_paths` refuses writes under the probe's names.
+    """
+    return name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES) or held_fs.is_probe_entry(name)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
 _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
@@ -410,9 +420,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     ):
         return True
     for segment in segments:
-        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
-            VAULT_SCAN_SKIP_DIR_PREFIXES
-        ):
+        if segment in VAULT_SCAN_SKIP_DIRS or is_scan_skipped_runtime_name(segment):
             return True
     return False
 
@@ -500,10 +508,22 @@ def _is_vault(path: Path) -> bool:
     at all, so a vault has to stay a vault across the move in both directions --
     one that has migrated, and one that never will.
     """
-    return (
+    if (
         (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
         or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
-    )
+    ):
+        return True
+    # A store-mode vault keeps the legacy sentinel page in its store, and its file may be absent.
+    from . import state_migration
+    from .vault_store import read
+
+    try:
+        return read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
+    except (ValueError, OSError, state_migration.StateMigrationManifestError):
+        # Callers probe every ancestor of a path. One that holds its own state root (the filesystem
+        # root, say) is refused placement, and a broken state root cannot prove a vault: both mean
+        # "not a vault", and file mode is as it was.
+        return False
 
 
 def kb_root(vault: Path) -> Path:
@@ -4589,6 +4609,12 @@ def read_bounded_guarded_bytes_with_generation(
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
+    raw, guard = read_guarded_bytes(vault_root, path)
+    return raw.decode("utf-8"), guard
+
+
+def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
+    """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -4616,8 +4642,7 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    raw, guard = read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
-    return raw.decode("utf-8"), guard
+    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
 
 
 @dataclass
@@ -8107,8 +8132,12 @@ def on_inbound_files_changed(
     """
     if not freshness.event_indexes_enabled():
         return
-    changed_list = list(changed_rels)
-    deleted_list = list(deleted_rels)
+    # The index covers the pages the vault walk yields, and the walk yields only `.md` files
+    # (`_walk_vault_md_entry`). A batch that carries any other file, such as a curation run
+    # artifact, leaves the registry where it was, which this patch reads as unproven data and
+    # withdraws, so the next lookup under the mutation boundary rebuilt the whole index.
+    changed_list = [rel for rel in changed_rels if rel.lower().endswith(".md")]
+    deleted_list = [rel for rel in deleted_rels if rel.lower().endswith(".md")]
     if not (changed_list or deleted_list):
         return
     root = str(vault_root.resolve())
@@ -8524,14 +8553,33 @@ class WikilinkResolver:
         return resolver
 
     def _build(self) -> None:
-        vault_resolved = self.vault_root.resolve()
-        for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
-            request_budget.checkpoint()
-            try:
-                rel = md.resolve().relative_to(vault_resolved).as_posix()
-            except ValueError:
-                continue
-            self._add_entry(rel, self._read_title_lower(md))
+        from . import find_corpus
+        from .vault_store import ownership, read
+
+        root = self.vault_root
+        # A store-mode vault's corpus holds the store's pages and the files that it does not own.
+        corpus = find_corpus.corpus_paths(root, "vault", lambda: walk_vault_md(root))
+        # One snapshot reads each stored page's body once, as the walk of the disk reads each file.
+        with (
+            read.snapshot(root)
+            if isinstance(corpus, find_corpus.StoreCorpus)
+            else contextlib.nullcontext()
+        ) as view:
+            for md in sorted(corpus, key=lambda item: item.as_posix()):
+                request_budget.checkpoint()
+                try:
+                    # The path's own spelling: the walk yields no link, and a stored page's file may
+                    # be one, which `resolve()` would follow to another page.
+                    rel = relative_posix(md, root)
+                except ValueError:
+                    continue
+                if view is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
+                    page = view.page(rel)
+                    if page is None:
+                        continue  # deleted since the corpus was listed
+                    self._add_entry(rel, title_key_from_bytes(page.body, rel))
+                else:
+                    self._add_entry(rel, self._read_title_lower(md))
 
     @classmethod
     def from_maps(
@@ -8641,6 +8689,23 @@ class WikilinkResolver:
             if candidate.title_key:
                 _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
+    def _current_title(self, vault_root: Path, rel_path: str) -> tuple[bool, str | None]:
+        """Whether the page exists now, and its title key: from the store when it serves the page,
+        else the file.
+        """
+        from .vault_store import read
+
+        try:
+            page = read.owned_page(vault_root, rel_path)
+        except FileNotFoundError:
+            return False, None
+        if page is not None:
+            return True, title_key_from_bytes(page.body, rel_path)
+        abs_path = vault_root / rel_path
+        if not abs_path.is_file():
+            return False, None
+        return True, self._read_title_lower(abs_path)
+
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
@@ -8686,7 +8751,7 @@ class WikilinkResolver:
         deleted = _norm(deleted_rels)
         conflict = changed & deleted
         for rel_path in conflict:
-            if (vault_root / rel_path).is_file():
+            if self._current_title(vault_root, rel_path)[0]:
                 deleted.discard(rel_path)
             else:
                 changed.discard(rel_path)
@@ -8695,9 +8760,9 @@ class WikilinkResolver:
         for rel_path in deleted | changed:
             self._remove_entry(rel_path)
         for rel_path in sorted(changed):
-            abs_path = vault_root / rel_path
-            if abs_path.is_file():
-                self._add_entry(rel_path, self._read_title_lower(abs_path))
+            found, title = self._current_title(vault_root, rel_path)
+            if found:
+                self._add_entry(rel_path, title)
 
     def on_entries_changed(
         self,

@@ -155,7 +155,7 @@ _KB_WRITES = (
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
-    "contradicted conclusion; intent->Planning, outcome->Records; "
+    "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
     'Rules: Exomem skill or read_instructions.'
 )

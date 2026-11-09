@@ -419,3 +419,45 @@ def test_remote_client_runs_the_whole_curation_workflow(
 
     assert applied["phase"] == "completed"
     assert (vault / "Knowledge Base/Notes/Insights/remote-curation-course-access.md").exists()
+
+
+def test_the_fold_steps_an_audit_finding_suggests_pass_proposal_unchanged(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope  # noqa: ANN001
+) -> None:
+    # A finding that suggested a step the lane then refused would send the reader into a loop:
+    # audit, copy the step, refusal, no way forward. The steps go in as the audit wrote them.
+    import datetime as dt
+
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import capabilities, writer_lease
+
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "state"))
+    data = b"\x89PNG photo of the notice"
+    pages = [
+        evidence_filing(vault, "Case", category, filename, data, filed=dt.date(2026, month, 1))
+        for month, (category, filename) in enumerate(
+            [("letters", "notice.png"), ("exhibits", "exhibit-a.png"), ("annexes", "annex-a.png")], start=1
+        )
+    ]
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    with capabilities.active_surface(descriptor):
+        [finding] = commands.op_audit(vault, categories=["duplicate_content"])["findings"]
+        steps = finding["meta"]["steps"]
+        proposed = writer_lease.invoke_command(
+            _command(),
+            vault,
+            mode="curation",
+            curation_action="propose",
+            plan={"version": 1, "title": "Fold the duplicate photos", "steps": steps},
+        )
+        preview = writer_lease.invoke_command(
+            _command(), vault, mode="curation", curation_action="preview", run_id=proposed["run_id"]
+        )
+
+    assert [step["args"]["canonical"]["path"] for step in steps] == [pages[0]] * 2
+    assert proposed["phase"] == "proposed"
+    assert preview["binding_health"] == "current"

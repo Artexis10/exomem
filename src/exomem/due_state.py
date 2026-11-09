@@ -1349,8 +1349,8 @@ def routing_targets(
     purpose: str | None = None,
 ) -> list[Any]:
     """Recompose routing targets after filtering every supporting item."""
-    from . import collection_claims, record_governance
     from . import structured_collections as collections_module
+    from .collection_store import ownership
     from .governance import egress as egress_module
 
     root = Path(vault_root)
@@ -1369,13 +1369,43 @@ def routing_targets(
     if keep is None:
         def keep(_path: str) -> bool:
             return True
+    manifests: dict[str, Any] = {}
+    for manifest_path, row in rows.items():
+        if type(manifest_path) is not str or not isinstance(row, Mapping):
+            continue
+        try:
+            manifests[manifest_path] = collections_module.load_manifest(root, root / manifest_path)
+        except Exception:  # noqa: BLE001 -- stale projections heal on reconcile
+            continue
+    # Naming the pages lets the store decide every store-owned one in one request, not one per page.
+    # Only a page under a collection placement can be store-owned, and routing each other page costs time.
+    named: list[str] = []
+    if not ownership.file_only(root):
+        for manifest_path, manifest in manifests.items():
+            items = rows[manifest_path].get("items")
+            item_paths = [
+                item["path"] for item in (items if isinstance(items, list) else ())
+                if isinstance(item, Mapping) and type(item.get("path")) is str
+            ]
+            named.extend(
+                path for path in (manifest_path, manifest.storage.source, *item_paths)
+                if ownership.relevant(path)
+            )
+    with published_admission.deciding(named):
+        return _routing_targets(root, rows, manifests, keep)
+
+
+def _routing_targets(
+    root: Path, rows: Mapping[str, Any], manifests: Mapping[str, Any], keep: Any
+) -> list[Any]:
+    from . import collection_claims, record_governance
+
     targets: list[collection_claims.RoutingTarget] = []
     for manifest_path, row in sorted(rows.items()):
         if type(manifest_path) is not str or not isinstance(row, Mapping) or not keep(manifest_path):
             continue
-        try:
-            manifest = collections_module.load_manifest(root, root / manifest_path)
-        except Exception:  # noqa: BLE001 -- stale projections heal on reconcile
+        manifest = manifests.get(manifest_path)
+        if manifest is None:
             continue
         writer = selected_writer(root, manifest)
         if (

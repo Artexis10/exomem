@@ -191,6 +191,8 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "transient_state_review",
     "collection_view_corrections",
 )
+# The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
+DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
     "missing_sources",
@@ -201,6 +203,8 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
     "path_variants",
+    # A vault meets its whole duplicate backlog on the first run, so a default audit would bury every other finding under it.
+    *DUPLICATE_CATEGORIES,
     # Every past recap with a Decided line is uncited after an upgrade, so a default
     # audit would list each one with a compile instruction. Run it only on request.
     review_state_module.EPISODE_BACKLOG,
@@ -579,7 +583,8 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY}
+    # These read the catalogue's columns and re-read their own members, so none parses the corpus first.
+    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY} | set(DUPLICATE_CATEGORIES)
     sense_scope = None
     release = _AUDIT_RELEASE_DEFAULT
     # An explicit entity-recurrence sweep reads only the pages that changed since the
@@ -808,6 +813,18 @@ def audit(
     with stage('path_variants') as run:
         if run:
             findings.extend(_check_path_variants(vault_root))
+    duplicate_categories = selected & set(DUPLICATE_CATEGORIES)
+    with stage(duplicate_categories) as run:
+        if run:
+            from . import duplicate_audit
+
+            duplicate_findings, duplicate_report, duplicate_coverage = duplicate_audit.check(
+                vault_root, duplicate_categories
+            )
+            findings.extend(duplicate_findings)
+            metadata["duplicates"] = duplicate_report
+            for name in duplicate_categories:
+                metadata.setdefault("coverage", {})[name] = duplicate_coverage
     with stage('collection_view_corrections') as run:
         if run:
             correction_findings, correction_coverage = _check_collection_view_corrections(vault_root)
@@ -2822,7 +2839,7 @@ def _has_non_markdown_collision(vault_root: Path, vault_relative: str, kb_relati
             continue
         for sibling in siblings:
             if (
-                sibling.identity.kind == "file"
+                sibling.kind == "file"
                 and "/" not in sibling.relative_path
                 and Path(sibling.relative_path).stem == candidate.name
                 and Path(sibling.relative_path).suffix.lower() != ".md"

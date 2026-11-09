@@ -26,8 +26,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # The surface is 23 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
-# wire measures 27,951 B, so the budget is 28,000 B. Raise a ceiling deliberately, in the diff that needs it.
-TOTAL_BUDGET = 28_000
+# wire measures 28,010 B, so the budget is 28,050 B. The door operations `imports.file`, `review.held` and
+# `maintenance.held_resolve` add 56 B to the two door enums. Raise a ceiling deliberately, in the diff that
+# needs it.
+TOTAL_BUDGET = 28_050
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -59,8 +61,10 @@ TOOL_CEILINGS: dict[str, int] = {
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
+# observe_transfer step 3 names the `file` call and the older-server fallback, so it measures 1,959 B and its
+# ceiling rounds to 2,000 B.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 1850,
+    "observe_transfer": 2000,
     "transfer_memory": 1650,
 }
 

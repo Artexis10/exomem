@@ -198,6 +198,21 @@ def test_bytes_that_are_not_a_dng_never_reach_the_raw_decoder(served):
     assert "IMAGE_UNDECODABLE" in refused
 
 
+def test_a_jpeg_saved_under_a_raw_extension_is_shown(served):
+    """Defect: phone exports name their JPEG rendering .dng, and every such photo failed as 'not a DNG'."""
+    from PIL import Image
+
+    mcp, client = served
+    rendered = io.BytesIO()
+    Image.new("RGB", (40, 30), (200, 40, 40)).save(rendered, "JPEG")
+    path = _upload(client, "PXL_0006.dng", rendered.getvalue(), "image/x-adobe-dng")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    [shown] = result.structured_content["images"]
+    assert shown["original_pixels"] == [40, 30]
+
+
 def test_a_monochrome_camera_raw_is_shown_in_greyscale(served):
     """Defect: a one-channel raw crashes the decoder instead of reaching the model."""
     mcp, client = served

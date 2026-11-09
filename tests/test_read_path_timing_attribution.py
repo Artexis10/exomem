@@ -210,6 +210,10 @@ def test_the_vault_root_is_resolved_once_not_once_per_candidate(
     recall_policy.clear_resolved_roots()
 
     pages = [_kb_page(tmp_path, f"page-{i}.md") for i in range(12)]
+    # The first candidate pays the one-time lookups of the vault (its mode records and the root);
+    # what must not happen is a root resolve for every later candidate.
+    assert recall_policy.is_recall_candidate(tmp_path, pages[0]) is True
+    pages = pages[1:]
 
     resolved: list[str] = []
     real_resolve = Path.resolve
@@ -225,7 +229,7 @@ def test_the_vault_root_is_resolved_once_not_once_per_candidate(
 
     root_resolves = [entry for entry in resolved if entry == str(tmp_path)]
     # Every candidate is still resolved on its own; only the root is remembered.
-    assert len(root_resolves) == 1, f"root resolved {len(root_resolves)}x for 12 candidates"
+    assert not root_resolves, f"root resolved {len(root_resolves)}x for {len(pages)} candidates"
     assert len(resolved) - len(root_resolves) == len(pages)
 
 

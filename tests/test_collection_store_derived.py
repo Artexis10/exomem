@@ -1179,3 +1179,18 @@ def test_an_undo_table_that_disagrees_with_the_member_count_rebuilds_in_full(der
 
     assert installs == ["rebuilding"]
     assert _mirror(writer) == before
+
+
+def test_a_preview_refuses_what_a_start_refuses_for_a_source_without_members(derived):
+    """Defect: a preview of a derived collection accepted a source without export members, and the start refused it,
+    so an agent that trusted the clean preview reached a dead end."""
+    writer, job = derived("plain")
+    assert finish(writer, job)["state"] == "complete"
+    request = {"source_ref": _preserve(writer.root, _archive(DAYS))["path"], "format": "json-document",
+               "mapping": SAMPLES}
+    refusals = []
+    for mode in ("preview", "start"):
+        with pytest.raises(OpError) as refused:
+            agent(writer, mode=mode, **request)
+        refusals.append((refused.value.code, refused.value.details["at"]))
+    assert refusals == [(derived_rows.COLLECTION_DERIVED, "import_request.members")] * 2

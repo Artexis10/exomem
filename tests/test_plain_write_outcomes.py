@@ -366,6 +366,7 @@ def test_a_batch_that_stored_two_files_and_lost_one_says_so(
     )
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_batch_that_found_a_copy_and_lost_a_file_never_says_saved(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -385,6 +386,7 @@ def test_a_batch_that_found_a_copy_and_lost_a_file_never_says_saved(
     )
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -405,6 +407,7 @@ def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
     )
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_batch_of_copies_says_already_saved_and_names_the_first(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -432,6 +435,7 @@ def test_a_batch_that_stored_every_file_keeps_its_summary(
     assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more (personal Exomem)"
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_preserving_bytes_that_are_already_stored_says_already_saved(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

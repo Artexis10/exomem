@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.170.0](https://github.com/Artexis10/exomem/compare/v0.169.0...v0.170.0) (2026-11-09)
+
+
+### Features
+
+* **import:** file a staged folder with one repeatable call ([#2554](https://github.com/Artexis10/exomem/issues/2554)) ([dbf5dd9](https://github.com/Artexis10/exomem/commit/dbf5dd9f0aecadfd8ee65b8dce117046ba47b19c))
+* store identical content once and fold existing duplicates ([#2631](https://github.com/Artexis10/exomem/issues/2631)) ([add9ee2](https://github.com/Artexis10/exomem/commit/add9ee227e1e5d6d449a128603563d71670729a0))
+* **vault-store:** list held items and resolve them by keeping the person's file or the store's page ([#2616](https://github.com/Artexis10/exomem/issues/2616)) ([ff46bf4](https://github.com/Artexis10/exomem/commit/ff46bf443126416ea73ff47cba2b6a5d45248e1b))
+
+
+### Bug Fixes
+
+* **demo:** wait for the find step's lexical repair before removing the temp copy ([#2640](https://github.com/Artexis10/exomem/issues/2640)) ([5bd0a6c](https://github.com/Artexis10/exomem/commit/5bd0a6ca932213d676af1e1274e6e3beb682a92d))
+* **upload:** refuse a large Source ticket upload before its body ([#2645](https://github.com/Artexis10/exomem/issues/2645)) ([7be4edb](https://github.com/Artexis10/exomem/commit/7be4edbfd9f62948397ceed07b9fa248ca172d61))
+
+## [0.169.0](https://github.com/Artexis10/exomem/compare/v0.168.0...v0.169.0) (2026-11-09)
+
+
+### Features
+
+* **artifacts:** preserve a held zip upload as content-addressed members ([#2624](https://github.com/Artexis10/exomem/issues/2624)) ([be3b280](https://github.com/Artexis10/exomem/commit/be3b280f8a573d250c051f51fc436702b357c4e6))
+* **language:** move unit kinds and verdicts into the vocabulary pack, read kind traits ([#2601](https://github.com/Artexis10/exomem/issues/2601)) ([0ac616b](https://github.com/Artexis10/exomem/commit/0ac616bc67cc154cd571b3e05182695503b0f376))
+* **media:** decode camera raw originals for viewing and visual search ([#2615](https://github.com/Artexis10/exomem/issues/2615)) ([0af2637](https://github.com/Artexis10/exomem/commit/0af263784c55244fee83d4057aa1ccf9a8e51ee0))
+* **media:** let the caller and settings choose the video frame size ([#2608](https://github.com/Artexis10/exomem/issues/2608)) ([41e6c9a](https://github.com/Artexis10/exomem/commit/41e6c9a7c3faab57ccd580193b52d0151d4ce88d))
+* **mutation:** yield the write boundary to interactive writes ([#2603](https://github.com/Artexis10/exomem/issues/2603)) ([b666206](https://github.com/Artexis10/exomem/commit/b666206d18ccb9c7f99b5ecf453dae1b6a397747))
+* **release:** land an intended release once its checks pass ([#2627](https://github.com/Artexis10/exomem/issues/2627)) ([fd0c454](https://github.com/Artexis10/exomem/commit/fd0c454094e5af228297ce978c15af658a3f75c7))
+* **replies:** lead agent replies with the summary and carry only what the next call needs ([#2600](https://github.com/Artexis10/exomem/issues/2600)) ([e635825](https://github.com/Artexis10/exomem/commit/e6358252efced53f10c328ac086ce4da471394c2))
+* **vault-store:** commit governed writes in one store transaction ([#2607](https://github.com/Artexis10/exomem/issues/2607)) ([f69b1fb](https://github.com/Artexis10/exomem/commit/f69b1fbef1dfcac1dd0846d712794e8cc1bd9553))
+* **vault-store:** embed store pages after commit and leave stale vectors out of search ([#2632](https://github.com/Artexis10/exomem/issues/2632)) ([ec48980](https://github.com/Artexis10/exomem/commit/ec489803ae938bd206add44679be2be992201aef))
+* **vault-store:** project store pages to disk and hold a person's edits ([#2583](https://github.com/Artexis10/exomem/issues/2583)) ([0ed7f89](https://github.com/Artexis10/exomem/commit/0ed7f89f5915fc34ca08f57a6f95f43e5f86ce5e))
+
+
+### Bug Fixes
+
+* **backoff:** share one capped doubling across the persistent retry loops ([#2629](https://github.com/Artexis10/exomem/issues/2629)) ([bf7a91a](https://github.com/Artexis10/exomem/commit/bf7a91a14ba0e8b36d2d28d7dadb2258157ca959))
+* **bench:** treat a vanished killed server as stopped in orphan cleanup ([#2606](https://github.com/Artexis10/exomem/issues/2606)) ([1daebc2](https://github.com/Artexis10/exomem/commit/1daebc2838c867d9895768c83cddeeb7cdbf0c76))
+* **collections:** carry a stale saved view through a summary conversion as a warning ([#2634](https://github.com/Artexis10/exomem/issues/2634)) ([3e3d20e](https://github.com/Artexis10/exomem/commit/3e3d20ee3833b4b9a0e22046960a5c38ac0d8a4b))
+* **context:** report a task lead or method cut for room as budget, not lane_truncated ([#2614](https://github.com/Artexis10/exomem/issues/2614)) ([4a729a7](https://github.com/Artexis10/exomem/commit/4a729a75b05514594be684baf1e68d7ad2830d2f))
+* **derived:** cap the retry backoff exponent so a long-failing batch still backs off ([#2625](https://github.com/Artexis10/exomem/issues/2625)) ([7b81e48](https://github.com/Artexis10/exomem/commit/7b81e4899156c741e8a1f5fef42798028d937f67))
+* **indexes:** settle the episode compile flake and stop false upsert-incomplete reports ([#2623](https://github.com/Artexis10/exomem/issues/2623)) ([11fd8a8](https://github.com/Artexis10/exomem/commit/11fd8a8bd5d0478f8533076e66d667c53fabe524))
+* **media:** close the buildable media store tasks ([#2622](https://github.com/Artexis10/exomem/issues/2622)) ([9ddc213](https://github.com/Artexis10/exomem/commit/9ddc213b4d42804035feb70b8340786e3a3c658a))
+* **receipts:** retire the receipt of a write whose rollback restored every path ([#2628](https://github.com/Artexis10/exomem/issues/2628)) ([18503d5](https://github.com/Artexis10/exomem/commit/18503d56392b40d38e46a954d3e79c3c241155c1))
+
+
+### Performance
+
+* **collections:** batch retired-link reads and explain connector-limited owner writes ([#2605](https://github.com/Artexis10/exomem/issues/2605)) ([0386bec](https://github.com/Artexis10/exomem/commit/0386becf0f5094228f15f037e98eca0cd4f3e202))
+* **due-state:** decide the memo's store pages in one store request ([#2630](https://github.com/Artexis10/exomem/issues/2630)) ([4e67905](https://github.com/Artexis10/exomem/commit/4e679056191fec34f1dfa21b7120491ddf83df81))
+* **warmup:** build the method-unit statistics in the cold-start warm too ([#2626](https://github.com/Artexis10/exomem/issues/2626)) ([0c2e4d1](https://github.com/Artexis10/exomem/commit/0c2e4d1ee794d5fe72380510929907750ceb1fb1))
+
 ## [0.168.0](https://github.com/Artexis10/exomem/compare/v0.167.0...v0.168.0) (2026-11-09)
 
 

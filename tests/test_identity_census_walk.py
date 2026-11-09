@@ -267,6 +267,33 @@ def test_a_non_markdown_alias_still_refuses_the_census(tmp_path: Path, monkeypat
     assert raised.value.code == "IDENTITY_CENSUS_UNSAFE_ENTRY"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX probe backend")
+def test_a_capability_probe_in_a_knowledge_base_directory_does_not_refuse_the_census(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A process probes each directory it first anchors a held filesystem on.
+
+    The probe briefly leaves symlink aliases in that directory, and the
+    directory can lie inside the Knowledge Base. A note write whose census
+    listed it at that moment was refused as an alias (seen in CI).
+    """
+    from exomem import _held_fs_posix, held_fs
+
+    _seed(tmp_path)
+    create_alias = _held_fs_posix._symlink
+    pages_beside_each_alias: list[set[str]] = []
+
+    def census_beside_the_alias(*args, **kwargs):
+        create_alias(*args, **kwargs)
+        census = semantic_contract.build_stable_identity_census(tmp_path)
+        pages_beside_each_alias.append({entry.path for entry in census.entries})
+
+    monkeypatch.setattr(_held_fs_posix, "_symlink", census_beside_the_alias)
+    held_fs.probe((tmp_path / PAGE_REL).parent)
+
+    assert pages_beside_each_alias == [{PAGE_REL}, {PAGE_REL}]
+
+
 # ---------------------------------------------------------------------------
 # Issue #545. `_build_identity_census` walked `Knowledge Base/_trash/` like
 # any canonical directory: `_IDENTITY_CENSUS_RESERVED_KB_DIRS` reserved only

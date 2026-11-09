@@ -264,29 +264,23 @@ def test_validate_uses_argument_presence_and_returns_repair_findings_for_saved_m
 
 
 def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
-    import json
-
     invalid = _schema(Path("/tmp"), "resolve", context={"unexpected": "value"})
     assert invalid == {
         "resolved": False,
         "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
     }
 
-    operation = json.loads(
-        Path("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
-    )["read_schema"]["inputSchema"]["properties"]["operation"]
-    resolve = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "resolve")
-    schema = {**resolve["properties"], **operation.get("properties", {})}["context"]
-    # Optional-null structure is no longer published; the leaves still accept null.
-    context_schema = {key: value for key, value in schema.items() if key != "description"}
-    assert context_schema == {
+    # The door publishes no per-operation schema; `read_instructions(topic=...)` lists one operation's arguments.
+    from exomem.commands import PRODUCT_COMMANDS
+    from exomem.public_surface import help_for
+
+    published = help_for("schema.resolve", PRODUCT_COMMANDS)
+    assert "context" in published["required"]
+    nullable_text = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert published["arguments"]["context"] == {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            "project": {"type": "string"},
-            "domain": {"type": "string"},
-            "activity": {"type": "string"},
-        },
+        "properties": {"project": nullable_text, "domain": nullable_text, "activity": nullable_text},
     }
 
 

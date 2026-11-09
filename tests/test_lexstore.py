@@ -9,14 +9,19 @@ custom builds only); the fallback/kill-switch tests run everywhere.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
+import threading
+import time
+import uuid
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
+from exomem import duplicates, find_corpus, lexstore
 from exomem import find as find_module
-from exomem import lexstore
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5/trigram"
@@ -2133,3 +2138,161 @@ def test_a_changed_catalogue_recomputes_request_admission_before_ranking(tmp_pat
     assert after.readiness.complete and independent.readiness.complete
     assert {path for path, _score in after.value} == {first, second}
     assert after.value == independent.value
+
+
+# ---------------------------------------------------------------- duplicate-handling index
+
+
+def _write_source(root: Path, name: str, text: str, *, original: bytes | None = None) -> str:
+    """A Source page of the shape `add` writes, with its original beside it when `original` is given."""
+    folder = root / "Knowledge Base" / "Sources" / "Session"
+    folder.mkdir(parents=True, exist_ok=True)
+    original_lines = ""
+    if original is not None:
+        (folder / f"{name}.txt").write_bytes(original)
+        original_lines = (
+            f"evidence_file: Knowledge Base/Sources/Session/{name}.txt\n"
+            f"binary_sha256: {hashlib.sha256(original).hexdigest()}\n"
+        )
+    (folder / f"{name}.md").write_text(
+        f"---\ntype: source\nexomem_id: {uuid.uuid4()}\ntitle: {name}\nsource_type: session\n"
+        f"captured: 2026-01-01\n{original_lines}tags: []\n---\n\n# {name}\n\n## Capture\n\n{text}\n",
+        encoding="utf-8",
+    )
+    return f"Knowledge Base/Sources/Session/{name}.md"
+
+
+def _lookup(root: Path, sha256: str) -> duplicates.DuplicateLookup:
+    return duplicates.find_duplicate(root, sha256=sha256, lane=duplicates.SOURCES, protected=False)
+
+
+def _built(root: Path) -> None:
+    """The catalogue as the background repair leaves it: no lookup builds one inline."""
+    assert lexstore.get_store(root).rebuild_atomic()
+
+
+def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path):
+    first = _write_source(tmp_path, "first", "the first capture")
+    _built(tmp_path)
+    assert lexstore.payload_candidates(tmp_path, duplicates.text_payload_sha256("the first capture")) == (first,)
+
+    # A later capture commits while search indexing has not caught up: no `upsert_after_write` runs.
+    second = _write_source(tmp_path, "second", "the second capture")
+    digest = duplicates.text_payload_sha256("the second capture")
+    assert lexstore.payload_candidates(tmp_path, digest) == (), "the lag hides the page, so the test does exercise it"
+
+    assert lexstore.record_payload_commit(tmp_path, [second])
+    assert lexstore.payload_candidates(tmp_path, digest) == (second,)
+
+
+def test_a_store_catalogue_made_at_schema_16_takes_a_page_write_without_the_duplicate_columns(tmp_path):
+    """A store that the released code created has no `payload_hash` or `source_url`, and its commits must not fail."""
+    raw = b"# Alpha\n\nAn early page.\n"
+    rel = "Knowledge Base/Notes/alpha.md"
+    page = find_corpus.parse_page(tmp_path / rel, 0.0, tmp_path, content=raw, resolved_relative=rel)
+    rows = lexstore.page_rows(tmp_path, rel, raw, page=page, state=None, mtime_ns=7, in_kb=True, in_vault=True)
+    with closing(sqlite3.connect(":memory:")) as catalogue:
+        lexstore.create_catalogue_schema(catalogue)
+        catalogue.execute("DROP INDEX pages_payload_hash")
+        catalogue.execute("DROP INDEX pages_source_url")
+        catalogue.execute("ALTER TABLE pages DROP COLUMN payload_hash")
+        catalogue.execute("ALTER TABLE pages DROP COLUMN source_url")
+
+        lexstore.write_page_rows(catalogue, rows)
+
+        assert catalogue.execute("SELECT path, title FROM pages").fetchall() == [(rel, "Alpha")]
+
+
+@pytest.mark.parametrize(
+    "outdated",
+    [
+        "UPDATE meta SET value = '16' WHERE key = 'schema_version'",
+        "UPDATE meta SET value = 'an-earlier-identity' WHERE key = 'catalog_identity'",
+    ],
+    ids=["earlier-schema", "earlier-semantic-identity"],
+)
+def test_a_catalogue_that_ensure_fresh_would_rebuild_whole_answers_unavailable_at_once_and_is_rebuilt_behind_the_lookup(
+    tmp_path, monkeypatch, outdated
+):
+    """A lookup under a door's writer lease never waits for a vault-sized rebuild; the repair runs in the background."""
+    kept = _write_source(tmp_path, "kept", "stored text", original=b"stored original")
+    digest = hashlib.sha256(b"stored original").hexdigest()
+    _built(tmp_path)
+    assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
+    with closing(sqlite3.connect(lexstore.lexical_path(tmp_path))) as conn:
+        conn.execute(outdated)
+        conn.commit()
+    lexstore.clear_stores()  # a restarted process finds the earlier release's catalogue
+
+    def tree() -> dict[str, tuple[bytes, int]]:
+        return {
+            path.relative_to(tmp_path).as_posix(): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in sorted(tmp_path.rglob("*")) if path.is_file()
+        }
+
+    before = tree()
+    started, release = threading.Event(), threading.Event()
+    rebuild = lexstore.LexicalStore.rebuild_atomic
+
+    def held_rebuild(self, *args, **kwargs):
+        started.set()
+        assert release.wait(timeout=30)
+        return rebuild(self, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "rebuild_atomic", held_rebuild)
+    asked = time.monotonic()
+    lookup = _lookup(tmp_path, digest)
+
+    # An inline rebuild would sit in `held_rebuild` for its whole timeout before this answer.
+    assert time.monotonic() - asked < 10
+    assert lookup == duplicates.DuplicateLookup(available=False)
+    assert started.wait(timeout=10), "the lookup scheduled the rebuild"
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "exomem-lexical-repair":
+            thread.join(timeout=60)
+
+    assert _lookup(tmp_path, digest).hit.path == kept
+    assert tree() == before
+
+
+def test_an_unfinishable_rebuild_reports_unavailable_not_empty(tmp_path, monkeypatch):
+    _write_source(tmp_path, "kept", "stored text")
+    digest = duplicates.text_payload_sha256("stored text")
+    _built(tmp_path)
+    assert lexstore.payload_candidates(tmp_path, "0" * 64) == (), "an answering index with no match is empty"
+    for sidecar in lexstore.lexical_path(tmp_path).parent.glob(".lexical.sqlite*"):
+        sidecar.unlink()
+    lexstore.clear_stores()
+
+    def fails(self, conn):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", fails)
+
+    assert lexstore.payload_candidates(tmp_path, digest) is None
+    lookup = _lookup(tmp_path, digest)
+    assert lookup.hit is None
+    assert lookup.available is False
+
+
+def test_an_indexed_original_edited_on_disk_is_not_reused(tmp_path):
+    page = _write_source(tmp_path, "original", "a description", original=b"the original bytes")
+    digest = hashlib.sha256(b"the original bytes").hexdigest()
+    _built(tmp_path)
+    assert _lookup(tmp_path, digest).hit.path == page, "intact and indexed, it is the copy to reuse"
+
+    (tmp_path / "Knowledge Base/Sources/Session/original.txt").write_bytes(b"edited behind the index")
+
+    assert lexstore.payload_candidates(tmp_path, digest) == (page,), "the index still names the page"
+    assert _lookup(tmp_path, digest) == duplicates.DuplicateLookup()
+
+    text_page = _write_source(tmp_path, "text", "captured words")
+    text_digest = duplicates.text_payload_sha256("captured words")
+    assert lexstore.record_payload_commit(tmp_path, [text_page])
+    assert _lookup(tmp_path, text_digest).hit.path == text_page
+    (tmp_path / text_page).write_text(
+        (tmp_path / text_page).read_text(encoding="utf-8").replace("captured words", "other words"), encoding="utf-8"
+    )
+    assert _lookup(tmp_path, text_digest) == duplicates.DuplicateLookup()
+

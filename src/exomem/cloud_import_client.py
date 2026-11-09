@@ -40,6 +40,8 @@ REGISTER = "register"
 ARCHIVE = "archive"
 UPLOAD = "upload"
 SERVER_IMPORT = "server_import"
+# The files of a checkpoint folder: the import's state, and its encrypted copy of the declared members.
+CHECKPOINT_RECORD, CIPHERTEXT = "checkpoint.json", "archive.age"
 
 
 @dataclass(frozen=True)
@@ -377,6 +379,16 @@ def _coded(where: _Where, error: Exception) -> CloudImportError:
     return CloudImportError(where.phase, code, message, where.import_id)
 
 
+def lands_declared(checkpoint: Path) -> bool:
+    """Whether a run on this checkpoint lands the member set that it declared, whatever the source holds now: the
+    checkpoint holds the encrypted copy, or Cloud already holds the whole upload, so the run reads no source file."""
+    try:
+        state = json.loads((checkpoint / CHECKPOINT_RECORD).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    return bool(state.get("completed")) or (checkpoint / CIPHERTEXT).exists()
+
+
 async def import_source(source: Path, config: CloudImportClientConfig, checkpoint: Path, *,
                         scope: str | None = None, category: str | None = None,
                         include_hidden: bool = False, use_gitignore: bool = True,
@@ -415,8 +427,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
         from .state_paths import _prepare_windows_private_state_root
 
         _prepare_windows_private_state_root(checkpoint)
-    record = checkpoint / "checkpoint.json"
-    ciphertext = checkpoint / "archive.age"
+    record = checkpoint / CHECKPOINT_RECORD
+    ciphertext = checkpoint / CIPHERTEXT
     own_api, own_uploads = api is None, uploads is None
     if api is None:
         api = authorized_api_client(config)
@@ -613,7 +625,7 @@ def _report_failure(error: CloudImportError, checkpoint: Path, progress: Progres
     progress.say(f"The import stopped in the {error.phase} phase: {error.code}. {error.message}.")
     if error.import_id:
         progress.say(f"Import id: {error.import_id}." + (" Run the same command again to resume." if error.resume else ""))
-    held = checkpoint / "archive.age"
+    held = checkpoint / CIPHERTEXT
     if not held.exists():
         return None
     size = held.stat().st_size
@@ -637,7 +649,8 @@ async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress
         async with McpCell(config, oauth) as cell:
             return await import_folder(
                 args.source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=args.include_hidden,
-                use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual)
+                use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual,
+                file=not args.no_file, collection=args.collection)
     finally:
         await api.aclose()
         await uploads.aclose()
@@ -656,7 +669,12 @@ def main(argv=None) -> int:
     command.add_argument("--checkpoint", type=Path)
     command.add_argument("--resend-residual", action="store_true",
                          help="send the members that discarded windows did not file, as a new series")
+    command.add_argument("--collection", help="the collection name that the cell files the folder under")
+    command.add_argument("--no-file", action="store_true",
+                         help="only upload: leave each landed window staged for your assistant to file")
     args = parser.parse_args(argv)
+    if args.no_file and args.collection:
+        parser.error("--collection names the filing, so it cannot go with --no-file")
     progress = Progress()
     checkpoint = args.checkpoint
     try:

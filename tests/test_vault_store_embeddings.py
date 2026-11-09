@@ -35,7 +35,6 @@ from exomem import (
     find,
     find_candidates,
     index_paths,
-    lexstore,
     readiness,
     recall_space,
     semantic_drain,
@@ -218,8 +217,9 @@ def test_before_the_drain_runs_the_vector_lane_leaves_out_the_edited_page_and_le
 
     assert ALPHA not in hit_paths(stored, "lighthouse keeper tide")
     assert BETA in hit_paths(stored, "lighthouse keeper tide"), "the pages that did not change stay"
-    lexical = lexstore.search_bm25(stored, "lighthouse", 5, scope="kb", repair=False)
-    assert ALPHA in [path for path, _score in lexical]
+    # In store mode find's lexical lanes read the store corpus, not the file catalogue.
+    found = find.find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+    assert ALPHA in [hit.path for hit in found], "find keeps the edited page through its lexical lane"
 
     catch_up(stored)
     assert ALPHA in hit_paths(stored, "lighthouse keeper harbour pilot")

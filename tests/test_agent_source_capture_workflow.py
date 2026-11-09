@@ -8,6 +8,7 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
 from test_agent_upload_handoff import _ASGISyncTransport
 from test_agent_upload_handoff import upload_env as upload_env
 
@@ -82,3 +83,73 @@ def test_published_read_follows_correction_and_can_read_history(vault, source_sc
     assert previous["ref"] == first["ref"]
     assert "09:00" in previous["body"]
     assert (vault / first["path"]).read_bytes() == historical
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply(upload_env, monkeypatch):
+    vault, who, *_ = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    mcp = server.build_server(require_auth=False)
+
+    def capture(**arguments):
+        with principal.request_scope(who):
+            result = asyncio.run(mcp.call_tool("capture_source", {"source_kind": "session", **arguments}, run_middleware=False))
+        payload = result.structured_content or json.loads(result.content[0].text)
+        assert payload.get("success", True), payload
+        return payload.get("result", payload)
+
+    def stored_sources():
+        return {path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*.md")}
+
+    seeded = stored_sources()
+    text = "Quarterly retention fell two points after the pricing change."
+    # A compact reply names the page by title and id; the vault path shows under `response_detail="full"`.
+    first = capture(title="Retention note", content=text, url="https://Example.com:443/a#top", tags=["metrics"],
+                    response_detail="full")
+    first_path = first["diagnostics"]["operational"]["path"]
+    page = vault / first_path
+    stored = page.read_bytes()
+    assert "duplicate_of" not in first and "same_url" not in first
+
+    again = capture(
+        title="Retention note, again", content=text, url="https://example.com/b", tags=["metrics"],
+        response_detail="full",
+    )
+    assert again["capture_outcome"] == "reused"
+    # `mutated` is an operational field, so it shows under `response_detail="full"`.
+    assert again["diagnostics"]["operational"]["mutated"] is False
+    assert again["duplicate_of"]["path"] == first_path
+    first_ref = again["duplicate_of"]["ref"]
+    # The reply names the stored source once, by title and id; `duplicate_of` keeps the ref.
+    assert again["source"] == {"title": "Retention note", "id": first["id"]}
+    # Nothing was written: the reply leads with its outcome and says nothing of a durable write or graph sync.
+    assert again["user_summary"].startswith("Already saved -> Retention note")
+    # One lead: the summary comes first and no second sentence says the same thing.
+    assert next(iter(again)) == "user_summary"
+    assert "notice" not in again
+    assert not {"graph_sync", "graph_sync_remediation"} & again.keys()
+    assert (again["duplicate_of"]["title"], again["duplicate_of"]["url"]) == ("Retention note", "https://Example.com:443/a#top")
+    assert again["fields_not_applied"] == [
+        {"field": "title", "provided": "Retention note, again", "kept": "Retention note"},
+        {"field": "url", "provided": "https://example.com/b", "kept": "https://Example.com:443/a#top"},
+    ]
+    assert page.read_bytes() == stored
+    assert len(stored_sources() - seeded) == 1
+
+    other_text = capture(title="Other text, same page", content=text + " It held through the second quarter.",
+                         url="https://example.com/a", tags=["metrics"])
+    assert other_text["id"] != first["id"]
+    assert "duplicate_of" not in other_text
+    advisory = other_text["same_url"]
+    assert advisory["count"] == 1
+    assert [(row["ref"], row["path"], row["title"]) for row in advisory["sources"]] == [
+        (first_ref, first_path, "Retention note")
+    ]
+    assert len(stored_sources() - seeded) == 2
+
+    identified = capture(title="Retention note, keyed", content=text, tags=["metrics"],
+                         source_identity={"system": "archive", "record_id": "item-1", "revision": "r1"})
+    assert identified["capture_outcome"] == "created"
+    assert identified["id"] not in (first["id"], other_text["id"])
+    assert page.read_bytes() == stored
+    assert len(stored_sources() - seeded) == 3
