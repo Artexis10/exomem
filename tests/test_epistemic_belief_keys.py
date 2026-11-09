@@ -11,7 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, lexstore, semantic_units, working_set_index, working_set_runtime
+from exomem import (
+    commands,
+    lexstore,
+    relation_registry,
+    semantic_units,
+    working_set_index,
+    working_set_runtime,
+)
 from exomem import semantic_language_registry as language_registry
 from exomem import vault as vault_module
 from exomem._hooks import exomem_retrieve_nudge as hook
@@ -543,3 +550,36 @@ def test_a_find_pack_shows_each_units_attribution_and_modality(vault: Path) -> N
     )
     assert units["norm"]["modality"] == "should"
     assert "asserted_by" not in units["norm"] and "credence" not in units["vendor"]
+
+
+def test_a_unit_emptied_only_by_a_new_key_stays_in_the_index(vault: Path) -> None:
+    """Catches the parser keeping a first-release unit that the stored summary and find drop."""
+    body = (
+        "# Deploy policy\n\n## Claim\n### Approvals detail\n- modality: should\n\n"
+        "## Claim\n- id: other\n\nDeploys run nightly.\n"
+    )
+    page = vault / POLICY
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: resource\nstatus: active\nupdated: 2026-10-01\n"
+        f"exomem_id: {POLICY_ID}\n---\n\n{body}",
+        encoding="utf-8",
+    )
+    core = language_registry.core_registry()
+    parsed = semantic_units.parse_semantic_units(
+        body, path=POLICY, parent_ref=POLICY_REF, language_registry=core,
+    )
+    stored = semantic_units.interpret_structural_summary(
+        semantic_units.structural_summary(semantic_units.scan_semantic_units(body)),
+        language_registry=core, relation_registry=relation_registry.core_registry(),
+        parent_ref=POLICY_REF, path=POLICY,
+    )
+    lexstore.ensure_fresh(vault)
+    found = commands.op_find(vault, query="", mode="keyword", kinds=["claim"])
+
+    parsed_refs = [unit.unit_ref for unit in parsed.units]
+    assert len(parsed_refs) == 2
+    assert [unit.unit_ref for unit in stored.units] == parsed_refs
+    assert sorted(hit["unit_ref"] for hit in found if hit["unit_ref"].startswith(POLICY_REF)) == sorted(
+        parsed_refs
+    )

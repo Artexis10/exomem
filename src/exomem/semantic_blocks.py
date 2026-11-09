@@ -58,9 +58,10 @@ GOVERNED_UNIT_METADATA_KEYS = (
 _RESERVED_METADATA_KEYS = frozenset(
     {"category", "id", "tags", "context", "relations", *GOVERNED_UNIT_METADATA_KEYS}
 )
-# The rows reserved before belief and statement keys joined them. A block whose body these
-# leave substantive, and the newly reserved keys empty, parsed on the release before, so it
-# warns in this release. Task 4.5 of make-epistemic-language-dynamic deletes this set.
+# The rows reserved before belief and statement keys joined them. In this release a block's
+# stored `substantive_body` reads this set, so the parser and the index keep a block that the
+# release before parsed, and only parsing warns when the newly reserved rows alone fill it.
+# Task 4.5 of make-epistemic-language-dynamic deletes this set and that warning.
 _RESERVED_BEFORE_UNIT_ROW_KEYS = _RESERVED_METADATA_KEYS - {
     *BELIEF_UNIT_METADATA_KEYS, *STATEMENT_UNIT_METADATA_KEYS,
 }
@@ -319,7 +320,7 @@ def scan_semantic_blocks(markdown: str) -> tuple[SemanticBlockCandidate, ...]:
         candidates.append(SemanticBlockCandidate(
             title=title, level=level, line=line, end_line=end, ancestor_line=ancestor,
             body=body, metadata=metadata, relations=_relation_candidates(values),
-            substantive_body=_has_substantive_body(body),
+            substantive_body=_has_substantive_body(body, reserved=_RESERVED_BEFORE_UNIT_ROW_KEYS),
         ))
     return tuple(candidates)
 
@@ -363,10 +364,8 @@ def interpret_semantic_blocks(
         problems = warnings if lenient is not None and lenient(block_type, block.metadata) else errors
         if candidate.substantive_body:
             blocks.append(block)
-        elif _has_substantive_body(candidate.body, reserved=_RESERVED_BEFORE_UNIT_ROW_KEYS):
-            # Only newly reserved rows fill the body: keep the unit the release before parsed.
-            blocks.append(block)
-            if validate:
+            # Parsing alone holds the body; the stored summary keeps the unit without the warning.
+            if validate and not _has_substantive_body(candidate.body):
                 warnings.append(SemanticBlockValidationError(
                     code="empty_rich_unit",
                     message=(
