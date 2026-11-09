@@ -116,12 +116,22 @@ def test_edit_note_discovery_is_one_discriminated_operation(
         "edit_observation",
         "remove_observation",
     }
-    assert schema["additionalProperties"] is False
     for field in ("edits", "links", "preview", "detail", "unlinked_reason"):
         assert field in schema["properties"]
     edit = schema["properties"]["edits"]["items"]
     assert set(edit["required"]) == {"old_text", "new_text"}
     assert set(edit["properties"]) == {"old_text", "new_text", "replace_all"}
+
+def test_edit_note_refuses_a_field_it_does_not_take(vault: Path, monkeypatch) -> None:
+    """The published schema leaves extra fields open to fit the budget; the server refuses them."""
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n")
+
+    out = _tool(mcp, "edit_note", {"note": rel, "why": "w", "action": "replace_body", "body": "x", "bogus": 1})
+
+    assert "error" in out
+    assert "bogus" in json.dumps(out["error"])
+
 
 def test_edit_batch_mode_routes_to_multi_edit(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
@@ -383,10 +393,9 @@ def test_create_note_project_description_is_stable_and_open(vault: Path, monkeyp
     # The sentinel must be fully substituted at registration time.
     assert "__PROJECT_KEYS_HINT__" not in project_desc
     assert "__PROJECT_KEYS_HINT__" not in projects_desc
-    # Open-set framing: the model must know unlisted keys are legal.
-    assert "any slug is legal" in project_desc.lower()
+    # Open-set framing: the model must know a new key is legal.
     assert "registers itself" in project_desc.lower()
-    assert "any slug is legal" in projects_desc.lower()
+    assert "registers itself" in projects_desc.lower()
     # Live registry values must not alter the discovery surface.
     assert "project-alpha" not in project_desc
     assert "personal" not in project_desc

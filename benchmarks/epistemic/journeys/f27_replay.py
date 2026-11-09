@@ -130,26 +130,29 @@ HOOK_RESPONSE_SUBTYPE = "hook_response"
 #: report a runtime that never spoke up as one that spoke up every turn.
 CAPTURE_NUDGE_HOOK_EVENT = "Stop"
 
-#: The two tools whose write actions are the family's subject matter.
+#: The typed tools that file a plan item or a record: the family's subject matter. The collection
+#: doors (`manage_memory` `plans.*` and `records.*`) are left out; the replayed collections exist.
 STRUCTURED_WRITE_TOOLS: tuple[str, ...] = (
-    "mcp__exomem__record_memory",
-    "mcp__exomem__plan_memory",
+    "mcp__exomem__add_plan_item",
+    "mcp__exomem__edit_plan_item",
+    "mcp__exomem__add_record",
+    "mcp__exomem__edit_record",
 )
 
 
-def is_structured_write(tool: str, action: str) -> bool:
-    """Whether ``tool(action=...)`` is a write, by the product's own definition.
+def is_structured_write(tool: str, arguments: dict | None) -> bool:
+    """Whether this call to a structured-write tool filed something, by the product's own test.
 
-    ``_KB_WRITE`` is the regex the capture nudge uses to decide whether a turn
-    already filed something. Borrowing it means the report and the nudge cannot
-    disagree about what a write is: if the product widens the set, this widens
-    with it, and if it narrows, a test here goes red rather than the number
-    quietly drifting.
+    ``_successful_kb_write`` is the check the capture nudge uses to decide whether a turn already
+    filed something. Borrowing it means the report and the nudge cannot disagree about what a write
+    is: a ``preview`` call is no write there, and none here.
     """
 
-    from exomem._hooks.exomem_capture_nudge import _KB_WRITE
+    from exomem._hooks.exomem_capture_nudge import _successful_kb_write
 
-    return bool(_KB_WRITE.search(f"{tool}:{action}"))
+    return tool in STRUCTURED_WRITE_TOOLS and _successful_kb_write(
+        {"name": tool, "input": arguments or {}}
+    )
 
 
 FAULT_PROJECTOR = ProjectorMeta(
@@ -708,7 +711,7 @@ class ArmResult:
     def structured_write_tool_uses(self) -> dict[str, int]:
         """Only the calls that actually wrote a plan item or a record.
 
-        Live, both arms opened by calling ``plan_memory(action="inspect")`` —
+        Live, both arms opened by reading the collection (``query_plan_items``) —
         discovery, not a write. Counting those would have reported a session that
         looked at the collection as one that filed into it, which is the exact
         distinction this family exists to measure.
@@ -719,8 +722,7 @@ class ArmResult:
             for use in transcript.tool_uses:
                 if use.name not in counts:
                     continue
-                action = str((use.input or {}).get("action") or "").strip()
-                if action and is_structured_write(use.name, action):
+                if is_structured_write(use.name, use.input):
                     counts[use.name] += 1
         return counts
 
