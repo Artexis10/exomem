@@ -17,6 +17,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import typing
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from difflib import get_close_matches
@@ -431,7 +432,10 @@ def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> d
 
     command = next(c for c in commands if c.name == op.command)
     rendering = next(r for r in command.renderings if r.name == op.rendering)
-    parameters = {name: parameter.replace(kind=inspect.Parameter.KEYWORD_ONLY)
+    # The leaf's annotations are strings (postponed evaluation), so resolve them before they become a schema.
+    hints = typing.get_type_hints(command.leaf, include_extras=True)
+    parameters = {name: parameter.replace(kind=inspect.Parameter.KEYWORD_ONLY,
+                                          annotation=hints.get(name, parameter.annotation))
                   for name, parameter in inspect.signature(command.leaf).parameters.items()
                   if name in {p.name for p in command.params}}
     branches = operation_schema(rendering, parameters)["oneOf"]

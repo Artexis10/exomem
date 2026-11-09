@@ -857,6 +857,7 @@ def op_bootstrap(
     workflow: str | None = None,
     skill_contract: str | None = None,
     section: str | None = None,
+    topic: str | None = None,
 ) -> dict:
     """Read Exomem's contract and live settings when missing or changed; reuse while current.
 
@@ -868,7 +869,17 @@ def op_bootstrap(
         workflow: Context label only.
         skill_contract: Session digest; missing/stale returns compact plus session_profile_unavailable.
         section: Compact block name; index lists available blocks.
+        topic: A listed tool, a door or one door operation; returns its arguments and an example
+            instead of the contract.
     """
+    if topic is not None:
+        if (profile, workflow, skill_contract, section) != ("compact", None, None, None):
+            raise ValueError("bootstrap: topic stands alone; it takes no profile, workflow, skill_contract or section")
+        from . import public_surface as public_surface_module
+
+        return public_surface_module.help_for(
+            topic, _active_bootstrap_descriptor().contributing_commands or PRODUCT_COMMANDS
+        )
     if profile not in ("compact", "full", "diagnostics", "session"):
         raise ValueError(
             "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
@@ -9342,25 +9353,54 @@ def op_preserve_artifacts(
     return _carrying_batch_advisories(vault_root, result)
 
 
+#: The most pages one download call takes; the public tool's schema states the same bound.
+_DOWNLOAD_BATCH_MAX = 8
+
+
 def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
-    hold: bool = False,
+    hold: bool = False, artifacts: list[str] | None = None,
 ) -> dict:
     """Prepare an upload or download; a handoff does not prove custody.
 
     Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
-    Capture its handle. Download: supply artifact; use MCP or HTTPS delivery.
+    Capture its handle. Download: supply artifact or artifacts; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
+        artifacts: Download only: up to 8 pages, each by title, id or path, replacing `artifact`.
+            Each gets its own handoff or its own refusal in the reply.
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
     from . import cloud_cell
+    from .cli_ops import OpError
 
+    if artifacts is not None:
+        if operation != "download" or artifact is not None or hold or expected_sha256 is not None:
+            raise ValueError("INVALID_MODE: artifacts needs download, with no artifact, hold or expected_sha256")
+        if not 1 <= len(artifacts) <= _DOWNLOAD_BATCH_MAX:
+            raise ValueError(f"INVALID_MODE: artifacts takes 1 to {_DOWNLOAD_BATCH_MAX} pages")
+        handoffs: list[dict] = []
+        for named in artifacts:
+            try:
+                reply = op_transfer_artifact(
+                    vault_root, operation="download",
+                    artifact=page_names_module.resolve_page(vault_root, named, field="artifacts"),
+                )
+                handoffs.append({"page": named, **reply})
+            except (ValueError, OpError) as error:
+                # One refused page leaves the others deliverable; the reply names which one failed.
+                handoffs.append({"page": named, "error": {"message": str(error)}})
+        return {
+            "handoff_status": "handoff_prepared" if any("error" not in h for h in handoffs) else "refused",
+            "committed": False,
+            "artifacts": handoffs,
+            "failed": sum("error" in h for h in handoffs),
+        }
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
         if operation != "download" or not artifact:

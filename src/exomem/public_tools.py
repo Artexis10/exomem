@@ -222,6 +222,18 @@ class ReadPage(Wire):
     )
 
 
+def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """The wire call of a read_memory call: the history and unit switches fold into `part`."""
+    handled = {"path", "continuation", "include_history", "units"}
+    wire = _given({"page": arguments.get("path"), "more": arguments.get("continuation")})
+    if arguments.get("include_history"):
+        wire["part"] = "history"
+    elif arguments.get("units"):
+        wire["part"] = "units"
+    rest = {key: value for key, value in arguments.items() if key not in handled and value is not None}
+    return {**wire, **({"options": rest} if rest else {})}
+
+
 def _read_page(wire: dict[str, Any], ctx: Context) -> Translated:
     handled = frozenset({"path", "include_history", "continuation", "units"})
     options = _bag(wire, "options", ctx, "read_memory", handled, "read_page")
@@ -432,6 +444,51 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
     if wire.get("preview"):
         operation["validate_only"] = True
     return "edit_memory", {"path": wire["note"], "why": wire["why"], "operation": operation, **detail}
+
+
+#: edit_memory's own operation kinds mapped to the edit_note action that sends each one.
+_EDIT_ACTIONS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed operation kinds of edit_memory mapped to edit_note's own actions.
+    "replace_string": "replace_text", "batch_replace": "replace_text", "edit_section": "replace_section",
+    "replace_body": "replace_body", "replace_tags": "set_tags", "patch_frontmatter": "set_fields",
+    "fill_row": "fill_row",
+}
+
+
+def _spell_edit(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The edit_note call of an edit_memory call, or None for a call that carries no nested operation."""
+    operation = arguments.get("operation")
+    if not isinstance(operation, Mapping) or operation.get("kind") not in _EDIT_ACTIONS:
+        return None
+    kind = operation["kind"]
+    wire: dict[str, Any] = _given({
+        "note": arguments.get("path"), "why": arguments.get("why"), "action": _EDIT_ACTIONS[kind],
+        "detail": arguments.get("response_detail"),
+    })
+    if operation.get("validate_only"):
+        wire["preview"] = True
+    if operation.get("relation_disposition") == "reviewed_none":
+        wire["unlinked_reason"] = operation.get("relation_review_reason")
+    if kind == "replace_string":
+        wire.update(_given({"old_text": operation.get("old_string"), "new_text": operation.get("new_string"),
+                            "replace_all": operation.get("replace_all")}))
+    elif kind == "batch_replace":
+        wire["edits"] = [
+            _given({"old_text": e.get("old_string"), "new_text": e.get("new_string"), "replace_all": e.get("replace_all")})
+            for e in operation.get("edits") or ()
+        ]
+    elif kind == "edit_section":
+        wire.update(_given({"heading": operation.get("heading"), "new_text": operation.get("new_string"),
+                            "position": operation.get("section_position"), "create_missing": operation.get("create_missing")}))
+    elif kind == "replace_body":
+        wire.update(_given({"body": operation.get("new_body"), "tags": operation.get("tags")}))
+    elif kind == "replace_tags":
+        wire["tags"] = operation.get("tags")
+    elif kind == "patch_frontmatter":
+        wire["fields"] = {operation.get("field"): operation.get("value")}
+    else:
+        wire.update(_given({"row": operation.get("row_key"), "take": operation.get("take"),
+                            "overwrite": operation.get("overwrite")}))
+    return wire
 
 
 def _is_id(value: object) -> bool:
@@ -741,7 +798,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           [Route("ask_memory", inverse={"continuation": "more"}, bag="options")], idempotent=True),
     _tool("read_page", "Read page", "Read one page by title or id: text, type, date and links.",
           ReadPage, "read", _read_page,
-          [Route("read_memory", inverse={"path": "page", "continuation": "more"}, bag="options")], idempotent=True,
+          [Route("read_memory", reverse=_spell_read)], idempotent=True,
           claims=(("read_memory", "page"),)),
     _tool("read_instructions", "Read instructions",
           "Read the live memory policy, or the arguments and one example of a tool, a door or one door operation.",
@@ -768,7 +825,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("edit_note", "Edit note",
           "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields.",
           EditNote, "write", _edit_note,
-          [Route("edit_memory", inverse={"path": "note"}, derived=frozenset({"operation", "expected_hash"})),
+          [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},
                  inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "content": "text", "reason": "why", **_NOTE_INVERSE}),
            Route("observe_memory", when={"operation": "remove"}, add={"action": "remove_observation"},
