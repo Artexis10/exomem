@@ -38,15 +38,18 @@ from exomem import semantic_language_registry as language_registry
 
 REGISTRY = "Knowledge Base/_Schema/semantic-language-registry.yaml"
 
-# A vault with the fixture's two kinds and one control. The commit that reads
-# traits adds `traits: [question]` to `research_question` and `traits:
-# [procedure]` to `protocol`, and nothing to `question`.
+# A vault with the fixture's two kinds and one control. `question` carries no trait: the census
+# once matched that literal, and the control proves it no longer does.
 KIND_OVERLAY = """\
 schema_version: 1
 categories: {}
 kinds:
-  research_question: {description: A question the research sets out to answer}
-  protocol: {description: A repeatable protocol}
+  research_question:
+    description: A question the research sets out to answer
+    traits: [question]
+  protocol:
+    description: A repeatable protocol
+    traits: [procedure]
   question: {description: A question under its shorter name}
 """
 
@@ -162,7 +165,8 @@ def test_activation_counts_the_assertion_kinds_and_no_other(kind_vault: Path) ->
     registry = relation_registry.load_registry(kind_vault)
 
     measured = activation.measure_document(
-        document, registry, project=None, page_type=None, body_wikilinks=0, frontmatter_counts={}
+        document, registry, language=language_registry.core_registry(), project=None,
+        page_type=None, body_wikilinks=0, frontmatter_counts={},
     )
 
     assert [unit.kind for unit in document.rich_units] == [
@@ -193,7 +197,7 @@ def test_two_pages_that_carry_one_question_are_proposed_as_related(kind_vault: P
 
     assert _suggested(kind_vault, "oq-a", "shared_open_question") == [(None, "oq-b")]  # CORE
     assert _suggested(kind_vault, "syn-a", "shared_open_question") == [(None, "syn-b")]  # CORE
-    assert _suggested(kind_vault, "rq-a", "shared_open_question") == []  # FLIPS 12
+    assert _suggested(kind_vault, "rq-a", "shared_open_question") == [(None, "rq-b")]  # FLIPS 12
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +227,10 @@ def test_an_answer_may_point_at_a_core_question_under_any_of_its_headings(
 @pytest.mark.parametrize(
     ("unit_target", "research_question", "literal_question"),
     [
-        # FLIPS 12: `research_question` becomes (1, 0) once it carries the `question` trait.
-        # FLIPS 12: `question` becomes (1, 1) once the census stops reading the literal.
-        (False, (1, 1), (1, 0)),
-        (True, (1, 1), (1, 0)),
+        # FLIPS 12: `research_question` was (1, 1) before it carried the `question` trait.
+        # FLIPS 12: `question` was (1, 0) while the census read the literal.
+        (False, (1, 0), (1, 1)),
+        (True, (1, 0), (1, 1)),
     ],
     ids=["page", "unit"],
 )
@@ -259,4 +263,4 @@ def test_a_protocol_is_a_reusable_method_only_when_it_has_the_procedure_trait(
 ) -> None:
     protocol = method().replace("## Procedure", "## Protocol")
 
-    assert _promotions(kind_vault, protocol) == 0  # FLIPS protocol
+    assert _promotions(kind_vault, protocol) == 1  # FLIPS protocol

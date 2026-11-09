@@ -57,6 +57,7 @@ from . import (
     note_types,
     recall_space,
     reserved_paths,
+    semantic_language_registry,
     semantic_units,
     sidecar_store,
 )
@@ -199,6 +200,8 @@ def extract_claim_text(
     *,
     page_type: str | None = None,
     entity_type: str | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    projects: tuple[str, ...] = (),
 ) -> str | None:
     """Extract a page's CLAIM as `"{title}\\n\\n{claim body}"` (or None).
 
@@ -212,17 +215,25 @@ def extract_claim_text(
     Title is always prepended (mirrors `embeddings.chunk_text`) so the claim
     carries its own topic. Returns None only when there is no usable text at all.
 
+    A unit whose kind has the `page_claim` trait is the claim. `language` is the registry that
+    names those kinds (core when absent) and `projects` the projects the page attaches.
+
     SEAM: an optional future LLM-distillation path replaces the body-selection
     here (title + a distilled one-sentence claim) WITHOUT changing any caller —
     the return contract (a short claim string, or None) stays the same.
     """
     title = (title or "").strip()
-    document = semantic_units.parse_semantic_units(body or "", validate=False)
+    language = language or semantic_language_registry.core_registry()
+    document = semantic_units.parse_semantic_units(
+        body or "",
+        validate=False,
+        language_registry=semantic_language_registry.for_attached_projects(language, projects),
+    )
     semantic_claim = next(
         (
             unit.body
             for unit in document.rich_units
-            if unit.kind == "claim" and unit.body and unit.body.strip()
+            if language.has(unit.kind, "page_claim") and unit.body and unit.body.strip()
         ),
         None,
     )
@@ -256,17 +267,25 @@ def extract_claim_text(
     return title or claim_body or None
 
 
-def extract_claim_for_page(page) -> str | None:
+def extract_claim_for_page(page, vault_root: Path | None = None) -> str | None:
     """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type).
 
     Claims feed a shared sidecar, so they read the withheld search body: an
-    origin carrier is never a claim, nor the lead-paragraph fallback.
+    origin carrier is never a claim, nor the lead-paragraph fallback. For the same reason they
+    read the vault's shared kind registry, never a private instance's; without `vault_root`
+    only the shipped kinds name a claim.
     """
+    from . import semantic_index
+
     return extract_claim_text(
         page.title,
         page.search_body,
         page_type=page.page_type,
         entity_type=page.frontmatter.get("entity_type"),
+        language=(
+            semantic_language_registry.load_registry(vault_root) if vault_root is not None else None
+        ),
+        projects=semantic_index.page_projects(page.frontmatter),
     )
 
 
@@ -862,7 +881,7 @@ class ClaimIndex:
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None or page.page_type not in claim_types:
                 continue
-            claim = extract_claim_for_page(page)
+            claim = extract_claim_for_page(page, self.vault_root)
             if not claim:
                 continue
             pending.append(
@@ -991,7 +1010,7 @@ def claim_checksum_for_page(
     """
     if page.page_type not in _claim_types(type_basis or producer_basis(vault_root)):
         return None
-    claim = extract_claim_for_page(page)
+    claim = extract_claim_for_page(page, vault_root)
     return _checksum(claim) if claim else None
 
 
@@ -1084,7 +1103,7 @@ def upsert_claims_after_write(
         if page.page_type not in claim_types:
             idx.delete(page.rel_path)
             continue
-        claim = extract_claim_for_page(page)
+        claim = extract_claim_for_page(page, vault_root)
         if not claim:
             idx.delete(page.rel_path)
             continue
@@ -1165,7 +1184,7 @@ def claim_text_for_page(
     page = find_module._CACHE.get(vault_root / rel_path, vault_root)
     if page is None:
         return None
-    return extract_claim_for_page(page)
+    return extract_claim_for_page(page, vault_root)
 
 
 # ---------------------------------------------------------------------------

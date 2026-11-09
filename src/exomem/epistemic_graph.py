@@ -9119,7 +9119,7 @@ class EpistemicGraphIndex:
                     coverage["definitions_unavailable_pages"] += 1
                     continue
                 measurement = activation.measure_document(
-                    parent.structure, parent.relations,
+                    parent.structure, parent.relations, language=parent.language,
                     project=activation._page_project(dict(parent.frontmatter)), page_type=row[6],
                     body_wikilinks=int(parent.metadata["body_wikilinks"]),
                     frontmatter_counts=dict(parent.metadata["frontmatter_link_counts"]),
@@ -13583,6 +13583,11 @@ class GraphView:
         parent = self.parent(rel_path)
         return parent.relations if parent is not None else relation_registry.core_registry()
 
+    def language_for(self, rel_path: str) -> semantic_language_registry.SemanticLanguageRegistry:
+        """The unit-kind registry the page's instance defines; core meanings when it has none."""
+        parent = self.parent(rel_path)
+        return parent.language if parent is not None else semantic_language_registry.core_registry()
+
     def behaviours(self, edge: dict[str, Any]) -> frozenset[str]:
         """What the served edge's relation does, read through its authoring page's registry."""
         registry = self.registry_for(str(edge.get("source_path") or ""))
@@ -14877,7 +14882,7 @@ def _question_label_clause(view: GraphView) -> tuple[str, list[str]]:
         category_labels |= plan.category_labels
         kind_labels |= plan.category_kind_labels
         kind_labels |= semantic_language_registry.unit_query_plan(
-            adapter, kinds=list(_QUESTION_KINDS),
+            adapter, kinds=sorted(adapter.kinds_with("question")),
         ).kind_labels
     categories, kinds = sorted(category_labels), sorted(kind_labels)
     return (
@@ -14916,7 +14921,7 @@ def _question_units(
         node = view.serve(_node_row_to_dict(row[:10]))
         metadata = (node or {}).get("metadata") or {}
         if node is not None and (
-            metadata.get("kind") in _QUESTION_KINDS
+            view.language_for(str(node["path"])).has(str(metadata.get("kind") or ""), "question")
             or metadata.get("category") in _QUESTION_CATEGORIES
         ):
             found.append(
@@ -14955,9 +14960,8 @@ def _ranked(
     return kept[: limit + 1]
 
 
-#: The fixed question meanings the co-participation generator has always read
-#: (existing vocabulary in code, reported as debt; unchanged by this owner).
-_QUESTION_KINDS: tuple[str, ...] = ("open_question",)
+#: Debt (category registry, out of scope for the kind-trait change): the kind leg reads the
+#: `question` trait, but this category leg still names the categories the generator has always read.
 _QUESTION_CATEGORIES: tuple[str, ...] = ("question", "open_question")
 
 

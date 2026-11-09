@@ -291,19 +291,14 @@ class SemanticLanguageRegistry:
         return definition.traits if definition is not None else frozenset()
 
     def has(self, kind: str, trait: str) -> bool:
-        """Whether units of `kind` have `trait`. A name outside `KIND_TRAITS` is a defect in the
-        caller, so it raises instead of reading false for every kind."""
-        if trait not in semantic_kinds.KIND_TRAITS:
-            raise ValueError(f"{trait!r} is not a kind trait")
-        return trait in self.traits_of(kind)
+        """Whether units of `kind` have `trait`; a name outside `KIND_TRAITS` raises."""
+        return semantic_kinds.require_trait(trait) in self.traits_of(kind)
 
     def kinds_with(self, trait: str) -> frozenset[str]:
         """Every core kind and every vault kind that has `trait`, whatever its status or scope.
 
-        A name outside `KIND_TRAITS` is a defect in the caller, so it raises instead of
-        answering with an empty set."""
-        if trait not in semantic_kinds.KIND_TRAITS:
-            raise ValueError(f"{trait!r} is not a kind trait")
+        A name outside `KIND_TRAITS` raises instead of answering with an empty set."""
+        semantic_kinds.require_trait(trait)
         return frozenset(
             key
             for definitions in (self.core_kinds, self.kinds)
@@ -570,6 +565,23 @@ def load_registry(
     from .vocabulary import instances
 
     return vocabulary_registry.load(instances.select(Path(vault_root), CATEGORY_SPEC, registry_scope), Path(vault_root)).typed
+
+
+def load_for_page(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> SemanticLanguageRegistry:
+    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+    from .vocabulary import contract, instances
+
+    root = Path(vault_root)
+    try:
+        scope = instances.page_scope(root, rel_path, dict(frontmatter))
+        selected = instances.select(root, CATEGORY_SPEC, scope)
+        if contract.admission_refusal(root, selected) is not None:
+            return core_registry()
+        return vocabulary_registry.load(selected, root).typed
+    except vocabulary_registry.RegistryError:
+        return core_registry()
 
 
 def clear_cache() -> None:

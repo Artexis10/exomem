@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from . import semantic_language_registry
+
 FAMILIES = ("artifact_role_promotion", "transient_state_review")
 PREDICATE_VERSION = 1
 MAX_UNITS = 400
@@ -80,14 +82,17 @@ def _cue(unit: Any, cues: tuple[str, ...]) -> bool:
     )
 
 
-def procedure(unit: Any) -> bool:
-    return unit.kind == "procedure" or unit.category in {"procedure", "technique"}
+# The kind leg reads the page's registry, so a vault kind with the trait counts. The category legs
+# stay fixed category keys: the category registry is out of scope for the kind-trait change.
+def procedure(unit: Any, kinds: Any) -> bool:
+    return kinds.has(unit.kind, "procedure") or unit.category in {"procedure", "technique"}
 
 
-def outcome(unit: Any) -> bool:
-    return unit.kind == "result" or unit.category in {"result", "outcome"}
+def outcome(unit: Any, kinds: Any) -> bool:
+    return kinds.has(unit.kind, "outcome") or unit.category in {"result", "outcome"}
 
 
+# Debt (C11): a category branch with no kind leg, so a kind trait does not reach it.
 def synthesis(unit: Any) -> bool:
     return unit.category in {"finding", "inference", "synthesis"}
 
@@ -169,9 +174,10 @@ def _pending_subject(unit: Any) -> str | None:
     return None
 
 
-def _result_subject(unit: Any) -> str | None:
+def _result_subject(unit: Any, kinds: Any) -> str | None:
     if (
-        not outcome(unit)
+        not outcome(unit, kinds)
+        # Debt (verdict keys): this set names verdicts a unit may carry, not the shipped vocabulary.
         or unit.verdict in {"retracted", "false", "failed"}
         or _historical_or_future(unit)
     ):
@@ -200,8 +206,14 @@ def detect(
     exact_links: Mapping[str, tuple[str, ...]] | None = None,
     superseded_refs: frozenset[str] = frozenset(),
     candidate_limit: int | None = MAX_CANDIDATES,
+    kinds: Any = None,
 ) -> Detection:
-    """Classify immutable parsed units and already-resolved, audience-readable links."""
+    """Classify immutable parsed units and already-resolved, audience-readable links.
+
+    `kinds` answers `has(kind, trait)` for the page's own registry; core kinds when omitted.
+    """
+    if kinds is None:
+        kinds = semantic_language_registry.core_registry()
     coverage = dict.fromkeys(FAMILIES, "complete")
     if (
         not page.eligible_compiled
@@ -222,18 +234,18 @@ def detect(
             units.append(unit)
     exact_links = exact_links or {}
     sources = source_documents or {}
-    methods = [u for u in units if procedure(u) and _cue(u, REUSABLE_CUES)]
+    methods = [u for u in units if procedure(u, kinds) and _cue(u, REUSABLE_CUES)]
     results = [
         u
         for u in units
-        if outcome(u)
+        if outcome(u, kinds)
         and u.verdict not in {"retracted", "false", "failed"}
         and not _historical_or_future(u)
         and _cue(u, SUCCESS_CUES)
     ]
     contexts = {id(u): normalized(u.context or "") for u in units}
-    procedure_counts = Counter(contexts[id(u)] for u in units if procedure(u))
-    outcome_counts = Counter(contexts[id(u)] for u in units if outcome(u))
+    procedure_counts = Counter(contexts[id(u)] for u in units if procedure(u, kinds))
+    outcome_counts = Counter(contexts[id(u)] for u in units if outcome(u, kinds))
     methods_by_ref = {unit_identity(u): u for u in methods}
     unique_methods = {contexts[id(u)]: u for u in methods if procedure_counts[contexts[id(u)]] == 1}
     candidates = []
@@ -271,7 +283,7 @@ def detect(
                 )
             )
     pending = [(u, subject) for u in units if (subject := _pending_subject(u)) is not None]
-    observed = [(u, subject) for u in units if (subject := _result_subject(u)) is not None]
+    observed = [(u, subject) for u in units if (subject := _result_subject(u, kinds)) is not None]
     episode_text = normalized(" ".join(u.content + " " + (u.context or "") for u in units))
     episodes = set(_EPISODE.findall(episode_text))
     authored_labels = re.findall(r"\b(?:trial|run|batch)\s+(\S+)", episode_text)

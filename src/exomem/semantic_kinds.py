@@ -32,6 +32,14 @@ KIND_TRAITS = frozenset(
     )
 )
 
+def require_trait(trait: str) -> str:
+    """`trait` itself. A name outside `KIND_TRAITS` is a defect in the caller, so it raises
+    instead of reading false for every kind."""
+    if trait not in KIND_TRAITS:
+        raise ValueError(f"{trait!r} is not a kind trait")
+    return trait
+
+
 _PACK = "kinds.yaml"
 _PACK_FIELDS = frozenset({"description", "heading_aliases", "traits"})
 _COMPACT_FIELDS = frozenset({"description"})
