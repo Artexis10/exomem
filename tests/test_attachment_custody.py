@@ -956,3 +956,17 @@ def test_attach_refuses_a_source_lane_for_a_direct_evidence_preserve(tmp_path: P
                 "8764",
             ]
         )
+
+
+def test_an_unknown_archive_mode_refuses_instead_of_keeping_the_zip_whole(vault: Path, lease) -> None:
+    """A CLI or HTTP caller skips the schema enum; a typo must not store the zip as one file."""
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault, scope="Clinic", category="Appointments", files=[handle], archive="member",
+            )
+
+    assert (refused.value.code, refused.value.details["accepted_values"]) == ("INVALID_PRESERVE", ["members"])

@@ -1812,6 +1812,13 @@ def preserve_artifacts(
     With `archive="members"` each file is a held zip, kept as its members
     exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
     """
+    if archive not in (None, "members"):
+        raise OpError(
+            "INVALID_PRESERVE",
+            f"archive {archive!r} is not supported",
+            'Pass archive="members" to keep a held zip as its members, or omit archive.',
+            details={"field": "archive", "accepted_values": ["members"]},
+        )
     if archive is not None and (adoption is not None or transcriptions):
         # Either would be dropped silently: an adoption commits the zip's own bytes,
         # and a members preservation has no original page to carry a transcription.
