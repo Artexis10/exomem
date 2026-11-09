@@ -186,21 +186,32 @@ def test_the_text_reader_bounds_a_stored_page_by_its_stored_size_not_its_files(s
     assert vault_module.read_guarded_text(stored, stored / NEW)[0] == EDITED.decode()
 
 
-def test_a_dotdot_or_symlink_spelling_of_a_page_reads_the_stored_page_and_one_leading_out_reads_the_file(
+def test_a_dotdot_spelling_reads_the_stored_page_and_a_symlink_never_names_a_page_by_its_target(
     stored, writer, tmp_path
 ):
-    """A reader that judges containment by the spelling: a path that reaches a page through `..` or
-    a link reads the stale file in store mode, and one that leads out of the vault is taken for a page."""
+    """A reader that judges containment by the spelling: a `..` path to a page reads the stale file in
+    store mode, a link that leads out of the vault is taken for a page, and a link that stands at a
+    stored page's path returns the link target's bytes in place of the page's."""
     write.commit(writer, put(ALPHA, EDITED))
     notes = stored / "Knowledge Base/Notes"
-    (notes / "Link.md").symlink_to("Alpha.md")
     outside = tmp_path / "Outside.md"
     outside.write_bytes(b"not a page of the vault\n")
     (notes / "Out.md").symlink_to(outside)
+    (notes / "Link.md").symlink_to("Alpha.md")
+    (stored / "Knowledge Base/Elsewhere").symlink_to(tmp_path)
     read_bytes = vault_module.read_bytes_without_pinning
     assert read_bytes(notes / ".." / "Notes" / "Alpha.md", stored) == EDITED
-    assert read_bytes(notes / "Link.md", stored) == EDITED
-    assert read_bytes(notes / "Out.md", stored) == outside.read_bytes()
+    # The store holds no page at the link's own path, and the link's target does not make one.
+    with pytest.raises(FileNotFoundError):
+        read_bytes(notes / "Link.md", stored)
+    with pytest.raises(FileNotFoundError):
+        read_bytes(notes / "Out.md", stored)
+    # A folder link that leads out of the vault holds no page of it: the disk answers.
+    assert read_bytes(stored / "Knowledge Base/Elsewhere/Outside.md", stored) == outside.read_bytes()
+    # A link at a stored page's path: the store key decides at the leaf.
+    (notes / "Alpha.md").unlink()
+    (notes / "Alpha.md").symlink_to(outside)
+    assert read_bytes(notes / "Alpha.md", stored) == EDITED
 
 
 def test_a_page_the_store_deleted_reads_as_missing_though_its_file_is_still_on_disk(stored, writer):

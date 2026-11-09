@@ -253,9 +253,11 @@ def owned_page_at(vault_root: Path, path: Path) -> StoredPage | None:
     """``owned_page`` for the file at ``path``, which a caller names by its location, not its vault path.
 
     A path that does not lie below the root is no page of it, and that lexical test runs first and
-    costs no read of the mode records. In store mode only, resolved paths decide what the file is: a
-    symlink or a ``..`` spelling that leads into the vault names the page it reaches, and one that
-    leads out names none. A file-mode read never pays that resolution.
+    costs no read of the mode records. In store mode only, the parent folder is resolved: a symlinked
+    folder or a ``..`` spelling that leads into the vault names the page it reaches, and one that
+    leads out names none. The file's own name is never resolved, so a symlink at a stored page's path
+    does not name its target: the store key decides at the leaf. A file-mode read never pays that
+    resolution.
     """
     root = _as_path(vault_root)
     try:
@@ -268,8 +270,10 @@ def owned_page_at(vault_root: Path, path: Path) -> StoredPage | None:
         return None
     if not mode.store_mode_for_reads(root):
         return None
+    if path.name in ("", ".", ".."):
+        return None  # a folder spelling, not a file's name: the store holds no page there
     try:
-        resolved = path.resolve().relative_to(root.resolve()).as_posix()
+        resolved = (path.parent.resolve() / path.name).relative_to(root.resolve()).as_posix()
     except ValueError:
         return None
     return owned_page(root, resolved)
