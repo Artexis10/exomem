@@ -132,12 +132,13 @@ def _governed(tmp_path: Path, root: Path, command_name: str, work) -> dict:  # n
     terminal = manager.invoke(
         SimpleNamespace(name=command_name, leaf=leaf, read_only=False),
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=None,
         mutation_request_id=str(uuid.uuid4()),
     )
-    assert terminal["status"] == "committed", terminal
-    assert terminal["derived_sync"] == "pending", "the write must run under derived batch custody"
+    operational = terminal["diagnostics"]["operational"]
+    assert operational["status"] == "committed", terminal
+    assert operational["derived_sync"] == "pending", "the write must run under derived batch custody"
     return terminal
 
 

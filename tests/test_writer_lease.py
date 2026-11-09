@@ -1043,10 +1043,11 @@ def test_record_replay_receipt_has_a_noop_terminal(tmp_path: Path) -> None:
 
     result = LeaseManager(
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "state")})
-    ).invoke(command, (tmp_path,), {})
+    ).invoke(command, (tmp_path,), {"response_detail": "full"})
 
-    assert result["status"] == "replayed"
-    assert result["mutated"] is False
+    operational = result["diagnostics"]["operational"]
+    assert operational["status"] == "replayed"
+    assert operational["mutated"] is False
     assert result["outcome"] == "replayed"
 
 
@@ -3385,11 +3386,11 @@ def test_completed_result_receipt_failure_is_committed_uncertain(
     replay = manager.invoke(
         command,
         (tmp_path,),
-        {},
+        {"response_detail": "full"},
         idempotency_key="receipt-failure",
         idempotency_principal_scope="principal:alice",
     )
-    assert replay["status"] == "committed"
+    assert replay["diagnostics"]["operational"]["status"] == "committed"
 
     assert target.read_text(encoding="utf-8") == "committed\n"
     assert calls == 1
@@ -5325,11 +5326,12 @@ def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
         mutation_request_id="11111111-1111-4111-8111-111111111111",
     )
 
-    assert first["status"] == "committed"
-    assert first["derived_sync"] == "pending"
+    operational = first["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert operational["derived_sync"] == "pending"
     # The components, not the exception class: a class name tells a reader
     # nothing about what derived state is behind.
-    assert "embeddings" in first["derived_sync_components"]
+    assert "embeddings" in operational["derived_sync_components"]
     assert any("embeddings" in warning for warning in first["warnings"])
     assert all("RuntimeError" not in warning for warning in first["warnings"])
     assert all("registration failed" not in warning for warning in first["warnings"])
@@ -5344,8 +5346,9 @@ def test_lost_derived_acknowledgement_persists_a_pending_success_terminal(
         mutation_request_id="22222222-2222-4222-8222-222222222222",
     )
 
-    assert replay["status"] in {"committed", "replayed"}
-    assert replay["derived_sync"] == "pending"
+    replayed = replay["diagnostics"]["operational"]
+    assert replayed["status"] in {"committed", "replayed"}
+    assert replayed["derived_sync"] == "pending"
     assert calls == [1]
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 
@@ -5396,9 +5399,10 @@ def test_derived_acknowledgement_budget_bounds_observation_not_custody(
         mutation_request_id="55555555-5555-4555-8555-555555555555",
     )
 
-    assert terminal["status"] == "committed"
-    assert terminal["derived_sync"] == "pending"
-    assert "embeddings" in terminal["derived_sync_components"]
+    operational = terminal["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert operational["derived_sync"] == "pending"
+    assert "embeddings" in operational["derived_sync_components"]
     # Custody still commits, but no expired status read or wait starts.
     assert proofs == ["prove"]
     assert observations == []
@@ -5482,8 +5486,9 @@ def test_a_spent_request_budget_still_commits_and_persists_its_terminal(
     finally:
         request_budget.reset_current(token)
 
-    assert terminal["status"] == "committed"
-    assert terminal["derived_sync"] == "pending"
+    operational = terminal["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert operational["derived_sync"] == "pending"
     assert calls == [1]
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 
@@ -5527,8 +5532,9 @@ def test_a_commit_that_registers_no_derived_batch_owes_no_pending(
         mutation_request_id="99999999-9999-4999-8999-999999999999",
     )
 
-    assert terminal["status"] == "committed"
-    assert "derived_sync" not in terminal
+    operational = terminal["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert "derived_sync" not in operational
 
     replay = manager.invoke(
         command,
@@ -5538,7 +5544,7 @@ def test_a_commit_that_registers_no_derived_batch_owes_no_pending(
         idempotency_principal_scope="principal:alice",
         mutation_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     )
-    assert "derived_sync" not in replay
+    assert "derived_sync" not in replay["diagnostics"]["operational"]
 
 
 def test_a_graph_rebuild_handoff_binds_the_pre_persistence_hook(
@@ -5723,7 +5729,7 @@ def test_terminal_persistence_failure_precedes_the_derived_acknowledgement(
         idempotency_principal_scope="principal:alice",
         mutation_request_id="44444444-4444-4444-8444-444444444444",
     )
-    assert replay["status"] == "committed"
+    assert replay["diagnostics"]["operational"]["status"] == "committed"
     assert calls == [1]
     assert target.read_text(encoding="utf-8") == "# Ack\n"
 

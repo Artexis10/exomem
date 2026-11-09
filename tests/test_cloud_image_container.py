@@ -508,14 +508,15 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
                 paraphrase = _mcp_call_tool(
                     client,
                     name="ask_memory",
+                    # Timings keep the raw warming block beside the hits, so the loop can wait
+                    # for exactly the embeddings component.
                     arguments={
-                        "query": "what does the container test note say happened here"
+                        "query": "what does the container test note say happened here",
+                        "include_timings": True,
                     },
                     request_id=3,
                 )
                 recall_result = paraphrase["structuredContent"]["result"]
-                if isinstance(recall_result, list):
-                    break
                 components = recall_result.get("warming", {}).get("components", [])
                 if "embeddings" not in components:
                     break

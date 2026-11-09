@@ -300,7 +300,7 @@ def _invoke_public(
     name: str,
     arguments: dict[str, object],
     *,
-    detail: str = "compact",
+    detail: str = "full",
 ) -> dict[str, object]:
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == name)
     manager = writer_lease.LeaseManager(
@@ -359,7 +359,7 @@ def test_real_remember_public_terminal_projects_committed_unknown_relation(
         },
     )
 
-    assert result["state"] == "committed"
+    assert result["diagnostics"]["operational"]["state"] == "committed"
     assert result["relation_advisory"]["raw_relations"] == ["applies_to"]  # type: ignore[index]
 
 
@@ -493,7 +493,7 @@ def test_real_observe_public_terminal_projects_committed_unknown_relation(vault)
         },
     )
 
-    assert result["state"] == "committed"
+    assert result["diagnostics"]["operational"]["state"] == "committed"
     assert result["relation_advisory"]["raw_relations"] == ["applies_to"]  # type: ignore[index]
 
 
@@ -517,7 +517,7 @@ def test_real_edit_public_terminal_projects_committed_unknown_relation(vault) ->
         },
     )
 
-    assert result["state"] == "committed"
+    assert result["diagnostics"]["operational"]["state"] == "committed"
     assert result["relation_advisory"]["raw_relations"] == ["applies_to"]  # type: ignore[index]
 
 
@@ -543,7 +543,7 @@ def test_real_replace_public_terminal_projects_committed_unknown_relation(vault)
         },
     )
 
-    assert result["state"] == "committed"
+    assert result["diagnostics"]["operational"]["state"] == "committed"
     assert result["relation_advisory"]["raw_relations"] == ["applies_to"]  # type: ignore[index]
 
 
@@ -558,9 +558,9 @@ def test_real_validation_and_reviewed_no_edge_terminals_have_no_advisory(vault) 
         ),
     }
     validation_terminal = _invoke_public(
-        vault, "remember", {**arguments, "validate_only": True}, detail="full"
+        vault, "remember", {**arguments, "validate_only": True}
     )
-    assert validation_terminal["state"] == "needs_review"
+    assert validation_terminal["diagnostics"]["operational"]["state"] == "needs_review"
     assert "relation_advisory" not in validation_terminal
     validation = validation_terminal["diagnostics"]
 
@@ -577,7 +577,7 @@ def test_real_validation_and_reviewed_no_edge_terminals_have_no_advisory(vault) 
             "relation_review_reason": "No honest typed relation applies.",
         },
     )
-    assert committed["state"] == "committed"
+    assert committed["diagnostics"]["operational"]["state"] == "committed"
     assert "relation_advisory" not in committed
 
 

@@ -666,7 +666,13 @@ def _claim(
                     "MAINTENANCE_JOB_ACTIVE",
                     "another maintenance job is running",
                     "Read it with mode maintenance-job, wait for it to finish, or cancel it, then start again.",
-                    details={"status": "terminal", "committed": False, "run_id": running[0]["run_id"]},
+                    details={
+                        "status": "terminal",
+                        "committed": False,
+                        "run_id": running[0]["run_id"],
+                        # The call that reads the running job: the agent learns its run id from this call alone.
+                        "retry_call": {"mode": MODE_STATUS, "run_id": running[0]["run_id"]},
+                    },
                 )
             _prune(conn)
             conn.execute(
@@ -754,10 +760,20 @@ def _run(
             foreground_priority.bulk(stop=live.stop),
         ):
             _JOB.set(live)
-            result = writer_lease.invoke_command(command, *injected, mutation_request_id=live.run_id, **kwargs)
-            if isinstance(result, Mapping) and "graph_sync" in result:
+            # `graph_sync` is an operational field: a job that asks for the compact reply reads it from the
+            # full one, and its receipt keeps the compact reply.
+            compact = not command.read_only and kwargs.get("response_detail", "compact") == "compact"
+            result = writer_lease.invoke_command(
+                command, *injected, mutation_request_id=live.run_id,
+                **({**kwargs, "response_detail": "full"} if compact else kwargs),
+            )
+            diagnostics = result.get("diagnostics") if isinstance(result, Mapping) else None
+            operational = diagnostics.get("operational") if isinstance(diagnostics, Mapping) else None
+            if isinstance(operational, Mapping) and "graph_sync" in operational:
                 # The dispatcher joined the graph after the leaf, so its outcome replaces the leaf's "pending".
-                note(graph=result["graph_sync"])
+                note(graph=operational["graph_sync"])
+            if compact and isinstance(result, Mapping):
+                result = {key: value for key, value in result.items() if key != "diagnostics"}
             # Only a preview that ended well lists its entries: a stopped one has no plan_id to start from.
             for kind in dict.fromkeys(kind for kind, _, _ in live.planned):
                 _insert(live, 0, kind, [(path, value) for entry, path, value in live.planned if entry == kind])

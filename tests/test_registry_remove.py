@@ -288,7 +288,7 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
 
     fresh = call("review_item_context", {"ref": ref})["revert"]["arguments"]
     done = call("schema_memory", {**fresh, "why": "the user undid it"})
-    assert done["ok"] is True
+    assert "error" not in done, done
     assert _entity_type_keys(call) == {"arena": "active"}, "the later save stays"
     assert call("review_item_context", {"ref": ref})["revert_fingerprint"] is None, "settled"
 
@@ -307,7 +307,7 @@ def test_domain_removal_counts_topic_and_home_references(
             "note_type": "insight", "title": "Seal pressure", "topics": ["hydraulics"],
             "status": "draft", "content": "## Claim\n\nA pressure finding.\n",
         })
-        assert page["ok"], page
+        assert "error" not in page, page
     elif use == "home":
         _save(call, "homes", {"upsert": {"workshop": {
             "label": "Workshop", "attributes": {

@@ -232,7 +232,10 @@ def chapter(name: str | None) -> dict:
             "local_day": "a bucketed datetime uses its declared offset field; without one, its own numeric offset",
             "links": "a link to a page the caller cannot read is omitted from the row",
         },
-        "errors": {"shape": ["code", "at", "expected", "allowed", "repair", "retryable"],
+        "errors": {"shape": ["code", "message", "retry", "candidates"],
+                   "message": "names the field it refused (at), what it expected and how to repair it; "
+                              "candidates are the values that field accepts; retry is present when the "
+                              "same request can succeed later",
                    "codes": sorted({"QUERY_FIELD_UNKNOWN", "QUERY_FIELD_UNAVAILABLE", "QUERY_KEY_UNKNOWN",
                                     "QUERY_VALUE_INVALID",
                                     "QUERY_INPUT_LIMIT", "QUERY_ARGUMENT_CONFLICT", "QUERY_UNAVAILABLE",

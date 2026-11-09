@@ -163,6 +163,9 @@ def _project_search(entries: Sequence[dict[str, Any]], problems: set[str]) -> di
     if response is None:
         problems.add(_EVIDENCE_INCOMPLETE)
         return None
+    if isinstance(response, dict):
+        # The reply is `{user_summary, hits, ...}`; a recording from before that shape is a bare list.
+        response = response.get("hits")
     if not isinstance(response, list):
         problems.add(_EVIDENCE_INVALID)
         return None

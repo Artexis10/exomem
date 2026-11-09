@@ -126,12 +126,15 @@ def _terminal(action: str, revision: int) -> dict[str, Any]:
             "audit_correlation": "a" * 24,
         }
     assert mutation_terminal.valid_record_receipt(receipt)
-    return mutation_terminal.project_terminal(
-        mutation_terminal.committed_terminal(
-            receipt,
-            request_id=f"request-{action}-{revision}",
-            receipt_id=f"receipt-{action}-{revision}",
-            idempotency_key=f"idempotency-{action}-{revision}",
+    return live._operational_view(
+        mutation_terminal.project_terminal(
+            mutation_terminal.committed_terminal(
+                receipt,
+                request_id=f"request-{action}-{revision}",
+                receipt_id=f"receipt-{action}-{revision}",
+                idempotency_key=f"idempotency-{action}-{revision}",
+            ),
+            "full",
         )
     )
 
@@ -808,7 +811,7 @@ def test_full_runner_executes_real_record_memory_lifecycle_on_a_temp_vault(tmp_p
             is_read = commands.invocation_is_read_only(self.command, values)
             if not is_read:
                 self.request_number += 1
-                values["response_detail"] = "compact"
+                values["response_detail"] = "full"
             result = self.manager.invoke(
                 self.command,
                 (self.root,),
@@ -818,12 +821,11 @@ def test_full_runner_executes_real_record_memory_lifecycle_on_a_temp_vault(tmp_p
                 public_idempotency_key=None if is_read else f"records-live-{self.request_number}",
             )
             if not is_read:
-                assert "leaf_result" not in result
-                assert result["status"] == "committed"
-                assert result["mutated"] is True
+                assert result["diagnostics"]["operational"]["status"] == "committed"
+                assert result["diagnostics"]["operational"]["mutated"] is True
                 self.compact_actions.append(action)
             if action == "append":
-                self.item_path = result["affected_paths"][0]
+                self.item_path = result["paths"][0]
             return result
 
         def readback(self, *, collection: str | None = None, timeout_seconds: float) -> dict[str, Any]:

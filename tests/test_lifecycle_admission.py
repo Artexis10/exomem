@@ -73,7 +73,7 @@ def test_restricted_mcp_edit_commits_stable_identity_and_prepared_state(
     written_response, read_response, unit_response = asyncio.run(invoke())
     response = written_response.structured_content
     written = response.get("result", response)
-    assert written["status"] == "committed", json.dumps(written)
+    assert "error" not in written, json.dumps(written)
     final_source = page.read_text(encoding="utf-8")
     assert "The completed round." in final_source
     assert "An earlier round." not in final_source
@@ -146,7 +146,7 @@ def test_restricted_mcp_edit_matches_absent_and_withheld_entity_worlds(
 
         response = asyncio.run(invoke()).structured_content
         written = response.get("result", response)
-        assert written["status"] == "committed", json.dumps(written)
+        assert "error" not in written, json.dumps(written)
         assert "protected identity" not in json.dumps(written)
         prepared = relation_review.load_lifecycle_prepared(root, IDENTITY)
         assert prepared is not None

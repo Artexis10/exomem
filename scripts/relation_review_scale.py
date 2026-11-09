@@ -644,13 +644,16 @@ def _component(report: Any, name: str) -> Any:
     )
 
 
+def _operational(terminal: Any) -> Mapping[str, Any]:
+    """The operational fields of a `response_detail=full` terminal; they are not in the compact reply."""
+    diagnostics = terminal.get("diagnostics") if isinstance(terminal, Mapping) else None
+    operational = diagnostics.get("operational") if isinstance(diagnostics, Mapping) else None
+    return operational if isinstance(operational, Mapping) else {}
+
+
 def _terminal_graph(terminal: Any) -> str:
-    if isinstance(terminal, Mapping):
-        value = terminal.get("graph_sync")
-        if value is None and isinstance(terminal.get("leaf_result"), Mapping):
-            value = terminal["leaf_result"].get("graph_sync")
-        return str(value or "absent")
-    return "absent"
+    value = _operational(terminal).get("graph_sync")
+    return str(value or "absent")
 
 
 def _busy_error(error: BaseException) -> bool:
@@ -690,7 +693,9 @@ def mutate_eligible_page(
 
     capture.activate(expected_path=relative)
     try:
-        command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+        command = SimpleNamespace(
+            name="remember", read_only=False, leaf=leaf, response_detail="full"
+        )
         terminal = writer_lease.get_manager().invoke(command, (root,), {})
     except BaseException as caught:  # noqa: BLE001 - classified below
         error = caught
@@ -712,7 +717,7 @@ def mutate_eligible_page(
 
     if error is not None:
         outcome = "busy" if _busy_error(error) else "failed"
-    elif isinstance(terminal, Mapping) and terminal.get("status") == "committed":
+    elif _operational(terminal).get("status") == "committed":
         outcome = "committed"
     else:
         outcome = "failed"

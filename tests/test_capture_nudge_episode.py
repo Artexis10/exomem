@@ -194,13 +194,10 @@ def test_only_a_successful_record_resets_coverage(
 def test_a_record_refused_with_the_error_envelope_leaves_the_episode_pending(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """MCP answers a coded refusal as normal content, so the result has no `is_error`."""
+    """MCP answers a coded refusal as normal content, so the result has no `is_error` and no `success`."""
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     _stops(monkeypatch, capsys, tmp_path, k - 1)
-    refusal = {
-        "success": False,
-        "error": {"code": "EPISODE_INVALID", "message": "subject is required", "remediation": None},
-    }
+    refusal = {"error": {"code": "EPISODE_INVALID", "message": "Subject is required. Nothing was saved."}}
     record = {"action": "record", "subject": "Harbor Lamp purchase"}
     lines = [
         {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
