@@ -20,6 +20,7 @@ from exomem import __main__ as cli
 from exomem import commands, get_page, lexstore, list_directory, project_keys, warmup
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.collection_store import connection
 from exomem.vault_store import ownership, write
 from exomem.vocabulary import registry
 
@@ -171,6 +172,36 @@ def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolve
 
     assert find_module._CACHE.get(stored / NEW, stored).title == "Delta"
     assert find_module.shared_resolver(stored).title_key_for_path(NEW) == "delta"
+
+
+def test_a_find_request_reads_one_store_snapshot_however_many_pages_it_reads(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A reader that opens a snapshot per page costs 7 to 14 ms a page and may mix revisions in one
+    answer; the request's reads must not grow with the pages it touches."""
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(connection, "store_reader", counting)
+
+    def snapshots_for_one_find(pages):
+        for index in range(pages):
+            rel, body = generated_page(index)
+            write.commit(writer, put(rel, body))
+        find_module.clear_cache()
+        opened.clear()
+        hits = find_module.find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+        assert len(hits) == 15
+        return len(opened)
+
+    few = snapshots_for_one_find(20)
+    many = snapshots_for_one_find(60)
+
+    assert many == few
 
 
 def test_warm_and_status_leave_no_sidecar_and_status_reports_the_store(

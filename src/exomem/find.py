@@ -1395,8 +1395,11 @@ def _with_catalog_scope(function):
     @wraps(function)
     def scoped(vault_root: Path, *args, **kwargs):
         from . import lexstore, readiness
+        from .vault_store import read as store_read
 
-        with lexstore.admitted_catalog_scope(vault_root):
+        # A store-mode request reads one store revision: the parse cache, the corpus and the
+        # admission checks all join this snapshot instead of opening one per page.
+        with lexstore.admitted_catalog_scope(vault_root), store_read.request_snapshot(vault_root):
             if (
                 not readiness.runtime_managed() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"
