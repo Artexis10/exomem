@@ -575,15 +575,17 @@ def test_a_recorded_backup_records_the_disk_use_its_job_measured() -> None:
     assert finished.row_updates["usage_observed_at"] == finished.row_updates["last_backup_at"]
 
 
-# An export's deadline grows with the cell (30 minutes per started 10 GiB); an import's does not.
+# An export's hold is its pause window, which grows with the bytes the pause copies
+# (here the whole size of a cell never measured, at 25 MiB/s after 6 minutes of start
+# allowances); an import's does not grow.
 @pytest.mark.parametrize(("kind", "size_gib", "deadline"), [
     ("import", 10, CONFIG.import_deadline),
-    ("export", 10, timedelta(minutes=30)),
-    ("export", 110, timedelta(minutes=330)),
+    ("export", 10, timedelta(minutes=6, seconds=410)),
+    ("export", 110, timedelta(minutes=6, seconds=4506)),
 ])
 def test_an_import_or_export_hold_no_row_owns_ends_after_twice_its_deadline(kind, size_gib, deadline) -> None:
     """Defect: a hold whose C5 or C6 row is gone keeps the owner's cell stopped forever, or
-    ends while a large cell's export Job may still use the volume."""
+    ends while a large cell's pause Job may still use the volume."""
 
     def decide_held_since(started):
         held_row = row(hold_kind=kind, hold_started_at=started, observed_image=IMAGE_A, storage_gib=size_gib)

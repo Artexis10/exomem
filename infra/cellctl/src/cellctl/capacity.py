@@ -18,9 +18,7 @@ from kubernetes.utils.quantity import parse_quantity
 
 from .manifests import JOB_CPU_REQUEST, JOB_MEMORY_REQUEST, ResourceSettings
 from .storage.topolvm import protocol_integer
-from .storage_config import LocalStorage
-
-GIB = 1024**3
+from .storage_config import GIB, LocalStorage
 
 
 @dataclass(frozen=True)

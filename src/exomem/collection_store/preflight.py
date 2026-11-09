@@ -122,6 +122,29 @@ def preflight(vault_root, cursor=None) -> dict:
     return {**found, "dry_run": True, "coordinator": coordinator}
 
 
+def tool_report(vault_root, cursor=None) -> dict:
+    """``preflight`` as a tool call answers it, through an egress that withholds each path it cannot release.
+
+    Only a process that serves the store can release a store collection's path, so elsewhere, as in
+    the CLI, the answer keeps ``inventory.total`` but lists no store row. Its ``outcome`` says so and
+    names where every row reads. The host command ``exomem collections migrate --dry-run`` prints
+    ``preflight`` itself.
+    """
+    from . import runtime
+    from .preview import bound_writer
+
+    found = preflight(vault_root, cursor)
+    root = Path(vault_root).resolve()
+    stored = sum(row["authority"] == inventory.STORE for row in found["inventory"]["collections"])
+    if stored and bound_writer(root) is None and not runtime.served(root):
+        found["outcome"] = (
+            f"This process does not serve the collection store, so this answer withholds the {stored} store "
+            "collection row(s) of this page: inventory.total counts them, and inventory.collections lists only "
+            "file collections. Ask the running service, or run `exomem collections migrate --dry-run` on the "
+            "host, for every row.")
+    return found
+
+
 def candidates(root, *, ownership_proof=None):
     """Find file candidates outside the complete canonical namespaces.
 

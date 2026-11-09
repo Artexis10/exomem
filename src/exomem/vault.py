@@ -674,14 +674,22 @@ def ensure_canonical_h1(content: str, title: str) -> str:
     return f"{canonical}\n\n{body}"
 
 
-def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | str) -> str:
-    """Canonical display-title precedence shared by every read surface."""
+def authored_title(frontmatter: Any, body: str) -> str | None:
+    """The title that a page's own bytes give: frontmatter `title`, else the first H1, else None."""
     title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
     if title is not None and str(title).strip():
         return str(title).strip()
     h1 = _H1_PATTERN.search(body or "")
     if h1 and h1.group(1).strip():
         return h1.group(1).strip()
+    return None
+
+
+def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | str) -> str:
+    """Canonical display-title precedence shared by every read surface."""
+    title = authored_title(frontmatter, body)
+    if title is not None:
+        return title
     stem = Path(path).stem.replace("-", " ").replace("_", " ").strip()
     return stem or str(path)
 

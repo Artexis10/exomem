@@ -1236,6 +1236,54 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
     return ObjectHead(size, plaintext.hexdigest())
 
 
+def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) -> ObjectHead:
+    """Decrypt one stored version into `sink` and return the plaintext's head; the export pack's read (D8).
+
+    The pack reads a staging copy, not the live vault, so this takes no pin, reservation or ledger row. A
+    transport failure raises `MEDIA_STORE_UNAVAILABLE`, after `sink` may have received a verified prefix.
+    """
+    return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
+
+
+def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
+    """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
+
+    Yields the path that the archive gives it: a live original's bound path, or a Trash payload's path
+    beside its companion. A companion that cannot be read binds nothing, so the ledger, which keeps a row
+    for each evicted path, gives the version of an original behind one. Raises `MEDIA_LEDGER_UNRESOLVED`
+    when such a row does not hold a version of this store with its size. The caller holds the consistency guard.
+    """
+    ledger = MediaJobStore(vault)
+    counted: set[str] = set()
+    unreadable: set[str] = set()
+    for companion, binary, reference in media_allowance.bound_references(
+            vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
+        counted.add(ledger._relative(ledger.vault_root / binary.path))
+        # A Trash companion sits beside its payload, not at the path that it binds.
+        path = (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix() \
+            if trash_metadata.is_trash_path(companion) else binary.path
+        if not _on_volume(vault, path):
+            yield path, binary, reference
+    if not unreadable:
+        return
+    with closing(ledger._connect(readonly=True)) as conn:
+        # Every row, not only the marked ones: a row whose bytes went missing before a census marked it
+        # still names the version that the store holds.
+        rows = conn.execute("SELECT binary_rel, reference, sha256, size FROM media_cache ORDER BY binary_rel").fetchall()
+    for relative, key, sha256, size in rows:
+        if relative in counted or _on_volume(vault, relative) or not any(
+                companion in unreadable for companion, _data in originals.companion_candidates(vault, relative)):
+            continue
+        try:
+            reference = originals.stored_reference(json.loads(key))
+        except ValueError:
+            reference = None
+        if (reference is None or reference.store != binding.store or not isinstance(size, int) or size < 0
+                or not originals.is_sha256(sha256)):
+            raise MediaStoreError("MEDIA_LEDGER_UNRESOLVED", "an evicted original's ledger row holds no version to read")
+        yield relative, originals.BinaryBinding(relative, sha256, size), reference
+
+
 def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
     # Only backend operations are transport failures; local staging writes keep their own errors.
     with _transport("read"), backend.open(reference.object, reference.version) as stream:

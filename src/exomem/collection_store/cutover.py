@@ -4,9 +4,12 @@ The preview reads the C0.1 inventory and names, per collection, the steps the ap
 every blocker with its fix. It changes nothing and returns the ``plan_id`` that the apply quotes.
 The apply runs offline, with the service stopped, as the owner's migrate and export do:
 
-1. It takes a backup snapshot through ``owner.backup`` and verifies it. Then it measures every
-   collection it will change: a store collection from the snapshot, a file collection from a
-   private proof import of its files, which is the import the migration makes.
+1. It takes a backup snapshot of the store through ``owner.backup`` and verifies it. The derived
+   rows' file beside the store is recorded by size and sha256, not copied: those rows rebuild from
+   the store's import log and the sources the vault preserves, and copying a large file would hold
+   the stop window. Then it measures every collection it will change: a store collection from the
+   snapshot, a file collection from a private proof import of its files, which is the import the
+   migration makes.
 2. It migrates the file collections through the existing migration (``admission.migrate_route``).
 3. It converts each markdown-items collection (``conversion``). A summary-mode one has no item
    files, so only its storage strategy changes. Each conversion's revise begins the query projection
@@ -71,6 +74,9 @@ BACKUP_REQUIRED = "COLLECTIONS_CUTOVER_BACKUP_REQUIRED"
 BACKUP_CHANGED = "COLLECTIONS_CUTOVER_BACKUP_CHANGED"
 BACKUP_EXISTS = "COLLECTIONS_CUTOVER_BACKUP_EXISTS"
 MIGRATION_INCOMPLETE = "COLLECTIONS_CUTOVER_MIGRATION_INCOMPLETE"
+#: Why the backup records the derived rows' file and does not copy it.
+DERIVED_NOT_COPIED = ("its rows rebuild from the store's import log and the sources the vault preserves, so the "
+                      "backup names the file by size and sha256 and copies nothing")
 #: The run records, beside the archives of the item files the conversions retired.
 RUNS = "cutover"
 APPLY = ("stop the service, then run `exomem collections cutover --plan-id ID --why REASON --backup-to FILE` "
@@ -353,15 +359,17 @@ def _backup(root, destination):
                                    "snapshot it takes first; name a new file outside the vault with --backup-to")
     target = Path(destination).expanduser()
     # Never over a file: it may be this run's first backup, the state before any step, or the owner's own copy.
-    if any(os.path.lexists(found) for found in (target, target.with_name(f"{target.name}.derived"))):
+    if os.path.lexists(target):
         raise CollectionStoreError(BACKUP_EXISTS, f"{target} already exists, and the cutover never replaces a file; "
                                    "name a file that does not exist yet with --backup-to")
     from . import owner
 
-    taken = owner.backup(root, destination=destination, include_derived=True)
+    taken = owner.backup(root, destination=destination)
     if conversion._file_sha(Path(taken["path"])) != taken["sha256"]:
         raise CollectionStoreError(BACKUP_CHANGED, f"the backup at {taken['path']} does not verify after writing")
-    return Path(taken["path"]), {"status": "verified", **taken}
+    derived = derived_rows.fingerprint(connection.store_path(root))
+    return Path(taken["path"]), {"status": "verified", **taken, "derived": None if derived is None else {
+        **derived, "copied": False, "reason": DERIVED_NOT_COPIED}}
 
 
 def _begin(root, sealed, staging, plan_id, why, destination):
@@ -534,10 +542,14 @@ def _convert_all(root, run):
     run["phase"] = COMPLETE
     moved = len(run["collections"])
     failed = [entry["path"] for entry in run["collections"] if entry["projection"] == FAILED]
+    # A run that an earlier release began may hold a copied derived file in its backup.
+    derived = run["backup"].get("derived")
+    left_out = (f"; it leaves out the derived rows in {derived['path']}, which rebuild from the store's import log."
+                if derived is not None and derived.get("copied") is False else ".")
     run["outcome"] = (f"Moved {moved} collection(s) to SQLite-only storage; parity held for every one. "
                       + (f"The query index of {', '.join(failed)} failed to build; a revise of the collection's "
                          "declaration builds it again. " if failed else "")
-                      + (f"The backup from before the run is {run['backup']['path']}."
+                      + (f"The backup from before the run is {run['backup']['path']}{left_out}"
                          if run["backup"]["status"] == "verified"
                          else "No backup was taken: " + run["backup"]["reason"] + ".")
                       + "".join(f" A resume measured {', '.join(resume['measured'])} again from its snapshot "

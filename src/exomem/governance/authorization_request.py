@@ -55,6 +55,9 @@ _SESSION_ACTION_RULES: Mapping[str, CredentialRule] = {
     "rotate": CredentialRule.REQUIRED,
     "close": CredentialRule.REQUIRED,
 }
+#: Row 4 of the credential matrix, as a whole command: an owner-only operation that a session
+#: credential may accompany but never replaces owner authorization for.
+_OWNER_ONLY_COMMANDS = frozenset({"approve_procedure"})
 _OPTIONAL_COMMANDS = frozenset(
     {
         "activate_context",
@@ -149,6 +152,8 @@ def credential_rule(
     """Return the one closed credential rule for a command selector variant."""
 
     if command_name != "govern_memory":
+        if command_name in _OWNER_ONLY_COMMANDS:
+            return CredentialRule.NON_AUTHORIZING
         if command_name in _OPTIONAL_COMMANDS:
             return CredentialRule.OPTIONAL
         raise AuthorizationRouteUnclassified
@@ -198,7 +203,7 @@ def validate_credential_registry(
         )
     else:
         names = frozenset(command_names)
-    if names != _OPTIONAL_COMMANDS | {"govern_memory"}:
+    if names != _OPTIONAL_COMMANDS | _OWNER_ONLY_COMMANDS | {"govern_memory"}:
         raise AuthorizationRouteUnclassified
 
     govern = next(

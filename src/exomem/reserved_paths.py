@@ -689,6 +689,24 @@ _REGISTRY = (
         trees=("_collections",),
     ),
     InternalStateDescriptor(
+        "procedure-approvals",
+        "procedure_approval.ledger",
+        StatePlacement.VAULT_CANONICAL,
+        # Only the owner-only `approve_procedure` operation writes this tree, so no
+        # generic, import, capture, move or recovery route can mint an approval.
+        "approve_procedure",
+        trees=("_approvals",),
+    ),
+    InternalStateDescriptor(
+        "procedure-approval-key",
+        "procedure_approval.key",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The per-owner HMAC key that makes ledger entries authentic. Canonical and
+        # outside the vault, so a copied vault carries entries that fail their MAC
+        # and nothing that resets, wipes or migrates machine-local state may touch it.
+        exact=("procedure-approval.key",),
+    ),
+    InternalStateDescriptor(
         "batch-workspace",
         "vault.batch",
         StatePlacement.TARGET_ADJACENT,
@@ -1228,6 +1246,8 @@ def mutation_remediation(descriptor_id: str | None) -> str:
         return "Use govern_memory's reviewed governance lifecycle."
     if descriptor is not None and descriptor.owning_command == "consolidate_memory":
         return "No public command owns consolidation state until consolidate_memory ships."
+    if descriptor is not None and descriptor.owning_command == "approve_procedure":
+        return "Only the owner approves a procedure, through approve_procedure. No file route writes approvals."
     return "Use the owning subsystem's bounded control operation."
 
 

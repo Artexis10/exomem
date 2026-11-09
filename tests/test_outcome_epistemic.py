@@ -14,6 +14,7 @@ import json
 import stat
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -439,6 +440,91 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
             assert leak not in text, f"a judge input contains {leak!r}"
 
 
+def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
+    """Every folder and Exomem answer in a smoke run named its store, which would show the judge the arm."""
+    entries = [
+        {
+            "state": "answered",
+            "arm": "F",
+            "item": None,
+            "task": "t",
+            "key": {"value": "8443"},
+            "answer": "Port 8443, from my note in memory/web.md.",
+            "changed": "memory/web.md\n+port 8443",
+        },
+        {
+            "state": "answered",
+            "arm": "P",
+            "item": None,
+            "task": "t",
+            "key": {"value": "8443"},
+            "answer": "Port 8443, as Exomem recalled through mcp__exomem__recall_context.",
+            "changed": "",
+        },
+    ]
+    monkeypatch.setattr(epistemic_judge, "collect", lambda *_: [dict(e) for e in entries])
+    judge_run = tmp_path / "judged"
+    epistemic_judge.items(tmp_path, {}, judge_run, ["F", "P"])
+
+    shown = (judge_run / "judge" / "items.jsonl").read_text()
+    assert "memory/" not in shown and "exomem" not in shown.casefold()
+    assert "[store]/" not in shown and "__recall" not in shown, (
+        "the whole token goes, path and tool shape too"
+    )
+    assert shown.count("[store]") == 4
+
+    rows = [json.loads(line) for line in shown.splitlines()]
+    (judge_run / "judge" / "verdicts.jsonl").write_text(
+        "".join(json.dumps({"id": r["id"], "verdict": {"correct": True}}) + "\n" for r in rows)
+    )
+    outcomes, _, _ = epistemic_judge.scored(judge_run)
+    mentions = report.store_mentions(outcomes, ["F", "P"])
+    assert mentions["F"]["naming_a_store"] == 1 and mentions["P"]["naming_a_store"] == 1
+
+
+def test_case_text_that_holds_a_store_name_is_refused_because_the_judge_would_read_it_masked():
+    """An ops key such as 'raise the memory/CPU limit' would reach the judge as an arm's note."""
+    project = invented_project()
+    project["probes"][0]["key"]["rubric"] = ["raises the memory/CPU limit to 2"]
+
+    problems = cases.structure_problems(project)
+
+    assert problems == [
+        "probe p-early key.rubric[0] holds a store name the judge masks (memory/, exomem); reword it"
+    ]
+
+
+def test_the_mask_reads_a_long_unbroken_token_in_linear_time():
+    """A minified line can fill the diff up to its cap; a backtracking mask took seconds per item."""
+    diff = "a" * epistemic_run.MAX_DIFF_CHARS
+
+    started = time.monotonic()
+    shown = epistemic_judge.hide_store_names(diff)
+
+    assert shown == diff
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_files_value_that_is_not_an_object_is_named_not_a_crash():
+    """An authoring lane that writes `files` as a list must get the shape problem back, not a traceback."""
+    project = invented_project()
+    project["probes"][0]["files"] = ["notes/a.md"]
+
+    problems = cases.structure_problems(project)
+
+    assert problems == ["probe p-early needs a `task` string and a `files` object"]
+
+
+def test_a_key_list_field_that_is_not_a_list_is_named_not_a_crash():
+    """A key with `accept: 5` must get the shape problem back, not a traceback from the store-name scan."""
+    project = invented_project()
+    project["probes"][0]["key"]["accept"] = 5
+
+    problems = cases.structure_problems(project)
+
+    assert problems == ["probe p-early: key.accept, key.rubric and key.behaviours must be lists"]
+
+
 def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
     tmp_path,
 ):
@@ -699,9 +785,14 @@ def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():
 
     rows = report.store_mentions(outcomes, ["F", "P", "N"])
 
-    assert rows["F"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
-    assert rows["P"] == {"answers": 2, "naming_a_store": 1, "share": 0.5}
-    assert rows["N"] == {"answers": 0, "naming_a_store": 0, "share": None}, "no answer is not 0"
+    assert rows["F"] == {"answers": 2, "naming_a_store": 1, "share": 0.5, "raw_answer_unknown": 0}
+    assert rows["P"] == {"answers": 2, "naming_a_store": 1, "share": 0.5, "raw_answer_unknown": 0}
+    assert rows["N"] == {
+        "answers": 0,
+        "naming_a_store": 0,
+        "share": None,
+        "raw_answer_unknown": 0,
+    }, "no answer is not 0"
 
 
 def window_state(project, window, hour, status="complete"):

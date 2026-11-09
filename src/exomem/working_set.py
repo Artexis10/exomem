@@ -477,6 +477,7 @@ def _without_lede_repeats(
             and not any(item.provenance.get(key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS)
             and not item.provenance.get("corrects")
             and not item.provenance.get("supersedes_targets")
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             and not item.provenance.get("superseded_by")
             and (item.ref, str(item.provenance.get("source_hash") or "")) not in qualified_sources
         ):
@@ -1160,6 +1161,7 @@ def _provenance(item: LaneItem) -> dict[str, Any]:
 
 
 def _superseded_targets(item: LaneItem) -> tuple[str, ...]:
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     raw = item.provenance.get("superseded_by")
     if isinstance(raw, str):
         return (raw,)
@@ -1386,6 +1388,77 @@ def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[st
     return ordered
 
 
+def method_unit_categories(vault_root: Path) -> tuple[str, ...]:
+    """The categories the effective role registry projects as methods, never a list kept in code."""
+    registry = context_roles.load_roles(vault_root)
+    return tuple(sorted(context_roles.projection_categories(registry, "method")))
+
+
+def search_method_units(
+    vault_root: Path, query_units: list, k: int, *,
+    categories: tuple[str, ...], allowed: AbstractSet[str], fresh: tuple, checkpoint: Any,
+):
+    """The method-unit lexical search of a full-source-access task context over its `allowed` catalogue paths.
+
+    One call for the request and for `warm_owner_method_units`, so a warm builds the statistics that this
+    search reads and a change to either cannot leave the other behind.
+
+    The caller proves full source access first: `allowed` is passed as the released set too, so the search
+    applies no release filter of its own. A request passes its released catalogue paths, a warm the
+    catalogue's own recall set after `warm_owner_method_units` proved the owner reads without a filter.
+    """
+    from . import lexstore, working_set_runtime
+
+    return lexstore.get_store(vault_root).search_semantic_units_result(
+        [], k, categories, (), "kb", fresh,
+        allowed_parent_paths=allowed,
+        admitted_parent_paths=allowed,
+        # Full source access was proved and `allowed` is already this request's released catalogue paths.
+        released_parent_paths=allowed,
+        query_units=query_units,
+        term_budget=working_set_runtime.material_term_budget(),
+        recall_checkpoint=checkpoint, allow_delta=False,
+    )
+
+
+def warm_owner_method_units(vault_root: Path) -> str:
+    """Build in this process the method-unit statistics an owner's first task context builds; say what happened.
+
+    For a standby, which has no request to read from and must publish nothing. It reads the lexical
+    catalogue as published: its own recall checkpoint and its own recall rows, so a vault write that the
+    standby's unwatched registry has not seen cannot make the catalogue look stale, and no repair is
+    asked for. A query with no units builds the statistics and ranks nothing.
+
+    The warmed set is every page the catalogue holds for the knowledge base, a superset of the catalogue
+    entries an owner's request admits. Interpreting a parent is the cost, and the unit base keeps each
+    parent by its own revision whatever set asked for it, so the owner's first request finds every parent
+    interpreted and only merges the figures, or reuses them whole when the sets agree.
+    """
+    from . import context_task, context_views, lexstore
+    from .governance import principal
+
+    # The standby's own read stands in for the owner's request, so it takes the owner-local scope that
+    # `effective_principal` leaves to a caller that declares it.
+    with principal.library_scope():
+        if not context_task.full_source_access(vault_root, context_views.CallerView.current(vault_root)):
+            return "skipped: the owner reads through a release filter"
+        categories = method_unit_categories(vault_root)
+        if not categories:
+            return "skipped: no category is projected as a method"
+        store = lexstore.get_store(vault_root)
+        published = store.published_recall_checkpoint("kb")
+        allowed = None if published is None else store.recall_admitted_paths("kb", published)
+        if published is None or allowed is None:
+            return "skipped: the catalogue publishes no recall projection"
+        result = search_method_units(
+            vault_root, [], 1, categories=categories, allowed=set(allowed),
+            fresh=published.triple, checkpoint=published,
+        )
+    if not result.readiness.complete:
+        return f"not built: the catalogue answered {result.readiness.status}"
+    return f"built over {len(allowed)} pages"
+
+
 @governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
@@ -1423,8 +1496,7 @@ def task_candidates(
     statistics = None
     with find_types.timing_span(timings, "working_set.task_context_policy"):
         fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
-        registry = context_roles.load_roles(vault_root)
-        categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
+        categories = method_unit_categories(vault_root)
         restricted = not context_task.full_source_access(vault_root, caller)
         metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
@@ -1529,22 +1601,31 @@ def task_candidates(
     method_seconds: float | None = None
     for origin, query_text in method_queries:
         # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
-        if budget_exhausted("working_set.task_context_methods", reserve=method_seconds):
+        # The leads already found must still be projected, so the search may spend only what that leaves.
+        kept = request_budget.task_projection_reserve(len(found))
+        reserve = kept + (
+            method_seconds if method_seconds is not None else request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        )
+        if budget_exhausted("working_set.task_context_methods", reserve=reserve):
             missing.append({"role": "task_context", "reason": "budget"})
             break
         started = time.monotonic()
-        with find_types.timing_span(timings, "working_set.task_context_methods"):
-            methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                [], limit + 1, categories, (), "kb", fresh,
-                allowed_parent_paths=allowed,
-                admitted_parent_paths=allowed,
-                # This branch proved FULL source access and filtered this request's catalogue paths.
-                released_parent_paths=allowed,
-                query_units=bm25.token_units(query_text, query=True),
-                term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=checkpoint, allow_delta=False,
+        with (
+            find_types.timing_span(timings, "working_set.task_context_methods"),
+            request_budget.leaving(kept),
+            lexstore.stopping_at_budget(),
+        ):
+            methods = search_method_units(
+                vault_root, bm25.token_units(query_text, query=True), limit + 1,
+                categories=categories, allowed=allowed, fresh=fresh, checkpoint=checkpoint,
             )
         method_seconds = time.monotonic() - started
+        if methods.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            budget = request_budget.current()
+            if budget is not None:
+                budget.note_truncated("working_set.task_context_methods")
+            break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
         else:
@@ -1590,9 +1671,9 @@ def _task_links(
     One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
     relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
     pages this caller may see, so a target outside it is never named; `visible` is also passed to the
-    owner API, which re-resolves each link in the caller's view. Typed relations rank by the registry's
-    declared `family` (the rule `find_candidates` uses for graph hits), never by relation name; within a
-    rank the owner API's order stands. Returns None while the graph cannot answer.
+    owner API, which re-resolves each link in the caller's view. Typed relations rank above plain links
+    by the registry's `plain_link` behaviour (the rule `find_candidates` uses for graph hits), never by
+    relation name; within a rank the owner API's order stands. Returns None while the graph cannot answer.
     """
     from . import epistemic_graph
 
@@ -2521,7 +2602,8 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     START a stage but never enough to finish one.
 
     `reserve` overrides that flat second for a stage whose cost this request
-    has already MEASURED. Nothing interrupts a stage once it has started, so
+    has already MEASURED. Nothing interrupts a started stage unless its queries run inside
+    `lexstore.stopping_at_budget`, so
     a flat reserve is only honest for stages that cost about the same every
     time; the carry's query is the same shape as the first lexical pass and
     costs about as much, so on a request where that pass took three seconds
@@ -2668,6 +2750,7 @@ def _is_current_page(
         return False
     if page is None:
         return False
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
@@ -3727,7 +3810,7 @@ def _carry_admission(
     A rich unit proves subject-associated context, never ownership of every
     sentence. Uncovered prose has no such association and cannot be a bypass.
     """
-    from . import find, semantic_language_registry, vault
+    from . import find, relation_registry, semantic_language_registry, vault
 
     scopes = working_set_resolve.possessive_scopes(analysis)
     if not scopes:
@@ -3756,6 +3839,7 @@ def _carry_admission(
         ) if len(matches) == 1 else frozenset()
     restricted = {}
     registries = {}
+    relation_registries = {}
     language = semantic_language_registry.load_registry(vault_root)
     for path, page in pages.items():
         if page is None:
@@ -3778,6 +3862,8 @@ def _carry_admission(
         restricted[path] = tuple(local)
         registries[path] = semantic_language_registry.for_attached_projects(
             language, tuple(find._all_projects(page.frontmatter)))
+        relation_registries[path] = relation_registry.load_for_page(
+            vault_root, path, page.frontmatter)
 
     def admit(path, hit):
         if path not in restricted:
@@ -3788,9 +3874,11 @@ def _carry_admission(
             return False
         # Subject relations must identify the canonical page. A short alias
         # alone cannot prove identity, even when the turn used a unique name.
+        names_subject = relation_registries[path]
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
-            for relation in hit.relations if relation.get("kind") == "about_entity"}
+            for relation in hit.relations
+            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False

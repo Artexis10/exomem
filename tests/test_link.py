@@ -422,14 +422,14 @@ def test_link_connections_normalize_and_render(vault: Path) -> None:
         today=TODAY,
     )
     text = _read(vault / result.path)
-    # Each connection rendered as a bullet.
+    # Each connection rendered as a plain-link bullet; a bare name states no meaning.
     # KB-relative inputs get promoted to full vault-rooted form. Read-only
     # sibling-tree references (`Reference/...`, marked readonly in _access.yaml)
     # stay vault-relative — they don't live under Knowledge Base/.
     assert "## Relations" in text
-    assert "- relates_to [[Knowledge Base/Notes/Insights/foo]]" in text
-    assert "- relates_to [[Knowledge Base/Notes/Patterns/bar]]" in text
-    assert "- relates_to [[Reference/Strategy]]" in text
+    assert "- links_to [[Knowledge Base/Notes/Insights/foo]]" in text
+    assert "- links_to [[Knowledge Base/Notes/Patterns/bar]]" in text
+    assert "- links_to [[Reference/Strategy]]" in text
 
 
 def test_link_connections_use_kb_relative_form_for_nested_obsidian_root(
@@ -447,7 +447,7 @@ def test_link_connections_use_kb_relative_form_for_nested_obsidian_root(
     )
 
     text = _read(vault / result.path)
-    assert "- relates_to [[Notes/Insights/foo]]" in text
+    assert "- links_to [[Notes/Insights/foo]]" in text
     assert "[[Knowledge Base/" not in text
 
 

@@ -55,13 +55,12 @@ CENSUS_VERSION = 1
 AUDIENCE_RESTRICTED = "audience_restricted"
 POLICY_BLOCKED = "policy_blocked"
 
-_AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
+_AUTHORED_ORIGINS = relation_registry.AUTHORED_ORIGINS
 # The indexer mints a `derived_from` edge from every unit or block to its own
 # page. That is structure, not an authored relation, and it never connects a
 # page to anything else.
 _STRUCTURAL_ORIGINS = ("semantic_unit", "semantic_block")
 _BODY_LINK_ORIGINS = frozenset({"wikilink", "markdown_relation", "semantic_relation"})
-_LINK = "links_to"
 _STATUS_KEYS = (
     "core_specific",
     "core_generic",
@@ -71,8 +70,12 @@ _STATUS_KEYS = (
     "unregistered",
     "scope_violation",
 )
+# Debt (K7, C8): a census-only check. `target_kinds` cannot state it, because folders and
+# Sources pages count as evidence too, so the kind list stays with the check.
 _EVIDENTIAL_KINDS = frozenset({"evidence", "result", "metric", "finding", "experiment"})
 _QUESTION_KINDS = ("question", "open_question")
+# Debt (F7): a census-only flag keyed on the family, so an extension in these families
+# already reaches it.
 _EPISTEMIC_FAMILIES = frozenset({"support", "contradiction", "supersession", "duplication"})
 _EVIDENCE_FOLDERS = ("Sources/", "Evidence/")
 _GOVERNANCE_SEGMENT = "/_Governance/"
@@ -111,6 +114,14 @@ class AddedEdges(NamedTuple):
     #: Facts whose endpoints no stable identity could prove, and every fact compared.
     unavailable: int
     compared: int
+    #: New facts that no stable identity proves, such as a relation inside a unit with no
+    #: anchor: left out of `edges`, and absent from the page this write replaces.
+    unproven: tuple[Any, ...] = ()
+
+
+def fact_operand(fact: Any) -> tuple[Any, ...]:
+    """What an author wrote for one edge: relation, target, anchor and source kind."""
+    return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
 
 
 def added_edges(
@@ -141,8 +152,7 @@ def added_edges(
             if fact.authored_path == path and fact.authored and fact.origin in _AUTHORED_ORIGINS
         ]
 
-    def operand(fact: Any) -> tuple[Any, ...]:
-        return (fact.raw_relation, fact.raw_target, fact.authored_anchor, fact.source_kind)
+    operand = fact_operand
 
     def endpoint(context: Any, path: str, anchor: str | None = None) -> str:
         page = context.pages.get(path)
@@ -191,6 +201,17 @@ def added_edges(
         not stable_endpoints(after, fact) for fact in current
     )
     compared = len(prior) + len(current)
+    # Without a stable identity a fact can only be compared by what its author wrote: it is new
+    # unless the page this write replaces wrote the same operand.
+    written_before = Counter(operand(fact) for fact in prior)
+    unproven = []
+    for fact in current:
+        if stable_endpoints(after, fact):
+            continue
+        if written_before[operand(fact)]:
+            written_before[operand(fact)] -= 1
+        else:
+            unproven.append(fact)
     prior = [fact for fact in prior if stable_endpoints(before, fact)]
     current = [fact for fact in current if stable_endpoints(after, fact)]
     # Unchanged operands cannot become additions through resolver or registry drift.
@@ -230,7 +251,7 @@ def added_edges(
                 hashlib.sha256(json.dumps(edge_identity, sort_keys=True).encode()).hexdigest(),
             )
         )
-    return AddedEdges(additions, uncertain, compared)
+    return AddedEdges(additions, uncertain, compared, tuple(unproven))
 
 
 def operation_provenance(
@@ -262,9 +283,6 @@ def operation_provenance(
         placement = preflight.placement
 
     added = added_edges(before, after, prior_path=prior_path, current_path=state.path)
-    # The reason a caller gave for each generic edge it kept, bound to that edge's identity.
-    cleared = getattr(preflight, "generic_cleared", None)
-    reasons = dict(cleared.edges) if cleared is not None else {}
     additions = []
     for edge in added.edges:
         fact = edge.fact
@@ -307,8 +325,10 @@ def operation_provenance(
                 "origin": fact.origin,
                 "endpoint_class": endpoint_class,
                 "generic": definition.generic if definition is not None else None,
-                "reason": reasons.get(edge.identity),
-                "reason_recorded": edge.identity in reasons,
+                # The v1 log schema keeps these two fields. No write keeps a generic edge on a
+                # stated reason any more, so no new event records one.
+                "reason": None,
+                "reason_recorded": False,
             }
         )
     # The v1 log schema fixes mutation kinds; note-type keys stay in their registry.
@@ -463,14 +483,36 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             "available": numerator is not None,
         }
 
-    def generic_share(population: list[dict]) -> dict[str, Any]:
-        known = [edge for edge in population if type(edge.get("generic")) is bool]
+    def share(
+        population: list[dict],
+        counted: Callable[[dict], bool],
+        known_when: Callable[[dict], bool] = lambda edge: True,
+    ) -> dict[str, Any]:
+        """The share of `population` edges that `counted` picks, over those the log classifies."""
+        known = [edge for edge in population if type(edge.get("generic")) is bool and known_when(edge)]
         measured = bool(events) and (bool(known) or (not population and not unknown_identity))
         return metric(
-            sum(edge["generic"] for edge in known) if measured else None,
+            sum(counted(edge) for edge in known) if measured else None,
             len(known) if measured else None,
             covered={**coverage, "classified_edges": len(known), "cohort_edges": len(population)},
         )
+
+    def generic_share(population: list[dict]) -> dict[str, Any]:
+        return share(population, lambda edge: edge["generic"])
+
+    # The edges a writer authored as a relation (a `## Relations` bullet or a semantic
+    # relation), never a body wikilink; the log must name each edge's relation to class it.
+    core = relation_registry.core_registry()
+    authored = [edge for edge in edges if edge.get("origin") in _AUTHORED_ORIGINS]
+
+    def plain_link(edge: dict) -> bool:
+        # Core meanings are shared; an extension reads through its authoring page's registry.
+        relation = edge["relation"]
+        registry = core if relation in core.core else reader.view.registry_for(edge["source_path"])
+        return registry.has(relation, "plain_link")
+
+    def names_relation(edge: dict) -> bool:
+        return isinstance(edge.get("relation"), str)
 
     generic = [edge for edge in edges if edge.get("generic") is True]
     reasoned = [edge for edge in generic if edge.get("reason_recorded") is True]
@@ -478,7 +520,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "status": "partial" if reasoned else "unavailable",
         "numerator": len(reasoned),
         "denominator": len(generic) if events else None,
-        "limitation": "Only writes that answered the generic-relation barrier record an edge-bound reason.",
+        "limitation": "Only events logged before the generic-relation barrier refused every new generic edge record an edge-bound reason.",
     }
     reasons = [
         unicodedata.normalize("NFKC", " ".join(edge["reason"].split())).casefold()
@@ -545,6 +587,11 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
             len(recorded_edges) if events and (edges or not unknown_identity) else None,
         ),
         "raw_generic_share": generic_share(edges),
+        # Of the relation edges writers authored: a specific relation, and a plain link.
+        "specific_share": share(
+            authored, lambda edge: not edge["generic"] and not plain_link(edge), names_relation
+        ),
+        "plain_link_share": share(authored, plain_link, names_relation),
         "endpoint_classes": classes,
         "unreasoned_generic_edges": metric(
             sum(
@@ -608,8 +655,8 @@ def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], di
         ),
         proposed_fix=(
             "Review the recorded choices through schema_memory(subject='relations', "
-            "operation='census'). Use a specific predicate when the evidence supports it; "
-            "keep an honest generic choice with its reason. This signal never blocks a write."
+            "operation='census'). Use a specific relation when the evidence supports it; "
+            "otherwise propose a relation or write a plain link. This signal never blocks a write."
         ),
         meta={
             "signal_version": hashlib.sha256(
@@ -873,6 +920,7 @@ class _Row(NamedTuple):
     dst_anchor: str | None
     fragment: str | None  # how a `#fragment` target resolved; None for no fragment
     target_fragment: str | None  # the fragment as authored
+    behaviours: frozenset[str]  # what the relation does, read in its authoring page's registry
 
     @property
     def touches_other(self) -> bool:
@@ -892,14 +940,15 @@ _ROWS_SQL = (
 _POPULATION_SQL = (
     "FROM (SELECT e.src_key, e.dst_key, "
     "exomem_edge_relation({columns}) AS relation_type, "
-    "exomem_edge_status({columns}) AS registry_status "
+    "exomem_edge_status({columns}) AS registry_status, "
+    "exomem_edge_behaves({columns}, 'plain_link') AS plain_link "
     "FROM graph_edges AS e "
     "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
     "AND exomem_census_eligible(e.source_path)) AS e {{join}}"
     "JOIN graph_nodes AS s ON s.node_key = e.src_key "
     "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
     "WHERE e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
-    "AND e.relation_type != 'links_to' AND s.path != d.path "
+    "AND e.plain_link = 0 AND s.path != d.path "
     "AND exomem_census_admitted(s.path) AND exomem_census_admitted(d.path)"
 )
 
@@ -1021,6 +1070,7 @@ class _Reader:
                 dst_anchor,
                 metadata.get("fragment_resolution"),
                 metadata.get("target_fragment"),
+                self.view.behaviours(edge),
             )
 
     def pair_checks(
@@ -1081,13 +1131,17 @@ class _Reader:
         )
 
     def sources_pages(self) -> set[str]:
-        """Pages with an admitted frontmatter `sources:` edge."""
+        """Pages with an admitted edge from the frontmatter field that declares Sources."""
+        from .epistemic_graph import declared_sources_binding
+
+        field, relation = declared_sources_binding()
         found: set[str] = set()
         for source_path, dst_path in self.connection.execute(
             "SELECT e.source_path, d.path FROM graph_edges AS e "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
-            "WHERE e.relation_type = 'derived_from' AND e.origin = 'frontmatter' "
-            "AND e.source_anchor = 'sources'"
+            "WHERE e.relation_type = ? AND e.origin = 'frontmatter' "
+            "AND e.source_anchor = ?",
+            (relation, field),
         ):
             if self.admitted(source_path) and self.admitted(dst_path):
                 found.add(source_path)
@@ -1095,15 +1149,17 @@ class _Reader:
 
     def supersession_chains(self) -> _UnionFind:
         chain = _UnionFind()
+        # A stored core key or a candidate narrows the scan; an extension is stored as a
+        # candidate and read per page, so the served `replaces` behaviour decides.
+        replacing = sorted(relation_registry.core_registry().keys_with("replaces"))
         for src_path, dst_path, source_path in self.connection.execute(
             "SELECT s.path, d.path, e.source_path FROM graph_edges AS e "
             "JOIN graph_nodes AS s ON s.node_key = e.src_key "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
             "WHERE e.origin != 'wikilink' "
-            "AND (e.relation_type = 'supersedes' OR e.registry_status = ?) "
-            f"AND exomem_edge_relation({self._columns}) = 'supersedes' "
-            f"AND exomem_edge_status({self._columns}) != 'unregistered'",
-            (self._candidate,),
+            f"AND (e.relation_type IN ({','.join('?' * len(replacing))}) OR e.registry_status = ?) "
+            f"AND exomem_edge_behaves({self._columns}, 'replaces') = 1",
+            (*replacing, self._candidate),
         ):
             if (
                 src_path != dst_path
@@ -1214,7 +1270,7 @@ def _census_payload(
         typed = (
             row.relation is not None
             and row.status != "unregistered"
-            and row.relation != _LINK
+            and "plain_link" not in row.behaviours
             and row.origin != "wikilink"
         )
         if row.touches_other:
@@ -1229,6 +1285,7 @@ def _census_payload(
             definition = (
                 registry if row.relation in registry.core else reader.view.registry_for(source)
             ).definition(row.relation or "")
+            # Debt (F8): one entity-census count for one family.
             if definition is not None and definition.family == "affiliation":
                 affiliated.add(source)
             _check_row(
@@ -1439,11 +1496,12 @@ def _check_row(
         record("signature_mismatch", row.status == "scope_violation" or bool(outside))
     src_page, dst_page = row.src_page or "", row.dst_page or ""
     same_page = src_page == dst_page
-    if row.relation == "supersedes" and not same_page:
+    if "replaces" in row.behaviours and not same_page:
         newer = _origin_date(reader.pages[src_page].origin_date)
         older = _origin_date(reader.pages[dst_page].origin_date)
         if newer is not None and older is not None:
             record("supersedes_backwards", newer < older)
+    # Debt (K7): the key and its target kinds are one census-only check; see `_EVIDENTIAL_KINDS`.
     if row.relation == "evidenced_by":
         if row.dst_kind == "file":
             relative = dst_page.removeprefix(kb_prefix())
@@ -1451,6 +1509,8 @@ def _check_row(
         else:
             evidential = row.dst_kind in _EVIDENTIAL_KINDS
         record("evidence_target_not_evidential", not evidential)
+    # Debt (K8): `settles` is wrong here, because a `resolves` target is often no question.
+    # The target side reads the `question` trait once the kinds move to the pack.
     if row.relation == "answers":
         if row.dst_kind == "file":
             answered = reader.question_page(dst_page)
@@ -1459,7 +1519,7 @@ def _check_row(
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
         record("same_page_epistemic", same_page)
-    if row.relation == "contradicts" and not same_page:
+    if "opposes" in row.behaviours and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
 
 
@@ -1516,7 +1576,7 @@ def sample(
     can read and judge them locally; the file never leaves the machine, and
     nothing but the folded counts re-enters the census. Specific means an
     authored, registered edge between pages in view that is neither
-    `relates_to` nor `links_to`. Each family keeps the edges with the smallest
+    the generic relation nor the plain link. Each family keeps the edges with the smallest
     seeded hash of their identity, so one pass draws a uniform, reproducible
     sample while holding at most `size` candidates per family.
     """
@@ -1539,7 +1599,8 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, generic_key, _LINK)
+                or row.relation in (None, generic_key)
+                or "plain_link" in row.behaviours
                 or row.status == "unregistered"
             ):
                 continue

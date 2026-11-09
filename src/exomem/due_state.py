@@ -4497,9 +4497,10 @@ def served(
     rows = served_entries(
         vault_root, today=today, principal=principal, purpose=purpose, include_triaged=True
     )
-    promoted = promotions_module.served_rows(
-        vault_root, principal=principal, purpose=purpose, today=today
-    )
+    with call_spans.span("recall.due_state.promotions", {}):
+        promoted = promotions_module.served_rows(
+            vault_root, principal=principal, purpose=purpose, today=today
+        )
     # Reserve one bounded display slot for promotion delivery; backlog cannot starve it.
     leading = [row for row in promoted if row.get("new_family")]
     trailing = [row for row in promoted if not row.get("new_family")]

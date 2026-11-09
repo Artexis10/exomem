@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.167.0](https://github.com/Artexis10/exomem/compare/v0.166.0...v0.167.0) (2026-11-08)
+
+
+### Features
+
+* **relations:** refuse generic relations on new edges and offer a ranked choice ([#2582](https://github.com/Artexis10/exomem/issues/2582)) ([fad91f7](https://github.com/Artexis10/exomem/commit/fad91f719069d1dccfb898a98ac87733cb3b1665))
+* **vault-store:** add the store-mode read and write contract ([#2569](https://github.com/Artexis10/exomem/issues/2569)) ([f89b165](https://github.com/Artexis10/exomem/commit/f89b165aa857d4e8dee7765cf3a18ac7897e8e50))
+
+
+### Bug Fixes
+
+* **capture:** name the fix in adoption key refusals and the page of an identical Source hand-over ([#2574](https://github.com/Artexis10/exomem/issues/2574)) ([659c484](https://github.com/Artexis10/exomem/commit/659c484aa27165e1879242fce32452b1d5fae877))
+* **derived:** converge only the pages a batch still owns ([#2580](https://github.com/Artexis10/exomem/issues/2580)) ([e419b1b](https://github.com/Artexis10/exomem/commit/e419b1bd5e61bb530327c226d642c2e7bfbd11b9))
+* **mode:** show when an idle CPU cache is released ([#2575](https://github.com/Artexis10/exomem/issues/2575)) ([5ea59e8](https://github.com/Artexis10/exomem/commit/5ea59e86f3e993a173ea4244ed9628c181f013c4))
+
+
+### Performance
+
+* **promotions:** build the link index once when proving open edge notices ([#2581](https://github.com/Artexis10/exomem/issues/2581)) ([020d66b](https://github.com/Artexis10/exomem/commit/020d66bde142c856d0300a3cfed8871095a2e721))
+* **recall:** keep one statistics base per admitted page set ([#2576](https://github.com/Artexis10/exomem/issues/2576)) ([9e9f41c](https://github.com/Artexis10/exomem/commit/9e9f41c03fabcd510d112f9f01a9ee82e037b1fe))
+
 ## [0.166.0](https://github.com/Artexis10/exomem/compare/v0.165.0...v0.166.0) (2026-11-08)
 
 

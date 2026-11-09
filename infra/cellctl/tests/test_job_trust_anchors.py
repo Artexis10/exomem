@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from cellctl import main, reconcile
 from cellctl.capacity import GIB
-from cellctl.exports import ExportRow, ExportSize, ExportStorage
+from cellctl.exports import UPLOAD, VERIFY, ExportRow, ExportSize, ExportStorage
 from cellctl.imports import ImportRow, ImportStorage
 from cellctl.manifests import (
     MAX_GRANT_CHARS,
@@ -60,7 +60,9 @@ def _export_job(*, verify: bool, grant: str | None = None, **anchors) -> dict:
     item = ExportRow(str(uuid.uuid4()), CELL_ID, "requested", NOW, operation_grant=grant,
                      **({"archive_version_id": "v1", "archive_bytes": 5, "archive_sha256": "b" * 64} if verify else {}))
     size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
-    return render_export_job(spec, item, size, part_urls=["https://storage.example/part"], deadline_seconds=1800)
+    # Of the export's steps, the upload and the verification move data through presigned URLs.
+    return render_export_job(spec, item, VERIFY if verify else UPLOAD, size=size,
+                             part_urls=["https://storage.example/part"], deadline_seconds=1800)
 
 
 _JOBS = [

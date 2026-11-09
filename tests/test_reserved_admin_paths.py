@@ -231,6 +231,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         lexstore,
         media_jobs,
         memory_refs,
+        procedure_approval,
         review_state,
         served_context,
         voice_profiles,
@@ -274,6 +275,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-store",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "procedure-approval-key",
+        "procedure-approvals",
         "references-store",
         "refs-store",
         "review-state",
@@ -310,6 +313,13 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (media_jobs.job_store_path(root), "media-jobs-store"),
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
+        (procedure_approval.key_path(root), "procedure-approval-key"),
+        (
+            procedure_approval.entry_path(
+                root, "exomem://memory/6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b", "a" * 32
+            ),
+            "procedure-approvals",
+        ),
         (graph_sync.checkpoint_path(root), "graph-handoff"),
         (graph_sync.floor_path(root), "graph-handoff"),
         (

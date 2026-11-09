@@ -110,8 +110,8 @@ def retained(manifest_path: str) -> dict[str, Manifest | None]:
 def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) -> Callable[[str], bool | None]:
     """A condemn call through the media edge. True when the edge hid the name, None when it refused this name alone.
 
-    An outage or a refused credential stops the pass: every later name would get the same answer. A name that the
-    edge holds busy or does not find leaves the rest of the pass going, and the next hold tries it again.
+    An outage, a refused credential or a missing route stops the pass: every later name would get the same answer. A
+    name that the edge holds busy leaves the rest of the pass going, and the next hold tries it again.
     """
     try:
         credential = credential_file.read_text(encoding="ascii").strip()
@@ -127,11 +127,13 @@ def edge_condemner(url: str, credential_file: Path, *, timeout: float = 30.0) ->
                                   headers={"authorization": f"Bearer {credential}"})
         except httpx.HTTPError as error:
             raise CollectStopped("edge-outage", f"the media edge condemn failed: {type(error).__name__}") from error
-        # HTTP's own statuses: 404 and 409 answer for one name, any other one for the edge as a whole.
-        if response.status_code in (404, 409):
+        # HTTP's own statuses: only 409, the edge's serial-write hold, answers for one name. A current edge answers a
+        # missing name with 200 and hides nothing, so a 404 means the route itself is gone (an edge rolled back).
+        if response.status_code == 409:
             return None
         if response.status_code != 200:
             reason = ("edge-refused" if response.status_code in (401, 403)
+                      else "edge-route" if response.status_code == 404
                       else "edge-outage" if response.status_code >= 500 else "edge-answer")
             raise CollectStopped(reason, f"the media edge answered {response.status_code}")
         try:

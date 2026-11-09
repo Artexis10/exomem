@@ -17,7 +17,7 @@ Revision 5 separates the revert fingerprint from the entry's review fingerprint,
 The owner approved the autonomous organisation plan. It amends this design as follows; the decisions below keep their history.
 
 - **Decision 3, items 3 to 5.** `create-entity` typed edges shipped as the separate `relations=[{kind,target}]` parameter, so `connections` gains no item union. The `add-relation` operation is dropped: agents author typed edges through `relations` items and `## Relations` bullets. Edge removal survives only as an internal curation step that the promotion revert runs; no tool gains a removal operation.
-- **Decision 3, item 6.** Organisation PR B replaces "endpoints never refuse a write" with a barrier: a newly added generic edge that touches an entity, where an active non-generic relation fits both endpoints, refuses before commit with at most 4 options and a one-retry route that keeps the generic relation with a recorded reason. Note-to-note generic edges are never refused; they get a warning and post-commit options. `endpoints` uses a typed grammar (`entity:<type>`, `entity:*`, `role:<note role>`) and lands with the barrier.
+- **Decision 3, item 6.** Organisation PR B replaces "endpoints never refuse a write" with a barrier: a newly added generic edge that touches an entity, where an active non-generic relation fits both endpoints, refuses before commit with at most 4 options and a one-retry route that keeps the generic relation with a recorded reason. Note-to-note generic edges are never refused; they get a warning and post-commit options. (`refuse-generic-relation-authoring` supersedes this: it refuses every added generic edge, entity or note, offers a ranked menu, and keeps no reasoned retry.) `endpoints` uses a typed grammar (`entity:<type>`, `entity:*`, `role:<note role>`) and lands with the barrier.
 - **Decision 7.** The rule that the baseline exists before any part of this change merges is replaced. Organisation PR A carries no behaviour layer, so the baseline is main with PR A.
 - **Decision 8.** Organisation PR B replaces the f33 protocol with the revised one: small paired development rounds, then one blind held-out run of 40 independent situations under a new preregistered amendment. The f33 amendment stays filed, sealed and unrun.
 
@@ -401,7 +401,7 @@ Page dates, graph rebuild times and promotion settlement do not establish edge c
 Stable resolved endpoint identity prevents a spelling change or inherited predecessor edge from becoming a new authored edge.
 
 Each metric reports its numerator, denominator, window, source and coverage; missing instrumentation is `unavailable`, never zero.
-Report raw generic share, unreasoned generic edges, exact-normalized duplicate reasons, referents acted on, dismissed or ignored, and placement by actual basis.
+Report raw generic share, referents acted on, dismissed or ignored, and placement by actual basis. (`refuse-generic-relation-authoring` now owns this cohort requirement and adds the specific and plain-link shares; reasons are recorded only by events logged before its refusal.)
 A mutation's general rationale does not count as an edge-review reason.
 Referent outcomes need correlated observations; clearing a review item does not prove that an agent acted.
 Legacy periods and unsupported writers remain visible coverage gaps.

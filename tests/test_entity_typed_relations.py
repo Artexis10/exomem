@@ -1,8 +1,8 @@
 """Typed relations authored when an entity is first created.
 
 `markdown-relations` "Entity creation can author typed relations": a caller that
-knows what an entity means to another page states the predicate at birth. A bare
-`relates_to` to an entity needs a stated reason when a specific relation fits.
+knows what an entity means to another page states the predicate at birth. A generic
+relation is refused (`test_generic_relation_barrier.py`).
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(
             {"kind": "supports", "target": target_ref},
             {"kind": "part_of", "target": target},
             {"kind": "supports", "target": target},
-            {"kind": "relates_to", "target": target_ref, "reason": "no narrower relation fits"},
+            {"kind": "extends", "target": target_ref},
         ],
     )
 
@@ -62,7 +62,7 @@ def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(
     assert _relations_section(page) == [
         f"- supports [[{target}]]",
         f"- part_of [[{target}]]",
-        f"- relates_to [[{target}]]",
+        f"- extends [[{target}]]",
     ]
     assert graph_sync.drain_active_rebuilds(timeout=60.0)
     graph = commands.op_connect_memory(
@@ -77,7 +77,7 @@ def test_create_entity_keeps_each_authored_predicate_in_markdown_and_graph(
     assert outgoing == {
         ("supports", f"file:{target}.md"),
         ("part_of", f"file:{target}.md"),
-        ("relates_to", f"file:{target}.md"),
+        ("extends", f"file:{target}.md"),
     }
 
 

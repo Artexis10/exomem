@@ -537,11 +537,12 @@ imposed in either lane.
 
 ### Requirement: Authored all-generic relations receive accurate non-blocking feedback
 
-When admitted authored explicit relations are present and all are registry-marked generic, semantic evaluation SHALL emit one bounded non-blocking advisory.
-It SHALL ask the active agent to review specific registered meaning while allowing honest generic relations or no edge.
+A write SHALL NOT add a generic relation; the relation-vocabulary requirement refuses it before commit.
+When admitted authored explicit relations are present and all are registry-marked generic, because the page authored them earlier or an upgrade left them, semantic evaluation SHALL emit one bounded non-blocking advisory.
+It SHALL ask the active agent to review specific registered meaning, and SHALL name a proposed relation, a plain link or no edge as the honest alternatives.
 It SHALL describe only that authored pattern, even when a qualifying incoming specific relation satisfies disposition.
 It SHALL suppress the duplicate typed-edge-absent warning for that pattern without changing incoming-specific qualification.
-It SHALL NOT infer meaning, force a predicate, impose an output count or refuse a write.
+It SHALL NOT infer meaning, force a predicate, impose an output count or refuse a write that adds no generic relation.
 Default compact mutation feedback SHALL retain the advisory and an actionable relation-resolution route.
 
 #### Scenario: Incoming specificity does not conceal generic authorship
@@ -553,9 +554,17 @@ Default compact mutation feedback SHALL retain the advisory and an actionable re
 - **WHEN** an admitted authored explicit relation is specific rather than registry-marked generic
 - **THEN** the all-generic advisory is absent
 
+#### Scenario: A newly added generic edge is refused
+- **WHEN** an otherwise valid write adds a generic relation to a page
+- **THEN** the write is refused with the relation menu and no advisory replaces the refusal
+
+#### Scenario: A generic relation inside a semantic unit is refused
+- **WHEN** an otherwise valid write adds a generic relation in a unit's `relations:` metadata, and the unit has no anchor
+- **THEN** the write is refused like a generic Relations bullet, unless the page it replaces authored the same relation, target, anchor and unit kind
+
 #### Scenario: Honest generic edges remain writable
-- **WHEN** an otherwise valid write authors only admitted generic relations
-- **THEN** the write may commit with the advisory and no specificity refusal
+- **WHEN** a page already holds only admitted generic relations that it authored earlier, and an otherwise valid edit adds none
+- **THEN** the edit may commit with the advisory and no specificity refusal
 
 ### Requirement: Reviewed-None Creation Is Logically Atomic, Crash-Recoverable, And Content-Bound
 Creation-capable governed writers SHALL support `validate_only=true`. Validation SHALL preassign a candidate page UUID and return `draft_id`, `draft_hash`, a bounded opaque `draft_token` for server-derived render inputs and ordered project auto-registration intent, deterministic relation findings/candidates, and no filesystem mutation. A reviewed-none commit SHALL repeat identical proposed content and supply the unused `draft_id`, echoed `draft_token`, `relation_disposition="reviewed_none"`, matching `relation_review_hash`, and a non-empty `relation_review_reason`. The writer SHALL recalculate the hash over candidate identity plus normalized final content/destination and reject mismatch/reuse. A bounded portable creation receipt SHALL be prepared for every full active-compiled commit before its deterministic auxiliary writes, and the primary Markdown SHALL be replaced last as the logical commit marker, so a visible page never lacks required review state. Reviewed-none/bootstrap receipts SHALL also carry their disposition; a qualifying-relation receipt SHALL be transaction/recovery state only. Portable state SHALL live in governed Markdown/frontmatter or a vault-managed governed artifact in the same creation batch, not solely in a derived database, and SHALL survive index rebuild or vault transfer. Exact recovery SHALL reconstruct the same ordered auxiliary target/content digest, include already-applied expected targets unchanged, bind every existing leaf to its exact safely read content, and reject unrelated drift rather than overwrite it. An exact existing qualifying primary without an artifact SHALL remain an idempotent already-committed case after upgrade, while a page-less no-artifact attempt has no retroactive prepared-recovery guarantee.

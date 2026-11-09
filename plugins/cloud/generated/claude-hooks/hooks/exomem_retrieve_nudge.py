@@ -2174,25 +2174,78 @@ def _format_slice_block(block: object, max_chars: int) -> str:
 _METHOD_RESET_LINE = "- methods: discard held methods before reuse."
 
 
-def _format_task_context(block: object, max_chars: int) -> str:
-    """Render current read routes, with invalidation before every method projection."""
+def _slice_refs(block: object) -> frozenset[str]:
+    """The refs of the leads the turn slice lists, read the way the server's own guard reads them."""
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return frozenset()
+    return frozenset(str(item["ref"]) for item in block.get("items") or () if isinstance(item, dict) and item.get("ref"))
+
+
+def _task_link_line(item: dict, carried_ref: str) -> str:
+    """The links one task lead offers on one indented line, or "" when it lists none.
+
+    A lead that the turn slice already shows has no line of its own, so its links name the ref they belong to.
+    """
+    links = [link for link in item.get("links") or () if isinstance(link, dict)]
+    if not links:
+        return ""
+    # The title is page text, so it is quoted and escaped: no title can read as part of the hook's own lines.
+    listed = "; ".join(
+        f"{link.get('relation', '')} {json.dumps(str(link.get('title', '')), ensure_ascii=False)} [{link.get('target_ref', '')}]"
+        for link in links
+    )
+    omitted = item.get("links_omitted")
+    more = f" (+{omitted} more)" if type(omitted) is int and omitted > 0 else ""
+    origin = f" from [{carried_ref}]" if carried_ref else ""
+    # Collapsed like `_packet_line`: no field can end this line early and start another.
+    return "  " + " ".join(f"links{origin}: {listed}{more}".split())
+
+
+def _format_task_context(block: object, max_chars: int, slice_block: object = None, *, links: bool = True) -> str:
+    """Render current read routes, with invalidation before every method projection.
+
+    Each lead's link line is charged after every lead and method line, so a tight cap drops links before routes.
+    `links=False` renders the routes alone, so a caller can charge the links after what outranks them.
+    """
     if not isinstance(block, dict):
         return ""
+    shown = _slice_refs(slice_block)
     methods = block.get("methods") or {}
-    lines = []
+    entries: list[tuple[str, str]] = []  # (the route line, the link line that sits under it)
     for item in block.get("candidates") or ():
-        lines.append(_packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or "")))
+        carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
+        lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
+        entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
-        lines.append(_packet_line("method", f"{item.get('attribution', '')}; read the source for applicability and exclusions.", str(item.get("read_ref") or "")))
-    if lines:
-        lines.insert(0, _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""))
+        read_ref = str(item.get("read_ref") or "")
+        # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
+        title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
+        # `approved` is the server's closed verdict token. The line carries the title and a fixed instruction, no page text.
+        if item.get("approval") == "approved":
+            entries.append((_packet_line("approved procedure", f"{title}. Read it, then follow it where it fits.", read_ref), ""))
+            continue
+        entries.append((_packet_line("method", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
+    entries = [entry for entry in entries if any(entry)]
+    if entries:
+        entries.insert(0, (_packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""), ""))
     kept, used = [], 0
-    for line in lines:
-        if used + len(line) + 1 > max_chars:
+    for route, link_line in entries:
+        cost = len(route) + 1 if route else 0
+        if used + cost > max_chars:
             break
-        kept.append(line)
-        used += len(line) + 1
-    return "\n".join(kept)
+        kept.append((route, link_line))
+        used += cost
+    linked = set()
+    for position, (_route, link_line) in enumerate(kept):
+        if not link_line:
+            continue
+        if used + len(link_line) + 1 > max_chars:
+            break
+        linked.add(position)
+        used += len(link_line) + 1
+    lines = [line for position, (route, link_line) in enumerate(kept) for line in (route, link_line if position in linked else "") if line]
+    # A header over nothing says nothing: keep it only when a route or link line follows.
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _format_stance_block(block: object, max_chars: int, last_generation: str = "") -> tuple[str, bool]:
@@ -2236,9 +2289,12 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     room -= len(stance_text) + (1 if stance_text else 0)
     text, complete = _format_map_block(packet["map"], room, last_generation)
     room -= len(text) + (1 if text else 0)
-    task = _format_task_context(packet.get("task_context"), room)
-    room -= len(task) + (1 if task else 0)
-    turn = _format_slice_block(packet.get("turn_slice"), room)
+    # Priority is routes, then the turn slice, then links: the server protects the slice before leads and links.
+    routes = _format_task_context(packet.get("task_context"), room, packet.get("turn_slice"), links=False)
+    routes_cost = len(routes) + (1 if routes else 0)
+    turn = _format_slice_block(packet.get("turn_slice"), room - routes_cost)
+    spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
+    task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     return "\n".join(part for part in (reset, stance_text, text, task, turn, action) if part), complete, stance_complete
 
 
