@@ -6401,7 +6401,9 @@ class EpistemicGraphIndex:
             )
         )
         return (
-            "graph_sync_predecessor_unreadable" if structural else ADOPTION_DECLINE_SNAPSHOT_UNUSABLE
+            "graph_sync_predecessor_unreadable"
+            if structural
+            else ADOPTION_DECLINE_SNAPSHOT_UNUSABLE
         )
 
     def _graph_sync_predecessor_state(
