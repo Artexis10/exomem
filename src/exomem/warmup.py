@@ -395,6 +395,39 @@ def warm_caches(
     return durations
 
 
+def warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
+    """Build the method-unit statistics a worker's first task context would build. Reads only.
+
+    Without this the first task context after a start builds them: 41 s on a vault of about four thousand
+    pages after a handoff, 25 s after a unit restart, and 6 s on the next request. A standby runs it
+    before promotion, since it becomes the serving process; a cold start runs it in its background warm.
+    The request-path warm cannot do it: its neutral turn raises no method query.
+
+    ``deadline`` (absolute monotonic) bounds the build the way the request path bounds a method search: a
+    request budget that ends at it, stopped at by the catalogue query itself, so a build that reaches it
+    leaves no statistics rather than running on, though it keeps the parents it interpreted for the next
+    build. It builds nothing when warm-up is disabled or no time is left. Never raises.
+    """
+    if not warmup_enabled():
+        return
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        return
+    from . import lexstore, request_budget, working_set
+
+    began = time.monotonic()
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=seconds))
+    try:
+        with lexstore.stopping_at_budget():
+            outcome = working_set.warm_owner_method_units(vault_root)
+    except Exception:  # noqa: BLE001 - the first request builds them itself when this fails
+        log.info("method-unit statistics warm failed", exc_info=True)
+        return
+    finally:
+        request_budget.reset_current(token)
+    log.info("method-unit statistics warm: %s (%.1f s)", outcome, time.monotonic() - began)
+
+
 def warm_all(vault_root: Path) -> dict[str, float]:
     """Required catalog/graph/corpus state, then optional caches and model preloads.
 
@@ -518,6 +551,15 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             )
         )
         readiness.mark_ready("lexical")
+        # A promoted standby built these before promotion (the branch above); a cold start builds
+        # them here, within the cold-start window an operator configures.
+        from .service_manager import cold_start_budget
+
+        _run_step(
+            durations,
+            "method_units",
+            lambda: warm_method_unit_statistics(vault_root, deadline=time.monotonic() + cold_start_budget()),
+        )
     else:
         # BM25/resolver warm-up reaches the live lexical sidecar with repair
         # enabled. Running it beside the detached repair owner makes the two
