@@ -1424,9 +1424,9 @@ def search_method_units(
 def warm_owner_method_units(vault_root: Path) -> str:
     """Build in this process the method-unit statistics an owner's first task context builds; say what happened.
 
-    For a standby, which has no request to read from and must publish nothing. It reads the lexical
-    catalogue as published: its own recall checkpoint and its own recall rows, so a vault write that the
-    standby's unwatched registry has not seen cannot make the catalogue look stale, and no repair is
+    For a warm, which has no request to read from and must publish nothing. It reads the lexical
+    catalogue as published: its own recall checkpoint and its own recall rows, so a vault write that this
+    process's registry has not yet seen cannot make the catalogue look stale, and no repair is
     asked for. A query with no units builds the statistics and ranks nothing.
 
     The warmed set is every page the catalogue holds for the knowledge base, a superset of the catalogue
@@ -1437,7 +1437,7 @@ def warm_owner_method_units(vault_root: Path) -> str:
     from . import context_task, context_views, lexstore
     from .governance import principal
 
-    # The standby's own read stands in for the owner's request, so it takes the owner-local scope that
+    # The warm's own read stands in for the owner's request, so it takes the owner-local scope that
     # `effective_principal` leaves to a caller that declares it.
     with principal.library_scope():
         if not context_task.full_source_access(vault_root, context_views.CallerView.current(vault_root)):
