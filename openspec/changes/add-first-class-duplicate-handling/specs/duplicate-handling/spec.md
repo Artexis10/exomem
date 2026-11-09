@@ -87,12 +87,19 @@ An index hit SHALL count only when the caller can read the existing page in full
 
 The audit SHALL report `duplicate_content`: one finding per group of live Source or Evidence pages whose payloads are identical by re-hash. It SHALL report `duplicate_source_url`: one finding per group of live Sources that share one canonical URL and whose payloads differ. Both categories SHALL be declared through the same category registration as every other audit category, whose names select implemented checks and are not vault vocabulary. Both SHALL be selectable through `audit` and `attention`, SHALL stay out of the default `attention` union because a vault meets its whole backlog on the first run, and SHALL be advisory, never blocking.
 
-A `duplicate_content` finding SHALL name each member (ref, path, lane, families or import mappings, recorded capture date), the suggested canonical page, the bytes that a fold would free, and the exact `fold-duplicate` step for each copy. A group that spans lanes SHALL say so and offer no fold. A `duplicate_source_url` finding SHALL name the Sources, say that their bytes differ, and offer no fold. A group of Sources with one URL and identical payloads SHALL appear once, as `duplicate_content`. Findings SHALL obey the caller's read admission, so a page the caller cannot read reads as absent. The report SHALL state its counts by lane and whether each count was re-verified by re-hash or read from the index alone, and an incomplete index SHALL read as unchecked.
+A `duplicate_content` finding SHALL name each member (ref, path, lane, families or import mappings, recorded capture date), the suggested canonical page, the bytes that a fold would free, and the exact `fold-duplicate` step for each copy. A group that spans lanes, or that is raw-protected, SHALL say so and offer no fold. The suggested canonical page SHALL be the oldest filing, except that a member cited by a page that the fold cannot rewrite (an append-only page, or a page in another owner's tree) SHALL be the canonical page instead, and a group with two such members SHALL offer no fold and say why, so that a suggested step never meets a refusal at proposal. A `duplicate_source_url` finding SHALL name the Sources, say that their bytes differ, and offer no fold. A group of Sources with one URL and identical payloads SHALL appear once, as `duplicate_content`. Findings SHALL obey the caller's read admission, so a page the caller cannot read reads as absent. The report SHALL state its counts by lane and whether each count was re-verified by re-hash or read from the index alone, and an incomplete index SHALL read as unchecked.
 
 #### Scenario: A group of three identical photos
 
 - **WHEN** the audit runs over a vault where one photo is stored in three Evidence families
 - **THEN** it returns one `duplicate_content` finding with three members, one suggested canonical page and two fold steps
+
+#### Scenario: A copy that a Source cites stays
+
+- **WHEN** the audit runs over two identical Evidence pages and a Source cites the newer one
+- **THEN** it suggests the newer page as the canonical page
+- **AND** the `fold-duplicate` step it carries passes proposal unchanged
+- **AND** a group with two pages that such citers cite offers no fold and gives the reason
 
 #### Scenario: A stale index entry
 
@@ -121,7 +128,7 @@ The fold SHALL:
 3. Mark the copy's page `status: superseded` with `duplicate_of` and `superseded_by` naming the canonical page, through the writer that marks recap revisions superseded.
 4. Move the copy's original bytes to the vault trash. A text Source has no separate bytes, so its marked page stays as the whole copy.
 
-No other change SHALL occur. The canonical page's payload and original bytes stay byte-identical. The choice of canonical page is the agent's judgement, shown in the preview. The work item SHALL suggest the oldest filing, by recorded capture date and then path, and the system SHALL NOT choose.
+No other change SHALL occur. The canonical page's payload and original bytes stay byte-identical. The choice of canonical page is the agent's judgement, shown in the preview. The work item SHALL suggest the canonical page that the audit requirement above defines (the oldest filing, by recorded capture date and then path, unless a citer pins another member), and the system SHALL NOT choose.
 
 The fold is the only way to retire a Source or Evidence page. `edit_note`, `replace`, `supersede`, `move` and `delete` SHALL keep refusing Sources and Evidence.
 

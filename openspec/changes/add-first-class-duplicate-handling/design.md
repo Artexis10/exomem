@@ -92,7 +92,7 @@ Adoption checks bytes against the vault through the index and against earlier it
 
 ### D10. Which copy is canonical is the agent's judgement, shown in the preview
 
-The audit suggests the oldest filing, by capture date and then path. The system never chooses. Why: the choice carries meaning (which family or collection the owner considers primary), so no rule can make it. The owner confirms each batch.
+The audit suggests the oldest filing, by capture date and then path, unless a page that the fold cannot rewrite cites another member: that member is then the suggestion, and two such members leave the group without a suggested fold. The system never chooses. Why: the choice carries meaning (which family or collection the owner considers primary), so no rule can make it. The owner confirms each batch.
 
 ### D11. A fold has its own leaf and its own invariant
 

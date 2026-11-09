@@ -73,6 +73,7 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != _MANIFEST_FIELDS:
         raise fold_leaf.invalid(where, "is not a sealed fold manifest")
     head, revisions = value["head"], value["revisions"]
+    # nosemgrep: ep-word-set -- the sealed head's own field names, fixed by the manifest this module writes.
     if not isinstance(head, Mapping) or set(head) != {"path", "hash"} or not fold_leaf.is_hex64(head["hash"]):
         raise fold_leaf.invalid(where, "has an invalid head")
     if not isinstance(revisions, list) or not revisions:
@@ -80,6 +81,7 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
     for key in ("episode_key", "folder", "exomem_version"):
         curation._require_string(value[key], f"{where}.{key}")  # noqa: SLF001
     actor = value["actor"]
+    # nosemgrep: ep-word-set -- the sealed actor's own field names, fixed by the manifest this module writes.
     if not isinstance(actor, Mapping) or set(actor) != {"audience", "surface"}:
         raise fold_leaf.invalid(where, "has an invalid actor")
     own = value["own_pages"]

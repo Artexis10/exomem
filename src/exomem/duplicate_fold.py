@@ -347,12 +347,26 @@ def _referencing(
     if canonical_path in pages:
         raise fold_leaf.refuse("CURATION_STEP_INVALID", "the canonical page cites the copy, and its body is never rewritten")
     for page in pages:
-        if vault.in_append_only_tree(page) is not None:
-            raise fold_leaf.refuse(
-                "CURATION_TARGET_PROTECTED", f"{page!r} cites the copy and sits in an append-only tree, so the fold cannot repoint it"
-            )
-        curation.normalize_target_path(page, field="the citing page", allow_fold=True)
+        refusal = repoint_refusal(page)
+        if refusal is not None:
+            raise refusal
     return pages
+
+
+def repoint_refusal(page: str) -> CurationError | None:
+    """The refusal that stops a fold from rewriting `page` when it cites a copy, or None when it may.
+
+    The audit asks this too, so a finding never suggests a canonical page whose copy the fold would refuse.
+    """
+    if vault.in_append_only_tree(page) is not None:
+        return fold_leaf.refuse(
+            "CURATION_TARGET_PROTECTED", f"{page!r} cites the copy and sits in an append-only tree, so the fold cannot repoint it"
+        )
+    try:
+        curation.normalize_target_path(page, field="the citing page", allow_fold=True)
+    except CurationError as error:
+        return error
+    return None
 
 
 def prepare(vault_root: Path, args: Mapping[str, Any], projection: Projection) -> dict[str, Any]:

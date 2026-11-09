@@ -6,12 +6,14 @@ index entry costs a missed finding and never a false one. An index that cannot b
 unchecked, never as zero findings.
 
 A `duplicate_content` finding carries the exact `fold-duplicate` step for each copy, with the oldest filing as
-the suggested canonical page. The audit only suggests: the owner confirms which filing stays (`duplicate_fold`).
+the suggested canonical page. A page that a fold cannot rewrite may cite a member, and the fold refuses to retire a
+cited member, so that member is the canonical page instead; two such members leave the group with no step. The audit
+only suggests: the owner confirms which filing stays (`duplicate_fold`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +23,7 @@ from . import (
     duplicate_fold,
     duplicates,
     evidence_reuse,
+    fold_leaf,
     lexstore,
     request_budget,
     vault,
@@ -79,20 +82,54 @@ def _member(vault_root: Path, path: str) -> Member | None:
     return Member(path, payload, str(payload.frontmatter.get("captured") or ""), size)
 
 
-def _content_finding(vault_root: Path, members: list[Member], sha256: str) -> tuple[str, AuditFinding]:
+def _no_fold_reason(members: Sequence[Member]) -> str | None:
+    """Why a group of identical pages gets no fold step whatever its citers, or None when it may."""
+    if len({member.payload.lane for member in members}) > 1:
+        return "the identical bytes sit in both lanes, and a fold never crosses lanes"
+    if members[0].payload.protected:
+        return "the pages are raw-protected, a release grant binds to each page's content hash, and a fold never rewrites a protected page"
+    return None
+
+
+def _pinned_members(vault_root: Path, members: Sequence[Member]) -> set[str]:
+    """The paths of the members that a page the fold cannot rewrite cites.
+
+    The fold refuses to retire a cited page whose citer it cannot repoint, so such a member can only be canonical.
+    This reads the inbound references the way the fold does (`fold_leaf.referencing_pages`, the whole vault), once
+    for every group of the audit. It names no citing page: the caller may not be allowed to read it.
+    """
+    targets = {member.path: member.payload.ref for member in members}
+    targets.update({member.payload.artifact_path: None for member in members if member.payload.artifact_path})
+    cited = fold_leaf.referencing_pages(vault_root, targets, frozenset())
+    return {
+        member.path
+        for member in members
+        for page in {page for name in (member.path, member.payload.artifact_path) if name for page in cited.get(name, ())}
+        if page != member.path and duplicate_fold.repoint_refusal(page) is not None
+    }
+
+
+def _content_finding(
+    vault_root: Path, members: list[Member], sha256: str, pinned_all: set[str]
+) -> tuple[str, AuditFinding]:
     """One finding for a group of identical pages in one protection class. Returns its lane label and the finding."""
     from .audit import AuditFinding
 
     ordered = sorted(members, key=lambda member: member.filing_order)
-    canonical, copies = ordered[0], ordered[1:]
     lanes = {member.payload.lane for member in members}
-    lane = SPANNING if len(lanes) > 1 else canonical.payload.lane
+    lane = SPANNING if len(lanes) > 1 else ordered[0].payload.lane
+    why = _no_fold_reason(members)
+    pinned = [member for member in ordered if member.path in pinned_all]
+    if why is None and len(pinned) > 1:
+        why = (
+            "more than one page is cited by a page that the fold cannot rewrite (a Sources or Evidence page, or a page "
+            "in another owner's tree), and only one page can stay: "
+            + ", ".join(repr(member.path) for member in pinned)
+        )
+    # The oldest filing, unless a cited page can only be kept: then that page is the canonical one.
+    canonical = pinned[0] if pinned else ordered[0]
+    copies = [member for member in ordered if member is not canonical]
     freed = sum(member.size or 0 for member in copies)
-    why = None
-    if len(lanes) > 1:
-        why = "the identical bytes sit in both lanes, and a fold never crosses lanes"
-    elif canonical.payload.protected:
-        why = "the pages are raw-protected, a release grant binds to each page's content hash, and a fold never rewrites a protected page"
     steps = []
     if why is None:
         steps = [
@@ -100,7 +137,11 @@ def _content_finding(vault_root: Path, members: list[Member], sha256: str) -> tu
                 f"fold-{number}",
                 canonical=(canonical.path, vault.content_hash(canonical.payload.text)),
                 copy=(copy.path, vault.content_hash(copy.payload.text)),
-                why="An exact duplicate of the oldest filing, folded into it.",
+                why=(
+                    "An exact duplicate of the oldest filing, folded into it."
+                    if not pinned
+                    else "An exact duplicate of a page that a page the fold cannot rewrite cites, folded into that page."
+                ),
             )
             for number, copy in enumerate(copies, start=1)
         ]
@@ -125,6 +166,7 @@ def _content_finding(vault_root: Path, members: list[Member], sha256: str) -> tu
             "protected": canonical.payload.protected,
             "members": [member.as_dict(vault_root) for member in ordered],
             "suggested_canonical": canonical.path,
+            "canonical_because": "cited by a page the fold cannot rewrite" if pinned and why is None else "the oldest filing",
             "bytes_freed": freed,
             "steps": steps,
             "no_fold": why,
@@ -168,6 +210,7 @@ def check(vault_root: Path, categories: Collection[str]) -> tuple[list[AuditFind
     content: dict[str, dict[str, Any]] = {}
     stale = 0
     if wanted_content:
+        candidates: list[tuple[str, list[Member]]] = []
         for sha256, paths in payload_groups.items():
             request_budget.checkpoint()
             held = [member for path in paths if (member := _member(vault_root, path)) and member.payload.sha256 == sha256]
@@ -176,12 +219,17 @@ def check(vault_root: Path, categories: Collection[str]) -> tuple[list[AuditFind
             groups = [members for members in classes.values() if len(members) > 1]
             if not groups:
                 stale += 1
-            for members in groups:
-                lane, finding = _content_finding(vault_root, members, sha256)
-                findings.append(finding)
-                count = content.setdefault(lane, {"groups": 0, "copies": 0, "verified": RE_HASHED})
-                count["groups"] += 1
-                count["copies"] += len(members) - 1
+            candidates.extend((sha256, members) for members in groups)
+        # One read of the inbound references answers every group that a fold could still be suggested for.
+        request_budget.checkpoint()
+        foldable = [member for _, members in candidates if _no_fold_reason(members) is None for member in members]
+        pinned = _pinned_members(vault_root, foldable) if foldable else set()
+        for sha256, members in candidates:
+            lane, finding = _content_finding(vault_root, members, sha256, pinned)
+            findings.append(finding)
+            count = content.setdefault(lane, {"groups": 0, "copies": 0, "verified": RE_HASHED})
+            count["groups"] += 1
+            count["copies"] += len(members) - 1
     urls = {"groups": 0, "sources": 0, "verified": RE_HASHED}
     if wanted_url:
         for url, paths in url_groups.items():

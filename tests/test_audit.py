@@ -863,6 +863,43 @@ def test_a_stale_index_entry_gives_no_finding(vault: Path) -> None:
     assert after["metadata"]["duplicates"]["stale_index_groups"] == 1
 
 
+def test_a_copy_cited_by_a_source_becomes_the_suggested_canonical_page_and_its_step_passes_proposal(vault: Path) -> None:
+    """A Source cannot be repointed, so the page it cites must stay. Suggesting the oldest filing would send the reader into a refusal."""
+    from duplicate_fixtures import evidence_filing, source_filing
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    oldest = evidence_filing(vault, "Case", "letters", "notice.png", data, filed=dt.date(2026, 1, 1))
+    cited = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data, filed=dt.date(2026, 2, 1))
+    source_filing(vault, "citer", f"See [[{cited.removesuffix('.md')}]] for the photo.")
+
+    [finding] = _duplicate_audit(vault, "duplicate_content")["findings"]
+
+    assert (finding["path"], finding["meta"]["suggested_canonical"]) == (cited, cited)
+    assert finding["meta"]["canonical_because"] == "cited by a page the fold cannot rewrite"
+    [step] = finding["meta"]["steps"]
+    assert (step["args"]["canonical"]["path"], step["args"]["copy"]["path"]) == (cited, oldest)
+    with library_scope():
+        curation.propose(vault, {"version": 1, "title": "Fold the cited photo", "steps": [step]})
+
+
+def test_two_copies_that_pages_the_fold_cannot_rewrite_cite_give_a_finding_with_no_step_and_a_reason(vault: Path) -> None:
+    """Only one page can stay. With two pinned pages every fold would be refused, so the audit offers none and says why."""
+    from duplicate_fixtures import source_filing
+
+    pages = _three_photos(vault)
+    source_filing(vault, "citer-one", f"See [[{pages[0].removesuffix('.md')}]].")
+    source_filing(vault, "citer-two", f"See [[{pages[2].removesuffix('.md')}]].")
+
+    [finding] = _duplicate_audit(vault, "duplicate_content")["findings"]
+
+    assert finding["meta"]["steps"] == []
+    assert pages[0] in finding["meta"]["no_fold"] and pages[2] in finding["meta"]["no_fold"]
+    assert pages[1] not in finding["meta"]["no_fold"]
+    assert finding["proposed_fix"].startswith("No fold is offered")
+
+
 def test_one_url_with_different_text_gives_one_finding_and_no_fold(vault: Path) -> None:
     """Two captures of one address that differ are not duplicates: the audit names both and offers no step."""
     from duplicate_fixtures import source_filing
