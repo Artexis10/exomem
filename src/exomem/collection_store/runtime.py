@@ -751,12 +751,16 @@ class CollectionStoreRuntime:
 
     def flush(self, token, *, deadline, cancelled=None, drain_views=True):
         """Called only after admission stops, drainage and boundary acquisition."""
+        from ..vault_store import marker as vault_marker
+
         with self._publication_writer(token) as writer:
             if drain_views:
                 self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
+                # Store mode changes no collection head, so the replica's marker is copied by this flag alone.
+                force=vault_marker.replica_stale(self.root, writer.connection),
             )
             if result.status != "published":
                 raise connection.CollectionStoreError(

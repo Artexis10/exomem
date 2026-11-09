@@ -81,6 +81,21 @@ def read_replica(vault_root: Path) -> Replica:
     )
 
 
+def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
+    """Whether the replica must be copied again for its marker: the store and the replica disagree about store mode.
+
+    The replica is published by head, and store mode changes no head: activation and rollback commit the
+    marker without a collection-chain commit. Without this answer the hand-back would find the head unchanged
+    and leave the old replica in place, so a file-mode service elsewhere would never see the marker. A
+    replica that cannot be read counts as disagreeing only when the store says store: copying it fresh is
+    the repair, and the copy of a file-mode store has nothing to add that a damaged replica needs.
+    """
+    wanted = store.execute("SELECT value FROM store_meta WHERE key = ?", (KEY,)).fetchone()
+    says_store = wanted is not None and wanted[0] == ACTIVE
+    found = read_replica(vault_root).state
+    return (found != STORE) if says_store else (found == STORE)
+
+
 def report(vault_root: Path) -> dict:
     """The replica's state for a status report: ``vault_marker``, and the error's name when it cannot be read."""
     found = read_replica(vault_root)

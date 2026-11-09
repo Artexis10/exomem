@@ -76,8 +76,12 @@ def project(writer, root):
     queued = writer.connection.execute("SELECT path, operation FROM store_projection_queue").fetchall()
     for rel, operation in queued:
         if operation == "write":
-            body = writer.connection.execute("SELECT body FROM store_pages WHERE path = ?", (rel,)).fetchone()[0]
-            projection.write_file(root, rel, body, durable=False)
+            body, mtime_ns = writer.connection.execute(
+                "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
+            ).fetchone()
+            target = projection.write_file(root, rel, body, durable=False)
+            # The file carries the page's own mtime, so a cold derivation of the files can equal the stored rows.
+            os.utime(target, ns=(mtime_ns, mtime_ns))
         else:
             raise AssertionError(f"this suite projects writes only, not {operation}")
     with writer.handle.transaction() as tx:

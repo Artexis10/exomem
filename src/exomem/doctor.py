@@ -991,18 +991,24 @@ def _check_collection_store(vault_root: Path | None) -> DoctorCheck | None:
 
 
 def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
-    """Warn when the manifest records store mode but the store does not hold it (OpenSpec make-vault-store-canonical).
+    """Report the records that say whether this vault is in store mode (OpenSpec make-vault-store-canonical).
 
-    A crash during activation or rollback leaves this state. The vault serves from files, so the check
-    warns and never fails. A vault that records no store mode has nothing to report.
+    A file-mode root whose vault replica says another state root holds the store fails: a service here would
+    write Markdown beside pages that the store owns. A crash during activation or rollback leaves the manifest
+    recording store mode beside a store that does not hold it; the vault serves from files, so that warns.
+    A store-mode root warns while the replica does not say store, since a file-mode service elsewhere would
+    start. A vault that records no store mode and has no such replica has nothing to report.
     """
     if vault_root is None or not vault_root.is_dir():
         return None
     from . import state_migration
-    from .vault_store import availability
+    from .vault_store import availability, marker, mode
 
     try:
         inconsistency = availability.marker_inconsistency(vault_root)
+        in_store_mode = mode.store_mode_active(vault_root)
+        elsewhere = None if in_store_mode else marker.conflict(vault_root)
+        unpublished = in_store_mode and marker.read_replica(vault_root).state != marker.STORE
     except state_migration.StateMigrationManifestError as error:
         # The manifest decides whether this vault is in store mode, and a write refuses while it is unreadable.
         return _check(
@@ -1012,9 +1018,20 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
             details={"migration_manifest": str(error.path)})
     except (OSError, RuntimeError, sqlite3.Error) as error:
         return _check("vault_store_records", "warn", f"The store-mode records could not be read: {error}")
-    if inconsistency is None:
-        return None
-    return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")
+    if elsewhere is not None:
+        return _check(
+            "vault_store_records", "fail", availability.ELSEWHERE_REASON, availability.ELSEWHERE_REMEDY,
+            details={"vault_marker": elsewhere.state})
+    if inconsistency is not None:
+        return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")
+    if unpublished:
+        return _check(
+            "vault_store_records", "warn",
+            "This vault is in store mode but its replica does not say so yet, so a file-mode service on "
+            "another state root would start on it.",
+            "The next hand-back of the writer lease copies the replica. Until then, keep services on other "
+            "state roots stopped.")
+    return None
 
 
 def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
