@@ -48,6 +48,7 @@ from .vault import (
     resolve_under_vault,
     write_log_entry,
 )
+from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,15 @@ def _recover_from_trash_local(
     validate_only: bool = False,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoverResult:
+    # The recovery preflight judges the restore against the pages on disk, and a store-mode vault
+    # holds a page there only once its projector writes it; the store form of recovery waits for that.
+    store_targets.refuse_unrouted(
+        vault_root,
+        "recover_from_trash",
+        "its semantic contract check reads pages from disk, where a store-mode vault holds a page "
+        "only after its projector writes it",
+        files=(trash_path,),
+    )
     try:
         trash_abs, trash_rel = resolve_under_vault(
             vault_root, trash_path, must_exist=True

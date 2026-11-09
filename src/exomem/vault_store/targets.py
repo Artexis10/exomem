@@ -1,9 +1,9 @@
-"""Where a store-mode writer looks for its page (OpenSpec make-vault-store-canonical, task 2.2).
+"""Where a store-mode writer looks for its page, and what it refuses (OpenSpec make-vault-store-canonical, task 2.2).
 
 A page that a commit stored has no file until the projector writes it, so a writer that asks the
 disk whether its source exists, or whether its destination is free, answers for the projection and
 not for the vault. These helpers answer from the store for the paths that the store owns, and from
-the disk for the rest, so delete, move and recover share one answer.
+the disk for the rest. A writer whose store form does not exist yet refuses through the same place.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import vault
-from . import ownership, read
+from . import availability, mode, ownership, read
 
 
 def holds(vault_root: Path, rel: str) -> bool:
@@ -50,3 +50,34 @@ def resolve_existing(vault_root: Path, path: str) -> tuple[Path, str]:
     if resolution.candidate.exists() and not resolution.candidate.is_file():
         raise vault.VaultPathError(code="NOT_A_FILE", reason=f"path is not a regular file: {rel}")
     return resolution.candidate, rel
+
+
+def refuse_unrouted(
+    vault_root: Path,
+    operation: str,
+    why: str,
+    *,
+    files: tuple[str, ...] = (),
+    folders: tuple[str, ...] = (),
+) -> None:
+    """Refuse ``operation`` in a store-mode vault when the store owns any path that it was given.
+
+    It runs before the writer reads or changes anything, so a refusal leaves the vault as it was. A
+    file-mode vault and a path that the store does not own pass: the disk writer serves them. A path
+    that does not resolve passes too, because the writer's own path check names that error.
+    """
+    if not mode.store_mode_active(vault_root):
+        return
+    try:
+        owned = any(
+            ownership.classify(vault.resolve_under_vault(vault_root, path)[1])
+            is not ownership.Ownership.NONE
+            for path in files
+        ) or any(
+            ownership.owns_folder(vault.resolve_under_vault(vault_root, path)[1])
+            for path in folders
+        )
+    except vault.VaultPathError:
+        return
+    if owned:
+        raise availability.unrouted(operation, why)

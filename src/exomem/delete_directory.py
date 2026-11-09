@@ -39,6 +39,7 @@ from .vault import (
     resolve_under_vault,
     write_log_entry,
 )
+from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,14 @@ def _delete_directory_local(
             ),
         )
 
+    # Trashing a folder needs one trash move and one sidecar for each page it holds, and that has no
+    # store form yet: a folder that the store owns refuses before anything changes.
+    store_targets.refuse_unrouted(
+        vault_root,
+        "delete_directory",
+        "trashing a folder needs a trash move and a sidecar for each page it holds, and has no store form yet",
+        folders=(path,),
+    )
     try:
         abs_path, rel_path = resolve_under_vault(
             vault_root, path, must_exist=True, must_be_dir=True

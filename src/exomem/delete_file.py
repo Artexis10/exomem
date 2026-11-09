@@ -33,8 +33,6 @@ from . import held_fs, media_types, originals, reserved_paths, semantic_contract
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
-from .vault_store import availability as store_availability
-from .vault_store import targets as store_targets
 from .vault import (
     VaultPathError,
     batch_atomic_write,
@@ -47,6 +45,8 @@ from .vault import (
     resolve_under_vault,
     write_log_entry,
 )
+from .vault_store import availability as store_availability
+from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
 
