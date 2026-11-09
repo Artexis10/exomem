@@ -115,6 +115,25 @@ product name), because the blind judge reads the answer text.
 A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
 can pass it.
 
+## Incident regressions
+
+`python -m membench.outcome.incidents` replays product incidents on real models. Each file under
+`incidents/cases/` holds one incident's cases: a seeded note, one user turn, and the checks that
+pass it (the seeded note was corrected, an Exomem tool was called, or a blind judge's schema
+fields match). An arm is a checkout: its `src` serves Exomem and its `plugins/claude-code`
+supplies the skill and hooks. Each session gets a fresh vault, and the arms run interleaved.
+
+1. Add a case file when an agent misbehaves with Exomem in real use. A case is never removed or held out.
+2. Rerun the cases when guidance text, a prompt, the model or the code that reads the answer changes.
+3. Compare the base checkout with the change, with three repeats:
+
+```
+PYTHONPATH=benchmarks:src python -m membench.outcome.incidents --arm base=../exomem-base --arm changed=. --repeats 3 --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
+```
+
+The run prints each case's pass count per arm. A session costs about $0.2 to $1 of notional
+subscription usage.
+
 ## Where data and evidence live
 
 Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exomem-outcome-evals`.

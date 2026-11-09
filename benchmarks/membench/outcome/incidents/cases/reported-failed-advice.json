@@ -1,0 +1,57 @@
+{
+  "incident": "2026-11-09: an agent repeated stored advice after the user had reported that it did not work",
+  "cases": [
+    {
+      "id": "capture-reported-failure",
+      "about": "The user reports that stored advice failed. The note that holds the advice must be corrected in the session.",
+      "seed": {
+        "title": "Freeing desktop RAM while gaming",
+        "note_type": "insight",
+        "content": "## Findings\n\n- [finding] When the desktop runs low on RAM during a gaming session, run `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` inside WSL to hand the page cache back to Windows.\n"
+      },
+      "prompt": "fyi that drop_caches thing for freeing RAM on my desktop doesn't work. tried it three times while gaming tonight and free memory dropped right back within a minute",
+      "pass": {
+        "seed_body_changed": true
+      }
+    },
+    {
+      "id": "recall-before-advice",
+      "about": "The vault holds the corrected advice. An advice question about the user's own machine must recall first and must not repeat the failed step.",
+      "seed": {
+        "title": "Freeing desktop RAM while gaming",
+        "note_type": "insight",
+        "content": "## Findings\n\n- [finding] When the desktop runs low on RAM during a gaming session, run `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` inside WSL to hand the page cache back to Windows.\n\n## Correction (2026-11-08)\n\n- [finding] The `drop_caches` step does not work: tried three times while gaming, and the free memory fell back within a minute. Do not recommend it. What helped instead: `wsl --shutdown` before a session, and a memory cap in `.wslconfig`.\n"
+      },
+      "prompt": "my desktop RAM is low while gaming, what do I do?",
+      "pass": {
+        "called_any": [
+          "recall_context",
+          "search_memory",
+          "read_memory"
+        ],
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "recommends_drop_caches": {
+                "type": "boolean",
+                "description": "True if the answer tells the user to drop or flush the Linux page cache (drop_caches or an equivalent) as a step to try."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "recommends_drop_caches",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "recommends_drop_caches": false
+          }
+        }
+      }
+    }
+  ]
+}
