@@ -21,8 +21,13 @@ from pathlib import Path
 
 # These names and events are the repository's closed Actions/release protocol.
 WORKFLOW = ".github/workflows/ci.yml"
+AUTOMATION = ".github/workflows/release-evidence-automation.yml"
 RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
+INTENT_ARTIFACT = "release-intent"
+INTENT_FILE = "release-intent.json"
+# Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
+CHECK_POLLS, CHECK_POLL_SECONDS = 60, 20
 
 
 def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
@@ -42,8 +47,8 @@ def event_payload() -> dict:
     return json.loads(Path(path).read_text()) if path else {}
 
 
-def command(*args: str) -> bytes:
-    return subprocess.check_output(args)
+def command(*args: str, env: dict | None = None) -> bytes:
+    return subprocess.check_output(args, env=env)
 
 
 def api(path: str, *, pages: bool = False):
@@ -291,11 +296,144 @@ def refresh_checks(repository: str) -> None:
                 break
 
 
+def merge_release(number: int, base: str, head: str, repository: str, token: str = "") -> None:
+    """Merge the reviewed head after the final checks, evidence and source preflight."""
+    command("gh", "pr", "checks", str(number), "--required")
+    print(json.dumps(require_evidence(base, repository)))
+    release_pr(number, base, head)
+    print(
+        "GitHub pins the reviewed head; a base update after this final read can still race the merge."
+    )
+    merge = ("gh", "pr", "merge", str(number), "--squash", "--match-head-commit", head)
+    # A merge made with the workflow token starts no workflow, so Release Please would not tag it.
+    command(*merge, env={**os.environ, "GH_TOKEN": token} if token else None)
+
+
+def intent_record(pr: dict) -> dict:
+    return {
+        "pr": pr["number"],
+        "expected_base": pr["base"]["sha"],
+        "expected_head": pr["head"]["sha"],
+    }
+
+
+def intended(pr: dict, repository: str) -> bool:
+    """True when a release intent dispatched on main named exactly this PR, source and head."""
+    workflow_runs = api(
+        f"actions/workflows/{Path(AUTOMATION).name}/runs"
+        "?event=workflow_dispatch&branch=main&status=success&per_page=30"
+    )["workflow_runs"]
+    for run in workflow_runs:
+        if (
+            run.get("path") != AUTOMATION
+            or run.get("event") != "workflow_dispatch"
+            or run.get("head_branch") != "main"
+            or run.get("conclusion") != "success"
+            or (run.get("head_repository") or {}).get("full_name") != repository
+        ):
+            continue
+        for artifact in api(f"actions/runs/{run['id']}/artifacts?name={INTENT_ARTIFACT}")[
+            "artifacts"
+        ]:
+            if artifact["expired"]:
+                continue
+            archive = command(
+                "gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"
+            )
+            try:
+                with zipfile.ZipFile(io.BytesIO(archive)) as files:
+                    named = json.loads(files.read(INTENT_FILE))
+            except (KeyError, ValueError, zipfile.BadZipFile) as error:
+                print(
+                    f"artifact {artifact['id']} holds no readable release intent: {error}",
+                    file=sys.stderr,
+                )
+                continue
+            if named == intent_record(pr):
+                return True
+    return False
+
+
+def intended_release(repository: str, intent_path: Path | None) -> dict | None:
+    """The open release PR that a release intent named at its exact source and head, if any."""
+    owner = repository.split("/", 1)[0]
+    for pr in api(f"pulls?state=open&head={owner}:{RELEASE_BRANCH}"):
+        if (
+            json.loads(intent_path.read_text()) == intent_record(pr)
+            if intent_path
+            else intended(pr, repository)
+        ):
+            return pr
+        print(
+            f"no release intent names release PR #{pr['number']} at {pr['head']['sha']}; "
+            "the release session merges it"
+        )
+    return None
+
+
+def required_checks(number: int) -> list[dict]:
+    """The required checks gh reports for the PR head; a failed or empty read raises with gh's error."""
+    result = subprocess.run(
+        ("gh", "pr", "checks", str(number), "--required", "--json", "name,bucket"),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        reason = result.stderr.decode(errors="replace").strip() or "gh listed no required checks"
+        raise ValueError(f"could not read the required checks of release PR #{number}: {reason}")
+    return json.loads(result.stdout)
+
+
+def settled_checks(pr: dict) -> list[dict] | None:
+    """The head's required checks once its CI run exists and has finished; None until then."""
+    head = pr["head"]["sha"]
+    ci = [run for run in runs(head) if run["event"] == "pull_request" and run["head_sha"] == head]
+    # gh lists only checks that exist, and the gate's check appears only when the jobs it needs
+    # finish, so wait for the CI run itself before reading the list.
+    if not ci or any(run["status"] != "completed" for run in ci):
+        return None
+    checks = required_checks(pr["number"])
+    # gh's documented bucket values: pass, fail, pending, skipping, cancel.
+    if any(check["bucket"] == "pending" for check in checks):
+        return None
+    return checks
+
+
+def land(repository: str, intent_path: Path | None, token: str) -> None:
+    """Merge the open release PR when a release intent named its exact source and head."""
+    pr = intended_release(repository, intent_path)
+    if pr is None:
+        return
+    number, base, head = pr["number"], pr["base"]["sha"], pr["head"]["sha"]
+    for _ in range(CHECK_POLLS):
+        time.sleep(CHECK_POLL_SECONDS)
+        checks = settled_checks(pr)
+        if checks is not None:
+            break
+    else:
+        raise ValueError(
+            f"no completed CI run with settled required checks on {head} after "
+            f"{CHECK_POLLS * CHECK_POLL_SECONDS // 60} minutes; release PR #{number} was not merged"
+        )
+    failed = [check["name"] for check in checks if check["bucket"] in ("fail", "cancel")]
+    if failed:
+        raise ValueError(
+            f"required checks failed ({', '.join(failed)}); release PR #{number} was not merged"
+        )
+    if api(f"pulls/{number}").get("merged"):
+        print(f"release PR #{number} was merged while its checks ran; nothing to land")
+        return
+    release_pr(number, base, head)
+    check_release_files(number)
+    merge_release(number, base, head, repository, token)
+    print(f"merged release PR #{number} at {head}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     # The command names are this helper's closed CLI protocol.
     parser.add_argument(
-        "command", choices=("scope", "record", "select", "intent", "refresh", "merge")
+        "command", choices=("scope", "record", "select", "intent", "refresh", "merge", "land")
     )
     parser.add_argument("--source")
     parser.add_argument("--pr", type=int)
@@ -304,6 +442,8 @@ def main() -> int:
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--intent", type=Path)
+    parser.add_argument("--find", action="store_true")
     args = parser.parse_args()
     repository = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     os.environ["GH_REPO"] = repository
@@ -342,13 +482,19 @@ def main() -> int:
             parser.error(
                 "merge/intent require --pr and --expected-base; merge also requires --expected-head"
             )
-        release_pr(args.pr, args.expected_base, args.expected_head)
+        pr = release_pr(args.pr, args.expected_base, args.expected_head)
         check_release_files(args.pr)
         if args.command == "intent":
+            if args.expected_head and args.output:
+                # The named head binds the intent: a later head or source never matches it.
+                args.output.write_text(json.dumps(intent_record(pr)) + "\n")
             selected = select_evidence(args.expected_base, repository)
             if selected:
                 print(json.dumps(selected))
                 refresh_checks(repository)
+                if os.environ.get("GITHUB_OUTPUT"):
+                    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                        output.write("reused=true\n")
             elif any(
                 trusted_full(run, repository, api("actions/workflows/ci.yml")["id"])
                 and run["head_sha"] == args.expected_base
@@ -362,21 +508,18 @@ def main() -> int:
                 command("gh", "workflow", "run", "ci.yml", "--ref", "main")
                 print(f"dispatched Full evidence on main for {args.expected_base}")
         else:
-            command("gh", "pr", "checks", str(args.pr), "--required")
-            print(json.dumps(require_evidence(args.expected_base, repository)))
-            release_pr(args.pr, args.expected_base, args.expected_head)
-            print(
-                "GitHub pins the reviewed head; a base update after this final read can still race the merge."
-            )
-            command(
-                "gh",
-                "pr",
-                "merge",
-                str(args.pr),
-                "--squash",
-                "--match-head-commit",
-                args.expected_head,
-            )
+            merge_release(args.pr, args.expected_base, args.expected_head, repository)
+    elif args.command == "land" and args.find:
+        # Lets the workflow mint the release App token only when there is a release to land.
+        found = intended_release(repository, args.intent) is not None
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"intended={str(found).lower()}\n")
+    elif args.command == "land":
+        token = os.environ.get("RELEASE_MERGE_TOKEN", "")
+        if not token:
+            # Without the release App token the merge would start no Release Please run and no tag.
+            parser.error("land requires RELEASE_MERGE_TOKEN, the release App installation token")
+        land(repository, args.intent, token)
     else:
         if not args.run_id or not args.attempt:
             parser.error("refresh requires --run-id and --attempt")
