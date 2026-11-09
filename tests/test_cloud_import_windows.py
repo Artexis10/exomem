@@ -1464,6 +1464,7 @@ def test_verify_a_member_change_that_empties_a_window_past_upload_keeps_the_wind
     with pytest.raises(CloudImportError) as stop:
         rig.run()
     assert stop.value.code == "WINDOW_IMPORTING" and stop.value.resume and NOT_IN_EXOMEM in stop.value.message
+    assert "action import_cancel" in stop.value.message  # The import holds the cell, so the stop names how to end it now.
     rig.cloud.release()  # Cloud finishes the import, and the cell lists its receipt.
 
     result = rig.run()
@@ -1471,6 +1472,33 @@ def test_verify_a_member_change_that_empties_a_window_past_upload_keeps_the_wind
     assert result["import_ids"] == [old] and rig.cloud.completed == [old]
     assert {name: rig.cloud.members[old][name] for name in before} == before
     assert result["not_sent"] == [] and result["sent_before_change"] == ["a01.bin", "a02.bin"]
+
+
+def test_verify_a_member_change_that_cloud_lands_before_the_rerun_is_reported_sent_and_keeps_the_source(rig):
+    """Rule (g): catches a window that lands from the cell's receipt, so no send sees the change and the CLI frees the source."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    before = (rig.source / "a02.bin").read_bytes()
+    (rig.source / "a02.bin").write_bytes(b"changed while Cloud imports")
+    rig.cloud.release()  # Cloud finishes the import before the rerun, and the cell lists its receipt.
+
+    result = rig.run(file=True)  # The cell files the window, so only the change can keep the source.
+
+    assert rig.cloud.completed == [old] and rig.cloud.members[old]["a02.bin"] == before
+    assert result["not_sent"] == [] and result["sent_before_change"] == ["a02.bin"]
+    assert result["keep_source"]["keep"] and "no longer need to keep the source" not in rig.said()
+
+
+def test_a_member_change_after_the_person_deletes_the_copy_of_a_completed_upload_waits_for_cloud_and_lands_once(rig):
+    """Rule (g): catches a run that stops although its checkpoint records the completed upload, so it can wait for Cloud."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.unlink()  # The person deletes the encrypted copy for space; the checkpoint still records the completed upload.
+    (rig.source / "a02.bin").write_bytes(b"changed while Cloud imports")
+    rig.cloud.read_count = 0  # Cloud finishes the import on the third read of its row.
+
+    result = rig.run(poll_seconds=0.001)
+
+    assert rig.cloud.completed == [old] and result["sent_before_change"] == ["a02.bin"]
 
 
 # -- Filing each landed window
