@@ -32,6 +32,7 @@ from exomem import (
     context_catalogue,
     contradiction_stance,
     dreamer_families,
+    entity_types,
     epistemic_graph,
     find,
     freshness,
@@ -47,6 +48,7 @@ from exomem import (
     sensed_model,
     traversal_profiles,
     unit_corrections,
+    vocabulary_projection,
     working_set,
     working_set_currency,
     working_set_index,
@@ -261,6 +263,14 @@ def build_fixture_vault(root: Path) -> Path:
     _page(root, "fs-a", front=f'sources: ["{_link(source)}"]\n')
     _page(root, "fs-b", front=f'sources: ["{_link(source)}"]\n')
     _page(root, "fs-c", f"## Relations\n- x.based_on {_link(source)}\n")
+    # A frontmatter Source that the page also states in the extension of `derived_from`.
+    restated = _page(root, "src-doc-restated", "A document one page cites twice.")
+    _page(
+        root,
+        "fs-d",
+        f"## Relations\n- x.based_on {_link(restated)}\n",
+        front=f'sources: ["{_link(restated)}"]\n',
+    )
 
     # Organizations: the pages a seed page reaches through one relation each.
     def entity(name: str) -> str:
@@ -439,7 +449,7 @@ def _suggested(vault: Path, name: str, method: str) -> list[tuple[str | None, st
 # ---------------------------------------------------------------------------
 
 
-def test_a_unit_relation_lifts_when_its_family_is_a_lift_family(fixture_vault: Path) -> None:
+def test_a_unit_relation_lifts_when_it_has_the_lifts_behaviour(fixture_vault: Path) -> None:
     """Eight core relations lift to a page proposal; `causes` and its control stay unlifted."""
     build_graph(fixture_vault)
 
@@ -455,13 +465,15 @@ def test_a_unit_relation_lifts_when_its_family_is_a_lift_family(fixture_vault: P
         "lift-b": ["contradicts", "refines", "supports"],
         "lift-c": ["duplicates", "evidenced_by"],
     }
-    # An extension whose family equals its parent's lifts like the parent.
+    # An extension of a lifting parent lifts like the parent.
     assert "x.qualifies" in [  # CORE
         relation for relation, _t in _suggested(fixture_vault, "lift-d", "unit_relation_lift")
     ]
 
 
-def test_a_grandfathered_extension_lifts_by_its_saved_family(fixture_vault: Path) -> None:
+def test_a_grandfathered_extension_lifts_by_its_parent_not_its_saved_family(
+    fixture_vault: Path,
+) -> None:
     """FLIPS 9: `x.leans_on` has parent `relates_to` and saved family `support`.
 
     The saved family used to decide, so it lifted. It now follows its parent
@@ -489,7 +501,7 @@ def test_two_pages_that_answer_one_target_are_proposed_as_related(fixture_vault:
     ]
 
 
-def test_an_extension_of_resolves_does_not_feed_shared_resolution_candidates(
+def test_an_extension_of_resolves_feeds_shared_resolution_candidates(
     fixture_vault: Path,
 ) -> None:
     """FLIPS 3: `x.closes` (parent `resolves`) was not in the key set.
@@ -529,7 +541,7 @@ def test_frontmatter_sources_and_shared_sources_are_proposed(fixture_vault: Path
     ] == [(None, "fs-b")]  # CORE
 
 
-def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
+def test_a_page_relation_in_an_extension_of_derived_from_seeds_shared_sources(
     fixture_vault: Path,
 ) -> None:
     """FLIPS 8: `fs-c` states `x.based_on` the same Source as `fs-a` and `fs-b`.
@@ -546,6 +558,24 @@ def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
     assert (None, "fs-c") in _suggested(  # FLIPS 8
         fixture_vault, "fs-a", "shared_sources"
     )
+
+
+def test_an_authored_extension_of_derived_from_suppresses_the_frontmatter_proposal(
+    fixture_vault: Path,
+) -> None:
+    """FLIPS 8: `fs-d` lists a Source in `sources` and states it again as `x.based_on`.
+
+    The review batch used to match the authored key `derived_from` only, so it still proposed
+    the frontmatter Source as an authored relation that the page already has.
+    """
+    batch = build_graph(fixture_vault).relation_review_batch()
+    methods = {
+        _short(group["path"]): {item["method"] for item in group["items"]}
+        for group in batch["groups"]
+    }
+
+    assert "frontmatter_sources" in methods["fs-a"]  # CORE
+    assert "frontmatter_sources" not in methods.get("fs-d", set())  # FLIPS 8
 
 
 def test_shared_source_suggestions_interpret_a_bounded_number_of_edges(
@@ -860,6 +890,48 @@ def test_projected_graph_lane_ranks_a_plain_link_below_a_typed_edge(
     assert "c-see-also" in typed  # CORE: no stored parent, so no plain link
 
 
+def _note_pairs(vault: Path, name: str) -> list[tuple[str, str]]:
+    """The (left, right) entity pages that the vocabulary projection pairs for one note."""
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    connection = index._open_read_snapshot()
+    assert connection is not None
+    try:
+        epistemic_graph.GraphView(vault, connection).register_relation_functions()
+        path = f"{KB}/{name}.md"
+        _note_pair, rows, _after, _count = vocabulary_projection._candidate_rows(
+            connection,
+            path,
+            sorted(entity_types.load_entity_types(vault).active_ids),
+            vocabulary_projection._anchor(connection, path),
+            ["", ""],
+        )
+    finally:
+        connection.close()
+    return sorted((_short(row[0]), _short(row[4])) for row in rows)
+
+
+def test_a_note_pairs_the_entities_it_reaches_by_a_plain_link_or_an_extension_of_one(
+    tmp_path: Path,
+) -> None:
+    """FLIPS 6: the note-pair query reads the `plain_link` behaviour, not the key `links_to`.
+
+    A note that links two entities pairs them. A note that reaches two entities
+    through `x.see_also`, an extension of `links_to`, used to pair nothing.
+    """
+    root = tmp_path / "vault"
+    _write(root, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+    org = {
+        name: _link(_page(root, f"vp-{name}", "An organization.", page_type="organization"))
+        for name in ("a", "b", "c", "d")
+    }
+    _page(root, "vp-linked", f"Both {org['a']} and {org['b']} are named here.")
+    _page(root, "vp-extended", f"## Relations\n- x.see_also {org['c']}\n- x.see_also {org['d']}\n")
+    build_graph(root)
+
+    assert _note_pairs(root, "vp-linked") == [("vp-a", "vp-b")]  # CORE
+    assert _note_pairs(root, "vp-extended") == [("vp-c", "vp-d")]  # FLIPS 6
+
+
 # ---------------------------------------------------------------------------
 # Audit: a due prediction or an old question stays open until a relation settles it
 # ---------------------------------------------------------------------------
@@ -1150,7 +1222,7 @@ def test_a_superseded_page_that_points_back_is_a_valid_supersession_target(
 # ---------------------------------------------------------------------------
 
 
-def test_currency_follows_a_unit_row_that_supersedes_by_family(fixture_vault: Path) -> None:
+def test_currency_follows_a_unit_row_that_replaces_its_target(fixture_vault: Path) -> None:
     registry = relation_registry.load_registry(fixture_vault)
     rows = [
         {"kind": kind, "target": f"[[#{kind.replace('.', '-').replace('_', '-')}]]"}

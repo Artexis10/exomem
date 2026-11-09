@@ -1607,9 +1607,9 @@ def _task_links(
     One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
     relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
     pages this caller may see, so a target outside it is never named; `visible` is also passed to the
-    owner API, which re-resolves each link in the caller's view. Typed relations rank by the registry's
-    declared `family` (the rule `find_candidates` uses for graph hits), never by relation name; within a
-    rank the owner API's order stands. Returns None while the graph cannot answer.
+    owner API, which re-resolves each link in the caller's view. Typed relations rank above plain links
+    by the registry's `plain_link` behaviour (the rule `find_candidates` uses for graph hits), never by
+    relation name; within a rank the owner API's order stands. Returns None while the graph cannot answer.
     """
     from . import epistemic_graph
 
