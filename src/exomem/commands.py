@@ -1612,6 +1612,7 @@ def op_bootstrap(
                 "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
                 "an edit to unit text."
             ),
+            # The bootstrap spec names these four kinds; task 6.2 reads their teaching from the pack.
             "kinds": {
                 "open_question": "a question this store has not answered yet",
                 "hypothesis": "a proposed explanation still under test",
