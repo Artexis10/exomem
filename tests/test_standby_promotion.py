@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1001,8 +1002,8 @@ def _method_unit_vault(tmp_path: Path, monkeypatch) -> tuple[Path, set[str]]:
     return vault, pages
 
 
-def _method_search(vault: Path, allowed: set[str]) -> tuple[int, int]:
-    """What the owner's task context measures for one method query: (statistics rebuilt, parents interpreted)."""
+def _method_search_result(vault: Path, allowed: set[str]) -> tuple[Any, Any]:
+    """The owner's task context's method query: its catalogue result, and what the query measured."""
     from exomem import bm25, call_spans, lexstore, working_set
     from exomem.governance import principal
 
@@ -1016,6 +1017,14 @@ def _method_search(vault: Path, allowed: set[str]) -> tuple[int, int]:
             categories=working_set.method_unit_categories(vault), allowed=allowed,
             fresh=published.triple, checkpoint=published,
         )
+    return result, measured
+
+
+def _method_search(vault: Path, allowed: set[str]) -> tuple[int, int]:
+    """What the owner's task context measures for one method query: (statistics rebuilt, parents interpreted)."""
+    from exomem import call_spans
+
+    result, measured = _method_search_result(vault, allowed)
     assert result.readiness.complete
     return int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.UNIT_PARENTS_INTERPRETED])
 
@@ -1139,6 +1148,58 @@ def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistic
 
     assert not delays, "the build never started, so this proved nothing about stopping it"
     assert _method_search(vault, pages) == (1, 3), "an interrupted build must leave no statistics behind"
+
+
+def test_a_method_unit_build_the_request_budget_stops_keeps_the_parents_it_interpreted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stopped build keeps no statistics but spares the next build the parents it finished.
+
+    Under sustained load each cold request ran to its deadline and served no methods, and the next
+    one began from nothing: the build took 41 s on a vault of several thousand pages.
+    """
+    import time
+
+    from exomem import call_spans, lexstore, request_budget
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    # SQLite checks the budget every 1000 instructions, more than this three-page build runs. One row per
+    # batch lets the read finish a parent before it starts the next.
+    monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
+    monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 1)
+    budget = request_budget.RequestBudget(seconds=60)
+    interpreted_paths: list[str] = []
+    unit = lexstore._SelectedUnits.unit
+
+    def unit_then_spend_the_budget(self, path, key):
+        found = unit(self, path, key)
+        if path not in interpreted_paths:
+            interpreted_paths.append(path)
+        if len(interpreted_paths) == 2:
+            budget.deadline = time.monotonic() - 1
+        return found
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lexstore._SelectedUnits, "unit", unit_then_spend_the_budget)
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget():
+                stopped, _measured = _method_search_result(vault, pages)
+        finally:
+            request_budget.reset_current(token)
+
+    assert stopped.readiness.status == lexstore.DEADLINE_STATUS
+    assert len(interpreted_paths) == 2, "the budget never ran out inside the build, so this proved nothing"
+    resumed, measured = _method_search_result(vault, pages)
+    # The first parent was finished, and the second was being read; the third was never reached.
+    assert resumed.readiness.complete
+    assert (int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.UNIT_PARENTS_INTERPRETED])) == (1, 2)
+
+    lexstore.clear_stores()
+    cold, measured = _method_search_result(vault, pages)
+    assert int(measured[call_spans.UNIT_PARENTS_INTERPRETED]) == 3
+    ranking = [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in cold.value]
+    assert ranking and [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in resumed.value] == ranking
 
 
 def test_a_standby_warm_of_the_method_unit_statistics_writes_nothing(

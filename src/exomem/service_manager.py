@@ -489,6 +489,8 @@ class Supervisor:
             "local_port": self.local_port,
             "transition": self.transition_id,
             "last_transition": self.last_transition,
+            # Read by the staging operator, which refuses before it stages a release this supervisor cannot run.
+            "upgrade_blocker": upgrade_blocker(),
             "worker_restarts": {
                 "in_window": len(self._recent_restarts()),
                 "limit": self.restart_limit,
@@ -680,6 +682,8 @@ class Supervisor:
                 }
             if resume:
                 target = pending["target"]
+            if (blocker := upgrade_blocker()) is not None:
+                return {"ok": False, "error": blocker}
             try:
                 target = await self.runtime.inspect(target)
                 self._migration_declared(target)
@@ -1120,6 +1124,34 @@ def _collections_migration_pending(vault: Path) -> bool:
     except Exception:  # noqa: BLE001 - see the docstring
         return False
     return intent is not None and intent["kind"] == authority.MIGRATE
+
+
+def upgrade_blocker() -> str | None:
+    """Why this supervisor cannot run an upgrade on the vault's state, with the fix, or None.
+
+    The supervisor runs from the launcher venv, which a worker upgrade does not replace. When a
+    newer worker records an optional state format that this release predates, the supervisor
+    cannot read the state manifest, so it could verify no target. Only an offline launcher
+    upgrade changes that, and the message says so before any release is staged.
+    """
+    vault = os.environ.get("EXOMEM_VAULT_PATH", "")
+    if not vault or not Path(vault).is_absolute():
+        return None
+    from importlib.metadata import PackageNotFoundError, version
+
+    from . import state_migration
+
+    unrecognized = state_migration.unrecognized_compatibility_ids(Path(vault))
+    if not unrecognized:
+        return None
+    try:
+        release = f"Exomem {version('exomem')}"
+    except PackageNotFoundError:
+        release = "a release whose installed version is unrecorded"
+    return (f"the supervisor runs {release}, older than the vault's state, which records "
+            f"{', '.join(unrecognized)}; upgrade the launcher venv offline, as \"A supervisor older than the "
+            "vault's state\" in docs/managed-service-upgrades.md describes, then upgrade again; current admission "
+            "unchanged")
 
 
 def _require_store_schema(vault: Path, ceiling: int | None) -> None:

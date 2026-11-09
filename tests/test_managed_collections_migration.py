@@ -670,8 +670,8 @@ def test_a_lease_handback_that_raises_after_admission_reports_the_migration(serv
         "from exomem import writer_lease\n"
         "from exomem.cli_ops import OpError\n"
         "closed = writer_lease.LeaseManager.close\n"
-        "def close(self):\n"
-        "    closed(self)\n"
+        "def close(self, **options):\n"
+        "    closed(self, **options)\n"
         "    raise OpError('WRITER_LEASE_UNAVAILABLE', 'the coordinator did not answer the handback')\n"
         "writer_lease.LeaseManager.close = close\n"))
     result = upgrade(tmp_path, Handoff(tmp_path, root), handback)

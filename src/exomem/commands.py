@@ -11838,7 +11838,7 @@ def op_maintain_memory(
             )
         from .collection_store import preflight as store_preflight
 
-        return store_preflight.preflight(vault_root, cursor)
+        return store_preflight.tool_report(vault_root, cursor)
     def store_preview_arguments_invalid() -> bool:
         # The preview-first store modes take no audit arguments; an apply needs true, plan_id and why.
         return (

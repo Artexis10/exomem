@@ -943,8 +943,8 @@ def _warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
 
     ``deadline`` (absolute monotonic) bounds the build the way the request path bounds a method search: a
     request budget that ends at it, stopped at by the catalogue query itself, so a build that reaches it
-    leaves no statistics rather than running on. It builds nothing when warm-up is disabled or no time is
-    left. Never raises.
+    leaves no statistics rather than running on, though it keeps the parents it interpreted for the next
+    build. It builds nothing when warm-up is disabled or no time is left. Never raises.
     """
     if not warmup.warmup_enabled():
         return
