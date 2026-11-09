@@ -450,7 +450,8 @@ def test_a_query_reads_a_linked_collection_once_and_shows_its_links_only_to_a_re
         env, monkeypatch):  # noqa: F811 - the imported fixture, by name
     """Defect: after conversion each link value that names an old item path runs its own governed read of
     the linked collection, so a query reads every row there once per link, on the legacy and on the typed
-    query route; or that one read shows a guest the links to rows that are withheld from the guest."""
+    query route; or that one read shows a guest a link to a row withheld from it, or hides a link to a row
+    it may read."""
     root = legacy_vault(env, relationships=True)
     assert migrate(root, "apply") == 0
     service = serve(root, monkeypatch)
@@ -487,8 +488,17 @@ def test_a_query_reads_a_linked_collection_once_and_shows_its_links_only_to_a_re
             assert shown(call, route) == links, route
             # One read of the Publications rows answers all four links.
             assert reads.count(LEDGER_ID) == 1, (route, reads)
-        write_scope(root, paths="Records/Publications/**", default_deny=True)
+        # One linked row is withheld from the guest, by its ref: the guest keeps the other three links.
+        [(withheld,)] = store(root, "SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
+                              LEDGER_ID, entries[0].relative_to(root).as_posix())
+        write_scope(root, paths="Unrelated/**")
+        scope = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [{collections.record_ref(LEDGER_ID, withheld)}]\n")
         write_rule(root, ceiling=0)
+        for route in routes:
+            assert shown(as_guest, route) == {**links, "Cites 0": None}, route
+            assert shown(call, route) == links, route
+        write_scope(root, paths="Records/Publications/**", default_deny=True)
         for route in routes:
             assert shown(as_guest, route) == dict.fromkeys(links), route
     finally:

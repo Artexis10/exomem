@@ -140,25 +140,24 @@ def _link_target(vault_root, target, released):
             continue
         cid, key = found
         if cid not in released:
-            released[cid] = _released_keys(vault_root, writer, cid)
+            released[cid] = _released_keys(writer, cid)
         if key in released[cid]:
             return spelling
     return None
 
 
-def _released_keys(vault_root, writer, cid):
+def _released_keys(writer, cid):
     """The keys of the rows of collection ``cid`` that the caller may read, or none if it cannot read them.
 
     One read of the collection's governed rows: the row release that its query and ``read`` apply,
     without the query's shaping or the rows' own link checks.
     """
-    from .. import record_formats
     from ..cli_ops import OpError
 
     try:
-        with writer.read_collection(cid) as manifest:
-            records = record_formats.load_adapter(vault_root, manifest).read().records
+        with writer.read_collection(cid):
+            rows = writer._operation.authorized_rows(cid)[0]
     except (OpError, CollectionStoreError, collections.CollectionError):
         # Each link into a collection this process cannot read stays a forward reference.
         return frozenset()
-    return frozenset(record.identity.key for record in records)
+    return frozenset(row["item_key"] for row in rows)
