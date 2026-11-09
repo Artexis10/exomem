@@ -331,6 +331,35 @@ def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path
     assert "- credence: likely" in page.read_text(encoding="utf-8")
 
 
+def test_an_edit_to_a_claims_prose_keeps_its_asserter_and_modality(tmp_path: Path) -> None:
+    """Catches the writer stripping hand-written attribution rows when an agent edits the prose."""
+    page = tmp_path / PATH
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntitle: Release outlook\ntype: insight\nstatus: active\n"
+        "exomem_id: 33333333-3333-4333-8333-333333333333\nupdated: 2026-10-01\n---\n\n"
+        "# Release outlook\n\n## Claim\n- id: uptime\n- asserted_by: Acme Hosting\n"
+        "- modality: should\n\nThe deploy service keeps 99.99% uptime.\n",
+        encoding="utf-8",
+    )
+    (claim,) = semantic_units.parse_semantic_units(
+        page.read_text(encoding="utf-8"), path=PATH,
+        parent_ref="exomem://memory/33333333-3333-4333-8333-333333333333",
+    ).units
+
+    updated = commands.op_observe_memory(
+        tmp_path, path=PATH, operation="update", category="claim",
+        content="The deploy service keeps 99.9% uptime.", kind="claim",
+        unit_ref=claim.unit_ref, expected_fingerprint=claim.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
+    )
+
+    assert (updated["unit"]["asserted_by"], updated["unit"]["modality"]) == ("Acme Hosting", "should")
+    text = page.read_text(encoding="utf-8")
+    assert "- asserted_by: Acme Hosting" in text and "- modality: should" in text
+    assert "99.9% uptime" in text
+
+
 def test_observe_memory_refuses_a_new_belief_it_cannot_give_a_holder(tmp_path: Path) -> None:
     """Catches the writer adding a `## Belief` that names no holder, which reads as nobody's."""
     page = tmp_path / PATH
