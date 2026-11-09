@@ -722,6 +722,16 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {"path": value["path"], "ref": value["ref"]}
 
+    def archive_receipt(value: Any) -> dict[str, Any] | None:
+        """A zip kept as members: its identity and how many blobs this call wrote or restored."""
+        if not isinstance(value, Mapping) or not sha256(value.get("sha256")) or not nonnegative_int(value.get("bytes")):
+            return None
+        # The count fields of `archive_members.preserve_members`' receipt protocol.
+        counts = {key: value[key] for key in ("members", "new_blobs", "restored") if key in value}
+        if not counts or not all(nonnegative_int(count) for count in counts.values()):
+            return None
+        return {"sha256": value["sha256"], "bytes": value["bytes"], **counts}
+
     def transcription(value: Any) -> dict[str, Any] | None:
         """Whether a client transcription was recorded with its original."""
         if not isinstance(value, Mapping):
@@ -795,6 +805,12 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     projected.append(invalid_row(item, index))
                     continue
                 row["duplicate_of"] = duplicate
+            if "archive" in item:
+                archive = archive_receipt(item["archive"])
+                if archive is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["archive"] = archive
             if "transcription" in item:
                 recorded = transcription(item["transcription"])
                 if recorded is None:

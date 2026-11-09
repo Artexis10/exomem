@@ -9293,6 +9293,7 @@ def op_preserve_artifacts(
     adoption: _OptionalArtifactAdoption = None,
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
     raw_protection: bool = False,
+    archive: Literal["members"] | None = None,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -9306,6 +9307,7 @@ def op_preserve_artifacts(
         category: One path segment.
         adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Keep originals owner-only until whole-artifact release.
+        archive: Keep a held zip as members; path is an import source_ref.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -9321,6 +9323,7 @@ def op_preserve_artifacts(
             adoption=adoption,
             transcriptions=transcriptions,
             raw_protection=raw_protection,
+            archive=archive,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,

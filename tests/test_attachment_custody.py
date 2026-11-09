@@ -601,6 +601,39 @@ def test_a_failed_preserve_leaves_the_claimed_hold_redeemable(
     assert (vault / again["files"][0]["stored_path"]).read_bytes() == _png()
 
 
+def test_a_held_file_that_is_no_zip_is_refused_as_members_and_stays_redeemable(vault: Path, lease) -> None:
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        refused = _preserve(lease, vault, [handle], "png-as-members", archive="members")
+        kept = _preserve(lease, vault, [handle], "png-as-one-file")
+
+    assert refused["files"][0]["code"] == "ARCHIVE_INVALID", refused
+    assert kept["files"][0]["state"] == "stored", kept
+
+
+def test_members_refuse_a_fetched_attachment_before_fetching_it(vault: Path, lease) -> None:
+    """A fetched attachment has no verified SHA-256, which the members manifest records."""
+    attachment = {"file_id": "chat-export", "download_url": "https://files.invalid/export.zip"}
+    refused = _preserve(lease, vault, [attachment], "fetched-as-members", archive="members")
+
+    assert refused["files"][0]["code"] == "INVALID_FILE", refused
+    assert "hold=true" in refused["files"][0]["reason"]
+
+
+def test_members_refuse_a_transcription_instead_of_dropping_it(vault: Path, lease) -> None:
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault, scope="Clinic", category="Appointments", files=[handle], archive="members",
+                transcriptions=[{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
+            )
+
+    assert (refused.value.code, refused.value.details["field"]) == ("INVALID_PRESERVE", "archive")
+
+
 def test_a_failed_capture_leaves_the_claimed_source_hold_redeemable(
     vault: Path, lease, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -923,3 +956,17 @@ def test_attach_refuses_a_source_lane_for_a_direct_evidence_preserve(tmp_path: P
                 "8764",
             ]
         )
+
+
+def test_an_unknown_archive_mode_refuses_instead_of_being_read_as_members(vault: Path, lease) -> None:
+    """A CLI or HTTP caller skips the schema enum; a typo must not be preserved as members."""
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault, scope="Clinic", category="Appointments", files=[handle], archive="member",
+            )
+
+    assert (refused.value.code, refused.value.details["accepted_values"]) == ("INVALID_PRESERVE", ["members"])
