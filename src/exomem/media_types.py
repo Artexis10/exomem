@@ -10,9 +10,11 @@ AUDIO_EXTS = frozenset(
 VIDEO_EXTS = frozenset(
     {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"}
 )
+# Camera raw sensor data, decoded by LibRaw rather than Pillow (`image_codecs`).
+RAW_EXTS = frozenset({".dng"})
 IMAGE_EXTS = frozenset(
     {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic"}
-)
+) | RAW_EXTS
 PDF_EXTS = frozenset({".pdf"})
 # Each document extension, the kind it extracts as, and the library that reads that
 # kind, by its import name: `extract` dispatches on it and checks that it imports.

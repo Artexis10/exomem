@@ -32,7 +32,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -314,6 +314,30 @@ def _phase_hold(vault_root: Path, operation: str, *, dry_run: bool) -> AbstractC
     # A writer that queued behind the last hold takes its turn before this run takes the next.
     foreground_priority.yield_to_foreground()
     return maintenance_jobs.chunk_hold(vault_root, operation)
+
+
+def _phase_holds(
+    vault_root: Path,
+    operation: str,
+    items: Sequence[Any],
+    apply: Callable[[Sequence[Any]], bool | None],
+    *,
+    dry_run: bool,
+) -> None:
+    """`_phase_hold` for a phase whose work grows with the vault: `apply` takes `items` in short holds.
+
+    Each hold ends after `maintenance_jobs.HOLD_SECONDS` or as soon as a writer waits, and the run lets
+    that writer in before it takes the boundary again (`maintenance_jobs.apply_in_holds`). A preview, and
+    a call from outside the writer lease, take no hold and apply every item at once, as `_phase_hold` does.
+    """
+    from .writer_lease import active_mutation_request_id
+
+    if not items:
+        return
+    if dry_run or active_mutation_request_id() is None:
+        apply(items)
+        return
+    maintenance_jobs.apply_in_holds(vault_root, operation, items, apply)
 
 
 def _current_hash(vault_root: Path, rel: str) -> str | None:
@@ -620,12 +644,14 @@ def reconcile(
 
     Under the writer lease, the CLI's run and a job's alike hold the mutation boundary only in one
     short hold per phase that writes vault-coupled state (`_phase_hold`), so other writers commit
-    between phases. Each phase reads again inside its hold what it applies, or checks that what it
-    read earlier has not moved: a page whose bytes moved belongs to the write that moved it. The
-    read-only phases (the census, the posthoc evaluation, the unit audit and the drift report) and
-    the lexical refresh, which serializes its publication itself, hold nothing. A stop lands between
-    holds: the phases before it keep their effect, and a repeat converges the rest. A write run holds
-    the vault's reconcile-run lock throughout (`_run_lock`), so two write runs never interleave.
+    between phases. The two phases whose work grows with the vault, the unit sidecars and the
+    embeddings, hold in batches that each end when a writer waits (`_phase_holds`). Each phase reads
+    again inside its hold what it applies, or checks that what it read earlier has not moved: a page
+    whose bytes moved belongs to the write that moved it. The read-only phases (the census, the
+    posthoc evaluation, the unit audit and the drift report) and the lexical refresh, which
+    serializes its publication itself, hold nothing. A stop lands between holds: the phases before
+    it keep their effect, and a repeat converges the rest. A write run holds the vault's
+    reconcile-run lock throughout (`_run_lock`), so two write runs never interleave.
     """
     with _run_lock(vault_root, dry_run=dry_run):
         return _reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph, plan_id=plan_id)
@@ -650,7 +676,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     if not dry_run:
         from .activation_manifest import ensure_manifest
 
-        with _phase_hold(vault_root, "reconcile manifest", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_manifest", dry_run=dry_run):
             ensure_manifest(vault_root)
     semantic_batch = semantic_writes.evaluate_posthoc_batch(
         vault_root,
@@ -671,7 +697,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     from . import deferred_index, epistemic_graph, index_paths, lexstore
 
     maintenance_jobs.checkpoint("purging")
-    with _phase_hold(vault_root, "reconcile purging", dry_run=dry_run):
+    with _phase_hold(vault_root, "reconcile_purging", dry_run=dry_run):
         # A preview reports the census it planned from. A write reads the census again inside this
         # hold, and a planned write applies only the rows that its plan names too: a row that moved
         # since the plan is reported, and the repair stays incomplete, so the cursors stay put.
@@ -796,30 +822,40 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
             for rel, digest in _read_hashes(vault_root, indexed_for).items()
             if digest not in indexed_for[rel]
         }
-        with _phase_hold(vault_root, "reconcile units", dry_run=dry_run):
+        read_hashes = {**_corpus_hashes(semantic_batch.corpus.pages, affected), **outside_corpus_hashes}
+        moved: set[str] = set()
+        removed: list[str] = []
+        refreshed: list[str] = []
+
+        def unmoved(batch: Sequence[str]) -> list[str]:
             # A parent whose bytes moved since they were read was indexed by the write that moved it, so
             # the run leaves it and reports it. Removing an orphan's rows would undo that write. Refreshing
             # a corpus page would repeat it, since each sidecar re-parses a planned state whose bytes moved.
-            moved = set(
-                _moved_since_read(
-                    vault_root,
-                    {**_corpus_hashes(semantic_batch.corpus.pages, affected), **outside_corpus_hashes},
-                    [*affected, *orphans],
-                )
-            )
-            affected = [path for path in affected if path not in moved]
-            orphans = [path for path in orphans if path not in moved]
-            if orphans:
-                index_sync.delete_after_remove(vault_root, orphans)
-            if affected:
+            gone = set(_moved_since_read(vault_root, read_hashes, batch))
+            moved.update(gone)
+            return [path for path in batch if path not in gone]
+
+        def remove_orphans(batch: Sequence[str]) -> None:
+            if kept := unmoved(batch):
+                index_sync.delete_after_remove(vault_root, kept)
+                removed.extend(kept)
+
+        def refresh_parents(batch: Sequence[str]) -> None:
+            if kept := unmoved(batch):
                 index_sync.upsert_after_write(
                     vault_root,
-                    [vault_root / path for path in affected],
-                    semantic_states={path: semantic_states[path] for path in affected},
+                    [vault_root / path for path in kept],
+                    semantic_states={path: semantic_states[path] for path in kept},
                 )
+                refreshed.extend(kept)
+
+        # The fan-out costs each parent its own sidecar writes, so a vault with many drifted parents runs
+        # it for minutes: in short holds, with a waiting writer let in between them.
+        _phase_holds(vault_root, "reconcile_units", orphans, remove_orphans, dry_run=dry_run)
+        _phase_holds(vault_root, "reconcile_units", affected, refresh_parents, dry_run=dry_run)
         report.semantic_unit_parents_moved = sorted(moved)
-        report.semantic_unit_parents_refreshed = len(affected)
-        report.semantic_unit_orphans_removed = len(orphans)
+        report.semantic_unit_parents_refreshed = len(refreshed)
+        report.semantic_unit_orphans_removed = len(removed)
     maintenance_jobs.checkpoint("lifecycle")
     lifecycle_batch = relation_review.inspect_lifecycle_prepared_slots(
         vault_root,
@@ -848,7 +884,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     )
     eligible = _cleanup_eligible(lifecycle_batch)
     if not dry_run and lifecycle_batch.cleanup_safe and eligible:
-        with _phase_hold(vault_root, "reconcile lifecycle", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_lifecycle", dry_run=dry_run):
             # The inspection classified each slot against its owner's bytes in the corpus read. A
             # slot whose owner moved since then is left for the next run to classify again. The
             # cleanup checks the rest itself: the owners' identities, the slots and the trash.
@@ -886,7 +922,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----
     maintenance_jobs.checkpoint("indexes")
-    with _phase_hold(vault_root, "reconcile indexes", dry_run=dry_run):
+    with _phase_hold(vault_root, "reconcile_indexes", dry_run=dry_run):
         # Counted inside the hold, so the counts it writes are the vault's as it writes them.
         top_index_path = kb / "index.md"
         top_text = (
@@ -925,31 +961,41 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
         if not dry_run and (missing_rels or drifted_abs):
             from . import embeddings, index_sync, mode, semantic_drain
 
-            with _phase_hold(vault_root, "reconcile embeddings", dry_run=dry_run):
-                # Found with no hold, then checked again inside it: a file that came back, or went,
-                # since the drift check belongs to the write that moved it. A refresh reads the
-                # current bytes, so a page edited since then is embedded as it is now.
-                missing_rels = [
-                    rel for rel in missing_rels if audit_module._no_follow_regular_markdown_path(vault_root, rel) is None
-                ]
-                drifted_abs = [
-                    path
-                    for rel, path in drifted.items()
+            # Found with no hold, then checked again inside each: a file that came back, or went,
+            # since the drift check belongs to the write that moved it. A refresh reads the
+            # current bytes, so a page edited since then is embedded as it is now.
+            def remove_missing(batch: Sequence[str]) -> None:
+                gone = [rel for rel in batch if audit_module._no_follow_regular_markdown_path(vault_root, rel) is None]
+                if gone:
+                    index_sync.delete_after_remove(vault_root, gone)
+
+            refreshed_paths: list[Path] = []
+
+            def refresh_drifted(batch: Sequence[str]) -> bool:
+                nonlocal refresh_succeeded
+                present = [
+                    drifted[rel] for rel in batch
                     if audit_module._no_follow_regular_markdown_path(vault_root, rel) is not None
                 ]
-                if missing_rels:
-                    index_sync.delete_after_remove(vault_root, missing_rels)
-                if drifted_abs:
-                    if mode.service_profile_enabled():
-                        semantic_drain.request(vault_root, drifted_abs, edited=False)
-                        refresh_succeeded = False
-                    else:
-                        refresh_succeeded = (
-                            embeddings.upsert_after_write(vault_root, drifted_abs) is not False
-                        )
-                    if refresh_succeeded:
-                        index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
-        report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0
+                if not present:
+                    return True
+                if mode.service_profile_enabled():
+                    semantic_drain.request(vault_root, present, edited=False)
+                    refresh_succeeded = False
+                    return True
+                refresh_succeeded = embeddings.upsert_after_write(vault_root, present) is not False
+                if refresh_succeeded:
+                    index_sync.clear_deferred_work(vault_root, paths=present)
+                    refreshed_paths.extend(present)
+                return refresh_succeeded
+
+            # Encoding every drifted page took one hold for as long as the model ran, minutes on a vault
+            # that an import had just filled. Short holds let a waiting writer in between batches.
+            _phase_holds(vault_root, "reconcile_embeddings", missing_rels, remove_missing, dry_run=dry_run)
+            _phase_holds(vault_root, "reconcile_embeddings", list(drifted), refresh_drifted, dry_run=dry_run)
+            drifted_abs = refreshed_paths
+        # The pages refreshed so far, also when a later batch failed and the rest stays deferred.
+        report.embeddings_refreshed = len(drifted_abs)
         if not refresh_succeeded:
             report.embeddings_status = "deferred"
         else:
@@ -977,7 +1023,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
         # One hold for the whole phase: lineage isolation, checkpoint recovery and the sweeps move
         # durable graph state, and the drift that decides a repair is read again inside it. The
         # graph build itself runs in its registered flight, which this hold only starts.
-        with _phase_hold(vault_root, "reconcile graph", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_graph", dry_run=dry_run):
             index = epistemic_graph.EpistemicGraphIndex(vault_root)
             reset_registered = False
             if rebuild_graph:
@@ -1115,7 +1161,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     # A planned write also takes the hold when every orphan that its plan names has gone, to report them.
     planned_orphans = census is not None and bool(census.clip_orphans or census.frame_orphans)
     if not dry_run and (clip_orphans or frame_orphans or swept.removed or swept.missing or planned_orphans):
-        with _phase_hold(vault_root, "reconcile orphans", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_orphans", dry_run=dry_run):
             clip_orphans = [key for key in clip_orphans if not _media_present(vault_root, key)]
             frame_orphans = [
                 (frame_dir, video_path)
@@ -1153,7 +1199,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     reference_drift = memory_refs.drift(vault_root)
     if reference_drift and not dry_run:
         # The rebuild reads every page again under this hold, then replaces the table.
-        with _phase_hold(vault_root, "reconcile references", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_references", dry_run=dry_run):
             memory_refs.ReferenceIndex(vault_root).rebuild_all()
     report.references_refreshed = len(reference_drift)
     report.references_status = "refreshed" if reference_drift else "current"
@@ -1196,7 +1242,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     from . import derived_receipts, index_sync
 
     maintenance_jobs.checkpoint("derived-receipts")
-    with _phase_hold(vault_root, "reconcile derived-receipts", dry_run=dry_run):
+    with _phase_hold(vault_root, "reconcile_derived-receipts", dry_run=dry_run):
         report.derived_batch_reconcile = derived_receipts.reconcile_stranded_batches(
             vault_root,
             converge=index_sync.converge_paths_from_current_bytes,
@@ -1228,7 +1274,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
         from . import freshness
         from . import vault as vault_module
 
-        with _phase_hold(vault_root, "reconcile rebaseline", dry_run=dry_run):
+        with _phase_hold(vault_root, "reconcile_rebaseline", dry_run=dry_run):
             freshness.rebaseline(vault_root)
             vault_module.clear_inbound_index()
         # Outside the hold, as warm-up calls it: it serializes on the lexical publication barrier, where
@@ -1243,7 +1289,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     from .governance import receipts
 
     maintenance_jobs.checkpoint("receipts")
-    with _phase_hold(vault_root, "reconcile receipts", dry_run=dry_run):
+    with _phase_hold(vault_root, "reconcile_receipts", dry_run=dry_run):
         report.receipt_reconcile = receipts.reconcile(vault_root, dry_run=dry_run)
 
     # A job's receipt reads the counts of what this run did; the full report stays the dispatcher's result.

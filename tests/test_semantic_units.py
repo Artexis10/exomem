@@ -92,11 +92,11 @@ def test_structural_summary_matches_selected_parser_and_activation_without_body(
         assert selected.resolve_unit(unit.unit_ref, expected_fingerprint="0" * 64).status == "stale"
     counts = activation.frontmatter_link_counts({"sources": ["First", "Second"], "related": "Other"})
     expected = activation.measure_document(
-        document, relations, project=project, page_type=None,
+        document, relations, language=language, project=project, page_type=None,
         body_wikilinks=3, frontmatter_counts=counts,
     )
     actual = activation.measure_document(
-        selected, relations, project=project, page_type=None,
+        selected, relations, language=language, project=project, page_type=None,
         body_wikilinks=3, frontmatter_counts=counts,
     )
     assert actual == expected

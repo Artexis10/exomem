@@ -793,6 +793,7 @@ def _narrowed(
 NAMED_ONLY_DEFAULT_KINDS: frozenset[str] = frozenset({"entity", "project"})
 
 #: The unit categories that are a page's settled conclusions.
+# Debt (category registry, out of scope for the kind-trait change): a fixed set of category keys.
 CONCLUSION_CATEGORIES: frozenset[str] = frozenset({"decision", "insight", "finding"})
 
 

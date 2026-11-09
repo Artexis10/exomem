@@ -95,6 +95,7 @@ _MAX_SECTIONS = 8
 _MAX_OUTLINE = 16
 _NEIGHBOR_LEDE_CHARS = 160
 
+# Debt (C12): heading text, which no kind registry states, so a kind trait does not reach it.
 # Headline sections whose lead line is a high-signal "claim". Matched case-insensitively
 # against the heading text (trailing colon stripped). Connections/See-also are links, not
 # claims, so they are deliberately absent.

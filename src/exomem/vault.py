@@ -188,8 +188,18 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return None
 
 
-def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+def governed_frontmatter_reason(
+    field: str,
+    value: Any,
+    page_type: Any,
+    *,
+    page: tuple[Path, str, Mapping[str, Any]] | None = None,
+) -> str | None:
     """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    `page` is the vault root, vault-relative path and frontmatter of the page written. The
+    verdict registry of that page's instance checks an `outcome`, so a verdict the instance
+    added is accepted; without `page` only the shipped verdicts are.
 
     This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
     is refused by that function at every governed write boundary, and
@@ -200,9 +210,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     """
     if field.strip().casefold() != "outcome":
         return None
-    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
-    # imports this module. The vocabulary still has exactly one definition.
-    from .semantic_units import EPISTEMIC_OUTCOMES
+    # Deferred: `semantic_language_registry` imports this module. The vocabulary still has
+    # exactly one definition, the verdict registry.
+    from . import semantic_language_registry, semantic_units
 
     normalized_type = str(page_type or "").strip().casefold()
     if normalized_type != "experiment":
@@ -212,11 +222,16 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
             "conclusion turned out with a semantic unit's `verdict:` metadata "
             "instead."
         )
-    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+    keys = (
+        semantic_language_registry.load_for_page(*page)
+        if page is not None
+        else semantic_language_registry.core_registry()
+    ).verdict_keys()
+    # An outcome takes a key only; a unit verdict also takes a label.
+    if not isinstance(value, str) or value.strip().casefold() not in keys:
         return (
-            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
-            "It is categorical lifecycle state, not a confidence score, so a "
-            "number or a free-text hedge is never valid."
+            f"`outcome:` must be exactly one of {', '.join(keys)}. "
+            f"{semantic_units.NO_CONFIDENCE_RULE}"
         )
     return None
 
@@ -738,7 +753,12 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
     if vault_root is not None:
         from .governance import connector_boundary
 
-        connector_boundary.require_create(vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix())
+        connector_boundary.require_create(
+            vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix()
+        )
+        stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
+        if stored is not None:
+            return directory / _first_free_name(stem, suffix, stored)
     try:
         taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
     except OSError:
@@ -753,12 +773,35 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
             candidate = directory / f"{stem}-{i}{suffix}"
             i += 1
         return candidate
+    return directory / _first_free_name(stem, suffix, taken)
+
+
+def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
+    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... with no name key in ``taken``."""
     candidate = f"{stem}{suffix}"
     i = 2
     while vault_name_key(candidate) in taken:
         candidate = f"{stem}-{i}{suffix}"
         i += 1
-    return directory / candidate
+    return candidate
+
+
+def _stored_folder_keys(vault_root: Path, directory: Path, name: str) -> set[str] | None:
+    """The name keys of the folder's entries in the store, or None when ``name`` is no stored page.
+
+    A stored page may have no file yet, so the disk listing would call its name free. The store
+    lists the pages and the folders that hold pages; a file that the store does not hold as a page
+    takes the disk listing, which has it.
+    """
+    from .vault_store import read
+
+    root = Path(vault_root)
+    folder = relative_posix(directory, root)
+    folder = "" if folder == "." else folder
+    if not read.serves(root, f"{folder}/{name}" if folder else name):
+        return None
+    with read.snapshot(root) as view:
+        return {vault_name_key(child.name) for child in view.children(folder)}
 
 
 @dataclass
@@ -4991,6 +5034,12 @@ def post_commit_batch_fanout(
 ) -> bool:
     if vault_root is None or not replaced:
         return True
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(Path(vault_root)):
+        # The store commit derived every row of a store-mode vault; the sidecars this fan-out
+        # refreshes belong to file mode, and nothing in store mode reads them.
+        return True
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
     publication_intents = tuple(publication_intents)
@@ -5469,16 +5518,27 @@ def batch_atomic_write(
     full content rehash before every destination flip. A trusted owner's private
     binding validator runs at those same boundaries; byte guards alone cannot
     establish fresh input permission.
+
+    A store-mode vault keeps its pages in the collection store, so its batch commits there, on the
+    store thread, and writes no Markdown for a page (``vault_store.batch``). Off that thread such a
+    batch refuses.
     """
     from . import working_set_heat
 
     if vault_root is not None:
         from .vault_store import availability
+        from .vault_store import batch as store_batch
 
-        # A store-mode vault keeps its pages in the store, so Markdown written here would go stale.
-        refusal = availability.write_refusal(Path(vault_root))
-        if refusal is not None:
-            raise refusal
+        writer = availability.page_writer(Path(vault_root))
+        if writer is not None:
+            return store_batch.commit_batch(
+                writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
+                completion_guards=completion_guards, index_reports=index_reports,
+                post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+            )
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -5538,6 +5598,19 @@ def batch_atomic_write(
     return result
 
 
+def _require_distinct_destinations(writes: Iterable[PlannedWrite]) -> None:
+    """Refuse a batch that names one destination twice, by the portable key of each path part."""
+    destinations: set[str] = set()
+    for write in writes:
+        destination = os.path.abspath(write.path)
+        portable_destination = "/".join(
+            vault_name_key(part) for part in Path(destination).parts
+        )
+        if portable_destination in destinations:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
+        destinations.add(portable_destination)
+
+
 def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite],
     *,
@@ -5554,6 +5627,8 @@ def _batch_atomic_write_locked(
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _before_first_install: Callable[[], None] | None = None,
+    _graph_epoch: bool = True,
+    _before_commit_point: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5584,7 +5659,8 @@ def _batch_atomic_write_locked(
     publication_intents_enabled = _prepare is None and vault_root is not None and (
         post_commit_fanout or publication_intents_out is not None
     )
-    if vault_root is not None:
+    # A store-mode batch derives its graph rows in its own transaction and never reads this epoch.
+    if vault_root is not None and _graph_epoch:
         from . import graph_sync
 
         if defer_graph_completion:
@@ -5617,15 +5693,7 @@ def _batch_atomic_write_locked(
             graph_debt_checkpoint = checkpoint_write
         elif defer_graph_completion:
             raise ValueError("defer_graph_completion requires graph-relevant writes")
-    destinations: set[str] = set()
-    for write in writes:
-        destination = os.path.abspath(write.path)
-        portable_destination = "/".join(
-            vault_name_key(part) for part in Path(destination).parts
-        )
-        if portable_destination in destinations:
-            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
-        destinations.add(portable_destination)
+    _require_distinct_destinations(writes)
     for write in writes:
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
@@ -6153,6 +6221,10 @@ def _batch_atomic_write_locked(
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
             guard.recheck()
+        if _before_commit_point is not None:
+            # A store-mode batch commits its pages here, the last step that can fail, so a failure
+            # restores the files above and a retry meets a vault the batch never touched.
+            _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
@@ -6686,6 +6758,9 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
     read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
+    stored = _respell_in_store(Path(vault_root), parts, replacing)
+    if stored is not None:
+        return stored
     current = Path(vault_root)
     spelled: list[str] = []
     for index, part in enumerate(parts):
@@ -6703,17 +6778,58 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
             names = os.listdir(current)
         except OSError:
             names = []
-        prefix = "/".join(spelled)
-        variants = [
-            name
-            for name in held_fs.name_variants(names, part)
-            if (f"{prefix}/{name}" if prefix else name) != replacing
-        ]
-        if not variants:
+        variant = _sibling_spelling(names, part, "/".join(spelled), replacing)
+        if variant is None:
             spelled.extend(parts[index:])
             break
-        spelled.append(variants[0])
-        current = current / variants[0]
+        spelled.append(variant)
+        current = current / variant
+    return "/".join(spelled)
+
+
+def _sibling_spelling(
+    names: Iterable[str], part: str, prefix: str, replacing: str | None
+) -> str | None:
+    """The spelling of the first sibling in ``names`` that shares ``part``'s name key.
+
+    The path that a move vacates is no sibling.
+    """
+    variants = [
+        name
+        for name in held_fs.name_variants(names, part)
+        if (f"{prefix}/{name}" if prefix else name) != replacing
+    ]
+    return variants[0] if variants else None
+
+
+def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None) -> str | None:
+    """``respell_new_path`` for a stored page, reading folders from the store and the disk.
+
+    It returns None for a path that the store does not serve. A stored page may have no file yet,
+    so a folder that only the store knows would read as new. A folder that holds no page (one with
+    only binaries) is not in the store, so the disk adds its names.
+    """
+    from .vault_store import read
+
+    if not read.serves(vault_root, "/".join(parts)):
+        return None
+    spelled: list[str] = []
+    with read.snapshot(vault_root) as view:
+        for index, part in enumerate(parts):
+            prefix = "/".join(spelled)
+            names = {child.name for child in view.children(prefix)}
+            try:
+                names.update(os.listdir(vault_root / prefix if prefix else vault_root))
+            except OSError:
+                pass  # a folder that only the store knows has no directory yet
+            if part in names:
+                spelled.append(part)
+                continue
+            variant = _sibling_spelling(names, part, prefix, replacing)
+            if variant is None:
+                spelled.extend(parts[index:])
+                break
+            spelled.append(variant)
     return "/".join(spelled)
 
 

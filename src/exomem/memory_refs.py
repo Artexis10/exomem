@@ -1706,6 +1706,24 @@ def identity_row(
     return None if row is None or row[4] == _UNREADABLE else row
 
 
+def replace_identity_row(
+    conn: sqlite3.Connection, rel: str, row: tuple[str, str | None, str, str, str] | None
+) -> None:
+    """Replace the identity row of ``rel`` with ``row`` (``identity_row`` of its bytes).
+
+    A ``row`` of None drops the row.
+
+    The caller owns the transaction.
+    """
+    conn.execute("DELETE FROM identities WHERE path = ?", (rel,))
+    if row is not None:
+        conn.execute(
+            "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            row,
+        )
+
+
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
     return _scan_directory(vault_root, Path(vault_root) / kb_dirname())
 

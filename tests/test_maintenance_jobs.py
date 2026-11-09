@@ -373,6 +373,47 @@ def test_a_job_lets_a_writer_in_after_the_page_it_is_writing_instead_of_after_it
     assert len(rewritten) == len(pages)
 
 
+def test_a_phase_that_grows_with_the_vault_lets_a_writer_in_and_still_applies_every_item(
+    vault, monkeypatch
+) -> None:
+    """A reconcile phase held the boundary through all of its items, 33 minutes on a large vault.
+
+    Every writer behind it was refused busy after its wait. The phase now runs in short holds that
+    end for a waiting writer, and it applies each item exactly once across them.
+    """
+    # Only a waiting writer ends a hold here: the time budget is out of reach.
+    monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 3600.0)
+    monkeypatch.setattr(maintenance_jobs, "current_run_id", lambda: "reconcile-run")
+    items = list(range(60))
+    applied: list[int] = []
+    entered: list[int] = []
+
+    def apply(chunk) -> None:
+        applied.extend(chunk)
+        time.sleep(0.05)
+
+    def writer() -> None:
+        with writer_lease.get_manager().mutation_guard(vault, request_id="writer", operation="edit"):
+            entered.append(len(applied))
+
+    job = threading.Thread(
+        target=lambda: maintenance_jobs.apply_in_holds(vault, "reconcile_units", items, apply, batch=1)
+    )
+    job.start()
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    while not applied:
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    other = threading.Thread(target=writer)
+    other.start()
+    other.join(_DEADLINE_SECONDS)
+    job.join(_DEADLINE_SECONDS)
+
+    # The writer got in while the phase had most of its items left, not after the last one.
+    assert len(entered) == 1 and entered[0] < len(items) // 2, entered
+    assert applied == items
+
+
 def test_a_job_whose_time_budget_is_spent_still_writes_a_page_every_hold(server, vault, monkeypatch) -> None:
     monkeypatch.setattr(maintenance_jobs, "HOLD_SECONDS", 0.0)
     monkeypatch.setattr(maintenance_jobs, "BATCH_PAGES", 1)

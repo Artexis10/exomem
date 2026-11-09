@@ -2041,8 +2041,8 @@ def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counte
     holder = threading.Thread(target=hold)
     route = runtime.route
 
-    def route_then_hold(*args):
-        server = route(*args)
+    def route_then_hold(*args, **keywords):
+        server = route(*args, **keywords)
         if server is not None and not holding.is_set():
             holder.start()
             assert holding.wait(5)

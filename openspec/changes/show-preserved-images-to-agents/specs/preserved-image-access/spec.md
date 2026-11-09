@@ -28,8 +28,27 @@
 
 #### Scenario: A format the server cannot decode
 
-- **WHEN** an agent asks to see a stored camera raw file
+- **WHEN** an agent asks to see a stored Photoshop `.psd` file, whose extension the image registry does not list
 - **THEN** the refusal is `IMAGE_FORMAT_UNSUPPORTED` and names `transfer_artifact` download as the route to the original
+
+### Requirement: Camera raw originals are decoded for viewing and search
+
+The image registry SHALL list the camera raw extension `.dng`, and every consumer of the registry's images SHALL decode it through LibRaw: image view, OCR extraction, the visual (CLIP) index and the optional caption. The decoder SHALL demosaic the full sensor image with the camera's white balance and SHALL turn it upright by the camera's recorded orientation, so the reported original size is the upright sensor image's. It SHALL refuse a raw whose sensor image exceeds the caller's pixel ceiling, or Pillow's decompression-bomb limit when the caller names none, before it demosaics anything. A raw that LibRaw cannot read SHALL be refused as `IMAGE_UNDECODABLE`. An install without the raw decoder SHALL answer with the `image-codecs` install guidance. The stored original SHALL NOT change.
+
+#### Scenario: An agent looks at a phone raw shot in portrait
+
+- **WHEN** an agent asks to see a stored DNG whose sensor rows are stored turned and whose orientation is 6
+- **THEN** the image block is upright, the reported original size is the upright sensor image's, and the stored bytes are unchanged
+
+#### Scenario: A raw is found by its text and its picture
+
+- **WHEN** a DNG containing printed text is processed
+- **THEN** its OCR text is extracted from the upright image and the visual index encodes the same upright image
+
+#### Scenario: A raw too large to decode
+
+- **WHEN** a DNG's sensor image is larger than image view's pixel ceiling
+- **THEN** the refusal is `IMAGE_TOO_LARGE`, named before any demosaic runs
 
 ### Requirement: Short download links for originals
 

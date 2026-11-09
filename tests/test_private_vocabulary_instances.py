@@ -2342,3 +2342,32 @@ def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_inst
     assert "vault.hosts" in (vault / relations["saved"]["path"]).read_text(encoding="utf-8")
     taxonomy_path = bootstrap["source_taxonomy"]["registry"]
     assert taxonomy_path == "Knowledge Base/_Schema/public/source-taxonomy.yaml"
+
+
+def test_an_outcome_takes_the_verdicts_of_its_page_instance(private_instances, vault):
+    """A verdict that one instance adds is a valid outcome on that instance's pages only."""
+    from exomem import semantic_language_registry
+    from exomem import vault as vault_module
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    path = "Knowledge Base/Notes/Experiments/trial.md"
+    private = {"type": "experiment", "projects": ["private-project"], "registry_scope": SCOPE}
+    with principal.request_scope(private_instances("full")):
+        spec = instances.select(vault, semantic_language_registry.CATEGORY_SPEC, SCOPE)
+        overlay = spec.overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\ncategories: {}\nkinds: {}\nverdicts:\n"
+            "  retracted:\n    description: The authors withdrew the claim\n",
+            encoding="utf-8",
+        )
+        on_private = vault_module.governed_frontmatter_reason(
+            "outcome", "retracted", "experiment", page=(vault, path, private)
+        )
+        on_public = vault_module.governed_frontmatter_reason(
+            "outcome", "retracted", "experiment", page=(vault, path, {"type": "experiment"})
+        )
+
+    assert on_private is None
+    assert on_public is not None and "`outcome:` must be exactly one of" in on_public
