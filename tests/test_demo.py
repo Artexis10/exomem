@@ -13,13 +13,14 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 import exomem
-from exomem import commands, state_migration
-from exomem import demo
+from exomem import commands, demo, lexstore, state_migration
 from exomem.__main__ import _core_op_names
 from exomem.__main__ import main as cli_main
 
@@ -102,15 +103,31 @@ def test_cli_json_envelope_shape_and_ordering(capsys: pytest.CaptureFixture) -> 
     assert envelope["total_seconds"] >= max(seconds)
 
 
-def test_temp_isolation_no_leftover_dir_and_sample_vault_unmodified() -> None:
+def test_temp_isolation_no_leftover_dir_and_sample_vault_unmodified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A loaded runner: the lexical repair that the find step starts is still
+    # running when the steps end. It writes into the temp copy's state root, so
+    # a cleanup that does not wait for it can leave that root behind.
+    open_store = lexstore.get_store
+
+    def slow_repair_open(*args, **kwargs):
+        store = open_store(*args, **kwargs)
+        if threading.current_thread().name == "exomem-lexical-repair":
+            time.sleep(1.0)
+        return store
+
+    monkeypatch.setattr(lexstore, "get_store", slow_repair_open)
     tmp_root = Path(tempfile.gettempdir())
     before_dirs = set(tmp_root.glob("exomem-demo-*"))
     before_vault = _vault_signature(demo.SAMPLE_VAULT)
 
     code = demo.run_demo(echo=lambda *_: None)
 
+    repairs = [t for t in threading.enumerate() if t.name == "exomem-lexical-repair" and t.is_alive()]
     after_dirs = set(tmp_root.glob("exomem-demo-*"))
     assert code == 0
+    assert repairs == []  # no repair still writing once the copy is gone
     assert after_dirs - before_dirs == set()  # temp copy was removed
     assert _vault_signature(demo.SAMPLE_VAULT) == before_vault  # package copy untouched
 

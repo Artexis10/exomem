@@ -210,6 +210,12 @@ def run_demo(
                 echo(f"kept sample vault at: {target}")
         return 0 if success else 1
     finally:
+        if target is not None:
+            # The find step can leave a lexical repair running on a daemon thread. It writes
+            # into the state root, so it must end before the environment and the copy go away.
+            from exomem import lexstore
+
+            lexstore.await_repairs_idle(target)
         for key, value in saved.items():
             if value is None:
                 os.environ.pop(key, None)
