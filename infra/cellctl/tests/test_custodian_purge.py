@@ -9,6 +9,7 @@ from pathlib import Path
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from kubernetes import client as k8s
 from kubernetes.client.exceptions import ApiException
@@ -88,12 +89,15 @@ class Cluster:
         self.bucket = FakeBucket(self.keys)
         self.hold_file = tmp_path / "hold-cells.json"
         self.hold_file.write_text(json.dumps(held or []))
+        self.keys_file = tmp_path / "grant-public-keys.json"
+        self.keys_file.write_text(json.dumps([SUBSTRATE.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()]))
         self.now = now if now is not None else float(IAT + 8 * DAY)
         self.purger = self.restart()
 
     def restart(self) -> Purger:
         self.purger = Purger(self.core, self.keys, self.bucket.hider,
-                             PurgeConfig(grant_keys=[SUBSTRATE.public_key()], hold_path=self.hold_file),
+                             PurgeConfig(grant_keys_path=self.keys_file, hold_path=self.hold_file),
                              clock=lambda: self.now)
         return self.purger
 
@@ -265,6 +269,20 @@ def test_a_done_mark_goes_with_its_grant(tmp_path: Path) -> None:
     cluster.sweep()
 
     assert cluster.core.done() == []
+
+
+def test_a_bad_grant_key_file_keeps_the_grants_and_their_done_marks(tmp_path: Path) -> None:
+    """Defect: a bad key value during a rotation reads as "no grants", so the done marks go and the cell's
+    recreated namespace gets a key."""
+    cluster = Cluster(tmp_path)
+    cluster.core.relay(_grant(CELL))
+    cluster.sweep()
+    cluster.keys_file.write_text("not a key list")
+
+    cluster.sweep(namespaces=(f"exo-cell-{CELL}",))
+
+    assert cluster.core.done() == [CELL]
+    assert (f"exo-cell-{CELL}", "cell-object-store-key") not in cluster.core.secrets
 
 
 def test_a_stale_purge_key_is_deleted_before_a_new_one_is_minted(tmp_path: Path) -> None:

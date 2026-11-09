@@ -1,9 +1,10 @@
 """Backblaze B2 native API (v3) for the media edge, over httpx.
 
-Only the calls the edge needs. The edge key lacks `deleteFiles`, and no call here
-lists or deletes a version. The one hide serves the collector's `condemn`. A
-rejected call did not take effect; an uncertain one may have. The write paths in
-`media_edge` depend on that split.
+Only the calls the edge needs. The edge key lacks `deleteFiles` and `listFiles`, and
+no call here deletes a version. The hide serves the collector's `condemn` and the
+purge of a deleted cell. Only the purge lists versions, with a second, list-only key
+(automate-cell-storage-deletion D3). A rejected call did not take effect; an
+uncertain one may have. The write paths in `media_edge` depend on that split.
 """
 
 from __future__ import annotations
@@ -192,6 +193,21 @@ class B2:
     async def hide_file(self, key: str) -> None:
         """Make the name's newest version non-current. The version stays readable by ID until the bucket rule runs."""
         await self._post("b2_hide_file", {"bucketId": (await self._authorized()).bucket_id, "fileName": key})
+
+    async def list_versions(self, prefix: str) -> list[FileInfo]:
+        """Every entry under the prefix, by name, and newest first within a name, as the provider lists them."""
+        session = await self._authorized()
+        entries: list[FileInfo] = []
+        start: dict[str, str] = {}
+        while True:
+            payload = await self._post("b2_list_file_versions", {
+                "bucketId": session.bucket_id, "prefix": prefix, "maxFileCount": 1000, **start})
+            with _shape():
+                entries += [FileInfo(str(item["fileId"]), str(item["fileName"]), int(item.get("contentLength") or 0),
+                                     str(item["action"]), dict(item.get("fileInfo") or {})) for item in payload["files"]]
+                if payload.get("nextFileName") is None:
+                    return entries
+                start = {"startFileName": payload["nextFileName"], "startFileId": payload["nextFileId"]}
 
     async def file_info(self, file_id: str) -> FileInfo | None:
         try:

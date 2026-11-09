@@ -26,11 +26,10 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 from kubernetes import watch
@@ -40,8 +39,8 @@ from .deletion_grant import (
     DELETIONS_CONFIGMAP,
     GRANTS_KEY,
     DeletionGrant,
-    load_public_keys,
     read_hold_list,
+    read_public_keys,
     verified_grants,
 )
 from .errors import describe_error
@@ -142,7 +141,8 @@ def _ensure_each(
 
 @dataclass(frozen=True)
 class PurgeConfig:
-    grant_keys: Sequence[Ed25519PublicKey]
+    # Mounted files of the chart-owned policy ConfigMap, read on each sweep.
+    grant_keys_path: Path
     hold_path: Path
     # Where cellctl relays the grants, and the custodian's own namespace for its done marks.
     deletions_namespace: str = GATEWAY_NAMESPACE
@@ -169,6 +169,9 @@ class Purger:
     def refresh(self) -> bool:
         """Reads the relayed grants. Returns whether the read succeeded."""
 
+        keys = read_public_keys(self.config.grant_keys_path)
+        if keys is None:
+            return False
         try:
             data = self.core.read_namespaced_config_map(DELETIONS_CONFIGMAP, self.config.deletions_namespace).data
         except ApiException as error:
@@ -176,7 +179,7 @@ class Purger:
                 logger.error("key custodian: deletion grants not read: %s", describe_error(error))
                 return False
             data = None
-        self.grants = verified_grants((data or {}).get(GRANTS_KEY), self.config.grant_keys)
+        self.grants = verified_grants((data or {}).get(GRANTS_KEY), keys)
         return True
 
     def _namespace_exists(self, cell_id: str) -> bool:
@@ -348,7 +351,7 @@ def run() -> None:
         key_store,
         lambda key: B2PrefixHider(B2Config(key_id=key.key_id, application_key=key.key_secret, bucket_id=bucket_id)),
         PurgeConfig(
-            grant_keys=load_public_keys(Path(os.environ["KEY_CUSTODIAN_GRANT_PUBLIC_KEYS_FILE"]).read_bytes()),
+            grant_keys_path=Path(os.environ["KEY_CUSTODIAN_GRANT_PUBLIC_KEYS_FILE"]),
             hold_path=Path(os.environ["KEY_CUSTODIAN_HOLD_LIST_FILE"]),
             deletions_namespace=os.environ["KEY_CUSTODIAN_DELETIONS_NAMESPACE"],
             own_namespace=os.environ["KEY_CUSTODIAN_NAMESPACE"],

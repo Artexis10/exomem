@@ -46,7 +46,7 @@ class DeletionGrant:
 
 def load_public_keys(raw: bytes) -> list[Ed25519PublicKey]:
     """The pinned grant public keys: a JSON array of PEM strings, the current key and, during a rotation,
-    the next one. Raises on any key that is not Ed25519, so a bad chart value stops the start."""
+    the next one. Raises on any key that is not Ed25519."""
 
     pems = json.loads(raw)
     if not isinstance(pems, list) or not all(isinstance(item, str) for item in pems):
@@ -55,6 +55,18 @@ def load_public_keys(raw: bytes) -> list[Ed25519PublicKey]:
     if not all(isinstance(key, Ed25519PublicKey) for key in keys):
         raise ValueError("every grant public key must be Ed25519")
     return keys
+
+
+def read_public_keys(path: Path) -> list[Ed25519PublicKey] | None:
+    """The keys in the mounted file, read on each sweep so that a rotation needs no restart. None when the
+    file is bad: the caller then keeps its previous grants, and the watcher reports a purge that does not
+    happen. A bad chart value must not stop the custodian, because new cells still need their keys."""
+
+    try:
+        return load_public_keys(path.read_bytes())
+    except (OSError, ValueError, TypeError):
+        logger.error("deletion grants: the grant public keys cannot be read; the previous grants stay")
+        return None
 
 
 def verify_grant(token: object, keys: Sequence[Ed25519PublicKey]) -> DeletionGrant | None:
