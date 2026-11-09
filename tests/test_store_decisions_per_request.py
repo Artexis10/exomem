@@ -243,6 +243,27 @@ def test_a_read_that_reuses_the_due_state_memo_asks_the_store_once_for_its_pages
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("caller", ["owner", "owner_with_policy", "external"])
+def test_routing_a_write_to_a_records_collection_asks_the_store_once_for_the_collections(
+    service, store_requests: StoreRequests, caller: str  # noqa: F811
+) -> None:
+    """A semantic write routes its terms through every records collection the writer may see.
+
+    Each collection's manifest and items pass the release plane. Asked one at a time, every store-owned
+    page queued its own store request after every write.
+    """
+    root, who = service.root, _who(caller)
+    pages = _seed(root, caller)
+    claims = {page: {"items": [{"path": page, "key": "k"}], "manifest_hash": "other"} for page in pages}
+
+    store_requests.kwargs.clear()
+    with request_scope(who):
+        due_state.routing_targets(root, payload={"claims": claims}, principal=who)
+
+    assert len(store_requests.kwargs) == 1, "routing asked the store about each collection on its own"
+
+
+@pytest.mark.timeout(180)
 def test_a_refused_store_request_withholds_the_store_pages_once_and_says_so(
     service, store_requests: StoreRequests  # noqa: F811
 ) -> None:
