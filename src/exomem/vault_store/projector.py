@@ -235,7 +235,7 @@ class Projector:
         """Project every intent that is queued now and not held, oldest first, and report it."""
         report = PassReport()
         with self._pass_lock:
-            acquired = held_fs.acquire(self._anchor())
+            acquired = held_fs.acquire(anchor(self._root))
             if not acquired.ok:
                 raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
             with acquired.require() as filesystem:
@@ -250,10 +250,6 @@ class Projector:
                         self._project(filesystem, intent.path, report)
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
-
-    def _anchor(self) -> Path:
-        # Windows resolves a root junction before no-follow anchoring, as the store's own routes do.
-        return self._root.resolve() if os.name == "nt" or self._root.is_symlink() else self._root
 
     def _list(self, after: tuple[str, str]) -> list[Intent]:
         """The next intents after ``after`` in queue order, without bodies or held paths."""
@@ -345,7 +341,7 @@ class Projector:
         assert intent is not None
         if page is None:
             raise Deferred("a write intent names a path with no stored page")
-        disk = _observe(filesystem, intent.path)
+        disk = observe(filesystem, intent.path)
         self._apply_write(filesystem, facts, disk, _judge_write(facts, disk), report)
 
     def _apply_write(
@@ -391,7 +387,7 @@ class Projector:
     ) -> None:
         intent = facts.intent
         assert intent is not None
-        disk = _observe(filesystem, intent.path)
+        disk = observe(filesystem, intent.path)
         removed = report.removed
         if self._remove(filesystem, facts, disk, report, store_revision=None):
             self._record_removed(intent.path, intent.revision)
@@ -442,8 +438,8 @@ class Projector:
         old = self._facts(intent.from_path)
         if old.held:
             return
-        old_disk = _observe(filesystem, old.path)
-        new_disk = _observe(filesystem, intent.path)
+        old_disk = observe(filesystem, old.path)
+        new_disk = observe(filesystem, intent.path)
         if (
             old_disk is not None
             and old.manifest is not None
@@ -478,7 +474,7 @@ class Projector:
 
         A file above ``HELD_BODY_LIMIT`` is held by its hash alone; its bytes stay in the file.
         """
-        kept = _observe(filesystem, facts.path, keep_body=True)
+        kept = observe(filesystem, facts.path, keep_body=True)
         if kept is None:
             raise Deferred("the file vanished while it was being held")
         self._hold(
@@ -600,7 +596,7 @@ class Projector:
                 if path
             }
         removed = 0
-        acquired = held_fs.acquire(self._anchor())
+        acquired = held_fs.acquire(anchor(self._root))
         if not acquired.ok:
             raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
         with acquired.require() as filesystem:
@@ -740,6 +736,12 @@ def _turn_into_write(tx: Connection, intent: Intent) -> None:
 # -- disk, through the held filesystem ------------------------------------------------------------
 
 
+def anchor(root: Path) -> Path:
+    """The vault root as the held filesystem anchors it: a symlinked root, and on Windows a root
+    junction, resolves first, as the store's own routes do."""
+    return root.resolve() if os.name == "nt" or root.is_symlink() else root
+
+
 def _missing(result: held_fs.HeldResult) -> bool:
     return not result.ok and result.error is not None and result.error.code == "MISSING"
 
@@ -749,7 +751,7 @@ def _split(rel: str) -> tuple[str, str]:
     return folder, leaf
 
 
-def _observe(
+def observe(
     filesystem: held_fs.HeldFilesystem, rel: str, *, keep_body: bool = False
 ) -> OnDisk | None:
     """The file at ``rel`` with its hash, or None when no file is there.

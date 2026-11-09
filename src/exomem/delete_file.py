@@ -25,11 +25,13 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from .fold_leaf import Placement
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
@@ -89,6 +91,25 @@ class DeleteFileValidation:
     content_hash: str
 
 
+def planned_trash_path(vault_root: Path, rel_path: str, now: dt.datetime) -> str:
+    """The vault-relative trash path `rel_path` takes at `now`, before any collision suffix."""
+    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
+    name = trash_metadata.preserve_floor(rel_path, f"{now.strftime('%H%M%S')}-{sanitized}")
+    trash_dir = kb_root(vault_root) / TRASH_SUBPATH / now.strftime("%Y-%m-%d")
+    return (trash_dir / name).relative_to(vault_root).as_posix()
+
+
+def free_trash_path(planned: Path, taken: Callable[[Path], bool]) -> Path:
+    """The first of `planned`, `name-2`, `name-3`... whose payload, metadata and companion slots `taken` all
+    finds free. A taken slot is never overwritten, and no other suffix routes around a private alias."""
+    stem, dot, ext = planned.name.rpartition(".")
+    candidate, counter = planned, 2
+    while any(taken(slot) for slot in trash_metadata.destination_paths(candidate)):
+        candidate = planned.with_name(f"{stem}-{counter}.{ext}" if dot else f"{planned.name}-{counter}")
+        counter += 1
+    return candidate
+
+
 def delete_file(
     vault_root: Path,
     *,
@@ -102,9 +123,10 @@ def delete_file(
     now: dt.datetime | None = None,
     validate_only: bool = False,
     expected_hash: str | None = None,
+    _fold: Placement | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     with ExitStack() as originals_context:
-        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context)
+        return _delete_file_local(vault_root, path=path, confirm=confirm, force_orphan=force_orphan, force_superseded=force_superseded, allow_curated=allow_curated, expected_dead_inbound=expected_dead_inbound, today=today, now=now, validate_only=validate_only, expected_hash=expected_hash, originals_context=originals_context, _fold=_fold)
 
 
 def _delete_file_local(
@@ -121,6 +143,7 @@ def _delete_file_local(
     validate_only: bool = False,
     expected_hash: str | None = None,
     originals_context: ExitStack,
+    _fold: Placement | None = None,
 ) -> DeleteFileResult | DeleteFileValidation:
     if not confirm:
         raise DeleteFileError(
@@ -189,7 +212,8 @@ def _delete_file_local(
         )
 
     append_only = in_append_only_tree(rel_path)
-    if append_only:
+    # A fold is the only caller past this refusal: it proves identical bytes remain held elsewhere.
+    if append_only and _fold is None:
         raise DeleteFileError(
             code="APPEND_ONLY",
             reason=(
@@ -321,9 +345,9 @@ def _delete_file_local(
     # Move to trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    date_dir, trash_filename = trash_metadata.placement(rel_path, now)
-    trash_dir = kb_root(vault_root) / TRASH_SUBPATH / date_dir
-    trash_abs = trash_dir / trash_filename
+    trash_abs = vault_root / planned_trash_path(vault_root, rel_path, now)
+    trash_dir = trash_abs.parent
+    trash_filename = trash_abs.name
 
     def trash_destination_exists(candidate: Path) -> bool:
         relative = candidate.relative_to(vault_root).as_posix()
@@ -350,22 +374,13 @@ def _delete_file_local(
     def destination_taken(candidate: Path) -> bool:
         return any(trash_destination_exists(slot) for slot in trash_metadata.destination_paths(candidate))
 
-    # Collision: never overwrite an existing ordinary trash entry, and never
-    # route around a private physical alias by selecting a different suffix.
-    if destination_taken(trash_abs):
-        i = 2
-        while True:
-            stem, dot, ext = trash_filename.rpartition(".")
-            if dot:
-                alt = f"{stem}-{i}.{ext}"
-            else:
-                alt = f"{trash_filename}-{i}"
-            alt_abs = trash_dir / alt
-            if not destination_taken(alt_abs):
-                trash_abs = alt_abs
-                trash_filename = alt
-                break
-            i += 1
+    if _fold is not None:
+        # A fold seals its trash identity, so a collision may not move it to another name.
+        if _fold.trash_path != trash_abs.relative_to(vault_root).as_posix() or destination_taken(trash_abs):
+            raise DeleteFileError("DELETE_FAILED", "the sealed trash identity is not free")
+    else:
+        trash_abs = free_trash_path(trash_abs, trash_destination_exists)
+        trash_filename = trash_abs.name
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
     meta_abs = trash_dir / f"{trash_filename}{METADATA_SUFFIX}"
@@ -449,6 +464,10 @@ def _delete_file_local(
 
     originals_context.enter_context(local_originals(vault_root, (rel_path,)))
     from . import graph_sync
+
+    if _fold is not None:
+        # Immediately before the move: the retained copy must still hold identical bytes.
+        _fold.verify()
 
     try:
         transition = graph_sync.begin_deletion_transition(

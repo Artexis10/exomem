@@ -733,11 +733,11 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -
     and its binding are checked again, the changed bytes move to Trash with their metadata, and the
     verified bytes replace the original in one rename. Returns the restored file's stat identity.
     """
-    from .kbdir import kb_dirname
+    from .delete_file import free_trash_path, planned_trash_path
 
     target = PurePosixPath(row.path)
     now = dt.datetime.now()
-    day, entry = trash_metadata.placement(row.path, now)
+    planned = Path(planned_trash_path(vault, row.path, now))
     damaged_name, restored_name = held_fs.publish_temporary_name(), held_fs.publish_temporary_name()
     written: dict[str, held_fs.StableIdentity] = {}
     with held_fs.acquire(vault).require() as filesystem, \
@@ -760,9 +760,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -
                 with filesystem.file(parent, target.name).require() as current:
                     if current.version() != hashed.version:
                         raise _Changed
-                trash = PurePosixPath(kb_dirname(), trash_metadata.TRASH_SUBPATH, day).as_posix()
-                with filesystem.parent(trash, create=True, access="mutate").require() as folder:
-                    leaf = _free_trash_leaf(filesystem, folder, entry)
+                with filesystem.parent(planned.parent.as_posix(), create=True, access="mutate").require() as folder:
+                    leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
                     metadata = {
                         "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
                         "reason": "original_fixity", "cause": cause,
@@ -805,22 +804,11 @@ def _rename(filesystem, parent, name: str, written: dict[str, held_fs.StableIden
     del written[name]
 
 
-def _free_trash_leaf(filesystem, folder, entry: str) -> str:
-    """The first Trash entry name whose payload, metadata and companion names are free, as delete picks it."""
-    def taken(name: str) -> bool:
-        for slot in trash_metadata.destination_paths(Path(name)):
-            found = filesystem.file(folder, slot.name)
-            if found.ok:
-                found.require().close()
-                return True
-        return False
-
-    candidate, counter = entry, 2
-    stem, dot, suffix = entry.rpartition(".")
-    while taken(candidate):
-        candidate = f"{stem}-{counter}.{suffix}" if dot else f"{entry}-{counter}"
-        counter += 1
-    return candidate
+def _exists(filesystem, folder, name: str) -> bool:
+    found = filesystem.file(folder, name)
+    if found.ok:
+        found.require().close()
+    return found.ok
 
 
 # --- what the owner and the operator see -------------------------------------------------------

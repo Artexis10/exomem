@@ -10,11 +10,14 @@ from pathlib import Path
 
 import pytest
 import yaml
+from test_episode_memory_command import _record
 
 from exomem import commands
+from exomem import edit as edit_module
 from exomem import note as note_module
 from exomem import replace as replace_module
 from exomem import vault as vault_module
+from exomem.governance.principal import owner_principal, request_scope
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -322,6 +325,26 @@ def test_replace_refuses_when_old_in_sources(vault: Path) -> None:
             today=TODAY,
         )
     assert exc.value.code == "INVALID_REPLACE"
+
+
+def test_edit_and_replace_still_refuse_a_recap_page(vault: Path) -> None:
+    """Only the episode recorder rewrites a recap page, and keeps its previous bytes when it does.
+    A hand edit or a supersession would change recap text that no history retains."""
+    with request_scope(owner_principal(surface="mcp")):
+        path = _record(vault)["source"]["path"]
+    before = _read(vault / path)
+
+    with pytest.raises(edit_module.EditError) as edit_refused:
+        edit_module.edit(
+            vault, path=path, why="x", old_string="brass", new_string="steel", today=TODAY
+        )
+    with pytest.raises(replace_module.ReplaceError) as replace_refused:
+        replace_module.replace(
+            vault, old_path=path, content="# x\n", note_type="insight", title="x", today=TODAY
+        )
+
+    assert (edit_refused.value.code, replace_refused.value.code) == ("INVALID_EDIT", "INVALID_REPLACE")
+    assert _read(vault / path) == before
 
 
 def test_replace_refuses_when_old_already_superseded(vault: Path) -> None:

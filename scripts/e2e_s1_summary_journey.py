@@ -738,6 +738,12 @@ class Session:
             await self.call(tool, **arguments, response_detail="full"), operation=tool
         )
 
+    async def mutate_released(self, tool: str, **arguments: Any) -> dict[str, Any]:
+        """A write on the compatible service, which answers in the released reply shape."""
+        return loop._released_mutation_diagnostics(
+            await self.call(tool, **arguments, response_detail="full"), operation=tool
+        )
+
     async def refused(self, code: str, tool: str, **arguments: Any) -> None:
         try:
             await self.call(tool, **arguments)
@@ -1882,7 +1888,7 @@ async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[
                                          columns=["occurred_on", "title", "status"], limit=20)
             row = next(row for row in rows["rows"] if row["record_id"] == NATIVE_RECORDS_KEY)
             title = row["title"] + " (rollback)"
-            changed = await service.mutate(
+            changed = await service.mutate_released(
                 "record_memory", action="update", collection=records, item_key=NATIVE_RECORDS_KEY,
                 changes={"title": title}, expected_container_hash=rows["snapshot"],
                 expected_item_version=row["item_version"], why="verify the compatible application write")
@@ -1891,7 +1897,7 @@ async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[
             row = next(row for row in plan["rows"] if row["plan_id"] == item)
             priority = PLAN_ITEMS[item]["priority"]
             expect(row["priority"] != priority, "the rollback fixture has no distinct Planning update")
-            await service.mutate(
+            await service.mutate_released(
                 "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": priority},
                 expected_container_hash=plan["snapshot"], expected_item_version=row["item_version"],
                 why="verify the compatible application Planning write")

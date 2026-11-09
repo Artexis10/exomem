@@ -78,17 +78,21 @@ background update failed, the reply carries a `notice` that says the change may 
 missing from search results.
 
 Artifact preservation reports one terminal `state` per file: `stored` for bytes
-this call committed, `already_stored` when the same SHA-256 already exists under
-the same `Evidence/<scope>/<category>/` destination — that outcome names the
-existing `path` and `ref`, writes nothing, and the batch summary counts it
-separately — and `failed` with a stable code and sanitized reason. `outcome`
+this call committed, `already_stored` when the same SHA-256 is already stored in
+the vault — that outcome names the existing `path`, `page` and `ref`, and the
+batch summary counts it separately — and `failed` with a stable code and
+sanitized reason. An `already_stored` hand-over writes nothing, except that bytes
+handed over into another Evidence family add that family to the existing page
+(`family_added: true`, with `families` listing every family the page holds, the first 64 and `families_total` beyond that); a caller field that the existing page did not take, such as a filename or description, is named in `fields_not_applied` as `{field, provided, kept}`; the
+page stays in its first folder, so browse a family by its tag filter. Raw-protected
+bytes keep one copy per family. `outcome`
 mirrors these for compatibility and reports `already_stored` as `stored` beside
 `duplicate_of`. A batch whose response was lost is recovered by repeating the
 identical call: the terminal is persisted before derived-state acknowledgement,
 so the same identity replays the same per-file paths, hashes, `request_id` and
 `receipt_id` without fetching or writing anything again. A retry under a new
-identity is a different mutation, and bytes already under that destination come
-back as `already_stored` rather than being stored a second time. `scope` and
+identity is a different mutation, and bytes the vault already holds come back as
+`already_stored` rather than being stored a second time. `scope` and
 `category` are each one path segment: a separator, reserved character, control
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.

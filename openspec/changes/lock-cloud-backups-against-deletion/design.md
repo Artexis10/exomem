@@ -50,6 +50,7 @@ The backups therefore move to a new bucket with Object Lock enabled and default 
   - Versions locked before such a change stay locked for at least the margin, so an alert leaves 23 days to act.
 - **The per-cell keys.** In compliance mode, no key can remove a locked version. A per-cell key may therefore keep the delete capability that restic needs, because on a locked version that delete only hides. Task 1.1 confirmed that restic's deletes through a per-cell key became hidden versions. The controller keeps only a list-only key for this bucket, so it removes nothing here directly.
 - **A deleted cell.** The key custodian hides the cell's files with its per-cell key, then deletes the key. It does this only on a deletion record that Substrate signed, after a grace period (`contain-cloud-controller-compromise` D9). The lifecycle rule removes the versions once their retention ends.
+  - *Amendment, 2026-11-09.* `automate-cell-storage-deletion` D2 changes the order. The custodian deletes the cell's key once the namespace is gone. After the grace, a short-lived purge key, with only `listFiles` and `writeFiles`, hides the files.
 
 ### D4. Recovery from a mass deletion
 

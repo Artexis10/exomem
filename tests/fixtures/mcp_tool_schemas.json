@@ -6954,6 +6954,20 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "held",
+                  "type": "string"
+                },
+                "limit": {}
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "vocabulary",
                   "type": "string"
                 },
@@ -8693,6 +8707,36 @@
                 "kind",
                 "why",
                 "run_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "held-resolve",
+                  "type": "string"
+                },
+                "why": {},
+                "path": {
+                  "description": "held-resolve: the held item's path.",
+                  "type": "string"
+                },
+                "choice": {
+                  "description": "held-resolve: keep-mine or keep-store.",
+                  "type": "string"
+                },
+                "item_version": {
+                  "description": "held-resolve: the item's item_version from the held list.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "why",
+                "path",
+                "choice",
+                "item_version"
               ],
               "additionalProperties": false
             },

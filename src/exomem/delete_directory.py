@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from .delete_file import planned_trash_path
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
@@ -34,7 +35,6 @@ from .vault import (
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
-    kb_root,
     plan_log_entry,
     resolve_under_vault,
     write_log_entry,
@@ -238,9 +238,9 @@ def _delete_directory_local(
     # Move the whole tree into trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    date_dir, trash_basename = trash_metadata.placement(rel_path, now)
-    trash_root = kb_root(vault_root) / TRASH_SUBPATH / date_dir
-    trash_abs = trash_root / trash_basename
+    trash_abs = vault_root / planned_trash_path(vault_root, rel_path, now)
+    trash_root = trash_abs.parent
+    trash_basename = trash_abs.name
 
     def trash_destination_exists(candidate: Path) -> bool:
         relative = candidate.relative_to(vault_root).as_posix()

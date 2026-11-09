@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from . import held_fs, originals, reserved_paths
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import kb_dirname
 
 if TYPE_CHECKING:
     from .graph_sync import GraphLifecycleTransition
@@ -34,15 +33,6 @@ def preserve_floor(source: str, name: str) -> str:
     from .governance.raw_protection import PREFIX, marked
 
     return PREFIX + name if marked(source) else name
-
-
-def placement(rel_path: str, now: datetime) -> tuple[str, str]:
-    """The Trash day folder and entry name for `rel_path` trashed at `now`: `YYYY-MM-DD` and `HHMMSS-<path>`.
-
-    The path loses its KB prefix and turns each `/` into `__`; a RAW path keeps its floor.
-    """
-    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
-    return now.strftime("%Y-%m-%d"), preserve_floor(rel_path, f"{now.strftime('%H%M%S')}-{sanitized}")
 
 
 def original_path(

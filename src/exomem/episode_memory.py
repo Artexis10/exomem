@@ -2,9 +2,13 @@
 
 `record` is the only way a recap reaches the vault. The agent authors it; this
 module validates it (`episode_capture`), writes it through the ordinary Source
-writer as an `episode` Source, retires the episode's earlier live revision in
-the same batch, and binds the committed page to the caller's own episode ledger
-by the writer's receipt. `inspect` reads that ledger back.
+writer as an `episode` Source, and binds the committed page to the caller's own
+episode ledger by the writer's receipt. An episode keeps one page: a later,
+different recap rewrites that page in place, and the same atomic batch keeps the
+page's previous bytes as a compiled-history entry. `inspect` reads that ledger back.
+
+This is the only writer that rewrites a Source (`revise_page`), and only a recap
+page of the caller's own episode: every other writer keeps refusing Sources.
 
 What it never does: summarise anything itself, walk the corpus for the page it
 just wrote, accept curation leaves or proposals, or answer a committed write
@@ -24,16 +28,23 @@ from typing import Any
 from . import add as add_module
 from . import (
     call_spans,
+    compiled_history,
     curation,
+    due_state,
     episode_capture,
     episode_compile,
+    episode_coverage,
     episode_nudge,
     freshness,
     memory_refs,
     query_log,
     recap_folder,
     request_budget,
+    reserved_paths,
+    source_coverage,
     source_taxonomy,
+    temporal,
+    vocabulary_auxiliaries,
     working_set_heat,
     writer_lease,
 )
@@ -44,11 +55,18 @@ from .find import RetrievalIndexWarming
 from .governance import egress
 from .governance.principal import effective_principal
 from .vault import (
+    _FM_PATTERN,
     BatchWriteError,
     ContentHashMismatchError,
+    FrontmatterError,
+    PlannedWrite,
+    batch_atomic_write,
     content_hash,
+    document_newline,
     parse_frontmatter,
     read_guarded_text,
+    with_newline,
+    yaml_scalar,
 )
 
 log = logging.getLogger(__name__)
@@ -129,8 +147,16 @@ def _revisions(
     frontmatter matters: a group collision is ruled out by the `episode` field
     itself.
     """
-    folder = _folder(vault_root)
-    group = episode_capture.key_group(key, audience)
+    return group_pages(
+        vault_root, _folder(vault_root), key, episode_capture.key_group(key, audience),
+        diagnostics=diagnostics,
+    )
+
+
+def group_pages(
+    vault_root: Path, folder: Path, key: str, group: str, *, diagnostics: dict[str, int] | None = None
+) -> list[_Revision]:
+    """The recap pages of episode `key` and filename group `group` in `folder`, oldest first."""
     try:
         with os.scandir(folder) as entries:
             names = [entry.name for entry in entries if entry.is_file()]
@@ -177,6 +203,122 @@ def _source(revision_path: str, frontmatter: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _not_revisable(reason: str) -> EpisodeError:
+    return EpisodeError("EPISODE_PAGE_NOT_REVISABLE", f"{reason}; nothing was written")
+
+
+def _revised_text(
+    before: str, current: dict[str, Any], body_before: str, recap: episode_capture.Recap, when: dt.datetime
+) -> str:
+    """`before` with the title, summary, digest, client and body of `recap`, stamped `updated`, every other byte kept.
+
+    `captured` keeps the first recap's date: the page is the episode's one filing. `updated` is the revision time.
+
+    The previous Decided lines decide whether the page's `ingested_into` is
+    cleared: a note that cited other Decided lines has not ingested these.
+    """
+    match = _FM_PATTERN.match(before)
+    if match is None:
+        raise _not_revisable("the episode page has no frontmatter")
+    newline = document_newline(before)
+    changed = episode_coverage.decided_lines(with_newline(body_before, "\n")) != recap.decided
+    revised = temporal.stamp(when)
+    lines: dict[str, str | None] = {
+        "title": f"title: {yaml_scalar(recap.subject)}",
+        "updated": f"updated: {yaml_scalar(revised)}",
+    }
+    expected: dict[str, Any] = {**current, "title": recap.subject, "updated": revised}
+    # The episode key is the page's identity and never changes; every other recap field follows.
+    for name, _required in add_module.EPISODE_FRONTMATTER_FIELDS:
+        if name == "episode":
+            continue
+        value = recap.frontmatter.get(name)
+        lines[name] = None if value is None else f"{name}: {yaml_scalar(value)}"
+        if value is None:
+            expected.pop(name, None)
+        else:
+            expected[name] = value
+    if changed and current.get("ingested_into"):
+        lines["ingested_into"] = "ingested_into: []"
+        expected["ingested_into"] = []
+    block = episode_capture.rewrite_fields(
+        match.group(1), lines, newline=newline, after="episode_digest"
+    )
+    if block is None:
+        raise _not_revisable("the episode page's frontmatter is not in the recorded shape")
+    # The recorder wrote this layout (`add._render_source`): heading, then the capture.
+    tail = with_newline(
+        f"\n# {recap.subject}\n\n{source_coverage.CAPTURE_HEADING}\n\n{recap.body}\n", newline
+    )
+    candidate = before[: match.start(1)] + block + before[match.end(1) : match.start(2)] + tail
+    try:
+        after, body, _raw = parse_frontmatter(candidate, strict=True)
+    except FrontmatterError:
+        after, body = {}, ""
+    # A recap is parsed in its own LF form, whatever line ending the page keeps.
+    if after != expected or episode_coverage.decided_lines(with_newline(body, "\n")) != recap.decided:
+        raise _not_revisable("the episode page could not be rewritten exactly")
+    return candidate
+
+
+def revise_page(
+    vault_root: Path, recap: episode_capture.Recap, *, path: str, expected_hash: str, when: dt.datetime
+) -> None:
+    """Rewrite the episode's recap page at `path` to `recap`, keeping its previous bytes in compiled history.
+
+    The page, its history entry and the index and log lines that a new recap
+    page used to write commit in one atomic batch, so the page never changes
+    without its previous text retained, and a failed history write leaves the
+    page as it was. `expected_hash` is the page's content hash as the
+    caller read it; a page another writer changed since fails the call.
+
+    This is the one place a Source is rewritten. The target check is closed
+    (Source tokens here are the recorder's protocol, not vault vocabulary): a recap Source in
+    the episode folder whose `episode` key and filename group are this recap's.
+    """
+    # The auxiliary seal reads paths against the resolved root, as the semantic writer's callers do.
+    root = Path(vault_root).resolve()
+    target = root / path
+    parts = episode_capture.filename_parts(target.name)
+    if target.parent.resolve() != _folder(root).resolve() or parts is None or parts[0] != recap.group:
+        raise _not_revisable("only this episode's own recap page can be revised")
+    before, guard = read_guarded_text(root, target)
+    actual = content_hash(before)
+    if actual != expected_hash:
+        raise ContentHashMismatchError(target, expected_hash, actual)
+    try:
+        current, body, _raw = parse_frontmatter(before, strict=True)
+    except FrontmatterError as error:
+        raise _not_revisable("the episode page's frontmatter is not valid") from error
+    if (
+        current.get("type") != "source"
+        or current.get("source_type") != source_taxonomy.EPISODE_KIND
+        or current.get("episode") != recap.key
+    ):
+        raise _not_revisable("only this episode's own recap page can be revised")
+    after = _revised_text(before, current, body, recap, when)
+    primary = PlannedWrite(path=target, content=after, expected_hash=expected_hash, guard=guard)
+    history = compiled_history.plan_episode_entry(root, path=path, before_source=before, after_source=after)
+    manifest = vocabulary_auxiliaries.seal(
+        root, primary=primary, derived=(("compiled-history", history),)
+    )
+    activity = add_module.revision_activity_writes(
+        root, path=path, title=recap.subject, source_type=source_taxonomy.EPISODE_KIND, now=when
+    )
+    intents: list[object] = []
+    with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
+        committed = batch_atomic_write(
+            [primary, history, *activity],
+            vault_root=root,
+            post_commit_fanout=False,
+            publication_intents_out=intents,
+            _vocabulary_auxiliaries=manifest,
+        )
+    assert isinstance(committed, list)
+    add_module.deferred_fanout(root, committed, created_paths=[history.path], publication_intents=intents)
+    due_state.refresh_after_writes(root, [due_state.PageWrite(path, prior_markdown=before)])
+
+
 @call_spans.timed("episode.write")
 def _write(
     vault_root: Path,
@@ -187,11 +329,11 @@ def _write(
 ) -> tuple[dict[str, str], bool, list[str]]:
     """The committed recap page for `recap`, writing it only when it is new, and the episode's recap paths.
 
-    Identical to this audience's newest live revision means a retry: nothing is
-    written. Otherwise the new page is written, ordered after every revision
-    listed, and every live revision listed is retired in the same batch,
-    guarded by the hash this listing read. A revision another writer changed
-    after this listing (a concurrent record retiring it, say) fails the call;
+    An episode has one live page. The same digest as that page means a retry:
+    nothing is written. A different recap rewrites the page in place
+    (`revise_page`), whatever superseded files an older layout left beside it.
+    An episode with no live page gets a new one, ordered after every file
+    listed. A page another writer changed after this listing fails the call;
     the listing is then read again and the write retried once.
     """
     for attempt in range(2):
@@ -201,37 +343,40 @@ def _write(
             revisions = _revisions(vault_root, recap.key, audience, diagnostics=revision_counts)
             live = [item for item in revisions if item.live]
             revision_counts["live_revisions"] = len(live)
-        if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
-            return _source(live[-1].path, live[-1].frontmatter), True, [item.path for item in revisions]
-        # Never before the newest revision on disk, whatever the clock says.
-        order = episode_capture.order_token(
-            when, after=revisions[-1].order if revisions else None
-        )
+        paths = [item.path for item in revisions]
+        head = live[-1] if live else None
+        if head is not None and head.frontmatter.get("episode_digest") == recap.digest:
+            return _source(head.path, head.frontmatter), True, paths
         try:
-            result = add_module.add(
-                vault_root,
-                source_schema,
-                content=recap.body,
-                title=recap.subject,
-                source_type=source_taxonomy.EPISODE_KIND,
-                slug=recap.slug_at(order),
-                today=when.replace(microsecond=0),
-                extra_frontmatter=recap.frontmatter,
-                supersede=tuple((item.path, item.hash) for item in live),
-                defer_fanout_to_terminal=True,
-            )
+            if head is not None:
+                revise_page(vault_root, recap, path=head.path, expected_hash=head.hash, when=when)
+                source = {**_source(head.path, head.frontmatter), "title": recap.subject}
+            else:
+                # Never before the newest file on disk, whatever the clock says.
+                order = episode_capture.order_token(
+                    when, after=revisions[-1].order if revisions else None
+                )
+                result = add_module.add(
+                    vault_root,
+                    source_schema,
+                    content=recap.body,
+                    title=recap.subject,
+                    source_type=source_taxonomy.EPISODE_KIND,
+                    slug=recap.slug_at(order),
+                    today=when.replace(microsecond=0),
+                    extra_frontmatter=recap.frontmatter,
+                    defer_fanout_to_terminal=True,
+                )
+                source = {"ref": result.ref, "path": result.path, "title": recap.subject}
+                paths.append(result.path)
         except add_module.AddError as error:
             raise ValueError(f"{error.code}: {error.reason} (missing: {error.missing})") from error
         except (ContentHashMismatchError, BatchWriteError):
             if attempt:
                 raise
             continue
-        query_log.log_write_call(tool="episode_memory", written_path=result.path, cited_sources=[])
-        return (
-            {"ref": result.ref, "path": result.path, "title": recap.subject},
-            False,
-            [*(item.path for item in revisions), result.path],
-        )
+        query_log.log_write_call(tool="episode_memory", written_path=source["path"], cited_sources=[])
+        return source, False, paths
     raise AssertionError("unreachable")  # pragma: no cover
 
 
