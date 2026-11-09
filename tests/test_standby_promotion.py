@@ -1070,6 +1070,57 @@ def test_the_method_unit_statistics_warm_yields_to_the_disable_switch_and_the_wa
     assert _method_search(vault, pages) == (1, 3)
 
 
+def test_the_method_unit_statistics_warm_runs_while_the_old_worker_still_serves(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Past `finish_warm` the supervisor promotes, and a long build would then run against the new worker."""
+    from exomem import working_set
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    seen: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(
+        working_set, "warm_owner_method_units",
+        lambda root: seen.append((readiness.is_warming(), service_standby.cutover_ready())) or "recorded",
+    )
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert seen == [(True, False)], "the build ran after the warm finished or the standby was cutover-ready"
+
+
+def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A build that outlives its budget stops at the catalogue query, without raising, and leaves nothing."""
+    import time
+
+    from exomem import lexstore
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    # SQLite checks the budget every 1000 instructions, more than this three-page build runs.
+    monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
+    build = lexstore.LexicalStore._admitted_unit_statistics
+    delays = [0.3]
+
+    def slow_start(self, *args, **kwargs):
+        # The budget runs out before the build reads its first row.
+        if delays:
+            time.sleep(delays.pop())
+        return build(self, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_admitted_unit_statistics", slow_start)
+
+    service_standby.enter_standby()
+    service_standby._warm_method_unit_statistics(vault, deadline=time.monotonic() + 0.2)
+
+    assert not delays, "the build never started, so this proved nothing about stopping it"
+    assert _method_search(vault, pages) == (1, 3), "an interrupted build must leave no statistics behind"
+
+
 def test_a_standby_warm_of_the_method_unit_statistics_writes_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:

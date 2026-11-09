@@ -1400,6 +1400,10 @@ def search_method_units(
 
     One call for the request and for `warm_owner_method_units`, so a warm builds the statistics that this
     search reads and a change to either cannot leave the other behind.
+
+    The caller proves full source access first: `allowed` is passed as the released set too, so the search
+    applies no release filter of its own. A request passes its released catalogue paths, a warm the
+    catalogue's own recall set after `warm_owner_method_units` proved the owner reads without a filter.
     """
     from . import lexstore, working_set_runtime
 
