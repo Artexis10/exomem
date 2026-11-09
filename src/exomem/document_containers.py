@@ -368,6 +368,13 @@ def _page_version(page: str) -> tuple[tuple[int, int], tuple[int, int, int], os.
 
 
 def _remembered_unclaimed(root: Path, path: str) -> bool:
+    from .vault_store import read
+
+    # A remembered note witnesses a file's version. A page that the store serves has none to
+    # witness: an entry from before the vault moved to the store would stat a projection that the
+    # store, not the file, answers for. The page's stored bytes are read and judged instead.
+    if read.serves(root, path if path.lower().endswith(".md") else path + ".md"):
+        return False
     key = (root, path)
     with _UNCLAIMED_LOCK:
         entry = _UNCLAIMED.get(key)

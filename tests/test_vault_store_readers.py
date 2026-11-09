@@ -24,7 +24,15 @@ from test_vault_store_migration import (
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 
 from exomem import __main__ as cli
-from exomem import commands, get_page, lexstore, list_directory, project_keys, warmup
+from exomem import (
+    commands,
+    document_containers,
+    get_page,
+    lexstore,
+    list_directory,
+    project_keys,
+    warmup,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.collection_store import connection
@@ -226,6 +234,16 @@ def test_a_store_mode_read_stats_no_stored_page_and_schedules_no_repair(
     the store does not hold."""
     for index in range(GENERATED):
         write.commit(writer, put(*generated_page(index)))
+    # What file-mode reads of the pages left behind: a note remembered by its file's version.
+    for path in stored.rglob("*.md"):
+        version = document_containers._page_version(str(path))
+        if version is not None and ownership.classify(path.relative_to(stored).as_posix()) is (
+            ownership.Ownership.PAGE
+        ):
+            document_containers._store_unclaimed(
+                (stored.resolve(), path.relative_to(stored).as_posix()),
+                (str(path), version[0], version[1]),
+            )
     damage_every_owned_projection(stored, damage)
     find_module.clear_cache()
     repairs, stats = [], []
