@@ -137,11 +137,12 @@ def test_a_saved_preference_reaches_the_next_turn_that_holds_a_token(served) -> 
 
 
 def test_a_full_map_still_delivers_the_block_inside_limit_chars(served) -> None:
+    # 2,000 -> 2,200 on 2026-11-09: the block grew by the correction rule; it still fits with the minimum map.
     with request_scope(CALLER):
-        packet = _activate(served, max_chars=2000)
+        packet = _activate(served, max_chars=2200)
 
     assert "capture_policy" in packet
-    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"] == 2000
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"] == 2200
 
 
 def test_a_request_too_small_for_the_block_is_not_starved_and_is_owed_it_later(served) -> None:
@@ -253,13 +254,16 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
 
 
 def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> None:
-    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,200 bytes."""
+    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,320 bytes.
+
+    1,200 -> 1,320 on 2026-11-09: the block carries the correction of advice the user says failed.
+    """
     from test_retrieve_nudge_working_set import hook
 
     rendered = hook._capture_policy_text(prominence.capture_policy("silent", "confirm-shortcut"))
 
     assert rendered.isascii()
-    assert 0 < len(rendered.encode("ascii")) <= 1200
+    assert 0 < len(rendered.encode("ascii")) <= 1320
 
 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))

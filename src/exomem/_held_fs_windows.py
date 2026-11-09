@@ -36,6 +36,7 @@ from pathlib import Path
 from . import request_budget
 from .held_fs import (
     FILE_ACCESS_MODES,
+    PROBE_ENTRY_PREFIX,
     Capabilities,
     Chunks,
     FileVersion,
@@ -1211,7 +1212,7 @@ def _probe(root: Path) -> Capabilities:
     provisional = Capabilities(True, True, True, True, True)
     filesystem = WindowsHeldFilesystem(descriptor, provisional)
     token = secrets.token_hex(16)
-    source_name = f".exomem-held-probe-{token}"
+    source_name = f"{PROBE_ENTRY_PREFIX}{token}"
     renamed_name = f"{source_name}-renamed"
     linked_name = f"{source_name}-link"
     replacement_source_name = f"{source_name}-replacement-source"

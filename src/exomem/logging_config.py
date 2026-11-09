@@ -14,7 +14,9 @@ from .log_events import JsonLinesFormatter
 # rename-on-rotate step fails when another process holds the file open), and
 # one checkout runs more than one process kind: the long-lived server,
 # one-shot CLI invocations, and the media worker child. Each gets its own
-# file so nothing contends for another's handle.
+# file so nothing contends for another's handle. Two servers still share the
+# server file during a standby handoff, and roles without an entry here log to
+# it too, so the handler follows the path when another process rotates it.
 _LOG_FILENAMES: dict[str, str] = {
     "server": "exomem.log",
     "cli": "exomem-cli.log",
@@ -211,6 +213,40 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+class _ReopeningRotatingFileHandler(RotatingFileHandler):
+    """A rotating handler that follows its path when another process rotates the file.
+
+    During a standby handoff the outgoing and incoming servers both log to the
+    server file. When one of them rotates it, the other would keep writing to the
+    renamed backup, and the live file would show a silent service until its own
+    size check rotated again. Reopening on an inode change, as `WatchedFileHandler`
+    does, keeps every process writing to the path that readers open.
+    """
+
+    def shouldRollover(self, record: logging.LogRecord) -> int:  # noqa: N802 - stdlib name
+        # The base `emit` calls this inside its try, so a failed reopen reaches
+        # `handleError` instead of the code that logged.
+        self._reopen_if_replaced()
+        return super().shouldRollover(record)
+
+    def _reopen_if_replaced(self) -> None:
+        if self.stream is None:
+            return
+        try:
+            on_disk = os.stat(self.baseFilename)
+        except FileNotFoundError:
+            on_disk = None
+        except OSError:
+            return
+        held = os.fstat(self.stream.fileno())
+        if on_disk is not None and (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino):
+            return
+        self.stream.close()
+        # A failed open leaves no stream, and the base `shouldRollover` opens the path again on the next record.
+        self.stream = None
+        self.stream = self._open()
+
+
 def configure_logging(
     log_dir: Path, level: int = logging.INFO, *, process: str = "server"
 ) -> None:
@@ -224,7 +260,7 @@ def configure_logging(
     max_bytes = int(_positive_float_env("EXOMEM_LOG_MAX_MB", 5.0) * 1024 * 1024)
     backup_count = _positive_int_env("EXOMEM_LOG_BACKUPS", 5)
     log_dir.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
+    handler = _ReopeningRotatingFileHandler(
         log_dir / filename,
         maxBytes=max_bytes,
         backupCount=backup_count,

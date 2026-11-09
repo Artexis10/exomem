@@ -135,6 +135,22 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     return refreshed
 
 
+def _refuse_overlay_in_store_mode(vault_root: Path) -> None:
+    """Refuse an overlay of the scaffold on a store-mode vault, before it writes a file.
+
+    The overlay copies the scaffold's index, log and schema files over the Markdown on disk, where
+    the store holds those pages, so the store and the files would disagree until the importer read
+    the copy as an outside edit. A false refusal costs one rollback of store mode.
+    """
+    from .vault_store import targets as store_targets
+
+    store_targets.refuse_in_store_mode(
+        vault_root,
+        "exomem init --force",
+        "its overlay replaces Markdown pages that the store holds",
+    )
+
+
 def init_vault(
     vault_root: Path,
     *,
@@ -152,6 +168,8 @@ def init_vault(
     because the per-vault state key binds the final vault path.
     """
     vault_root = Path(vault_root)
+    if force:
+        _refuse_overlay_in_store_mode(vault_root)
     vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
     fresh_vault = not kb.exists()
@@ -256,6 +274,16 @@ def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> d
     scope and never inspected.
     """
     vault_root = Path(vault_root)
+    if apply:
+        # The preview only reads the disk, so it stays. The unlink would remove files that the
+        # store holds as pages; a false refusal costs one rollback of store mode.
+        from .vault_store import targets as store_targets
+
+        store_targets.refuse_in_store_mode(
+            vault_root,
+            "exomem reclaim-schema --apply",
+            "it deletes `_Schema` Markdown from disk, and the store holds those pages",
+        )
     legacy_root = vault_root / kb_dirname() / "_Schema"
     target_root = shipped_schema_target(vault_root)
     removed: list[str] = []
