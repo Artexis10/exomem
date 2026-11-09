@@ -20,6 +20,11 @@ A promoted worker SHALL NOT repeat warm-up work its own standby completed and pr
 - **WHEN** promotion's re-proof of a moved checkpoint declines or runs past its bound
 - **THEN** promotion records the snapshot as advanced with the decline reason, the graph handoff is not carried forward, and the promoted worker's warm runs it in full
 
+#### Scenario: The inherited graph snapshot belongs to an older graph schema
+- **WHEN** a standby proves that the inherited graph sidecar has an older graph schema version than its own build
+- **THEN** the graph snapshot component is reported settled so the upgrade is not held
+- **AND** promotion records the snapshot as unproven, and the promoted worker runs the whole graph handoff
+
 #### Scenario: A cold start carries nothing
 - **WHEN** a worker starts without having been a standby
 - **THEN** it carries no components and runs every warm-up step

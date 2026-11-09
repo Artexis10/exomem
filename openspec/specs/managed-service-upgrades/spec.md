@@ -110,7 +110,7 @@ A standby worker SHALL take no writer lease, publish no index or graph state, sc
 
 ### Requirement: A promoted standby does not repeat the warm it already ran
 
-A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged.
+A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged. A graph snapshot whose proof declined because it is unusable for the standby's build SHALL be reported settled, so it does not hold cutover, and SHALL NOT be carried.
 
 #### Scenario: A governed write arrives immediately after promotion
 - **WHEN** a governed write reaches a worker that was promoted from a standby whose warm completed
@@ -131,6 +131,11 @@ A promoted worker SHALL NOT repeat warm-up work its own standby completed and pr
 #### Scenario: A warm step failed rather than not running
 - **WHEN** a standby's semantic corpus build runs and fails
 - **THEN** the component is reported settled so the upgrade is not held, and it is not carried forward, so the promoted worker runs that step itself
+
+#### Scenario: The inherited graph snapshot belongs to an older graph schema
+- **WHEN** a standby proves that the inherited graph sidecar has an older graph schema version than its own build
+- **THEN** the graph snapshot component is reported settled so the upgrade is not held
+- **AND** promotion records the snapshot as unproven, and the promoted worker runs the whole graph handoff
 
 ### Requirement: A stopped worker's replacement is awaited under the cold-start budget
 
