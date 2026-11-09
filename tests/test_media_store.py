@@ -561,6 +561,76 @@ def test_hydration_reports_local_disk_exhaustion_as_local(vault: Path, selected_
     assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
+def test_a_hydration_downloads_the_ciphertext_without_holding_the_vault_guard(vault: Path, selected_store, monkeypatch):
+    """Defect: a hydration that holds the vault guard through the download makes every vault write wait for it,
+    minutes for a large recording."""
+    import threading
+
+    from exomem import media_store, writer_lease
+
+    path = _stored(vault, "recording", 3_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    opened, entered_during_download = media_store.FilesystemStore.open, []
+
+    def open_while_an_owner_writes(store, *args, **kwargs):
+        entered = threading.Event()
+
+        def owner_write() -> None:
+            with writer_lease.get_manager().mutation_guard(vault, request_id="owner-write", operation="edit"):
+                entered.set()
+
+        writer = threading.Thread(target=owner_write)
+        writer.start()
+        entered_during_download.append(entered.wait(10))
+        writer.join(10)
+        return opened(store, *args, **kwargs)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", open_while_an_owner_writes)
+
+    with media_store.open_original(vault, path) as source:
+        assert source.stream.read() == expected
+
+    assert entered_during_download == [True]
+
+
+def test_a_hydration_writes_one_temporary_beside_the_original_and_no_ciphertext_copy(vault: Path, selected_store, monkeypatch):
+    """Defect: a hydration that stages the downloaded ciphertext before it decrypts needs room for two copies, so
+    a recording that fits on the volume fails to hydrate, or fills the volume."""
+    import contextlib
+    import tempfile
+
+    from exomem import media_store
+
+    path = _stored(vault, "recording", 300_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    before = {entry.name for entry in path.parent.iterdir()}
+    staged, at_download_end = [], []
+    # The standard library's ways to stage a named or an anonymous temporary file.
+    for name in ("TemporaryFile", "NamedTemporaryFile", "mkstemp"):
+        real = getattr(tempfile, name)
+        monkeypatch.setattr(tempfile, name, lambda *a, _real=real, _name=name, **k: staged.append(_name) or _real(*a, **k))
+    opened = media_store.FilesystemStore.open
+
+    @contextlib.contextmanager
+    def open_and_list_the_folder_once_read(store, *args, **kwargs):
+        with opened(store, *args, **kwargs) as stream:
+            yield stream
+        # The whole ciphertext has arrived, so a staged copy would sit beside the hydration's temporary now.
+        at_download_end.append({entry.name for entry in path.parent.iterdir()} - before)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", open_and_list_the_folder_once_read)
+
+    with media_store.open_original(vault, path) as source:
+        assert source.stream.read() == expected
+
+    assert staged == []
+    [added] = at_download_end
+    assert len(added) == 1 and next(iter(added)).startswith(".exomem-held-publish-")
+    assert {entry.name for entry in path.parent.iterdir()} - before == {path.name}
+
+
 def test_page_move_refuses_the_catalog_before_hydrating(vault: Path, selected_store, monkeypatch):
     """An unavailable object store must not mask a move's catalog refusal or change its files."""
     from exomem import media_jobs, media_processing, media_store, move_file, preserve
