@@ -437,9 +437,10 @@ Do not start this phase speculatively. It is gated on 7.1 answering yes.
   The managed upgrade to v0.162.0 had failed: the standby held cutover on the
   older-schema sidecar until its warm budget expired. #2495 settles that wait.
   v0.163.0 then installed through the managed upgrade at 07:45Z.
-  The promoted worker registered one whole-vault rebuild with reason
+  The promoted worker registered a whole-vault rebuild with reason
   `graph_sync_snapshot_unusable` at 07:46Z and published it at 08:37Z.
   The rebuild took 51.5 minutes, beside a reconcile preview and the post-install index backlog.
+  A second queued rebuild published at 08:41Z in 188 seconds with no differing paths.
   The sidecar then reported schema version 15, and `/health/ready` reported
   `graph_sync` as `current` with an empty graph queue.
   The next write drained incrementally about one second after its commit.
