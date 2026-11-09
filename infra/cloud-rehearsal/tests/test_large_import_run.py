@@ -16,8 +16,6 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_rehearsal import large_import, platform
-from cloud_rehearsal import large_import_fixture as fixture
-from cloud_rehearsal.large_import_fixture import FILED_ARTIFACT, FILED_TEXT, Entry
 from cloud_rehearsal.mcp_client import ToolResult
 from cloud_rehearsal.report import StepFailure
 
@@ -89,7 +87,7 @@ def test_a_peak_over_ticks_that_could_not_read_the_cell_is_unknown_not_zero():
     assert reading["ticks"] == 3 and reading["ticks_with_cell_reading"] == 1
 
 
-# --- paging ---------------------------------------------------------------------------------
+# --- filing ---------------------------------------------------------------------------------
 
 
 STATUS = "read_import.status"
@@ -111,8 +109,8 @@ class Scripted:
         return self.replies[f"{name}.{kind}"].pop(0), 0.5
 
 
-def _folder(entries=()):
-    folder = large_import.Folder("notes", None, [], list(entries), "x", True, "phrase")
+def _folder(entries=(), name="notes"):
+    folder = large_import.Folder(name, None, [], list(entries), "x", True, "phrase")
     folder.import_id, folder.proof = "i-1", "cloud-receipt"
     return folder
 
@@ -124,46 +122,38 @@ def _plan():
 STAGE = {"stage": "i-1", "proof": "cloud-receipt"}
 
 
-def _started(*, next_after=None):
-    """The compact start reply: the run id and the control field, never the inventory."""
-    return {"run_id": "r", **({"next_after": next_after} if next_after else {})}
+def _working(run_id, *, filed=0, failed=0, token="t"):
+    """The compact `file` reply while filing goes on."""
+    return {"run_id": run_id, "filing": "working", "continuation": f"{run_id}:{token}", "person": [],
+            "progress": {"filed": filed, "failed": failed, "remaining": 1, "pages_done": 0}}
 
 
-def _stored(rows, *, next_after=None, stage=STAGE):
-    """The run as read_import status reports it right after start."""
+def _done(run_id, *, filed, failed=0, residual=None):
+    return {"run_id": run_id, "filing": "done", "person": [], "progress": {"filed": filed, "failed": failed, "remaining": 0, "pages_done": 2},
+            "filed": {"last_finished_page": {"page": 2, "run_id": run_id}, **({"residual": residual} if residual is not None else {})}}
+
+
+def _stored(rows, *, stage=STAGE, finish=None):
+    """The page as read_import status reports it: the inventory, the recorded stage and, once finished, the filed count."""
     return {"inventory": [{"path": f"_Imports/i-1/{n}", "eligible": True} for n in rows], "stage": stage,
-            **({"next_after": next_after} if next_after else {})}
-
-
-def _applied(*, applied=0, failed=0, stop=None):
-    reply = {"progress": {"applied": applied, "remaining": 0, "failed": failed}}
-    return {**reply, "apply_stop": stop} if stop else reply
+            **({"finish": finish} if finish else {})}
 
 
 def _residual(files, by_reason):
     return {"files": files, "by_reason": by_reason}
 
 
-def _finished(*, residual):
-    """The compact finish reply: the residual, and not the filed count."""
-    return {"finish": {"residual": residual}}
-
-
 def _recorded(consumed, *, residual):
-    """The run as read_import status reports it after finish, which holds the filed count."""
-    return {"finish": {"consumed": consumed, "residual": residual}}
+    return {"consumed": consumed, "residual": residual}
 
 
-def test_paging_follows_next_after_adds_up_consumed_and_keeps_the_last_page_residual():
+def test_filing_repeats_file_with_each_continuation_adds_up_consumed_and_keeps_the_last_page_residual():
     first, last = _residual(2, {"outside_run": {"files": 1}, "ineligible": {"files": 2}}), _residual(2, {"ineligible": {"files": 2}})
     agent = Scripted({
-        "start": [_started(next_after="cursor"), _started()],
-        STATUS: [_stored(["a"], next_after="cursor"), _recorded(3, residual=first), _stored(["b"]), _recorded(4, residual=last)],
-        "select": [{}, {}], "plan": [{"plan": {"plan_id": "p1"}}, {"plan": {"plan_id": "p2"}}],
-        "apply": [_applied(), _applied()],
-        "finish": [_finished(residual=first), _finished(residual=last)],
+        "file": [_working("r1", filed=3, token="a"), _done("r2", filed=7, residual=last)],
+        STATUS: [_stored(["a"], finish=_recorded(3, residual=first)), _stored(["b"], finish=_recorded(4, residual=last))],
     })
-    folder = _folder()
+    folder = _folder(name="media")
 
     problems = asyncio.run(large_import.file_pages(agent, _plan(), folder))
 
@@ -171,123 +161,86 @@ def test_paging_follows_next_after_adds_up_consumed_and_keeps_the_last_page_resi
     assert folder.consumed == 7
     assert folder.report["residual_files_left"] == 2
     assert folder.report["residual_by_reason_files"] == {"ineligible": 2}
-    starts = [fields for kind, fields in agent.asked if kind == "start"]
-    assert "after" not in starts[0] and starts[1] == {"after": "cursor"}
+    calls = [fields for kind, fields in agent.asked if kind == "file"]
+    assert "continuation" not in calls[0] and calls[1]["continuation"] == "r1:a"
+    assert not any(kind in ("start", "select", "plan", "apply", "finish") for kind, _ in agent.asked)
 
 
-def test_a_stop_for_lack_of_space_ends_paging_before_finish_and_is_reported():
-    stop = {"code": "INSUFFICIENT_SPACE"}
-    agent = Scripted({"start": [_started(next_after="cursor")], STATUS: [_stored(["a"], next_after="cursor")],
-                      "select": [{}], "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied(stop=stop)], "finish": []})
-    folder = _folder()
+def test_the_first_folder_bootstraps_the_knowledge_base_with_one_start_and_the_second_does_not():
+    done = _done("r1", filed=1, residual=_residual(0, {}))
+    notes = Scripted({"start": [{"run_id": "r1"}], "file": [done], STATUS: [_stored(["a"], finish=_recorded(1, residual=_residual(0, {})))]})
+    media = Scripted({"file": [done], STATUS: [_stored(["a"], finish=_recorded(1, residual=_residual(0, {})))]})
 
-    problems = asyncio.run(large_import.file_pages(agent, _plan(), folder))
+    asyncio.run(large_import.file_pages(notes, _plan(), _folder(name="notes")))
+    asyncio.run(large_import.file_pages(media, _plan(), _folder(name="media")))
 
-    assert len(problems["no_space_failure"]) == 1
-    assert [kind for kind, _ in agent.asked].count("finish") == 0
-    assert folder.report["pages"][0]["apply_stop"] == stop
+    assert [kind for kind, _ in notes.asked][:2] == ["start", "file"]
+    assert notes.asked[0][1]["initialize_kb"] is True
+    assert "start" not in [kind for kind, _ in media.asked]
+
+
+def test_a_stop_for_lack_of_space_ends_filing_and_is_reported():
+    stopped = {"run_id": "r1", "filing": "stopped", "stop": {"code": "INSUFFICIENT_SPACE"}, "person": [{"need": "free_space", "text": "t"}],
+               "progress": {"filed": 0, "failed": 0, "remaining": 5, "pages_done": 0}}
+    agent = Scripted({"file": [stopped], STATUS: [_stored(["a"])]})
+
+    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder(name="media")))
+
+    assert len(problems["no_space_failure"]) == 1 and "INSUFFICIENT_SPACE" in problems["no_space_failure"][0]
+    assert [kind for kind, _ in agent.asked].count("file") == 1
 
 
 def test_a_page_recorded_under_another_stage_proof_is_a_manifest_problem():
     other = {"stage": "i-1", "proof": "something-else"}
-    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"], stage=other), _recorded(0, residual=_residual(0, {}))],
-                      "select": [{}], "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied()],
-                      "finish": [_finished(residual=_residual(0, {}))]})
+    empty = _residual(0, {})
+    agent = Scripted({"file": [_done("r1", filed=0, residual=empty)],
+                      STATUS: [_stored(["a"], stage=other, finish=_recorded(0, residual=empty))]})
 
-    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder()))
+    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder(name="media")))
 
     assert len(problems["manifest_proof"]) == 1
 
 
-def test_files_that_failed_to_file_are_reported_by_page():
+def test_files_that_failed_to_file_are_reported():
     empty = _residual(0, {})
-    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"]), _recorded(0, residual=empty)],
-                      "select": [{}], "plan": [{"plan": {"plan_id": "p"}}],
-                      "apply": [_applied(failed=2)], "finish": [_finished(residual=empty)]})
+    agent = Scripted({"file": [_done("r1", filed=0, failed=2, residual=empty)],
+                      STATUS: [_stored(["a"], finish=_recorded(0, residual=empty))]})
 
-    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder()))
+    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder(name="media")))
 
-    assert problems["filing"] == ["page 1: 2 files failed to file"]
-
-
-def test_a_compact_start_reply_that_drops_the_next_page_is_a_problem_not_a_short_run():
-    empty = _residual(0, {})
-    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"], next_after="cursor"), _recorded(0, residual=empty)],
-                      "select": [{}], "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied()],
-                      "finish": [_finished(residual=empty)]})
-
-    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder()))
-
-    assert len(problems["compact_reply"]) == 1 and "next_after" in problems["compact_reply"][0]
+    assert problems["filing"] == ["2 files failed to file"]
 
 
-def test_a_compact_finish_reply_that_drops_the_residual_is_a_problem():
-    agent = Scripted({"start": [_started()], STATUS: [_stored(["a"]), _recorded(1, residual=_residual(2, {"ineligible": {"files": 2}}))],
-                      "select": [{}], "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied()],
-                      "finish": [{"finish": {}}]})
+def test_a_compact_done_reply_that_drops_the_residual_is_a_problem():
+    agent = Scripted({"file": [_done("r1", filed=1)],
+                      STATUS: [_stored(["a"], finish=_recorded(1, residual=_residual(2, {"ineligible": {"files": 2}})))]})
 
-    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder()))
+    problems = asyncio.run(large_import.file_pages(agent, _plan(), _folder(name="media")))
 
     assert len(problems["compact_reply"]) == 1 and "residual" in problems["compact_reply"][0]
 
 
-def test_the_large_files_are_applied_alone_first_and_timed():
-    big = Entry("archive/backup-00.dat", fixture.LARGE_MIN_BYTES, "0" * 64, FILED_ARTIFACT)
-    small = Entry("notes/a.md", 10, "1" * 64, FILED_TEXT)
-    stored = {"stage": STAGE, "inventory": [{"path": "_Imports/i-1/archive/backup-00.dat", "eligible": True},
-                                            {"path": "_Imports/i-1/notes/a.md", "eligible": True}]}
+# --- the file record ------------------------------------------------------------------------
+
+
+def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_per_second():
     empty = _residual(0, {})
-    agent = Scripted({"start": [_started()], STATUS: [stored, _recorded(1, residual=empty)], "select": [{}],
-                      "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied(applied=1), _applied(applied=2)],
-                      "finish": [_finished(residual=empty)]})
-    folder = _folder([big, small])
+    agent = Scripted({"file": [_working("r1", filed=40), _done("r1", filed=100, residual=empty)],
+                      STATUS: [_stored(["a"], finish=_recorded(100, residual=empty))]})
+    folder = _folder(name="media")
 
     asyncio.run(large_import.file_pages(agent, _plan(), folder))
 
-    applies = [fields for kind, fields in agent.asked if kind == "apply"]
-    assert applies[0]["only_paths"] == ["_Imports/i-1/archive/backup-00.dat"] and "only_paths" not in applies[1]
-    assert folder.report["large_binaries"]["files"] == 1 and folder.report["large_binaries"]["seconds"] == 0.5
-
-
-# --- the apply record -----------------------------------------------------------------------
-
-
-def test_each_apply_call_keeps_its_counts_and_the_page_shows_files_per_call_and_per_second():
-    empty = _residual(0, {})
-    agent = Scripted({
-        "start": [_started()], STATUS: [_stored(["a"]), _recorded(100, residual=empty)], "select": [{}],
-        "plan": [{"plan": {"plan_id": "p"}}],
-        "apply": [{**_applied(applied=40), "continuation": "more"}, _applied(applied=100)],
-        "finish": [_finished(residual=empty)],
-    })
-    folder = _folder()
-
-    asyncio.run(large_import.file_pages(agent, _plan(), folder))
-
-    page = folder.report["pages"][0]
-    assert [(step["files"], step["stopped"]) for step in page["apply_steps"]] == [(40, False), (60, False)]
+    (page,) = folder.report["pages"]
+    assert [(step["files"], step["filing"]) for step in page["file_steps"]] == [(40, "working"), (60, "done")]
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
 
 
-def test_the_files_filed_alone_before_the_rest_are_not_counted_again_in_the_first_rest_call():
-    big = Entry("archive/backup-00.dat", fixture.LARGE_MIN_BYTES, "0" * 64, FILED_ARTIFACT)
-    stored = {"stage": STAGE, "inventory": [{"path": "_Imports/i-1/archive/backup-00.dat", "eligible": True}]}
-    empty = _residual(0, {})
-    agent = Scripted({"start": [_started()], STATUS: [stored, _recorded(5, residual=empty)], "select": [{}],
-                      "plan": [{"plan": {"plan_id": "p"}}], "apply": [_applied(applied=1), _applied(applied=5)],
-                      "finish": [_finished(residual=empty)]})
-    folder = _folder([big])
-
-    asyncio.run(large_import.file_pages(agent, _plan(), folder))
-
-    assert [step["files"] for step in folder.report["pages"][0]["apply_steps"]] == [1, 4]
-
-
 def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero():
-    steps = [large_import.apply_step({"progress": {"applied": 10}}, 2.0, before=0),
-             large_import.apply_step({}, 2.0, before=10)]
+    steps = [large_import.file_step({"progress": {"filed": 10}}, 2.0, before=0),
+             large_import.file_step({}, 2.0, before=10)]
 
-    assert steps[1]["files"] is None and steps[1]["applied"] is None
+    assert steps[1]["files"] is None and steps[1]["filed"] is None
     assert large_import.files_per_second(steps) is None
 
 

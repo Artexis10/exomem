@@ -32,6 +32,7 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     kb_root,
+    read_bytes_without_pinning,
     read_guarded_text,
 )
 
@@ -129,14 +130,15 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
     logged so service-log readers can see the misconfiguration.
     """
     path = Path(vault_root) / registry_relpath()
-    if not path.exists():
+    try:
+        # A store-mode vault keeps this registry in its store; the file is only a projection.
+        text = read_bytes_without_pinning(path, vault_root).decode("utf-8")
+        data = yaml.safe_load(text) or {}
+    except (FileNotFoundError, NotADirectoryError):
         log.warning(
             "project-keys.yaml missing at %s; using built-in fallback set", path
         )
         return _fallback_registry()
-    try:
-        text = path.read_text(encoding="utf-8")
-        data = yaml.safe_load(text) or {}
     except (OSError, yaml.YAMLError) as e:
         log.warning(
             "project-keys.yaml unreadable (%s); using built-in fallback set", e
@@ -167,7 +169,7 @@ def filename_style(vault_root: Path) -> str | None:
     """
     path = Path(vault_root) / registry_relpath()
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(read_bytes_without_pinning(path, vault_root).decode("utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return None
     if not isinstance(data, dict):

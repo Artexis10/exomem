@@ -51,7 +51,6 @@ from typing import Any, NamedTuple
 
 from . import find as find_module
 from . import freshness, recall_policy, text_scripts
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -882,17 +881,23 @@ class BM25Index:
         """
         if not query.strip():
             return []
-        from . import lexstore
+        from . import find_corpus, lexstore
 
-        indexed = lexstore.search_bm25(
-            vault_root,
-            query,
-            k,
-            scope=scope,
-            freshness=freshness,
-            allowed_paths=allowed_paths,
-            admitted_paths=admitted_paths,
-            repair=repair,
+        # A store-mode vault never asks the sidecar: it is built from files, and a query that it
+        # cannot serve schedules a repair that rebuilds from those same files (as `warm` holds).
+        indexed = (
+            None
+            if find_corpus.store_serves(vault_root)
+            else lexstore.search_bm25(
+                vault_root,
+                query,
+                k,
+                scope=scope,
+                freshness=freshness,
+                allowed_paths=allowed_paths,
+                admitted_paths=admitted_paths,
+                repair=repair,
+            )
         )
         if indexed is not None:
             return indexed
@@ -944,8 +949,13 @@ class BM25Index:
         backend, or `UNKNOWN_ERROR_RETIREMENT` consecutive unclassified
         sidecar errors warm the Python rung.
         """
-        from . import lexstore
+        from . import find_corpus, lexstore
 
+        if find_corpus.store_serves(vault_root):
+            # The lexical sidecar is built from files, and a store-mode vault's row readers are not
+            # here yet, so this warm builds no sidecar: it holds the corpus that the store gives.
+            self._fresh_corpus(vault_root, scope, None)
+            return "python"
         if lexstore.search_bm25(vault_root, "warm", 1, scope=scope) is not None:
             # FTS5 serves: the probe query ran the sync check and faulted the
             # index in. The rank-bm25 corpus stays cold on purpose — not
@@ -1001,16 +1011,9 @@ def corpus_key(vault_root: Path, scope: str) -> tuple:
 
 
 def _recall_walk(vault_root: Path, scope: str):
-    if scope == "vault":
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
-    else:
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
-            return ()
-        walk = find_module._walk_md(kb)
-    return recall_policy.iter_recall_markdown(vault_root, walk)
+    return recall_policy.iter_recall_markdown(
+        vault_root, find_module._corpus_walk(vault_root, scope)
+    )
 
 
 _INDEX = BM25Index()

@@ -76,9 +76,11 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
 
     Activation and rollback run offline, and each changes the manifest, so a reader may keep its answer
-    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window is
-    never kept, and a manifest or store that cannot be read raises as ``state`` does. The write refusal
-    in ``availability`` does not use this: it asks ``store_mode_active`` every time.
+    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window
+    is never kept, and a manifest or store that cannot be read raises as ``state`` does. A rollback
+    commits the store's file mode before it changes the manifest; ``read.snapshot`` meets that
+    window when it opens the store, and ``forget_read_mode`` drops the kept answer there. The write
+    refusal in ``availability`` does not use this: it asks ``store_mode_active`` every time.
     """
     key = (os.fspath(vault_root), state_paths._placement_environment())
     cached = _READ_MODES.get(key)
@@ -93,6 +95,11 @@ def store_mode_for_reads(vault_root: Path) -> bool:
             _READ_MODES.clear()
         _READ_MODES[key] = (manifest, signature, current == STORE_MODE)
     return current == STORE_MODE
+
+
+def forget_read_mode(vault_root: Path) -> None:
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
 
 
 def _stored_mode(vault_root: Path) -> str | None:
