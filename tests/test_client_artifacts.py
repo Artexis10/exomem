@@ -1359,7 +1359,7 @@ def test_all_duplicate_batch_still_carries_the_mutation_terminal(
     operational = _operational(duplicate)
     assert operational["ok"] is True
     # Nothing was written, so the batch settles and reports `mutated: false` instead of claiming a commit.
-    assert (operational["status"], duplicate["mutated"]) == ("settled", False)
+    assert (operational["status"], operational["mutated"]) == ("settled", False)
     assert operational["terminal"] is True
     assert operational["request_id"]
     assert operational["receipt_id"]
@@ -1404,7 +1404,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
 
     operational = _operational(duplicate)
     assert operational["ok"] is True
-    assert (operational["status"], duplicate["mutated"]) == ("settled", False)
+    assert (operational["status"], operational["mutated"]) == ("settled", False)
     assert operational["terminal"] is True
     assert operational["request_id"]
     assert operational["receipt_id"]

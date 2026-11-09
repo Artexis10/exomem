@@ -108,14 +108,22 @@ def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply
     stored = page.read_bytes()
     assert "duplicate_of" not in first and "same_url" not in first
 
-    again = capture(title="Retention note, again", content=text, url="https://example.com/b", tags=["metrics"])
+    again = capture(
+        title="Retention note, again", content=text, url="https://example.com/b", tags=["metrics"],
+        response_detail="full",
+    )
     assert again["capture_outcome"] == "reused"
-    assert again["mutated"] is False
+    # `mutated` is an operational field, so it shows under `response_detail="full"`.
+    assert again["diagnostics"]["operational"]["mutated"] is False
     assert again["duplicate_of"]["path"] == first["path"]
     first_ref = again["duplicate_of"]["ref"]
-    assert again["source"] == {"path": first["path"], "ref": first_ref}
+    # The reply names the stored source once, by the path every read takes; `duplicate_of` keeps the ref.
+    assert again["source"] == {"path": first["path"]}
     # Nothing was written: the reply leads with its outcome and says nothing of a durable write or graph sync.
     assert again["user_summary"].startswith(f"Already saved -> {first['path']}")
+    # One lead: the summary comes first and no second sentence says the same thing.
+    assert next(iter(again)) == "user_summary"
+    assert "notice" not in again
     assert not {"graph_sync", "graph_sync_remediation"} & again.keys()
     assert (again["duplicate_of"]["title"], again["duplicate_of"]["url"]) == ("Retention note", "https://Example.com:443/a#top")
     assert again["fields_not_applied"] == [

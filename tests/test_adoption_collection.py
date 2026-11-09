@@ -1052,7 +1052,7 @@ def test_a_plan_names_the_other_root_that_earlier_imports_of_the_collection_came
     assert warning["roots"] == ["_Imports/first/Coll"]
 
 
-def test_a_plan_warning_reaches_the_warning_count_of_the_plan_and_apply_replies(
+def test_the_plan_and_apply_replies_carry_the_plan_warning_and_the_apply_reply_the_skipped_count(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from starlette.testclient import TestClient
@@ -1070,22 +1070,28 @@ def test_a_plan_warning_reaches_the_warning_count_of_the_plan_and_apply_replies(
     monkeypatch.delenv("EXOMEM_CF_ACCESS_AUD", raising=False)
     client = TestClient(server.build_server(require_auth=False).http_app())
 
-    def call(body: dict) -> dict:
+    def call(body: dict, *, detail: str = "compact") -> dict:
         response = client.post(
-            "/api/adoption_studio", json=body, headers={"Authorization": "Bearer studio-key"}
+            "/api/adoption_studio",
+            json={**body, "response_detail": detail},
+            headers={"Authorization": "Bearer studio-key"},
         )
         assert response.status_code == 200, response.text
         return response.json()["data"]
 
     run_id = call({"action": "start", "path": "_Imports/second"})["run_id"]
     call({"action": "select", "run_id": run_id, "include": ["_Imports/second"]})
-    planned = call({"action": "plan", "run_id": run_id})
+    planned = call({"action": "plan", "run_id": run_id}, detail="full")
     applied = call({"action": "apply", "run_id": run_id, "plan_id": planned["plan_id"]})
 
-    for reply in (planned, applied):
-        assert reply["warnings_count"] == 1
-        [warning] = reply["warnings"]
-        assert warning.startswith("EARLIER_IMPORT_FROM_OTHER_ROOT")
+    [warning] = planned["warnings"]
+    assert warning.startswith("EARLIER_IMPORT_FROM_OTHER_ROOT")
+    # The warning count is an operational field: it shows under `diagnostics` for `full`.
+    assert planned["diagnostics"]["operational"]["warnings_count"] == 1
+    # The default apply reply carries the warning and says how many items the run left unstored.
+    assert applied["warnings"] == [warning]
+    assert applied["skipped_duplicates"] == 1
+    assert "skipped_duplicates" not in planned
 
 
 def test_the_recall_question_asks_about_the_largest_text_note_not_a_larger_media_file(

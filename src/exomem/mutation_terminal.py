@@ -2414,6 +2414,10 @@ def project_terminal(
         if isinstance(plan, Mapping) and isinstance(plan.get("plan_id"), str):
             compact["plan_id"] = plan["plan_id"]
         compact.update(_adoption_control_projection(leaf))
+        apply_result = leaf.get("apply_result")
+        if isinstance(apply_result, Mapping) and type(apply_result.get("skipped_duplicates")) is int:
+            # The agent tells the person how many items the run left unstored because those bytes were already stored.
+            compact["skipped_duplicates"] = apply_result["skipped_duplicates"]
     compact.update(artifact_receipt)
     if isinstance(leaf, Mapping) and leaf.get("state") == "already_stored":
         # A file handed over alone has no row; its outcome names the earlier copy and what it did not take.
