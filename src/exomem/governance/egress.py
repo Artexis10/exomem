@@ -483,28 +483,44 @@ def _outcome_for_decision(
         if ref is not None:
             value["ref"] = ref
     else:
-        # Defence in depth: `rel_path` is expected to already be a decided,
-        # vault-relative candidate, but this hash is the last thing that
-        # touches the filesystem before the receipt is written. Confining it
-        # here too means an unconfined candidate that reaches this far still
-        # cannot make the receipt read (and hash the size of) an arbitrary
-        # server file — it just loses its content hash.
-        try:
-            target = Path(vault_root) / rel_path
-            resolved = target.resolve()
-            resolved.relative_to(Path(vault_root).resolve())
-        except (OSError, ValueError):
-            pass
-        else:
-            if resolved.is_file():
-                try:
-                    raw = resolved.read_bytes()
-                except OSError:
-                    pass
-                else:
-                    value["content_hash"] = hashlib.sha256(raw).hexdigest()
-                    value["size"] = len(raw)
+        raw = _receipt_bytes(vault_root, rel_path)
+        if raw is not None:
+            value["content_hash"] = hashlib.sha256(raw).hexdigest()
+            value["size"] = len(raw)
     _record_outcome(value)
+
+
+def _receipt_bytes(vault_root: Path, rel_path: str) -> bytes | None:
+    """The bytes that a decision receipt hashes, or None when there are none to read.
+
+    A page that the store serves is read from the store: its file is a projection that may lag.
+    """
+    from ..vault_store import read
+
+    try:
+        stored = read.owned_bytes(vault_root, rel_path)
+    except OSError:  # the store serves this path but holds no page for it
+        return None
+    if stored is not None:
+        return stored
+    # Defence in depth: `rel_path` is expected to already be a decided,
+    # vault-relative candidate, but this hash is the last thing that
+    # touches the filesystem before the receipt is written. Confining it
+    # here too means an unconfined candidate that reaches this far still
+    # cannot make the receipt read (and hash the size of) an arbitrary
+    # server file — it just loses its content hash.
+    try:
+        target = Path(vault_root) / rel_path
+        resolved = target.resolve()
+        resolved.relative_to(Path(vault_root).resolve())
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    try:
+        return resolved.read_bytes()
+    except OSError:
+        return None
 
 
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:

@@ -379,6 +379,24 @@ def test_a_store_page_tagged_into_a_restricted_scope_is_withheld_whatever_its_pr
     assert [hit.path for hit in released.hits] == [open_page]
 
 
+def test_a_decision_receipt_hashes_the_stored_page_not_its_projected_file(
+    stored, writer  # noqa: F811
+):
+    """A receipt that hashes a lagging projection records bytes that no reader was served, and a
+    store-only page loses its hash."""
+    page = "Knowledge Base/Notes/Gen/Receipted.md"
+    body = b"---\ntitle: Re\ntype: note\n---\n# Re\n\nStored bytes.\n"
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", puts=(write.PagePut(page, body),)),
+    )
+
+    assert egress._receipt_bytes(stored, page) == body  # no projected file yet
+    (stored / page).parent.mkdir(parents=True, exist_ok=True)
+    (stored / page).write_bytes(b"stale projection")
+    assert egress._receipt_bytes(stored, page) == body
+
+
 def test_warm_and_status_leave_no_sidecar_and_status_reports_the_store(
     stored, capsys  # noqa: F811
 ):
