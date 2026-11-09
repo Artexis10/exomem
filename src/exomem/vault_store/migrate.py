@@ -32,7 +32,7 @@ from .. import (
 )
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
-from . import availability, mode, ownership, verify
+from . import availability, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
@@ -314,11 +314,13 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
         raise ValueError("a store-mode migration needs a reason")
     root = Path(vault_root).resolve()
     preflight(root)
-    return admission.store_mode_route(
+    result = admission.store_mode_route(
         root,
         "store-mode migrate",
         lambda session, token, writer: _cutover(root, session, token, writer, why=why),
     )
+    # What the replica says once the hand-back ran: "store" means another state root's file-mode start now refuses.
+    return {**result, "vault_marker": marker.read_replica(root).state}
 
 
 def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
@@ -491,6 +493,9 @@ def _install_rows(
         "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
         (revision, Origin.MIGRATION.value, why, now),
     )
+    # The vault-side marker commits with the mode row, so a replica never says store for a vault that is not.
+    marker.record(conn)
+    rederive.record_derived_from_files(conn, revision)
 
 
 def _recheck_files(root: Path, source: sqlite3.Connection) -> list[tuple[str, FileFact]]:

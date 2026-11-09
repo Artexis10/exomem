@@ -23,6 +23,7 @@ NOT_SERVED = "VAULT_STORE_NOT_SERVED"
 OFF_THREAD = "VAULT_STORE_OFF_THREAD"
 SERVICE_REQUIRED = "VAULT_STORE_SERVICE_REQUIRED"
 PAGES_AT_RISK = "VAULT_STORE_PAGES_AT_RISK"
+STORE_ELSEWHERE = "VAULT_STORE_ELSEWHERE"
 
 ROLLBACK = "`exomem store-mode rollback`"
 
@@ -59,6 +60,7 @@ def require_servable(vault_root: Path) -> None:
         inconsistency = marker_inconsistency(vault_root)
         if inconsistency is not None:
             log.warning("%s", inconsistency)
+        require_no_store_elsewhere(vault_root)
         return
     from .. import writer_lease
 
@@ -67,6 +69,25 @@ def require_servable(vault_root: Path) -> None:
         NOT_SERVED,
         f"this vault's pages live in the collection store and this build cannot serve them yet: run {ROLLBACK} "
         "to return them to files, or start a build that serves store mode")
+
+
+def require_no_store_elsewhere(vault_root: Path) -> None:
+    """Refuse to start a file-mode service on a vault that another state root holds in store mode.
+
+    It prevents this service from writing Markdown beside pages that the other root's store owns. A false
+    refusal needs a replica that says store after the owner rolled back and before the new replica arrives,
+    and the owner's way out is to let the replica sync or to run the rollback's hand-back again. Only a
+    readable replica that says store refuses: an absent or unreadable one is a normal state of a synced vault.
+    """
+    from . import marker
+
+    elsewhere = marker.conflict(vault_root)
+    if elsewhere is not None:
+        raise connection.CollectionStoreError(
+            STORE_ELSEWHERE,
+            "the vault's replica says another state root holds this vault's pages in the collection store, so a "
+            "file-mode service here would write Markdown beside them: start the service on the state root that "
+            f"holds the store, or run {ROLLBACK} there and let the replica sync back to this machine")
 
 
 def marker_inconsistency(vault_root: Path) -> str | None:
