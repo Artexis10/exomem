@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 51dd03b8e18fe5fa1f4c45ead039fc25850dc6739c9da9bc1dc109375734204a
+  skill_contract: e345b9c8a582ee1718e708bcab8a959eb34d0ec2229c830b592889c89ebc4a35
   version: "0.1.0"
 ---
 
@@ -177,7 +177,7 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-After writing, report the `user_summary` (`Saved -> <path> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
+After writing, report the `user_summary` (`Saved -> <title> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
 
 ## Save rules
 Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.

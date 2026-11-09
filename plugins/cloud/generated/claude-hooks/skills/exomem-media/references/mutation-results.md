@@ -1,28 +1,45 @@
 # Mutation results and recovery
 
+## Naming pages
+
+Name a page by its title or its short `id` wherever a tool takes a page path. A title
+resolves at once, including a page created a second ago. An `id` looks like `abcdefg.hijk`:
+the first part names the page and survives edits and moves, and the part after the dot names
+the version you read. A vault path, a KB-relative path and an `exomem://` ref keep working.
+
+A title that several pages share refuses with `AMBIGUOUS_REFERENCE`: `message` says how many
+pages carry it, and `candidates` lists at most 5 rows of `title`, `type`, `date` and `id`,
+newest first. Retry with `path` set to the `id` of the page you mean. An `id` in `expected_hash`
+guards the edit against the version that id names; if the page changed since, the refusal is
+`STALE_EDIT` and carries the current `id` in its retry. An edit by `id` that requires
+`expected_hash` and gets none is guarded by the version of the `id` it named.
+
 ## Mutation results and safe retries
 
 Successful product mutations return a compact decisive terminal by default. Its
-first key, `user_summary`, is one plain sentence for the user: `Saved -> <path>`,
-`Updated -> <path>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
-`Replaced -> <new path>, was <old path>`, `Discarded -> <path>` or `Restored -> <path>`.
+first key, `user_summary`, is one plain sentence for the user that names each page by its
+title: `Saved -> <title>`,
+`Updated -> <title>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
+`Replaced -> <new title>, was <old title>`, `Discarded -> <path>` or `Restored -> <path>`.
+A tool whose subject is a file names the file by its path instead.
 Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
 failed or was already stored counts each state, and `Saved` covers only the files that
 this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
-`Already saved -> <path>`, or `Nothing saved; 2 files could not be saved`. A single file
+`Already saved -> <title>`, or `Nothing saved; 2 files could not be saved`. A single file
 whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
 carry the codes and reasons. A result whose status is
-`replayed` reads `Already saved -> <path>`. Each sentence ends with the name of the store
-that took the write, such as `Saved -> <path> (personal Exomem)`; the bootstrap's `store`
+`replayed` reads `Already saved -> <title>`. Each sentence ends with the name of the store
+that took the write, such as `Saved -> <title> (personal Exomem)`; the bootstrap's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
-your next call can take: `path` or `paths`, the hashes a guarded write takes, any
+your next call can take: the `title` and short `id` of each page written (`pages` when
+several), the hashes a guarded write takes, any
 `warnings`, and at most one `next_action` sentence (do it) and one `notice` sentence (tell the
 user). `notice` appears only when the change may be incomplete: for example a background
 update failed, or the call only checked a draft. Everything operational moves under
-`diagnostics.operational`, which only `response_detail="full"` returns: `ok`, `status`,
-`mutated`, `request_id`, `receipt_id`, `idempotency_key`, `before_hash`,
+`diagnostics.operational`, which only `response_detail="full"` returns: `path` or `paths`,
+`ok`, `status`, `mutated`, `request_id`, `receipt_id`, `idempotency_key`, `before_hash`,
 `warnings_count`, and every `derived_sync*`, `advisory_sync*`, `graph_sync*` and
 `vocabulary_sync` field. A null receipt means that the surface supplied no replay
 identity; it does not weaken the committed status.
