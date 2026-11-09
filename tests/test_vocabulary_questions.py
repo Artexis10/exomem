@@ -790,7 +790,13 @@ def test_question_variant_reaches_same_leaf_over_mcp_rest_and_cli(
         headers={"Authorization": "Bearer test-key"},
     )
 
-    assert mcp_result.structured_content == direct
+    # An agent reads the follow-up call in the spelling of the tool it has; REST and CLI keep the grouped one.
+    served = dict(mcp_result.structured_content)
+    assert served.pop("context_route") == {
+        "tool": "inspect_memory",
+        "args": {"operation": "review.item_context", "arguments": {"ref": direct["context_route"]["ref"]}},
+    }
+    assert served == {key: value for key, value in direct.items() if key != "context_route"}
     assert rest.status_code == 200, rest.text
     assert rest.json() == {"success": True, "data": direct}
     assert (

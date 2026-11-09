@@ -85,7 +85,7 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
     # The write says what it promoted, under which parent, and how to revert it.
     [receipt] = promoted["vocabulary_receipt"]
     assert "entity-types: registered venue (parent concept)" in receipt
-    assert 'operation="restore"' in receipt
+    assert "operation='schema.restore'" in receipt
 
     # Bootstrap lists it with a counted zero once the server's own graph
     # maintenance has converged on the new registry.
@@ -154,7 +154,7 @@ def test_a_first_use_registration_is_announced_and_marked_new(
     )
     [receipt] = captured["vocabulary_receipt"]
     assert "source-kinds: registered field-notebook on first use" in receipt
-    assert 'operation="restore"' in receipt
+    assert "operation='schema.restore'" in receipt
 
     # Another agent's next bootstrap marks it new.
     served = call("bootstrap", {"section": "vocabulary"})
