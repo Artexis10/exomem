@@ -1072,9 +1072,8 @@ def test_a_cold_start_warm_builds_the_method_unit_statistics_the_first_request_w
     lexstore.clear_stores()
     freshness.clear()
 
-    durations = warmup.warm_all(vault)
+    warmup.warm_all(vault)
 
-    assert "method_units" in durations
     assert _method_search(vault, pages) == (0, 0)
 
 

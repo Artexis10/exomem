@@ -551,15 +551,6 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             )
         )
         readiness.mark_ready("lexical")
-        # A promoted standby built these before promotion (the branch above); a cold start builds
-        # them here, within the cold-start window an operator configures.
-        from .service_manager import cold_start_budget
-
-        _run_step(
-            durations,
-            "method_units",
-            lambda: warm_method_unit_statistics(vault_root, deadline=time.monotonic() + cold_start_budget()),
-        )
     else:
         # BM25/resolver warm-up reaches the live lexical sidecar with repair
         # enabled. Running it beside the detached repair owner makes the two
@@ -742,6 +733,18 @@ def warm_all(vault_root: Path) -> dict[str, float]:
                     log.info("CLIP query encoder ready")
                     readiness.mark_ready("clip")
 
+    if catalog_ready:
+        # The statistics an owner's first task context would otherwise build. Last, so no model preload or
+        # parked-write drain waits on it, and outside the carry branches: a standby normally built them and
+        # this finds them whole, but one whose build was cut short or re-proved leaves them to this step.
+        # The cold-start budget is only a loose cap on a background step, not a readiness window.
+        from .service_manager import cold_start_budget
+
+        _run_step(
+            durations,
+            "method_units",
+            lambda: warm_method_unit_statistics(vault_root, deadline=time.monotonic() + cold_start_budget()),
+        )
     if carried:
         log.info("warm complete: %s carried_from_standby=%s", durations, sorted(carried))
     else:
