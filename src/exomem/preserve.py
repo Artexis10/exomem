@@ -1692,7 +1692,10 @@ def update_sidecar_extraction(
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
-    _parts_module().retire(vault_root, plan.surplus)
+    parts = _parts_module()
+    kept = parts.retire(vault_root, plan.surplus)
+    if kept:
+        log.info("%s", parts.kept_note(kept))
     return result
 
 

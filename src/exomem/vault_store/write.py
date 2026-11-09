@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership
-from .read import NOT_ACTIVE
+from .read import NOT_ACTIVE, inbound_sources
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -51,16 +51,24 @@ class Expect:
     ``absent`` says the store holds nothing at the path. Otherwise each field that is set must
     match the stored page or binary record. ``projected`` says that the file on disk is the stored
     page: the projection manifest records the page's own revision, no projection intent is queued
-    for the path and no outside change is held for it.
+    for the path and no outside change is held for it. ``linked_from`` names every page that may
+    link to the path: a link from a page outside it, in the graph rows at commit time, refuses the
+    commit. A delete reads its inbound links and commits on that reading through it.
     """
 
     revision: int | None = None
     sha256: str | None = None
     absent: bool = False
     projected: bool = False
+    linked_from: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
-        if self.absent and (self.revision, self.sha256, self.projected) != (None, None, False):
+        if self.absent and (self.revision, self.sha256, self.projected, self.linked_from) != (
+            None,
+            None,
+            False,
+            None,
+        ):
             raise ValueError("an expectation of absence names nothing else")
 
 
@@ -383,6 +391,11 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
             raise StoreConflict(rel, "its bytes are not the expected bytes")
         if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
+        if want.linked_from is not None:
+            gained = inbound_sources(tx, rel) - want.linked_from
+            if gained:
+                # No name: the page that linked may be one the caller is not allowed to see.
+                raise StoreConflict(rel, "a page now links to it")
 
 
 def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:

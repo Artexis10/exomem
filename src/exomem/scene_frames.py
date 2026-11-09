@@ -107,6 +107,30 @@ def parse_frame_ts(name: str) -> float | None:
     return int(m.group(2)) / 1000.0
 
 
+def _refuse_in_store_mode(vault_root: Path, frames: Path) -> None:
+    """Refuse to clear frames that a store-mode vault holds: a sidecar is a stored page.
+
+    An unlink removes only the projection of a sidecar, and the frames may be stored with no file
+    on disk, so the clear would leave pages behind. A video without frames and a file-mode vault
+    clear as before. Callers that clear as a best-effort step log the refusal and go on.
+    """
+    from .vault_store import availability, mode, ownership, targets
+
+    if not mode.store_mode_active(vault_root):
+        return
+    try:
+        relative = frames.resolve().relative_to(vault_root.resolve()).as_posix()
+    except (ValueError, OSError):
+        return
+    if not ownership.owns_folder(relative):
+        return
+    if frames.is_dir() or targets.holds_pages_under(vault_root, relative):
+        raise availability.unrouted(
+            "clear_scene_frames",
+            "a frame sidecar is a stored page, and removing its file does not remove the page",
+        )
+
+
 def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
     """Remove the frames this feature owns (`scene-*.jpg` + sidecars) for a video.
 
@@ -115,6 +139,7 @@ def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
     embedding index so stale rows don't linger. Returns the number of files removed.
     """
     d = frames_dir_for(video_path)
+    _refuse_in_store_mode(vault_root, d)
     if not d.is_dir():
         return 0
     removed_sidecars: list[str] = []
