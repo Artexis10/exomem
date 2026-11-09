@@ -369,10 +369,17 @@ def platform_support() -> PlatformSupport:
 
 
 #: The name prefix of every entry a backend's capability probe creates in the
-#: root it tests. The probe briefly leaves symlink aliases there, and a root can
-#: lie inside the Knowledge Base, so vault scans skip these names
-#: (`vault.VAULT_SCAN_SKIP_DIR_PREFIXES`) rather than refuse them as aliases.
+#: root it tests.
 PROBE_ENTRY_PREFIX = ".exomem-held-probe-"
+#: The probe's own entry names: the prefix, its 32-hex token and an optional role suffix such
+#: as `-alias`. The probe briefly leaves symlink aliases in its root, which can lie inside the
+#: Knowledge Base, so vault scans skip these names and `reserved_paths` refuses writes under them.
+PROBE_ENTRY_RE = re.compile(rf"{re.escape(PROBE_ENTRY_PREFIX)}[0-9a-f]{{32}}(?:-[a-z]+)*", re.ASCII)
+
+
+def is_probe_entry(name: str) -> bool:
+    """Whether a directory entry name is one that a capability probe creates."""
+    return PROBE_ENTRY_RE.fullmatch(name) is not None
 
 
 def probe(root: Path) -> Capabilities:

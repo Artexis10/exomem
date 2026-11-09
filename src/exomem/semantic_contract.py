@@ -100,7 +100,7 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
-    if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
+    if vault.is_scan_skipped_runtime_name(name):
         return True
     if directory != kb:
         return False

@@ -481,7 +481,7 @@ def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
     # gives up on the publication lock after 0.05 s, so on a loaded machine it
     # would defer behind that repair's publish; let the repair finish first.
     assert lexstore.await_repairs_idle(tmp_path)
-    store.upsert_paths([path])
+    assert store.upsert_paths([path])
     current = lexstore.search_semantic_units(tmp_path, "current", k=5, scope="kb")
     assert current and [hit.category for hit in current] == ["rule"]
     still_stale_graph = epistemic_graph.graph_context(tmp_path, path=_REL, depth=1)

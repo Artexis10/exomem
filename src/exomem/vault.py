@@ -291,10 +291,17 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
         "_Adoption",
     }
 )
-# Runtime names a scan skips at any depth: batch workspaces, and the entries a
-# held-filesystem capability probe briefly creates (symlink aliases included)
-# in a root it tests, which can lie inside the Knowledge Base.
-VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-", held_fs.PROBE_ENTRY_PREFIX)
+VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+
+
+def is_scan_skipped_runtime_name(name: str) -> bool:
+    """Whether a scan skips this entry at any depth as runtime scratch, not content.
+
+    Batch workspaces, and the entries a held-filesystem capability probe briefly
+    creates (symlink aliases included) in a root it tests, which can lie inside the
+    Knowledge Base. `reserved_paths` refuses writes under the probe's names.
+    """
+    return name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES) or held_fs.is_probe_entry(name)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
 _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
@@ -413,9 +420,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     ):
         return True
     for segment in segments:
-        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
-            VAULT_SCAN_SKIP_DIR_PREFIXES
-        ):
+        if segment in VAULT_SCAN_SKIP_DIRS or is_scan_skipped_runtime_name(segment):
             return True
     return False
 
