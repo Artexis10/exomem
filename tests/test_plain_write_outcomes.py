@@ -209,11 +209,11 @@ def test_a_review_error_through_the_tool_names_the_field_and_never_an_empty_list
         },
     )
 
-    assert refused["success"] is False
+    assert set(refused) == {"error"}
     assert refused["error"]["code"] == "INVALID_RELATION_REVIEW"
     assert "relation_review_hash" in refused["error"]["message"]
     assert "(missing: [])" not in refused["error"]["message"]
-    assert refused["error"]["remediation"]
+    assert refused["error"]["message"].endswith("Nothing was saved.")
 
 
 def _manage_file(vault: Path, **arguments: object) -> dict:

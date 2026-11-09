@@ -166,6 +166,7 @@ def _answer(*, structured=None, is_error=False, text=None):
         ("hang", "timeout"),
         (_answer(is_error=True, text="boom secret-token-value"), "tool_error"),
         (_answer(structured={"result": {"warming": True, "hits": []}}), "warming"),
+        (_answer(structured={"user_summary": "Found 0 pages.", "hits": [], "notice": "Results may be incomplete."}), "notice"),
         (_answer(structured={"success": False, "error": {"code": "DENIED"}}), "refused"),
         (_answer(structured={"result": "unexpected"}), "malformed"),
     ],

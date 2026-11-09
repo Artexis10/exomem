@@ -50,21 +50,24 @@ def test_ask_memory_structured_content_matches_declared_schema(server, case: str
     assert result.structured_content is not None
     _validate(schema, result.structured_content)
     if case == "operation_error":
-        assert result.structured_content["result"]["success"] is False
+        assert result.structured_content["result"]["error"]["code"] == "INVALID_RELATION_FILTER"
 
 
 def test_every_tool_schema_admits_the_failure_envelope(server) -> None:
     """A structured refusal is a normal result on every command, so no tool's
     declared schema may exclude it."""
-    envelope = cli_ops.envelope(
-        False, error={"code": "X", "message": "m", "remediation": None}
-    )
+    envelope = {"error": {"code": "X", "message": "m"}}
+    full_envelope = {
+        **envelope,
+        "diagnostics": cli_ops.envelope(False, error={"code": "X", "message": "m"}),
+    }
     checked = 0
     for tool in asyncio.run(server.list_tools()):
         schema = tool.to_mcp_tool().model_dump(mode="json", by_alias=True).get("outputSchema")
         if not schema:
             continue
         wrapped = schema.get("x-fastmcp-wrap-result")
-        _validate(schema, {"result": envelope} if wrapped else envelope)
+        for reply in (envelope, full_envelope):
+            _validate(schema, {"result": reply} if wrapped else reply)
         checked += 1
     assert checked >= 2, json.dumps(checked)

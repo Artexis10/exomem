@@ -1,0 +1,40 @@
+# The unit kinds Exomem ships. A kind is what a `##` heading says a unit is.
+#
+# `heading_aliases` are the other spellings of a heading that name the kind; the kind's own
+# key always names it. `traits` state what code does with the kind, from the closed set in
+# `exomem.semantic_kinds.KIND_TRAITS`; a pack that names another trait fails the build, and a
+# vault kind declares its own traits from the same set in `_Schema/semantic-language-registry.yaml`.
+# The kind `question` is no entry: only `open_question` carries the `question` trait.
+schema_version: 1
+kinds:
+  claim: {description: Portable claim semantic block, heading_aliases: [claims], traits: [assertion, page_claim]}
+  finding: {description: Portable finding semantic block, heading_aliases: [findings], traits: [assertion]}
+  evidence: {description: Portable evidence semantic block, heading_aliases: [proof, proofs, evidences]}
+  decision: {description: Portable decision semantic block, heading_aliases: [decisions]}
+  assumption: {description: Portable assumption semantic block, heading_aliases: [assumptions]}
+  inference: {description: Portable inference semantic block, heading_aliases: [inferences], traits: [assertion]}
+  constraint: {description: Portable constraint semantic block, heading_aliases: [constraints]}
+  risk: {description: Portable risk semantic block, heading_aliases: [risks]}
+  open_question: {description: Portable open question semantic block, heading_aliases: [open_questions, questions], traits: [question]}
+  hypothesis: {description: Portable hypothesis semantic block, heading_aliases: [hypotheses], traits: [assertion]}
+  prediction: {description: Portable prediction semantic block, heading_aliases: [predictions]}
+  result: {description: Portable result semantic block, heading_aliases: [results, outcome, outcomes], traits: [assertion, outcome]}
+  metric: {description: Portable metric semantic block, heading_aliases: [metrics]}
+  failure: {description: Portable failure semantic block, heading_aliases: [failures]}
+  pattern: {description: Portable pattern semantic block, heading_aliases: [patterns]}
+  record: {description: Portable record semantic block, heading_aliases: [records]}
+  case: {description: Portable case semantic block, heading_aliases: [cases]}
+  timeline_event: {description: Portable timeline event semantic block, heading_aliases: [timeline, timelines, timeline_events, events]}
+  requirement: {description: Portable requirement semantic block, heading_aliases: [requirements]}
+  action: {description: Portable action semantic block, heading_aliases: [actions, todo, todos]}
+  definition: {description: Portable definition semantic block, heading_aliases: [definitions]}
+  procedure: {description: Portable procedure semantic block, heading_aliases: [procedures], traits: [procedure]}
+  source: {description: Portable source semantic block, heading_aliases: [sources]}
+  experiment: {description: Portable experiment semantic block, heading_aliases: [experiments]}
+  entity: {description: Portable entity semantic block, heading_aliases: [entities]}
+  project: {description: Portable project semantic block, heading_aliases: [projects]}
+  media_segment: {description: Portable media segment semantic block, heading_aliases: [media_segments, segments]}
+# A compact kind has no heading: it is the kind of a unit written as one line, so no `##`
+# heading resolves to it.
+compact_kinds:
+  observation: {description: Compact semantic observation}

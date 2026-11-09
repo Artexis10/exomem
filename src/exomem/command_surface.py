@@ -850,6 +850,35 @@ def _published_parameters(
     return sig, visible, resolved
 
 
+def agent_refusal_result(
+    refusal: dict[str, typing.Any],
+    error: BaseException | None,
+    command_name: str,
+    arguments: dict[str, typing.Any],
+    parameters: Iterable[str],
+    *,
+    write: bool,
+    default_detail: str | None = None,
+) -> dict[str, typing.Any]:
+    """The MCP error result for a refusal: what happened, and the exact retry.
+
+    `default_detail` is the command's own `response_detail` default, which an omitted argument means.
+    """
+    from . import agent_refusal, cli_ops
+
+    detail = arguments.get("response_detail") or default_detail
+    return agent_refusal.reply(
+        refusal,
+        error if error is not None else ValueError(refusal.get("message")),
+        command=command_name,
+        called=arguments,
+        parameters=set(parameters),
+        write=write,
+        full=detail == "full",
+        envelope=cli_ops.envelope(False, error=dict(refusal)),
+    )
+
+
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -903,7 +932,15 @@ def bind_vault(
                 )
                 from . import cli_ops
 
-                return cli_ops.envelope(False, error=refusal)
+                return agent_refusal_result(
+                    refusal,
+                    None,
+                    command.name,
+                    kwargs,
+                    (p.name for p in visible),
+                    write=False,
+                    default_detail=getattr(command, "response_detail", None),
+                )
             from .commands import invocation_is_read_only
             from .governance.egress import SelectorCoverageError
             from .writer_lease import invoke_command
@@ -1038,7 +1075,15 @@ def bind_vault(
                     message=str(refusal.get("message") or ""),
                     retry_scope=retry_scope,
                 )
-                return cli_ops.envelope(False, error=refusal)
+                return agent_refusal_result(
+                    refusal,
+                    error,
+                    command.name,
+                    kwargs,
+                    (p.name for p in visible),
+                    write=not invocation_read_only,
+                    default_detail=getattr(command, "response_detail", None),
+                )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__

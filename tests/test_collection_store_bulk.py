@@ -97,10 +97,12 @@ def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store):
         first = writer_lease.invoke_command(_command("record_memory"), store.root, **args)
         before = tuple(store.connection.iterdump())
         retried = writer_lease.invoke_command(_command("record_memory"), store.root, **args)
-    assert first["status"] == "committed"
-    assert retried["status"] == "replayed"
-    assert retried["terminal"] is True and retried["mutated"] is False
-    assert retried["diagnostics"] == first["diagnostics"]
+    assert first["diagnostics"]["operational"]["status"] == "committed"
+    operational = retried["diagnostics"]["operational"]
+    assert operational["status"] == "replayed"
+    assert operational["terminal"] is True and operational["mutated"] is False
+    leaf = lambda reply: {k: v for k, v in reply["diagnostics"].items() if k != "operational"}  # noqa: E731
+    assert leaf(retried) == leaf(first)
     assert "due_state" not in retried and "capture_sweep" not in retried
     assert tuple(store.connection.iterdump()) == before
 
@@ -281,7 +283,7 @@ def test_public_bulk_advances_due_projection_only_after_commit(store):
         due_state.reconcile(store.root)
         response = writer_lease.invoke_command(_command("record_memory"), store.root,
                                               rows=rows, response_detail="full", **kwargs)
-        assert response["status"] == "committed"
+        assert response["diagnostics"]["operational"]["status"] == "committed"
         assert "due_state" not in response
         assert due_state.served(store.root)["total"] >= 1
         result = response["diagnostics"]

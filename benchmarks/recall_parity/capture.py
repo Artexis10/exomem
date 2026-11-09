@@ -114,7 +114,9 @@ def decode_hits(result: Any) -> tuple[list[Any] | None, str | None, str | None]:
         if data.get("success") is False or isinstance(error, dict):
             code = error.get("code") if isinstance(error, dict) else None
             return None, "refused", str(code) if code else None
-        for marker in ("warming", "degraded"):
+        # `notice` is the reply's one sentence for results that may be incomplete; it replaces
+        # the raw `warming` and `degraded` fields, which only a timings request returns.
+        for marker in ("warming", "degraded", "notice"):
             if data.get(marker):
                 return None, marker, None
         if isinstance(data.get("hits"), list):

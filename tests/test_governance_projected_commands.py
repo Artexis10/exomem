@@ -797,8 +797,8 @@ def test_product_recall_does_not_reopen_due_state_on_projected_boundary(
 
     token = "pc1." + "a" * 64
     assert (
-        commands.op_ask_memory(tmp_path, query="term", continuation=token)
-        is result
+        commands.op_ask_memory(tmp_path, query="term", continuation=token)["hits"]
+        == result
     )
     assert len(calls) == 1
     assert calls[0]["continuation"] == token

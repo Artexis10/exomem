@@ -8,6 +8,8 @@ import hashlib
 import io
 import json
 import tempfile
+from fractions import Fraction
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -117,9 +119,140 @@ def test_agent_compares_photos_in_one_call(served):
     assert [block.type for block in result.content] == ["text", "image", "image"]
 
 
-def test_a_raw_photo_names_the_download_instead(served):
+SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
+
+
+def test_agent_sees_a_camera_raw_photo_upright_at_its_sensor_size(served, vault):
+    """Defect: a preserved DNG answers IMAGE_FORMAT_UNSUPPORTED, so the agent cannot look at it."""
+    from PIL import Image
+
     mcp, client = served
-    path = _upload(client, "IMG_0002.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
+    # A phone raw shot in portrait: the sensor rows are stored turned, with orientation 6.
+    original = (SAMPLES / "ocr-eng.dng").read_bytes()
+    path = _upload(client, "PXL_0001.dng", original, "image/x-adobe-dng")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    [shown] = result.structured_content["images"]
+    assert shown["original_pixels"] == [1068, 280]
+    assert shown["shown_pixels"] == [1068, 280]
+    seen = Image.open(io.BytesIO(base64.b64decode(result.content[1].data)))
+    assert seen.size == (1068, 280), "the raw must reach the model upright"
+    assert hashlib.sha256((vault / path).read_bytes()).hexdigest() == hashlib.sha256(original).hexdigest()
+
+
+def _dng(width: int, height: int, tags: dict | None = None, *, pixels: bytes = b"") -> bytes:
+    """A DNG directory declaring a 16-bit sensor image of `width` x `height`, then `pixels`."""
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    # TIFF field types for the tags Pillow does not know: SHORT, BYTE and RATIONAL.
+    types = {33421: 3, 33422: 1, 50706: 1, 50718: 5, 50829: 3}
+    directory = ImageFileDirectory_v2()
+    fields = {
+        254: 0, 256: width, 257: height, 258: 16, 259: 1, 262: 32803, 277: 1, 278: height,
+        273: 4096, 279: max(len(pixels), 2), 33421: (2, 2), 33422: b"\x00\x01\x01\x02",
+        50706: b"\x01\x04\x00\x00", 50717: 4095, **(tags or {}),
+    }
+    for tag, value in fields.items():
+        if value is None:  # the caller removes a default field
+            continue
+        if tag in types:
+            directory.tagtype[tag] = types[tag]
+        directory[tag] = value
+    out = io.BytesIO()
+    out.write(b"II*\x00\x08\x00\x00\x00")
+    directory.save(out)
+    return out.getvalue().ljust(4096, b"\x00") + pixels
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        pytest.param(_dng(60000, 60000), id="declared-huge"),
+        # DefaultScale stretches a 4 MP sensor image tenfold on output.
+        pytest.param(_dng(4000, 1000, {50718: (Fraction(10), Fraction(1))}), id="stretched"),
+        # ActiveArea shows 32 x 32 pixels of an 8000 x 8000 sensor buffer that is still unpacked.
+        pytest.param(_dng(8000, 8000, {50829: (0, 0, 32, 32)}), id="small-active-area"),
+    ],
+)
+def test_a_camera_raw_that_would_decode_too_large_is_refused_before_it_is_demosaiced(served, monkeypatch, declared):
+    """Defect: a small hostile DNG demosaics gigabytes in the serving process before any size check."""
+    from exomem import image_view
+
+    mcp, client = served
+    monkeypatch.setattr(image_view, "MAX_DECODE_PIXELS", 10_000_000)
+    path = _upload(client, "PXL_0002.dng", declared, "image/x-adobe-dng")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_TOO_LARGE" in refused
+
+
+def test_bytes_that_are_not_a_dng_never_reach_the_raw_decoder(served):
+    """Defect: LibRaw decodes any file of a known sensor-dump length, so noise named .dng is shown and indexed."""
+    mcp, client = served
+    path = _upload(client, "PXL_0004.dng", bytes(range(256)) * 3072, "image/x-adobe-dng")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_UNDECODABLE" in refused
+
+
+def test_a_monochrome_camera_raw_is_shown_in_greyscale(served):
+    """Defect: a one-channel raw crashes the decoder instead of reaching the model."""
+    mcp, client = served
+    # LinearRaw, one sample per pixel. LibRaw reads past the declared strip, so the file is padded.
+    mono = _dng(64, 64, {262: 34892, 33421: None, 33422: None}, pixels=b"\x00\x08" * 64 * 64 + bytes(65536))
+    path = _upload(client, "PXL_0005.dng", mono, "image/x-adobe-dng")
+
+    result = _call(mcp, {"kind": "image", "path": path})
+
+    [shown] = result.structured_content["images"]
+    assert shown["original_pixels"] == [64, 64]
+
+
+def test_a_camera_raw_with_a_malformed_date_is_shown_without_one(served):
+    """Defect: a bad EXIF date in a raw throws away a decode that succeeded, where a JPEG loses only the date."""
+    mcp, client = served
+    dated = _dng(64, 64, {262: 34892, 33421: None, 33422: None, 306: "99999999:1:1 0:0:0"},
+                 pixels=b"\x00\x08" * 64 * 64 + bytes(65536))
+    path = _upload(client, "PXL_0006.dng", dated, "image/x-adobe-dng")
+
+    [shown] = _call(mcp, {"kind": "image", "path": path}).structured_content["images"]
+
+    assert shown["taken_at"] is None
+
+
+def test_a_raw_the_decoder_runs_out_of_memory_on_names_the_download(served, monkeypatch):
+    """Defect: decoder memory exhaustion surfaces as an unhandled error that names nothing to change."""
+    from exomem import image_codecs
+
+    mcp, client = served
+    path = _upload(client, "PXL_0007.dng", (SAMPLES / "ocr-eng.dng").read_bytes(), "image/x-adobe-dng")
+
+    def exhausted(*_args, **_kwargs):
+        raise MemoryError("camera raw decoding ran out of memory")
+
+    monkeypatch.setattr(image_codecs, "_open_raw", exhausted)
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_TOO_LARGE" in refused
+    assert "transfer_artifact operation=download" in refused
+
+
+def test_a_damaged_camera_raw_is_named_undecodable(served):
+    mcp, client = served
+    path = _upload(client, "PXL_0003.dng", b"II*\x00" + b"\x00" * 64, "image/x-adobe-dng")
+
+    refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
+
+    assert "IMAGE_UNDECODABLE" in refused
+
+
+def test_a_format_without_a_decoder_names_the_download_instead(served):
+    mcp, client = served
+    path = _upload(client, "cover.psd", b"8BPS" + b"\x00" * 64, "image/vnd.adobe.photoshop")
 
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 

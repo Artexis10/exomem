@@ -73,7 +73,6 @@ _STATUS_KEYS = (
 # Debt (K7, C8): a census-only check. `target_kinds` cannot state it, because folders and
 # Sources pages count as evidence too, so the kind list stays with the check.
 _EVIDENTIAL_KINDS = frozenset({"evidence", "result", "metric", "finding", "experiment"})
-_QUESTION_KINDS = ("question", "open_question")
 # Debt (F7): a census-only flag keyed on the family, so an extension in these families
 # already reaches it.
 _EPISTEMIC_FAMILIES = frozenset({"support", "contradiction", "supersession", "duplication"})
@@ -1032,9 +1031,13 @@ class _Reader:
         if path not in self._question_pages:
             parent = self.view.parent(path) if self.admitted(path) else None
             self._question_pages[path] = parent is not None and any(
-                unit.kind in _QUESTION_KINDS for unit in parent.structure.units
+                parent.language.has(unit.kind, "question") for unit in parent.structure.units
             )
         return self._question_pages[path]
+
+    def question_unit(self, path: str, kind: str | None) -> bool:
+        """True when `kind`, as the page's own registry resolved it, has the `question` trait."""
+        return kind is not None and self.view.language_for(path).has(kind, "question")
 
     def rows(self) -> Iterator[_Row]:
         """Every non-structural edge authored on an admitted page, streamed."""
@@ -1510,12 +1513,12 @@ def _check_row(
             evidential = row.dst_kind in _EVIDENTIAL_KINDS
         record("evidence_target_not_evidential", not evidential)
     # Debt (K8): `settles` is wrong here, because a `resolves` target is often no question.
-    # The target side reads the `question` trait once the kinds move to the pack.
+    # The relation side stays with the check; the target side reads the `question` trait.
     if row.relation == "answers":
         if row.dst_kind == "file":
             answered = reader.question_page(dst_page)
         else:
-            answered = row.dst_kind in _QUESTION_KINDS
+            answered = reader.question_unit(dst_page, row.dst_kind)
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
         record("same_page_epistemic", same_page)

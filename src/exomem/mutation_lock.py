@@ -75,6 +75,10 @@ _QUIET_HOLD_MS = 250.0
 # derived-receipt proofs, watcher freshness, media commits and collection ownership reads.
 # Their holds run beside ordinary traffic and would rotate the service log every fifteen minutes.
 _MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
+# Holder kinds whose waiters are not an interactive writer: background work that steps aside for one
+# (`waiter_count`) and never for another of its kind. A request-driven read (`collection-read`) is
+# interactive, though its hold logs quietly above.
+_NON_INTERACTIVE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "maintenance-job"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
 # One INFO `mutation_lock_hold_summary` row per window stands in for every
 # demoted hold in it, so the log keeps hours of boundary evidence.
 _HOLD_SUMMARY_INTERVAL_SECONDS = 60.0
@@ -1999,15 +2003,16 @@ class _LocalLockState:
         default_factory=lambda: deque(maxlen=_CONTENTION_RECENT_SAMPLES)
     )
     last_holder: dict[str, object] | None = None
-    #: Threads of this process inside `hold()` that do not hold the boundary
-    #: yet. Read by work that can step aside between units (`waiter_count`).
-    waiters: int = 0
+    #: Threads of this process inside `hold()` that do not hold the boundary yet and are
+    #: interactive writers (`_NON_INTERACTIVE_HOLDER_KINDS` are not). Read by work that can
+    #: step aside between units (`waiter_count`). A borrower waits for a loan and never counts.
+    interactive_waiters: int = 0
     #: The boundary's lock file, from which the waiters sidecar is named. `None`
     #: for a bare state that has no boundary behind it.
     lock_path: Path | None = None
     #: The open waiters sidecar holding this process's shared lock. Only the one
     #: thread that holds `guard` and polls for the OS lock sets it, and it
-    #: clears it before leaving `_waiting`, so it is set only while `waiters > 0`.
+    #: clears it before leaving `_waiting`, so it is set only while a thread waits.
     signal_handle: BinaryIO | None = None
     #: The last probe for a waiter in another process, and when it ran. Read and
     #: written under `metadata_guard`; `waiter_count` repeats the probe at most
@@ -2113,15 +2118,18 @@ def _another_process_waits(lock_path: Path) -> bool:
 
 
 @contextmanager
-def _waiting(state: _LocalLockState) -> Iterator[None]:
-    """Count this thread among the boundary's waiters for the block."""
-    with state.metadata_guard:
-        state.waiters += 1
+def _waiting(state: _LocalLockState, holder_kind: str) -> Iterator[None]:
+    """Count this thread among the boundary's interactive waiters for the block, unless it is a machine hold."""
+    interactive = holder_kind not in _NON_INTERACTIVE_HOLDER_KINDS
+    if interactive:
+        with state.metadata_guard:
+            state.interactive_waiters += 1
     try:
         yield
     finally:
-        with state.metadata_guard:
-            state.waiters -= 1
+        if interactive:
+            with state.metadata_guard:
+                state.interactive_waiters -= 1
 
 
 class WaitEnded(BaseException):
@@ -2159,14 +2167,14 @@ def ending_waits(when: Callable[[int | None], bool]) -> Iterator[None]:
         _ENDING_WAITS.reset(token)
 
 
-def _acquire_guard(state: _LocalLockState, deadline: float) -> bool:
+def _acquire_guard(state: _LocalLockState, deadline: float, holder_kind: str) -> bool:
     """Wait for the local guard until ``deadline``, as one of its waiters; whether it was taken.
 
     Inside `ending_waits`, a thread that holds no boundary yet waits one poll interval at a time
     and raises `WaitEnded` when its scope asks.
     """
     when = _ENDING_WAITS.get()
-    with _waiting(state):
+    with _waiting(state, holder_kind):
         remaining = max(0.0, deadline - time.monotonic())
         if when is None or remaining <= 0.0 or current_thread_holds_boundary():
             return state.guard.acquire(timeout=remaining)
@@ -2187,7 +2195,6 @@ def _enter_or_borrow(state: _LocalLockState, deadline: float) -> bool | None:
     lending owner keeps the guard, so no other kind of holder can enter.
     """
     with state.turn:
-        state.waiters += 1
         state.borrower_deadlines.append(deadline)
         try:
             while True:
@@ -2204,7 +2211,6 @@ def _enter_or_borrow(state: _LocalLockState, deadline: float) -> bool | None:
                     return None
                 state.turn.wait(remaining)
         finally:
-            state.waiters -= 1
             state.borrower_deadlines.remove(deadline)
             # An owner offering its boundary withdraws the offer once no borrower waits.
             state.turn.notify_all()
@@ -2357,6 +2363,7 @@ class VaultMutationCoordinator:
         long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS,
         kind: str = COORDINATOR_VAULT_BOUNDARY,
         name: str | None = None,
+        queued_writers: Callable[[], int] | None = None,
     ) -> None:
         if kind not in _COORDINATOR_KINDS:
             raise ValueError("unknown mutation coordinator kind")
@@ -2383,6 +2390,8 @@ class VaultMutationCoordinator:
         self.long_holder_seconds = long_holder_seconds
         self.kind = kind
         self.name = name
+        # Keyed writes that wait their turn outside `hold()`, which no waiter count can see.
+        self._queued_writers = queued_writers
 
     def current_thread_holds_boundary(self) -> bool:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
@@ -2411,19 +2420,25 @@ class VaultMutationCoordinator:
         return True
 
     def waiter_count(self) -> int:
-        """Waiters for this boundary, in this process or another on the host.
+        """Interactive writers waiting for this boundary, in this process or another on the host.
 
-        A positive count is the number of threads of this process now waiting.
-        With none, it is 1 when another process waits (that process holds a
-        shared lock on the boundary's waiters sidecar) and 0 otherwise. The
-        other-process answer is at most one poll interval old. The contention
-        counters stay process-local. On Windows only this process's threads count.
+        Work that holds the boundary steps aside between units when this is positive. A machine
+        hold (a drain, a graph build, a maintenance job) and a borrower of a lent boundary never
+        count, so background work does not yield to other background work. A positive count is the
+        threads of this process now waiting, plus the keyed writes queued behind the head of the
+        capture line, which wait outside `hold()` between attempts (`queued_writers`). With none,
+        it is 1 when another process waits (that process holds a shared lock on the boundary's
+        waiters sidecar, which only a writer raises) and 0 otherwise. The other-process answer is
+        at most one poll interval old. The contention counters stay process-local. On Windows only
+        this process counts.
         """
         state = _state_for(self.lock_path)
         with state.metadata_guard:
-            local = state.waiters
-            if local or os.name == "nt":
-                return local
+            local = state.interactive_waiters
+        local += self._queued_writers() if self._queued_writers is not None else 0
+        if local or os.name == "nt":
+            return local
+        with state.metadata_guard:
             now = time.monotonic()
             if now - state.foreign_probed_at < self.poll_interval_seconds:
                 return int(state.foreign_waiter)
@@ -2432,14 +2447,27 @@ class VaultMutationCoordinator:
             with state.metadata_guard:
                 return int(state.foreign_waiter)
         try:
-            # This process holds its shared lock only while `waiters > 0`, so the
-            # probe cannot meet it here.
+            # This process holds its shared lock only while an interactive thread waits, which
+            # the count above found none of, so the probe cannot meet it here.
             found = _another_process_waits(self.lock_path)
             with state.metadata_guard:
                 state.foreign_waiter, state.foreign_probed_at = found, now
         finally:
             state.foreign_probe.release()
         return int(found)
+
+    def hand_over(self) -> float:
+        """After a hold that ended for a waiting writer, wait while one still waits; return the wait.
+
+        The writer polls for the boundary, so a holder that asks for it again at once takes it back
+        first, above all against a writer in another process, which no foreground mark makes it
+        yield to. The wait holds no lock and keeps the floors of a bulk pass
+        (`foreground_priority.wait_while`), which a thread that holds a boundary never waits
+        under. A thread inside `ending_waits` does not wait either: its waiter may need it.
+        """
+        if _ENDING_WAITS.get() is not None:
+            return 0.0
+        return foreground_priority.wait_while(lambda: self.waiter_count() > 0)
 
     def current_thread_borrows_boundary(self) -> bool:
         """Whether this thread holds this boundary on loan from its owner (`lend`)."""
@@ -2640,7 +2668,7 @@ class VaultMutationCoordinator:
                 return
             entered = borrowed is not None
         else:
-            entered = _acquire_guard(state, deadline)
+            entered = _acquire_guard(state, deadline, holder_kind)
         if not entered:
             raise _Contended() if probe else self._refused(wait_start)
         released_work: tuple[Callable[[], None], ...] = ()
@@ -2648,7 +2676,7 @@ class VaultMutationCoordinator:
             handle = self._open_lock_file(self.lock_path)
             metadata_handle = self._open_lock_file(self.metadata_lock_path)
             try:
-                with _waiting(state):
+                with _waiting(state, holder_kind):
                     try:
                         self._acquire_boundary(
                             handle, metadata_handle, deadline, request_id, operation, holder_kind,
@@ -2961,8 +2989,10 @@ class VaultMutationCoordinator:
     ) -> None:
         """Acquire and publish with the metadata mutex held for one generation.
 
-        The first failed try raises this process's cross-process waiter signal;
-        the caller drops it.
+        A failed try raises this process's cross-process waiter signal while an interactive writer
+        waits here, and the caller drops it. Only the thread that polls the OS lock can raise it, so
+        a machine hold that polls with a writer queued behind it on the local guard raises it for
+        that writer. A signal always means a writer.
         """
         while True:
             try:
@@ -3012,7 +3042,14 @@ class VaultMutationCoordinator:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _Contended() if probe else self._refused(wait_start)
-            _raise_waiter_signal(waiter_state)
+            # Asked again at each poll: this thread counts itself when it is a writer, and a writer
+            # that queued behind it, or left, changes the answer.
+            with waiter_state.metadata_guard:
+                writer_waits = waiter_state.interactive_waiters > 0
+            if writer_waits:
+                _raise_waiter_signal(waiter_state)
+            else:
+                _drop_waiter_signal(waiter_state)
             time.sleep(min(self.poll_interval_seconds, remaining))
 
     def _publish_holder_metadata(self, holder: dict[str, object]) -> None:

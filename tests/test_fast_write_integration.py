@@ -93,6 +93,14 @@ def _manager(tmp_path: Path) -> writer_lease.LeaseManager:
     )
 
 
+def _flat(terminal: dict) -> dict:
+    """The `full` reply with its operational fields lifted beside the agent's fields.
+
+    These tests read custody and sync state, which a reply carries under `diagnostics.operational`.
+    """
+    return {**terminal, **terminal["diagnostics"]["operational"]}
+
+
 def _governed_write(
     manager: writer_lease.LeaseManager,
     root: Path,
@@ -101,7 +109,7 @@ def _governed_write(
     source: str,
     command_name: str = "remember",
     idempotency_key: str | None = None,
-    response_detail: str = "compact",
+    response_detail: str = "full",
     declare: bool = True,
     guarded: bool = False,
 ) -> dict:
@@ -132,13 +140,13 @@ def _governed_write(
         return {"path": rel_path, "warnings": []}
 
     command = SimpleNamespace(name=command_name, leaf=leaf, read_only=False)
-    return manager.invoke(
+    return _flat(manager.invoke(
         command,
         (root,),
         {"response_detail": response_detail},
         idempotency_key=idempotency_key,
         mutation_request_id="22222222-2222-4222-8222-222222222222",
-    )
+    ))
 
 
 def _drain(root: Path, *, passes: int = 24, limit: int = 32) -> int:
@@ -490,9 +498,9 @@ def test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled(
 
     terminal = _manager(tmp_path).invoke(
         SimpleNamespace(name="adoption_studio", leaf=save_progress, read_only=False),
-        (vault,), {"action": "apply"}, idempotency_key="checkpoint-graph-debt",
+        (vault,), {"action": "apply", "response_detail": "full"}, idempotency_key="checkpoint-graph-debt",
     )
-    assert terminal["status"] == "committed"
+    assert terminal["diagnostics"]["operational"]["status"] == "committed"
     assert (deferred_index.graph_full_rebuild_pending(vault) is not None) == (flag is None)
 
 
@@ -533,7 +541,9 @@ def test_expired_acknowledgement_does_not_wait_for_status_io(
     assert terminal["status"] == "committed" and terminal["derived_sync"] == "pending"
     assert "deadlineprobe" in (vault / arguments["rel_path"]).read_text()
     assert arguments["rel_path"] in _keyword(vault, "deadlineprobe")
-    assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == terminal
+    assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == {
+        **terminal, "replayed": True
+    }
     assert _drain(vault) > 0
 
 
@@ -595,7 +605,9 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
             arguments["continuation"] = continuation
         terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
         assert clock["now"] - began <= request_budget.MCP_REQUEST_BUDGET_SECONDS
-        assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == terminal
+        assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == {
+            **terminal, "replayed": True
+        }
         continuation = results[-1].get("continuation")
         if not continuation:
             break
@@ -612,6 +624,7 @@ def _import_three_sources_while(
     hold,
     *,
     proof_seconds: float = 0.0,
+    borrows: bool = True,
 ) -> dict:
     """Import three Sources, one chunk each, while `hold(receipt)` waits on the boundary.
 
@@ -678,8 +691,10 @@ def _import_three_sources_while(
         if len(committed) == 1:
             waiting.start()
             waited = time.monotonic() + 10
-            while not boundary.waiter_count():  # the second chunk starts once the holder waits
-                assert time.monotonic() < waited, "the holder never waited on the boundary"
+            # A derived proof waits to borrow the boundary, and the second chunk starts once it does.
+            # A background hold only waits behind the import, so it needs no wait of its own.
+            while borrows and boundary.next_borrower_deadline() is None:
+                assert time.monotonic() < waited, "the holder never waited to borrow the boundary"
                 time.sleep(0.005)
         if len(committed) == 2:
             waiting.join(timeout=10)
@@ -743,7 +758,7 @@ def test_a_background_holder_cannot_borrow_the_boundary_of_an_import(
         ):
             return "held"
 
-    held = _import_three_sources_while(vault, tmp_path, monkeypatch, scan)
+    held = _import_three_sources_while(vault, tmp_path, monkeypatch, scan, borrows=False)
 
     assert held["outcome"] == "MUTATION_BUSY"
     assert held["applied"] == 3
@@ -966,7 +981,9 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     find_module.shared_resolver(vault)
     command = next(cmd for cmd in commands.PRODUCT_COMMANDS if cmd.name == "adoption_studio")
     manager = _manager(tmp_path)
-    arguments = {"action": "apply", "run_id": run_id, "plan_id": plan["plan_id"]}
+    arguments = {
+        "action": "apply", "run_id": run_id, "plan_id": plan["plan_id"], "response_detail": "full",
+    }
     entered = threading.Event()
     release = threading.Event()
     fanout = media_processing.post_commit_batch_fanout
@@ -990,6 +1007,7 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
             terminal = future.result(timeout=8)
         finally:
             release.set()
+    terminal = _flat(terminal)
     assert terminal["status"] == "committed"
     outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
     assert outcomes["Collection/own-note.md"]["status"] == "applied"
@@ -1014,9 +1032,9 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     else:
         assert derived_receipts.recoverable_batch_count(vault) == 0
     pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
-    assert manager.invoke(
+    assert _flat(manager.invoke(
         command, (vault,), arguments, idempotency_key="import-media-custody"
-    ) == terminal
+    )) == {**terminal, "replayed": True}
     assert {path: path.read_bytes() for path in pages} == pages
     assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
@@ -1191,7 +1209,7 @@ def test_exact_replay_returns_the_original_terminal(
     second = _governed_write(
         manager, vault, rel_path=rel, source=source, idempotency_key="lane5-replay"
     )
-    assert second == first
+    assert second == {**first, "replayed": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -1335,13 +1353,13 @@ def test_superseded_batch_releases_the_session_advisory_claim(
         return {"path": rel, "warnings": []}
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-claim-release",
         mutation_request_id="33333333-3333-4333-8333-333333333333",
-    )
+    ))
 
     # Both overlapping batches name the target: the first takes the claim, and the second
     # takes it back because its own paths supersede the first's.
@@ -1435,13 +1453,13 @@ def test_non_governed_markdown_is_skipped_by_the_named_predicate(
 
     manager = _manager(tmp_path)
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-predicate",
         mutation_request_id="44444444-4444-4444-8444-444444444444",
-    )
+    ))
 
     assert terminal["status"] == "committed"
     assert (vault / "README.md").exists()
@@ -1549,6 +1567,39 @@ def test_crash_cut_pre_prepare_leaves_no_custody_and_no_canonical_change(
     assert derived_receipts.due_component_count(vault) == 0
 
 
+def test_a_write_refused_at_the_commit_fence_retires_its_own_receipt(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that loses its lease after preparing its receipt leaves nothing for recovery to retry.
+
+    Only the writer knows it replaced nothing. Left prepared, the receipt was stranded for good once later
+    writes moved its paths on, and the drain retried it every cycle.
+    """
+    from exomem import writer_lease
+    from exomem.cli_ops import OpError
+
+    rel = "Knowledge Base/Notes/Insights/fenced-after-prepare.md"
+    original = _compiled_page("Fenced after prepare", "fencedafterprepare")
+    _put(vault, rel, original)
+
+    def fenced() -> None:
+        raise OpError("WRITER_FENCED", "writer lease fencing token 7 is no longer current")
+
+    monkeypatch.setattr(writer_lease, "validate_active_write_fence", fenced)
+    with pytest.raises(Exception, match="no longer current"):  # noqa: B017, PT011 - the envelope varies
+        _governed_write(
+            _manager(tmp_path),
+            vault,
+            rel_path=rel,
+            source=_compiled_page("Fenced after prepare", "changed"),
+            guarded=True,
+        )
+
+    assert (vault / rel).read_text(encoding="utf-8") == original
+    assert derived_receipts.recoverable_batch_count(vault) == 0
+    assert derived_receipts.stranded_batch_count(vault) == 0
+
+
 def test_crash_cut_prepared_before_replacement_never_publishes(vault: Path) -> None:
     """Cut 2: prepared, then death before the first canonical replacement."""
     rel = "Knowledge Base/Notes/cut-prepared.md"
@@ -1577,6 +1628,25 @@ def test_crash_cut_prepared_before_replacement_never_publishes(vault: Path) -> N
         vault, receipt, current_generation="generation-1", known_uncommitted=True
     )
     assert aborted.outcome == "aborted"
+
+
+def test_a_known_rollback_retires_a_batch_with_a_path_it_left_unchanged(vault: Path) -> None:
+    """An index the write rewrote with the same bytes reads as written, and must not keep the receipt."""
+    changed, unchanged = "Knowledge Base/Notes/rolled-back.md", "Knowledge Base/index.md"
+    _put(vault, changed, "before body\n")
+    _put(vault, unchanged, "index body\n")
+    receipt = _prepare_store_batch(
+        vault,
+        batch_id="rolled-back-with-unchanged-path",
+        generation="generation-1",
+        changes=((changed, "before body\n", "after body\n"), (unchanged, "index body\n", "index body\n")),
+    )
+
+    proof = derived_receipts.prove_committed(
+        vault, receipt, current_generation="generation-1", known_uncommitted=True
+    )
+
+    assert proof.outcome == "aborted", proof.outcome
 
 
 def test_crash_cut_partial_canonical_state_fails_closed(vault: Path) -> None:
@@ -1910,13 +1980,13 @@ def test_relocation_auxiliary_batch_takes_no_advisory_custody(
 
     manager = _manager(tmp_path)
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-relocation",
         mutation_request_id="55555555-5555-4555-8555-555555555555",
-    )
+    ))
 
     assert terminal["status"] == "committed"
     assert terminal["advisory_sync"] == "not_required", terminal

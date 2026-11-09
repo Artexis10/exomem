@@ -57,6 +57,7 @@ from . import (
     note_types,
     recall_space,
     reserved_paths,
+    semantic_language_registry,
     semantic_units,
     sidecar_store,
 )
@@ -199,6 +200,8 @@ def extract_claim_text(
     *,
     page_type: str | None = None,
     entity_type: str | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    projects: tuple[str, ...] = (),
 ) -> str | None:
     """Extract a page's CLAIM as `"{title}\\n\\n{claim body}"` (or None).
 
@@ -212,17 +215,31 @@ def extract_claim_text(
     Title is always prepended (mirrors `embeddings.chunk_text`) so the claim
     carries its own topic. Returns None only when there is no usable text at all.
 
+    A unit whose kind has the `page_claim` trait is the claim. `language` is the registry that
+    names those kinds (core when absent) and `projects` the projects the page attaches.
+
     SEAM: an optional future LLM-distillation path replaces the body-selection
     here (title + a distilled one-sentence claim) WITHOUT changing any caller —
     the return contract (a short claim string, or None) stays the same.
     """
     title = (title or "").strip()
-    document = semantic_units.parse_semantic_units(body or "", validate=False)
+    language = language or semantic_language_registry.core_registry()
+    document = semantic_units.parse_semantic_units(
+        body or "",
+        validate=False,
+        # Without vault kinds the parser's shipped headings name the same kinds, and the parse
+        # skips the per-unit category resolution that a claim never reads.
+        language_registry=(
+            semantic_language_registry.for_attached_projects(language, projects)
+            if language.kinds
+            else None
+        ),
+    )
     semantic_claim = next(
         (
             unit.body
             for unit in document.rich_units
-            if unit.kind == "claim" and unit.body and unit.body.strip()
+            if language.has(unit.kind, "page_claim") and unit.body and unit.body.strip()
         ),
         None,
     )
@@ -256,18 +273,36 @@ def extract_claim_text(
     return title or claim_body or None
 
 
-def extract_claim_for_page(page) -> str | None:
+def extract_claim_for_page(
+    page,
+    vault_root: Path,
+    *,
+    language: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> str | None:
     """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type).
 
     Claims feed a shared sidecar, so they read the withheld search body: an
-    origin carrier is never a claim, nor the lead-paragraph fallback.
+    origin carrier is never a claim, nor the lead-paragraph fallback. For the same reason they
+    read the shared kind registry of the vault at `vault_root`, never a private instance's.
+    `vault_root` is required, so every claim and every checksum of it reads the same kinds. A
+    loop over many pages loads that registry once with `shared_kinds` and passes it as
+    `language`.
     """
+    from . import semantic_index
+
     return extract_claim_text(
         page.title,
         page.search_body,
         page_type=page.page_type,
         entity_type=page.frontmatter.get("entity_type"),
+        language=language if language is not None else shared_kinds(vault_root),
+        projects=semantic_index.page_projects(page.frontmatter),
     )
+
+
+def shared_kinds(vault_root: Path) -> semantic_language_registry.SemanticLanguageRegistry:
+    """The kind registry every claim of the vault at `vault_root` is extracted with."""
+    return semantic_language_registry.load_registry(vault_root)
 
 
 def _checksum(claim_text: str) -> str:
@@ -845,6 +880,7 @@ class ClaimIndex:
             self._mark_repair_needed()
             return 0
         identity, _entries = snapshot
+        language = shared_kinds(self.vault_root)
         pending: list[
             tuple[Path, freshness.FileSignature, str, str, str, str | None, str | None, float]
         ] = []
@@ -862,7 +898,7 @@ class ClaimIndex:
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None or page.page_type not in claim_types:
                 continue
-            claim = extract_claim_for_page(page)
+            claim = extract_claim_for_page(page, self.vault_root, language=language)
             if not claim:
                 continue
             pending.append(
@@ -982,16 +1018,16 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
 
 
 def claim_checksum_for_page(
-    page: Any, *, vault_root: Path | None = None, type_basis: note_types.Basis | None = None
+    page: Any, *, vault_root: Path, type_basis: note_types.Basis | None = None
 ) -> str | None:
     """Expected claim row from an already-bounded parse; None means no row.
 
-    Without `vault_root` only the shipped note types carry a claim. A pass that
-    already holds `producer_basis` passes it as `type_basis`.
+    `vault_root` names the vault whose note types and kinds the claim row was built with. A
+    pass that already holds `producer_basis` passes it as `type_basis`.
     """
     if page.page_type not in _claim_types(type_basis or producer_basis(vault_root)):
         return None
-    claim = extract_claim_for_page(page)
+    claim = extract_claim_for_page(page, vault_root)
     return _checksum(claim) if claim else None
 
 
@@ -1065,6 +1101,7 @@ def upsert_claims_after_write(
     )
     claim_types = _claim_types(type_basis or producer_basis(vault_root))
     identity = recall_policy.recall_policy_identity(vault_root)
+    language = shared_kinds(vault_root)
 
     pending: list[
         tuple[Path, freshness.FileSignature, str, str, str, str | None, str | None, float]
@@ -1084,7 +1121,7 @@ def upsert_claims_after_write(
         if page.page_type not in claim_types:
             idx.delete(page.rel_path)
             continue
-        claim = extract_claim_for_page(page)
+        claim = extract_claim_for_page(page, vault_root, language=language)
         if not claim:
             idx.delete(page.rel_path)
             continue
@@ -1165,7 +1202,7 @@ def claim_text_for_page(
     page = find_module._CACHE.get(vault_root / rel_path, vault_root)
     if page is None:
         return None
-    return extract_claim_for_page(page)
+    return extract_claim_for_page(page, vault_root)
 
 
 # ---------------------------------------------------------------------------

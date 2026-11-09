@@ -2541,8 +2541,9 @@ def test_the_compact_terminal_projects_a_discard_receipt(tmp_path: Path) -> None
 
     assert compact["operation"] == "discard"
     assert compact["outcome"] == "discarded"
-    assert compact["affected_paths"] == receipt["affected_paths"]
     assert compact["paths"] == receipt["affected_paths"]
+    full = mutation_terminal.project_terminal(terminal, "full")
+    assert full["diagnostics"]["operational"]["affected_paths"] == receipt["affected_paths"]
 
 
 def test_governance_does_not_withhold_a_discard_receipt(tmp_path: Path) -> None:

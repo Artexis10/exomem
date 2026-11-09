@@ -74,7 +74,7 @@ def test_the_first_page_carries_no_block(tmp_path: Path) -> None:
         tmp_path, content=_content("First meeting."), title="First meeting", slug="first-meeting"
     )
 
-    assert result["status"] == "committed"
+    assert "error" not in result and result["path"]
     assert "entity_candidate" not in result
 
 
@@ -89,7 +89,7 @@ def test_the_second_page_carries_the_block(tmp_path: Path) -> None:
         slug="second-meeting",
     )
 
-    assert second["status"] == "committed"
+    assert "error" not in second and second["path"]
     candidate = second["entity_candidate"]
     assert len(candidate["identities"]) == 1
     identity = candidate["identities"][0]
@@ -116,7 +116,7 @@ def test_a_third_page_carries_no_block(tmp_path: Path) -> None:
         tmp_path, content=_content("Third meeting."), title="Third meeting", slug="third-meeting"
     )
 
-    assert third["status"] == "committed"
+    assert "error" not in third and third["path"]
     assert "entity_candidate" not in third
 
 
@@ -162,9 +162,9 @@ def test_a_link_to_an_existing_entity_yields_an_edge_not_a_block(tmp_path: Path)
         slug="second-meeting",
     )
 
-    assert first["status"] == "committed"
+    assert "error" not in first and first["path"]
     assert "entity_candidate" not in first
-    assert second["status"] == "committed"
+    assert "error" not in second and second["path"]
     assert "entity_candidate" not in second
 
 
@@ -206,8 +206,9 @@ def test_create_entity_closes_the_candidate_and_both_notes_hold_their_edge(
         entity_type="organization",
         name=NAME,
         summary=f"{NAME} is the venue the meetings above were coordinating with.",
+        response_detail="full",
     )
-    assert created["mutated"] is True
+    assert created["diagnostics"]["operational"]["mutated"] is True
     entity_path = created["path"]
 
     # No block for a THIRD note linking the same name: the identity resolves
@@ -270,12 +271,13 @@ def test_ask_memory_and_find_are_unaffected_by_a_pending_candidate(
     after = commands.op_ask_memory(tmp_path, query=NAME, mode="keyword")
     after_hits = find.find(tmp_path, query=NAME, mode="keyword")
 
-    assert isinstance(after, list)
+    assert isinstance(after["hits"], list)
     # Neither read surface exposes the write-time key.
-    assert not any("entity_candidate" in row for row in after)
+    assert "entity_candidate" not in after
+    assert not any("entity_candidate" in row for row in after["hits"])
     assert not any(hasattr(hit, "entity_candidate") for hit in after_hits)
     # The query finds both notes -- unaffected by the other command's block.
-    ask_paths = {row["path"] for row in after}
+    ask_paths = {row["path"] for row in after["hits"]}
     find_paths = {hit.path for hit in after_hits}
     assert first["path"] in ask_paths
     assert second["path"] in ask_paths

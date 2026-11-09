@@ -71,6 +71,7 @@ def _save_extension(call, key: str, definition: dict, subject: str = "relations"
             "proposal": {"upsert": {key: definition}},
             "expected_hash": current["content_hash"],
             "why": "record who and what the relation joins",
+            "response_detail": "full",
         },
     )
 
@@ -100,7 +101,7 @@ def test_a_narrowing_extension_saves_and_its_endpoints_survive_a_restore(
     # `affiliated_with` joins a person to an organization; a club is an organization.
     narrowed = {"subject": ["entity:person"], "object": ["entity:club"]}
     saved = _save_extension(call, "vault.club_member", _extension("affiliated_with", narrowed))
-    assert saved["state"] == "committed", saved
+    assert saved["diagnostics"]["operational"]["state"] == "committed", saved
     assert _entry(call, "vault.club_member")["attributes"]["endpoints"] == narrowed
 
     # A later save, then its revert: the older bytes carry the endpoints and revalidate.
@@ -115,9 +116,10 @@ def test_a_narrowing_extension_saves_and_its_endpoints_survive_a_restore(
             "version": newest["version"],
             "expected_hash": current["content_hash"],
             "why": "the patron relation was premature",
+            "response_detail": "full",
         },
     )
-    assert restored["state"] == "committed", restored
+    assert restored["diagnostics"]["operational"]["state"] == "committed", restored
     keys = {entry["key"] for entry in _relations(call, "inspect", limit=200)["entries"]}
     assert "vault.club_patron" not in keys
     assert _entry(call, "vault.club_member")["attributes"]["endpoints"] == narrowed
@@ -196,6 +198,7 @@ def _capture_and_note(call, title: str, relation_row: str | None = None) -> dict
                 + (f"\n## Relations\n\n- {relation_row}\n" if relation_row else "")
             ),
             "sources": [f"{captured['path']}#Capture"],
+            "response_detail": "full",
         },
     )
 
@@ -210,7 +213,7 @@ def test_an_owns_edge_from_a_note_is_written_and_the_receipt_flags_the_endpoint(
     written = _capture_and_note(
         call, "Crane ownership", f"owns [[{target['path'].removesuffix('.md')}]]"
     )
-    assert written["state"] == "committed", written
+    assert written["diagnostics"]["operational"]["state"] == "committed", written
     assert "owns [[" in (vault / written["path"]).read_text(encoding="utf-8")
     flagged = {item["code"] for item in written["semantic_advisory"]["findings"]}
     assert "endpoint_mismatch" in flagged
@@ -219,7 +222,7 @@ def test_an_owns_edge_from_a_note_is_written_and_the_receipt_flags_the_endpoint(
     undeclared = _capture_and_note(
         call, "Crane support", f"supports [[{target['path'].removesuffix('.md')}]]"
     )
-    assert undeclared["state"] == "committed", undeclared
+    assert undeclared["diagnostics"]["operational"]["state"] == "committed", undeclared
     assert "endpoint_mismatch" not in {
         item["code"] for item in (undeclared.get("semantic_advisory") or {}).get("findings", [])
     }
@@ -233,6 +236,7 @@ def _entity(call, entity_type: str, name: str, **extra) -> dict:
             "entity_type": entity_type,
             "name": name,
             "summary": f"{name} is an invented entity for the endpoint check.",
+            "response_detail": "full",
             **extra,
         },
     )
@@ -252,12 +256,12 @@ def test_an_edge_is_judged_against_the_declared_type_and_its_descendants(
 
     # A club is an organization, so a person affiliated with one is within `affiliated_with`.
     within = affiliation("Ben Quay", club)
-    assert within["state"] == "committed"
+    assert within["diagnostics"]["operational"]["state"] == "committed"
     assert "semantic_advisory" not in within
 
     # A concept is not an organization: the edge is written and the receipt flags it.
     outside = affiliation("Cy Dock", concept)
-    assert outside["state"] == "committed"
+    assert outside["diagnostics"]["operational"]["state"] == "committed"
     assert [item["code"] for item in outside["semantic_advisory"]["findings"]] == [
         "endpoint_mismatch"
     ]

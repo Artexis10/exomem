@@ -89,8 +89,9 @@ def test_op_error_logs_tool_failure_and_bumps_metrics(
     caplog.set_level(logging.WARNING)
     result = bound()
 
-    assert result["success"] is False
-    assert result["error"] == public_error.as_public_dict()
+    assert set(result) == {"error"}
+    assert result["error"]["code"] == "MUTATION_BUSY"
+    assert result["error"]["message"].endswith("Retry the same call.")
 
     record = next(r for r in caplog.records if getattr(r, "event", None) == "tool_failure")
     assert record.fields["tool"] == "mutate"

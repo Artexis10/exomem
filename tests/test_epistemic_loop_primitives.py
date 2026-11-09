@@ -103,6 +103,34 @@ def _fake_page(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+REGISTRY_PATH = "Knowledge Base/_Schema/semantic-language-registry.yaml"
+
+# A vault that adds one verdict. Each label, in any language, is another spelling of its key.
+RETRACTED_OVERLAY = """\
+schema_version: 1
+categories: {}
+kinds: {}
+verdicts:
+  retracted:
+    labels: {en: Retracted by authors, fi: Tekijät peruivat}
+    description: The authors withdrew the claim
+"""
+
+
+def _add_retracted_verdict(root: Path) -> semantic_language_registry.SemanticLanguageRegistry:
+    """Write the vault overlay and return the registry the writers and the parser read."""
+    path = root / REGISTRY_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(RETRACTED_OVERLAY, encoding="utf-8")
+    return semantic_language_registry.load_registry(root)
+
+
+def _parse_with(
+    body: str, registry: semantic_language_registry.SemanticLanguageRegistry
+) -> semantic_units.SemanticUnitDocument:
+    return semantic_units.parse_semantic_units(body, path="fixture.md", language_registry=registry)
+
+
 # --------------------------------------------------------------------------
 # 1. semantic-unit-language: the prediction kind
 # --------------------------------------------------------------------------
@@ -169,8 +197,8 @@ def test_verdict_values_normalize_onto_the_unit(authored: str, expected: str) ->
     assert unit.to_dict()["verdict"] == expected
 
 
-def test_verdict_vocabulary_is_the_five_audit_approved_values() -> None:
-    assert semantic_units.EPISTEMIC_OUTCOMES == (
+def test_shipped_verdicts_are_the_five_audit_approved_values() -> None:
+    assert semantic_language_registry.core_registry().verdict_keys() == (
         "abandoned",
         "confirmed",
         "inconclusive",
@@ -212,6 +240,49 @@ def test_a_refuted_unit_keeps_ordinary_active_standing() -> None:
     assert hit.parent_status == "active"
     assert hit.parent_superseded_by == []
     assert hit.as_dict().get("superseded_by") is None
+
+
+def test_a_vault_added_verdict_parses_and_keeps_active_standing(tmp_path: Path) -> None:
+    body = "## Prediction\n- verdict: retracted\n\nRetry budgets hold.\n"
+    registry = _add_retracted_verdict(tmp_path)
+
+    # The shipped verdicts alone refuse it; the vault's registry is what makes it valid.
+    assert "invalid_rich_verdict" in _codes(_parse(body))
+    document = _parse_with(body, registry)
+    assert document.errors == ()
+    unit = document.units[0]
+    assert unit.verdict == "retracted"
+    hit = find_module._semantic_unit_hit(_fake_page(), unit, bm25_rank=None, bm25_score=None)
+    assert hit.parent_status == "active"
+    assert hit.parent_superseded_by == []
+
+
+@pytest.mark.parametrize(
+    "authored",
+    ["Retracted by authors", "RETRACTED BY AUTHORS", "\uff32etracted", "tekijät PERUIVAT"],
+)
+def test_a_verdict_label_normalizes_to_its_key(tmp_path: Path, authored: str) -> None:
+    registry = _add_retracted_verdict(tmp_path)
+
+    document = _parse_with(f"## Prediction\n- verdict: {authored}\n\nRetry budgets hold.\n", registry)
+
+    assert document.errors == ()
+    assert document.units[0].verdict == "retracted"
+
+
+@pytest.mark.parametrize("authored", ["probably-wrong", "0.7", "70%"])
+def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
+    tmp_path: Path, authored: str
+) -> None:
+    registry = _add_retracted_verdict(tmp_path)
+
+    document = _parse_with(f"## Prediction\n- verdict: {authored}\n\nRetry budgets hold.\n", registry)
+
+    error = next(item for item in document.errors if item.code == "invalid_rich_verdict")
+    for key in registry.verdict_keys():
+        assert key in error.remediation
+    assert "retracted" in error.remediation
+    assert "probability is not a verdict" in error.remediation
 
 
 # --------------------------------------------------------------------------
@@ -800,6 +871,18 @@ def test_an_invalid_verdict_argument_is_refused(tmp_path: Path) -> None:
     assert "INVALID_SEMANTIC_VERDICT" in str(caught.value)
 
 
+def test_a_vault_added_verdict_is_written_by_its_key(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, "# Loop primitives\n\nExisting prose.\n")
+    _add_retracted_verdict(tmp_path)
+
+    added = _add_prediction(tmp_path, verdict="Retracted by authors")
+
+    # The response unit is the vault-neutral parse, which knows only the shipped verdicts, so
+    # the file and the unit's metadata are what show the stored key.
+    assert added["unit"]["metadata"]["verdict"] == "retracted"
+    assert "- verdict: retracted\n" in page.read_text(encoding="utf-8")
+
+
 def test_an_invalid_check_by_argument_is_refused(tmp_path: Path) -> None:
     _write_page(tmp_path, "# Loop primitives\n\nExisting prose.\n")
 
@@ -1213,7 +1296,16 @@ def test_concluded_is_an_accepted_experiment_status() -> None:
 
 
 def test_experiment_outcome_shares_the_unit_verdict_vocabulary() -> None:
-    assert note.EXPERIMENT_OUTCOME_VALUES == semantic_units.EPISTEMIC_OUTCOMES
+    keys = semantic_language_registry.core_registry().verdict_keys()
+
+    assert all(
+        vault_module.governed_frontmatter_reason("outcome", key, "experiment") is None
+        for key in keys
+    )
+    assert all(
+        _only_unit(f"## Prediction\n- verdict: {key}\n\nRetry budgets hold.\n").verdict == key
+        for key in keys
+    )
 
 
 def _experiment_note(vault: Path, *, status: str, title: str) -> object:
@@ -1312,6 +1404,27 @@ def test_an_invalid_experiment_outcome_is_refused(vault: Path) -> None:
 
     assert caught.value.code == "INVALID_OUTCOME"
     assert "refuted" in caught.value.reason
+
+
+def test_a_vault_added_verdict_is_a_valid_experiment_outcome(vault: Path) -> None:
+    path = _experiment_page(vault)
+    _add_retracted_verdict(vault)
+
+    # An outcome takes keys only; the label that a unit verdict also accepts is refused here.
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as caught:
+        set_frontmatter_field.set_frontmatter_field(
+            vault, path=path, field="outcome", value="Retracted by authors",
+            why="Recording the experiment result.", today=TODAY,
+        )
+    assert caught.value.code == "INVALID_OUTCOME"
+
+    result = set_frontmatter_field.set_frontmatter_field(
+        vault, path=path, field="outcome", value="retracted",
+        why="Recording the experiment result.", today=TODAY,
+    )
+
+    assert result.new_value == "retracted"
+    assert "outcome: retracted" in (vault / path).read_text(encoding="utf-8")
 
 
 def test_outcome_belongs_only_to_experiments(vault: Path) -> None:

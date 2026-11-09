@@ -96,8 +96,9 @@ class PublicCommandNameMiddleware(Middleware):
         self.shape = shape
 
     async def on_call_tool(self, context, call_next):
-        from .cli_ops import OpError, envelope, public_refusal
+        from .cli_ops import OpError, public_refusal
         from .command_surface import (
+            agent_refusal_result,
             find_rendering,
             rendered_call_writes,
             rendering_scope,
@@ -133,7 +134,12 @@ class PublicCommandNameMiddleware(Middleware):
                 log.info("public operation refused: tool=%s code=%s", name, error.code)
                 from fastmcp.tools import ToolResult
 
-                return ToolResult(content=[], structured_content=envelope(False, error=public_refusal(error)))
+                return ToolResult(
+                    content=[],
+                    structured_content=agent_refusal_result(
+                        public_refusal(error), error, name, arguments, (), write=False
+                    ),
+                )
             refusal = error
             flat = error.arguments
             writes = rendered_call_writes(command, error.rendering, arguments, passthrough=passthrough)
@@ -154,6 +160,7 @@ class RenderedRefusalMiddleware(Middleware):
         from . import cli_ops
         from .command_surface import (
             _log_tool_failure,
+            agent_refusal_result,
             mcp_idempotency_key,
             mcp_request_id,
             pending_rendering_refusal,
@@ -164,7 +171,8 @@ class RenderedRefusalMiddleware(Middleware):
         if error is None:
             return await call_next(context)
         request_id = mcp_request_id()
-        if pending_rendering_refusal_writes() and isinstance(error, cli_ops.OpError):
+        writes = pending_rendering_refusal_writes()
+        if writes and isinstance(error, cli_ops.OpError):
             # The grouped write refusal comes from inside the lease, which adds these ids;
             # this refusal comes before any lease, so it holds no receipt.
             error.details.update(request_id=request_id, receipt_id=None)
@@ -185,7 +193,17 @@ class RenderedRefusalMiddleware(Middleware):
             message=str(refusal.get("message") or ""),
         )
         tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
-        return tool.convert_result(cli_ops.envelope(False, error=refusal))
+        return tool.convert_result(
+            agent_refusal_result(
+                refusal,
+                error,
+                context.message.name,
+                context.message.arguments or {},
+                (),
+                write=writes,
+                default_detail=getattr(getattr(error, "command", None), "response_detail", None),
+            )
+        )
 
 
 class ExomemFastMCP(FastMCP):

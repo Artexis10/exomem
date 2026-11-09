@@ -4750,17 +4750,18 @@ def _print_adopt_human(result: dict) -> None:
 
 def _print_human(result, *, op: str | None = None) -> None:
     specialized_op = op in {"adopt", "adopt_vault", "review_memory", "triage_memory"}
-    if (
-        specialized_op
-        and isinstance(result, dict)
-        and result.get("ok") is True
-        and result.get("status") == "committed"
-        and result.get("mutated") is True
-    ):
+    if specialized_op and isinstance(result, dict):
+        # A committed write answers with an outcome sentence; its leaf is under `diagnostics`.
         diagnostics = result.get("diagnostics")
-        if isinstance(diagnostics, dict):
+        operational = diagnostics.get("operational") if isinstance(diagnostics, dict) else None
+        if (
+            isinstance(operational, dict)
+            and operational.get("ok") is True
+            and operational.get("status") == "committed"
+            and operational.get("mutated") is True
+        ):
             result = diagnostics
-        else:
+        elif "user_summary" in result:
             print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
             return
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
@@ -4772,12 +4773,14 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op == "triage_memory" and isinstance(result, dict):
         _print_triage_human(result)
         return
-    if isinstance(result, dict) and isinstance(result.get("hits"), list) and "due_state" in result:
-        # The advisory block that `commands._with_due_state` puts on a recall has no
-        # human view; the human view shows the recall as before and `--json` keeps it.
-        result = {key: value for key, value in result.items() if key != "due_state"}
-        if set(result) == {"hits"}:
-            result = result["hits"]
+    if isinstance(result, dict) and isinstance(result.get("hits"), list) and "user_summary" in result:
+        # A search reply: the human view lists the hits and then prints the notice;
+        # `--json` keeps the whole reply, summary line included.
+        rest = {key: value for key, value in result.items() if key not in {"user_summary", "notice"}}
+        _print_human(rest["hits"] if set(rest) == {"hits"} else rest, op=op)
+        if isinstance(result.get("notice"), str):
+            print(f"note: {result['notice']}")
+        return
     if (
         isinstance(result, dict)
         and isinstance(result.get("hits"), list)

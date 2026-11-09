@@ -404,7 +404,8 @@ class ExomemBackend:
             )
         vault_root = Path(self._vault).resolve()
         target = Path(folder).expanduser().resolve()
-        raw: dict[str, Any] = {"mode": mode, **extra}
+        # The confirm dialog renders the whole report, so the TUI asks for the full detail.
+        raw: dict[str, Any] = {"mode": mode, "response_detail": "full", **extra}
         if target != vault_root:
             try:
                 raw["path"] = str(target.relative_to(vault_root))

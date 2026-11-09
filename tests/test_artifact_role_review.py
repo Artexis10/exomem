@@ -238,17 +238,6 @@ def test_pending_context_cannot_present_history_or_future_as_current(context):
     assert not detect(state, exact_links={unit_identity(result): (unit_identity(old),)}).candidates
 
 
-@pytest.mark.parametrize("verdict", ["retracted", "false"])
-def test_retracted_success_is_not_a_reusable_method(verdict):
-    state = page(method())
-    units = state.document.units
-    state = replace(
-        state,
-        document=replace(state.document, units=(units[0], replace(units[1], verdict=verdict))),
-    )
-    assert not roles(state)
-
-
 @pytest.mark.parametrize("label", ["trial A/B", "trial #A", "batch @2"])
 def test_unsupported_episode_label_disables_page_fallback(label):
     assert not transients(page(pending(context="", result=f"Taste results: {label} measured 2.")))

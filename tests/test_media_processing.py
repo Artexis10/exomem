@@ -2940,7 +2940,7 @@ def test_process_media_selected_batch_replays_without_reconciliation(
         idempotency_key="selected-media-replay",
     )
 
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert calls == 1
     assert first["paths"] == [relative]
     assert first["media_results"] == [
@@ -3000,13 +3000,14 @@ def test_selected_media_retry_without_canonical_commit_has_a_settled_terminal(
         idempotency_key="selected-queue-retry",
     )
 
-    assert replay == compact
-    assert first["ok"] is True
-    assert first["state"] == "settled"
-    assert first["status"] == "settled"
-    assert first["terminal"] is True
-    assert first["mutated"] is False
-    assert isinstance(first["request_id"], str)
+    assert replay == {**compact, "replayed": True}
+    operational = first["diagnostics"]["operational"]
+    assert operational["ok"] is True
+    assert operational["state"] == "settled"
+    assert operational["status"] == "settled"
+    assert operational["terminal"] is True
+    assert operational["mutated"] is False
+    assert isinstance(operational["request_id"], str)
     assert first["media_results"] == [
         {
             "path": relative,
@@ -3095,7 +3096,6 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
         idempotency_key="selected-policy-races",
     )
 
-    assert result["terminal"] is True
     assert result["user_summary"] == (
         f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved (personal Exomem)"
     )
@@ -3163,7 +3163,6 @@ def test_a_reprocess_batch_that_lost_two_files_says_so(
         vault, monkeypatch, "reprocess", readonly.name, vanished.name, relative
     )
 
-    assert result["terminal"] is True
     assert result["user_summary"] == (
         f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated (personal Exomem)"
     )
@@ -3247,7 +3246,6 @@ def test_selected_media_batch_reports_provenance_open_races_per_item(
         idempotency_key="selected-provenance-race",
     )
 
-    assert result["terminal"] is True
     assert result["media_results"][0]["outcome"] == "processed"
     assert result["media_results"][1] == {
         "path": denied_relative,

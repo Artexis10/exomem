@@ -231,13 +231,15 @@ def _leased_note(tmp_path: Path, vault: Path, **kwargs) -> dict:
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "lease-state")
     )
-    return manager.invoke(
+    terminal = manager.invoke(
         SimpleNamespace(name="remember", leaf=leaf, read_only=False),
         (vault,),
-        {"response_detail": "compact", "suggestions": kwargs.get("suggestions", False)},
+        {"response_detail": "full", "suggestions": kwargs.get("suggestions", False)},
         idempotency_key=None,
         mutation_request_id=str(uuid.uuid4()),
     )
+    # `full` carries the sync fields under `diagnostics.operational`; read them beside the leaf's.
+    return {**terminal, **terminal["diagnostics"]["operational"]}
 
 
 def test_fast_ack_delivers_the_dedupe_sweep_through_its_deferred_result(

@@ -465,7 +465,8 @@ def _semantic_retrieval_observation(value: Any) -> bool | None:
     while pending:
         current = pending.pop()
         if isinstance(current, Mapping):
-            if current.get("warming"):
+            # Without timings the reply folds `warming` into a `notice`: the results may be incomplete.
+            if current.get("warming") or current.get("notice"):
                 return False
             mode = str(current.get("effective_mode", "")).lower()
             if mode in {"hybrid", "vector"}:
@@ -734,7 +735,7 @@ def _bindings_match_environment(receipt: Mapping[str, Any]) -> bool:
     return all(receipt.get(name) == value for name, value in expected.items())
 
 
-def _committed_paths(result: Any, vault: Path) -> set[str]:
+def _committed_paths(result: Any, vault: Path, *, writes: bool = False) -> set[str]:
     is_error = getattr(result, "is_error", None)
     if is_error is None:
         is_error = getattr(result, "isError", None)
@@ -750,7 +751,12 @@ def _committed_paths(result: Any, vault: Path) -> set[str]:
     if not isinstance(payload, dict):
         return set()
     payload = payload.get("result", payload)
-    if not isinstance(payload, dict) or payload.get("mutated") is not True:
+    if not isinstance(payload, dict):
+        return set()
+    # A compact write reply no longer carries `mutated`, so a write tool's own reply stands for it.
+    # An explicit `mutated` still decides, for a reply that carries one.
+    mutated = payload.get("mutated")
+    if mutated is not True and not (mutated is None and writes):
         return set()
     paths: set[str] = set()
     pending = [payload]
@@ -860,7 +866,12 @@ class _ReadinessRecorder:
                 recorder.mark_observation_pending()
                 result = await call_next(context)
                 try:
-                    recorder.paths.update(_committed_paths(result, recorder.vault))
+                    from exomem.command_surface import resolve_command
+                    from exomem.commands import PRODUCT_COMMANDS
+
+                    command = resolve_command(str(context.message.name), PRODUCT_COMMANDS)
+                    writes = command is not None and not command.read_only
+                    recorder.paths.update(_committed_paths(result, recorder.vault, writes=writes))
                     recorder.record()
                 except Exception:  # noqa: BLE001 - pending marker already fails readiness closed
                     pass
