@@ -618,6 +618,23 @@ def test_a_sweep_refreshes_a_new_markdown_file_that_no_event_named(stored, impor
     assert importing.sweep().refreshed == [], "a refreshed file is current: the next sweep is quiet"
 
 
+def test_a_sync_conflict_copy_of_an_unowned_file_gets_no_rows(stored, importing, tmp_path):
+    """An importer that judges an unowned file by the Markdown suffix alone, so that a conflict
+    copy that no corpus walk keeps enters the search rows through its event."""
+    outside = stored / "Outside"
+    outside.mkdir()
+    (outside / "Fresh.md").write_bytes(b"# Fresh\n\nThe harbour master keeps this page.\n")
+    copy = "Outside/Fresh.sync-conflict-20260101-120000-ABCDEFG.md"
+    (stored / copy).write_bytes(b"# Fresh\n\nThe other device's copy of the page.\n")
+
+    by_event = importing.import_paths([copy, "Outside/Fresh.md"])
+    swept = importing.sweep()
+
+    assert by_event.refreshed == ["Outside/Fresh.md"] and swept.refreshed == []
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", copy) == []
+    assert cold_differences(stored, tmp_path) == ()
+
+
 def test_a_markdown_file_at_the_vault_root_is_imported_by_a_sweep_and_an_event(
     stored, importing, tmp_path
 ):

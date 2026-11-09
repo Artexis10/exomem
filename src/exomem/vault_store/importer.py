@@ -695,8 +695,8 @@ class Importer:
         """Note a Markdown file outside the store's ownership whose derived rows are stale.
 
         The store does not hold such a file's bytes, so nothing is imported: ``_refresh_noted``
-        rederives the page's rows from the file. A file with no row is noted only when the corpus
-        walk reaches it.
+        rederives the page's rows from the file. A file with no row is noted only when a corpus
+        walk reaches it: the Knowledge Base walk or the vault walk, as the sweep's corpus is both.
         """
         if not ownership.is_markdown(rel):
             return
@@ -707,7 +707,7 @@ class Importer:
             row = view.connection.execute(
                 "SELECT content_hash FROM pages WHERE path = ?", (rel,)
             ).fetchone()
-        if row is None and not read.walk_member(rel):
+        if row is None and not any(read.corpus_member(rel, scope) for scope in ("kb", "vault")):
             return
         self._check_unowned(rel, disk, None if row is None else row[0], report)
 
