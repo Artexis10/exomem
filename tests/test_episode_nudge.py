@@ -209,7 +209,7 @@ def test_the_ledger_is_bounded(vault: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_the_server_instructions_ask_for_a_record_and_stay_short() -> None:
     text = server.SERVER_INSTRUCTIONS
-    assert "record_episode" in text and "episode_memory" not in text
+    assert "save_episode" in text and "episode_memory" not in text
     assert "stopping points" in text and "reuse `episode`" in text and "left open" in text
     assert "not authority" in text
     assert len(text) <= 900, len(text)

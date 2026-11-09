@@ -351,7 +351,7 @@ def project_core(reference: dict) -> dict:
     core["capture_semantics"] = _capture_semantics(reference)
     core["pointers"] = _pointers(reference)
     core["sections"] = {
-        "how": "bootstrap(section=<name>|index|all)",
+        "how": active_call_text("bootstrap", {"section": "<name>|index|all"}),
         **sections_index(reference),
     }
     if "due_state" in reference:

@@ -184,8 +184,6 @@ def project_call_routes(value: Any) -> Any:
     operations = operation_entries.OPERATIONS.get(tool)
     argument_key = "arguments" if "arguments" in result else "args"
     arguments = result.get(argument_key)
-    if isinstance(arguments, Mapping) and isinstance(arguments.get("operation"), Mapping):
-        return result
     if arguments is None:
         fields = (operations.every_field() | ({operations.selector} if operations.selector else set())
                   if operations is not None else set())

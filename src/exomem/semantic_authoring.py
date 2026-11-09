@@ -43,10 +43,10 @@ OBSERVATION_UPDATE_GUIDANCE = (
 EXISTING_VALIDATION_GUIDANCE = (
     "Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. "
     "Inspect the current page and candidate evidence. "
-    'If no truthful relation applies, revalidate with relation_disposition="reviewed_none" and a bounded evidence-based relation_review_reason. '
+    "If no truthful link applies, preview again with a bounded evidence-based unlinked_reason. "
     "Missing edges prove nothing; preserve typed relations and metadata. "
     "Report insufficient evidence or unresolved material choices. "
-    "Commit needs separate write authority and returned guards."
+    "Commit needs separate write authority."
 )
 
 

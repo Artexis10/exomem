@@ -955,6 +955,10 @@ def op_bootstrap(
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     tool_shape = active_descriptor.tool_shape
+    public = tool_shape == "public"
+    # The same advice spelled for the surface that reads it: the public tools name these arguments differently.
+    detail_full = "detail='full'" if public else "response_detail='full'"
+    suggest_links = "create_note(suggest_links=true)" if public else "create_note(suggestions=true)"
 
     def listed(command: str, effect: operation_entries.Effect | None = None) -> bool:
         """Whether the surface lists the command's required side in its active shape."""
@@ -1391,6 +1395,31 @@ def op_bootstrap(
     semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
         authoring_contract, profile=profile
     )
+    # The reviewed-write contracts as the public tools state them: they carry a preview and an
+    # unlinked reason, where the grouped writers carry drafts, hashes and tokens.
+    public_reviewed_creation = {
+        "preview": "call create_note with preview=true to read the semantic feedback without writing",
+        "commit": "after review, call create_note again without preview; the write validates the same bytes again",
+        "unlinked": (
+            "when no truthful link applies, send a bounded unlinked_reason; "
+            "never fabricate one or infer review from missing links"
+        ),
+        "generic": (
+            "a write that adds a generic relation is refused with GENERIC_RELATION_REFUSED, "
+            "a ranked list of up to eight specific relations and the exact routes: retry "
+            "with one, propose a new relation type, or as a last resort write a plain link"
+        ),
+        "adoption_handoff": (
+            f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
+            "it, then call create_note() so normal semantic precommit still applies"
+        ),
+    }
+    public_reviewed_existing_edit = {
+        "rule": (
+            "if refused for relation review, send the edit again with unlinked_reason when no "
+            "truthful link applies; preview=true shows the review without writing"
+        ),
+    }
     if listed("record_memory"):
         contract_tool, contract_arguments = operation_entries.spell_call(
             "record_memory", {"action": "describe"}, tool_shape
@@ -1522,6 +1551,9 @@ def op_bootstrap(
             f"{tools_text('plan_memory', 'write')} before treating them as observed Records."
         ),
         "inventory": (
+            "Name a collection by its title and a plan item by the id that query_plan_items returns. "
+            "Send changes with edit_plan_item and why; a stale id is refused with the current one."
+            if public else
             f"{call_text('plan_memory', {'action': 'inspect'})} without collection lists manifest_path. "
             "Query by title or natural key plus lifecycle/status. For update/triage, "
             "use inspect/query snapshot as expected_container_hash and the chosen "
@@ -1823,8 +1855,8 @@ def op_bootstrap(
                     if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
-                    "response_detail='full', and suggestions additionally need "
-                    "create_note(suggestions=true)"
+                    f"{detail_full}, and suggestions additionally need "
+                    f"{suggest_links}"
                 ),
                 (
                     "Tell the user the reply's user_summary; follow next_action when present; "
@@ -1859,8 +1891,8 @@ def op_bootstrap(
                 ),
                 f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
                 (
-                    "inspect write warnings; response_detail='full' reveals write_feedback; "
-                    "create_note(suggestions=true) also reveals suggestions"
+                    f"inspect write warnings; {detail_full} reveals write_feedback; "
+                    f"{suggest_links} also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
                 mutation_terminal_module.NARRATION_RULE,
@@ -1889,8 +1921,8 @@ def op_bootstrap(
                 ),
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",
-                "write_feedback": "create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with response_detail='full'",
+                "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
+                "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
                     "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
@@ -1953,6 +1985,22 @@ def op_bootstrap(
                     "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
+                    f"Read {tools_text('review_item_context')} with ref; refresh on REVIEW_ITEM_CHANGED. "
+                    "Audit wider if needed. One writer that fits resolves the item and clears the "
+                    "finding with no extra triage. decide_review_item only dismisses advice. "
+                    "Keep write authority."
+                    if public and profile == "compact"
+                    else
+                    f"For relevant_due_refs, read {tools_text('review_item_context')} with ref; "
+                    "bounded context may need a wider audit. "
+                    f"{tools_text('review_memory', 'read')} takes no fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
+                    f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, "
+                    "resolves the item and clears the finding without extra triage. "
+                    f"One {call_text('triage_memory', {'ref': '<ref>', 'action': 'dismiss', 'why': '<code>: ...'})} "
+                    "records presentation disposition, not authored resolution. "
+                    "Preserve existing mutation authority."
+                    if public
+                    else
                     f"Read {tools_text('review_item_context')} with ref and expected_fingerprint; refresh on REVIEW_ITEM_CHANGED. "
                     "Audit wider if needed. Resolve with unit fingerprint and parent hash, "
                     "not due fingerprint; no extra triage. triage_memory only dismisses advice. "
@@ -2051,6 +2099,9 @@ def op_bootstrap(
                         "rich_form": authoring_contract.rich["heading_syntax"],
                         "mutation_rule": authoring_contract.routes["single_semantic_unit"],
                         "drift_guards": (
+                            "edit_note(edit_observation|remove_observation) takes the unit id that "
+                            "read_page(part='units') returned; a stale id is refused with the current one"
+                            if public else
                             "update/remove require the current parent content hash and unit fingerprint"
                         ),
                     }
@@ -2058,7 +2109,7 @@ def op_bootstrap(
                     else {}
                 ),
             },
-            "reviewed_creation": {
+            "reviewed_creation": public_reviewed_creation if public else {
                 "validate_only": (
                     "call the intended creation writer with validate_only=true and retain "
                     "its draft_id, draft_hash, draft_token, relation_review_hash, candidate, "
@@ -2086,6 +2137,8 @@ def op_bootstrap(
                 ),
             },
             "reviewed_existing_edit": (
+                public_reviewed_existing_edit
+                if public else
                 {
                     "rule": (
                         "if refused for relation review, re-send the edit with "
@@ -2185,17 +2238,19 @@ def op_bootstrap(
                 "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
-                    "args": {"hold": True},
+                    "args": {"operation": "upload", "hold": True},
                     "when": "the client cannot supply file handles",
                 },
             },
             "original_recovery": {
                 "tool": "transfer_artifact",
                 "when": "recover a stored original through a desktop/personal endpoint",
-                # The tool description, its response and the skill carry these, so compact leaves them out.
+                # The tool description, its response and the skill carry the rest, so compact leaves them out.
+                "args": {"operation": "download", **(
+                    {"artifacts": ["<stored artifact or custody page>"]} if profile != "compact" else {}
+                )},
                 **(
                     {
-                        "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
                         "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
                         "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
                     }
@@ -2297,7 +2352,11 @@ def op_bootstrap(
             },
             {
                 "goal": "capture a durable conclusion",
-                "call": "create_note(note_type='research-note'|'insight'|..., title='...', content='...')",
+                "call": (
+                    "create_note(type='research-note'|'insight'|..., title='...', content='...')"
+                    if public else
+                    "create_note(note_type='research-note'|'insight'|..., title='...', content='...')"
+                ),
             },
             {
                 "goal": "preserve attached binary files when the client supplies file handles",

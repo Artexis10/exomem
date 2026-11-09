@@ -35,7 +35,7 @@ def test_the_instructions_still_say_what_the_server_is() -> None:
 def test_initialize_requires_live_policy_before_sending_context() -> None:
     """Connection alone must not override an explicit-only engagement setting."""
     text = server.SERVER_INSTRUCTIONS
-    assert "bootstrap" in text and "live" in text
+    assert "read_instructions" in text and "live" in text
     assert "policy" in text
     assert "proactive_capture" in server.SERVER_INSTRUCTIONS
     assert "requested" in server.SERVER_INSTRUCTIONS

@@ -254,6 +254,9 @@ class PublicSurface:
         """The tool and arguments that carry a grouped-command call. Raises ValueError when none does."""
         if command in PASSTHROUGH_COMMANDS:
             return PASSTHROUGH_COMMANDS[command], dict(arguments)
+        if command in self.tools:
+            # Guidance names a typed tool by the preferred name of its grouped command: search_memory, create_note.
+            command = self.tools[command].routes[0].command
         for tool in self.tools.values():
             wire = tool.spell(command, arguments)
             if wire is not None:
