@@ -10,6 +10,8 @@ dependencies = [
     "httpx>=0.28,<1",
     "kubernetes>=35.0,<36",
     "prometheus-client>=0.26,<1",
+    # automate-cell-storage-deletion D1: the key custodian verifies deletion grants.
+    "pyjwt[crypto]>=2.8,<3",
 ]
 
 [project.scripts]
@@ -17,7 +19,6 @@ exomem-cellctl = "cellctl.main:run"
 
 [dependency-groups]
 dev = [
-    "pyjwt[crypto]>=2.8,<3",
     "pytest>=8,<10",
     "pytest-asyncio>=1,<2",
     "pytest-split>=0.11,<1",
