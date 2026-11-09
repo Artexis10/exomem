@@ -11,7 +11,8 @@ import hashlib
 import json
 import os
 import shutil
-import threading
+import subprocess
+import sys
 import uuid
 import zipfile
 from pathlib import Path
@@ -54,11 +55,22 @@ def _trash_companion(vault: Path, path: Path) -> Path:
     return bundle / path.name
 
 
-def _phase(log: Path, *args: str) -> dict:
-    status = cloud_export.main([*args, "--termination-log", str(log)])
+def _start_phase(log: Path, *args: str) -> subprocess.Popen:
+    # Each step is its own process, as each is its own Job step on a cell; one shared process would let a step
+    # inherit another's state.
+    return subprocess.Popen([sys.executable, "-m", "exomem", "cell-export", *args, "--termination-log", str(log)],
+                            env=dict(os.environ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def _finish_phase(process: subprocess.Popen, log: Path) -> dict:
+    _, stderr = process.communicate(timeout=300)
     report = json.loads(log.read_text(encoding="ascii"))
-    assert status == (1 if "error" in report else 0)
+    assert process.returncode == (1 if "error" in report else 0), stderr.decode(errors="replace")[-2000:]
     return report
+
+
+def _phase(log: Path, *args: str) -> dict:
+    return _finish_phase(_start_phase(log, *args), log)
 
 
 def test_an_export_carries_every_member_and_each_evicted_original_byte_identical(
@@ -86,7 +98,6 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
-    monkeypatch.setattr(cloud_export_steps, "SPOOL_POLL_SECONDS", 0.01)
     common = ["--export-id", str(uuid.uuid4()), "--max-bytes", str(PLENTY), "--vault", str(vault),
               "--staging", str(staging)]
     paused = _phase(tmp_path / "pause.json", "--phase", "pause", "--media-mode", "served", *common)
@@ -99,13 +110,11 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
     shutil.rmtree(vault / kb_dirname() / TRASH_SUBPATH)
 
     urls = [f"{storage['base']}/cells/{CELL}/exports/archive.zip?partNumber={number}" for number in range(1, 201)]
-    packed: dict = {}
-    pack = threading.Thread(target=lambda: packed.update(_phase(
-        tmp_path / "pack.json", "--phase", "pack", "--part-bytes", str(64 * 1024), "--max-parts", "200", *common)))
-    pack.start()
+    pack = _start_phase(tmp_path / "pack.json", "--phase", "pack", "--part-bytes", str(64 * 1024),
+                        "--max-parts", "200", *common)
     uploaded = _phase(tmp_path / "upload.json", "--phase", "upload", *common,
                       *(argument for url in urls for argument in ("--part-url", url)))
-    pack.join()
+    packed = _finish_phase(pack, tmp_path / "pack.json")
     assert "error" not in packed and "error" not in uploaded, (packed, uploaded)
     assert packed["evicted"] == 2
 
