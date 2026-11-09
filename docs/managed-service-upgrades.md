@@ -650,7 +650,11 @@ manifest state that was not complete) when it runs. `promotion.snapshot` is
 `current` when the checkpoint this process adopted is the one on disk,
 `advanced` when it moved and promotion could not re-prove it, and
 `rebuild-after-promotion` when the migrated re-proof failed — in that last case
-promotion still proceeds and the coalesced rebuild path owns the repair.
+promotion still proceeds and the coalesced rebuild path owns the repair. It is
+`unproven` when the standby's proof declined the snapshot outright, for example
+because the graph sidecar has an older schema than the build; promotion then
+records the decline reason in `promotion.proof_declined`, and the promoted
+worker runs the whole graph handoff.
 
 `promotion.revalidated` says promotion re-checked the snapshot at all;
 `promotion.reproved` says it re-ran the source proof. With a migration it re-runs
