@@ -105,14 +105,14 @@ def _fake_page(**overrides: object) -> SimpleNamespace:
 
 REGISTRY_PATH = "Knowledge Base/_Schema/semantic-language-registry.yaml"
 
-# A vault that adds one verdict. Its label is a second spelling of the same key.
+# A vault that adds one verdict. Each label, in any language, is another spelling of its key.
 RETRACTED_OVERLAY = """\
 schema_version: 1
 categories: {}
 kinds: {}
 verdicts:
   retracted:
-    label: Retracted by authors
+    labels: {en: Retracted by authors, fi: Tekijät peruivat}
     description: The authors withdrew the claim
 """
 
@@ -258,7 +258,8 @@ def test_a_vault_added_verdict_parses_and_keeps_active_standing(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
-    "authored", ["Retracted by authors", "RETRACTED BY AUTHORS", "\uff32etracted"]
+    "authored",
+    ["Retracted by authors", "RETRACTED BY AUTHORS", "\uff32etracted", "tekijät PERUIVAT"],
 )
 def test_a_verdict_label_normalizes_to_its_key(tmp_path: Path, authored: str) -> None:
     registry = _add_retracted_verdict(tmp_path)

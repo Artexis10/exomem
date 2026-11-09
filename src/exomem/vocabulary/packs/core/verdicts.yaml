@@ -1,12 +1,13 @@
 # The verdicts Exomem ships: how a claim about the world turned out. A unit's `verdict` and an
 # experiment page's `outcome` draw from this one registry, plus any verdict a vault adds in
-# `_Schema/semantic-language-registry.yaml`. A verdict is state: it carries a label and a
-# description and no behaviour, and it changes no lifecycle, standing or rank. Parsing accepts
-# the key or the label, after NFKC normalisation and casefolding, and stores the key.
+# `_Schema/semantic-language-registry.yaml`. A verdict is state: it carries labels and a
+# description and no behaviour, and it changes no lifecycle, standing or rank. `labels` maps a
+# language tag to the label in that language. Parsing accepts the key or any label, after NFKC
+# normalisation and casefolding, and stores the key.
 schema_version: 1
 verdicts:
-  abandoned: {label: Abandoned, description: The work behind the claim was dropped before it could be settled.}
-  confirmed: {label: Confirmed, description: The evidence supports the claim.}
-  inconclusive: {label: Inconclusive, description: The evidence neither supports nor contradicts the claim.}
-  qualified: {label: Qualified, description: The claim holds only under stated conditions.}
-  refuted: {label: Refuted, description: The evidence contradicts the claim.}
+  abandoned: {labels: {en: Abandoned}, description: The work behind the claim was dropped before it could be settled.}
+  confirmed: {labels: {en: Confirmed}, description: The evidence supports the claim.}
+  inconclusive: {labels: {en: Inconclusive}, description: The evidence neither supports nor contradicts the claim.}
+  qualified: {labels: {en: Qualified}, description: The claim holds only under stated conditions.}
+  refuted: {labels: {en: Refuted}, description: The evidence contradicts the claim.}

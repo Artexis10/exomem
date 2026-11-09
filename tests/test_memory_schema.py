@@ -1426,14 +1426,16 @@ def test_the_categories_read_lists_each_accepted_verdict_and_a_save_keeps_the_va
         "schema_version": 1,
         "categories": {},
         "kinds": {},
-        "verdicts": {"retracted": {"label": "Retracted by authors", "description": "Withdrawn"}},
+        "verdicts": {
+            "retracted": {"labels": {"en": "Retracted by authors"}, "description": "Withdrawn"}
+        },
     }
     created = semantic_language_registry.save_registry(vault, current)
 
     inferred = commands.op_schema_memory(vault, operation="infer", subject="categories")
     retracted = next(item for item in inferred["verdicts"] if item["key"] == "retracted")
     assert retracted == {
-        "key": "retracted", "label": "Retracted by authors",
+        "key": "retracted", "labels": {"en": "Retracted by authors"},
         "description": "Withdrawn", "shipped": False,
     }
     assert inferred["proposal"]["verdicts"] == current["verdicts"]
@@ -1478,8 +1480,8 @@ def test_a_categories_save_adds_and_relabels_verdicts_in_a_saved_registry(tmp_pa
     proposal = {
         **current,
         "verdicts": {
-            "retracted": {"label": "Retracted", "description": "Withdrawn by its authors"},
-            "refuted": {"label": "Kumottu"},
+            "retracted": {"labels": {"en": "Retracted"}, "description": "Withdrawn by its authors"},
+            "refuted": {"labels": {"fi": "Kumottu"}},
         },
     }
 

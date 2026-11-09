@@ -536,12 +536,15 @@ def test_the_shipped_verdicts_resolve_by_key_and_label_without_a_vault_entry() -
     assert registry.resolve_verdict("0.7") is None
 
 
-def test_a_vault_adds_a_verdict_and_gives_a_shipped_one_a_label() -> None:
+def test_a_vault_adds_a_verdict_and_labels_a_shipped_one_in_another_language() -> None:
     registry = language_registry.load_registry(
         proposal=_proposal(
             verdicts={
-                "retracted": {"label": "Retracted by authors", "description": "Withdrawn"},
-                "refuted": {"label": "Disproved"},
+                "retracted": {
+                    "labels": {"en": "Retracted by authors", "pt-br": "Retirado pelos autores"},
+                    "description": "Withdrawn",
+                },
+                "refuted": {"labels": {"fi": "Kumottu"}},
             }
         )
     )
@@ -549,8 +552,12 @@ def test_a_vault_adds_a_verdict_and_gives_a_shipped_one_a_label() -> None:
     assert registry.findings == ()
     assert "retracted" in registry.verdict_keys()
     assert registry.resolve_verdict("retracted by AUTHORS") == "retracted"
-    assert registry.resolve_verdict("Disproved") == "refuted"
-    assert registry.resolve_verdict("refuted") == "refuted"
+    assert registry.resolve_verdict("Retirado pelos autores") == "retracted"
+    assert registry.resolve_verdict("kumottu") == "refuted"
+    # The vault's Finnish label sits beside the shipped English one.
+    assert registry.verdict_definitions()["refuted"].labels == (
+        ("en", "Refuted"), ("fi", "Kumottu"),
+    )
     assert registry.verdict_definitions()["refuted"].description == (
         language_registry.core_registry().verdict_definitions()["refuted"].description
     )
@@ -560,23 +567,29 @@ def test_a_vault_adds_a_verdict_and_gives_a_shipped_one_a_label() -> None:
     ("verdicts", "code"),
     [
         (
-            {"retracted": {"label": "Confirmed", "description": "Withdrawn"}},
+            {"retracted": {"labels": {"fi": "Confirmed"}, "description": "Withdrawn"}},
             "verdict_label_collision",
         ),
         (
             {
-                "retracted": {"description": "Withdrawn"},
-                "withdrawn": {"label": "Retracted", "description": "Gone"},
+                "retracted": {"labels": {"en": "Pulled"}, "description": "Withdrawn"},
+                "withdrawn": {"labels": {"fi": "PULLED"}, "description": "Gone"},
             },
             "verdict_label_collision",
         ),
-        ({"retracted": {"label": "Retracted"}}, "missing_description"),
+        (
+            {"retracted": {"labels": {"English": "Retracted"}, "description": "Withdrawn"}},
+            "invalid_label",
+        ),
+        ({"retracted": {"labels": "Retracted", "description": "Withdrawn"}}, "invalid_labels"),
+        ({"retracted": {"labels": {"en": "Retracted"}}}, "missing_description"),
         ({"refuted": {"description": "Rewritten"}}, "core_verdict_fixed"),
         ({"retracted": {"description": "Withdrawn", "behaviour": "closes"}}, "unknown_field"),
         ({"Not A Key": {"description": "Withdrawn"}}, "invalid_key"),
     ],
     ids=[
-        "label-is-a-key", "label-is-a-label", "no-description", "shipped-fixed",
+        "label-is-another-key", "label-is-another-label", "bad-language-tag", "labels-not-a-map",
+        "no-description", "shipped-fixed",
         "unknown-field", "bad-key",
     ],
 )
@@ -588,9 +601,12 @@ def test_a_malformed_verdict_is_refused_and_hides_every_vault_verdict(verdicts, 
     assert registry.verdict_keys() == language_registry.core_registry().verdict_keys()
 
 
-def test_a_saved_vault_verdict_keeps_its_label_and_description(tmp_path: Path) -> None:
+def test_a_saved_vault_verdict_keeps_its_labels_and_description(tmp_path: Path) -> None:
     proposal = _proposal(
-        verdicts={"retracted": {"label": "Retracted by authors", "description": "Withdrawn"}}
+        verdicts={
+            "retracted": {"labels": {"en": "Retracted by authors"}, "description": "Withdrawn"},
+            "refuted": {"labels": {"fi": "Kumottu"}},
+        }
     )
 
     language_registry.save_registry(tmp_path, proposal)

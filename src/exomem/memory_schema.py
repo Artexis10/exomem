@@ -1186,7 +1186,7 @@ def infer_category_registry(
         "verdicts": [
             {
                 "key": definition.key,
-                "label": definition.label,
+                "labels": dict(definition.labels),
                 "description": definition.description,
                 "shipped": definition.core,
             }
