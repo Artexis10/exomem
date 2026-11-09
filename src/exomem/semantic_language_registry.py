@@ -628,21 +628,38 @@ def load_registry(
     return vocabulary_registry.load(instances.select(Path(vault_root), CATEGORY_SPEC, registry_scope), Path(vault_root)).typed
 
 
-def load_for_page(
-    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
-) -> SemanticLanguageRegistry:
-    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+def load_admitted(
+    vault_root: Path, registry_scope: str | None = None
+) -> SemanticLanguageRegistry | None:
+    """The registry of one instance, or None when this caller cannot admit it.
+
+    As `relation_registry.load_admitted`, None is one answer for an instance that does not
+    exist, a binding that is ambiguous and an overlay the caller may not read.
+    """
     from .vocabulary import contract, instances
 
     root = Path(vault_root)
     try:
-        scope = instances.page_scope(root, rel_path, dict(frontmatter))
-        selected = instances.select(root, CATEGORY_SPEC, scope)
+        selected = instances.select(root, CATEGORY_SPEC, registry_scope)
         if contract.admission_refusal(root, selected) is not None:
-            return core_registry()
+            return None
         return vocabulary_registry.load(selected, root).typed
     except vocabulary_registry.RegistryError:
+        return None
+
+
+def load_for_page(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, Any]
+) -> SemanticLanguageRegistry:
+    """The registry the page's instance defines; core meanings when this caller cannot admit it."""
+    from .vocabulary import instances
+
+    try:
+        scope = instances.page_scope(Path(vault_root), rel_path, dict(frontmatter))
+    except vocabulary_registry.RegistryError:
         return core_registry()
+    registry = load_admitted(vault_root, scope)
+    return registry if registry is not None else core_registry()
 
 
 def clear_cache() -> None:

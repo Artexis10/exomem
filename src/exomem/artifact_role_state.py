@@ -41,7 +41,46 @@ def _generation(root: Path, path: str) -> list[int] | None:
         return None
 
 
-def _state(root: Path, parsed: Any) -> Any:
+_Registries = tuple[
+    relation_registry.RelationRegistry, semantic_language_registry.SemanticLanguageRegistry
+]
+
+
+class _PageRegistries:
+    """Each page's relation and unit-language registries, one load per instance for one pass.
+
+    A build or a delta reads its pages under one principal and one governance plane, so an
+    instance's admission and definitions hold for every page that selects it, as one
+    `instances.DefinitionsSelection` serves a corpus build. Each page still resolves its own
+    instance; a page or instance this caller cannot admit reads core meanings.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._by_instance: dict[str | None, _Registries] = {}
+
+    def for_page(self, path: str, frontmatter: Mapping[str, Any]) -> _Registries:
+        """`(relations, language)` for the page at `path`."""
+        from .vocabulary import instances
+        from .vocabulary import registry as vocabulary_registry
+
+        try:
+            scope = instances.page_scope(self._root, path, dict(frontmatter))
+        except vocabulary_registry.RegistryError:
+            return relation_registry.core_registry(), semantic_language_registry.core_registry()
+        if scope not in self._by_instance:
+            relations = relation_registry.load_admitted(self._root, scope)
+            language = semantic_language_registry.load_admitted(self._root, scope)
+            self._by_instance[scope] = (
+                relations if relations is not None else relation_registry.core_registry(),
+                language if language is not None else semantic_language_registry.core_registry(),
+            )
+        return self._by_instance[scope]
+
+
+def _state(
+    root: Path, parsed: Any, language: semantic_language_registry.SemanticLanguageRegistry
+) -> Any:
     from . import semantic_contract
     from .vault import yaml_safe_dump_for_parse
 
@@ -52,9 +91,7 @@ def _state(root: Path, parsed: Any) -> Any:
         parsed.rel_path,
         "---\n" + yaml_safe_dump_for_parse(parsed.frontmatter) + "---\n" + parsed.body,
         # The page's own registry resolves its headings, so a vault kind reaches the descriptor.
-        language_registry=semantic_language_registry.load_for_page(
-            root, parsed.rel_path, parsed.frontmatter
-        ),
+        language_registry=language,
     )
 
 
@@ -92,9 +129,11 @@ def _raw_links(unit: Any) -> list[str]:
     )
 
 
-def describe(root: Path, state: Any) -> dict[str, Any]:
-    registry = relation_registry.load_for_page(root, state.path, state.frontmatter)
-    language = semantic_language_registry.load_for_page(root, state.path, state.frontmatter)
+def describe(root: Path, state: Any, registries: _Registries | None = None) -> dict[str, Any]:
+    """The stored descriptor of one parsed page; a pass hands in the page's `registries`."""
+    registry, language = registries or _PageRegistries(root).for_page(
+        state.path, state.frontmatter
+    )
     units = state.document.units
     complete = len(units) <= sensor.MAX_UNITS and all(
         len(u.content) + len(u.context or "") <= sensor.MAX_UNIT_CHARS for u in units
@@ -429,10 +468,12 @@ def build(root: Path, parsed_pages: list[Any]) -> dict[str, Any]:
         "reverse": {},
         "dependencies": {},
     }
+    registries = _PageRegistries(root)
     for parsed in parsed_pages:
         request_budget.checkpoint()
-        state = _state(root, parsed)
-        page = describe(root, state)
+        selected = registries.for_page(parsed.rel_path, parsed.frontmatter)
+        state = _state(root, parsed, selected[1])
+        page = describe(root, state, selected)
         index["pages"][state.path] = page
         _register(index, page)
     for path in index["pages"]:
@@ -487,7 +528,8 @@ def delta(
         index["pages"].pop(path, None)
         page = None
     else:
-        page = describe(root, _state(root, parsed))
+        selected = _PageRegistries(root).for_page(parsed.rel_path, parsed.frontmatter)
+        page = describe(root, _state(root, parsed, selected[1]), selected)
         _checkpoint(index)
         index["pages"][path] = page
         _register(index, page)
