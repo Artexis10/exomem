@@ -1388,6 +1388,77 @@ def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[st
     return ordered
 
 
+def method_unit_categories(vault_root: Path) -> tuple[str, ...]:
+    """The categories the effective role registry projects as methods, never a list kept in code."""
+    registry = context_roles.load_roles(vault_root)
+    return tuple(sorted(context_roles.projection_categories(registry, "method")))
+
+
+def search_method_units(
+    vault_root: Path, query_units: list, k: int, *,
+    categories: tuple[str, ...], allowed: AbstractSet[str], fresh: tuple, checkpoint: Any,
+):
+    """The method-unit lexical search of a full-source-access task context over its `allowed` catalogue paths.
+
+    One call for the request and for `warm_owner_method_units`, so a warm builds the statistics that this
+    search reads and a change to either cannot leave the other behind.
+
+    The caller proves full source access first: `allowed` is passed as the released set too, so the search
+    applies no release filter of its own. A request passes its released catalogue paths, a warm the
+    catalogue's own recall set after `warm_owner_method_units` proved the owner reads without a filter.
+    """
+    from . import lexstore, working_set_runtime
+
+    return lexstore.get_store(vault_root).search_semantic_units_result(
+        [], k, categories, (), "kb", fresh,
+        allowed_parent_paths=allowed,
+        admitted_parent_paths=allowed,
+        # Full source access was proved and `allowed` is already this request's released catalogue paths.
+        released_parent_paths=allowed,
+        query_units=query_units,
+        term_budget=working_set_runtime.material_term_budget(),
+        recall_checkpoint=checkpoint, allow_delta=False,
+    )
+
+
+def warm_owner_method_units(vault_root: Path) -> str:
+    """Build in this process the method-unit statistics an owner's first task context builds; say what happened.
+
+    For a standby, which has no request to read from and must publish nothing. It reads the lexical
+    catalogue as published: its own recall checkpoint and its own recall rows, so a vault write that the
+    standby's unwatched registry has not seen cannot make the catalogue look stale, and no repair is
+    asked for. A query with no units builds the statistics and ranks nothing.
+
+    The warmed set is every page the catalogue holds for the knowledge base, a superset of the catalogue
+    entries an owner's request admits. Interpreting a parent is the cost, and the unit base keeps each
+    parent by its own revision whatever set asked for it, so the owner's first request finds every parent
+    interpreted and only merges the figures, or reuses them whole when the sets agree.
+    """
+    from . import context_task, context_views, lexstore
+    from .governance import principal
+
+    # The standby's own read stands in for the owner's request, so it takes the owner-local scope that
+    # `effective_principal` leaves to a caller that declares it.
+    with principal.library_scope():
+        if not context_task.full_source_access(vault_root, context_views.CallerView.current(vault_root)):
+            return "skipped: the owner reads through a release filter"
+        categories = method_unit_categories(vault_root)
+        if not categories:
+            return "skipped: no category is projected as a method"
+        store = lexstore.get_store(vault_root)
+        published = store.published_recall_checkpoint("kb")
+        allowed = None if published is None else store.recall_admitted_paths("kb", published)
+        if published is None or allowed is None:
+            return "skipped: the catalogue publishes no recall projection"
+        result = search_method_units(
+            vault_root, [], 1, categories=categories, allowed=set(allowed),
+            fresh=published.triple, checkpoint=published,
+        )
+    if not result.readiness.complete:
+        return f"not built: the catalogue answered {result.readiness.status}"
+    return f"built over {len(allowed)} pages"
+
+
 @governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
@@ -1425,8 +1496,7 @@ def task_candidates(
     statistics = None
     with find_types.timing_span(timings, "working_set.task_context_policy"):
         fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
-        registry = context_roles.load_roles(vault_root)
-        categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
+        categories = method_unit_categories(vault_root)
         restricted = not context_task.full_source_access(vault_root, caller)
         metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
@@ -1545,15 +1615,9 @@ def task_candidates(
             request_budget.leaving(kept),
             lexstore.stopping_at_budget(),
         ):
-            methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                [], limit + 1, categories, (), "kb", fresh,
-                allowed_parent_paths=allowed,
-                admitted_parent_paths=allowed,
-                # This branch proved FULL source access and filtered this request's catalogue paths.
-                released_parent_paths=allowed,
-                query_units=bm25.token_units(query_text, query=True),
-                term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=checkpoint, allow_delta=False,
+            methods = search_method_units(
+                vault_root, bm25.token_units(query_text, query=True), limit + 1,
+                categories=categories, allowed=allowed, fresh=fresh, checkpoint=checkpoint,
             )
         method_seconds = time.monotonic() - started
         if methods.readiness.status == lexstore.DEADLINE_STATUS:
