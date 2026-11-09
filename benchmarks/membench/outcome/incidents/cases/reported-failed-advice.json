@@ -11,7 +11,7 @@
       },
       "prompt": "fyi that untrackedCache setting for the slow git status in the monorepo doesn't help. tried it on three checkouts today and status still takes about 20 seconds",
       "pass": {
-        "seed_body_changed": true
+        "seed_corrected": true
       }
     },
     {
