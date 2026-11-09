@@ -2,7 +2,7 @@
 
 ### Requirement: Compact write responses may carry one bounded capture-sweep advisory
 
-Default compact responses to a committed durable write — the compiled page writers `remember`, `edit_memory`, `observe_memory` and `replace_memory`, and the structured writers `record_memory` and `plan_memory` — MAY carry the capture-sweep advisory as one `next` sentence that asks the agent to check the recent conversation once for anything else worth keeping, to save what memory lacks, and to stay silent when nothing qualifies. The response SHALL NOT carry the producer's `capture_sweep` block: its `boundary`, `rule`, `consider` and `written_recently` keys stay at the post-commit seam and in the leaf. The block's `unpaged_mentions` names, at most five, travel as one top-level `unpaged_mentions` list beside the `next` sentence, because they are data the pass acts on. A response that already carries a `next` sentence of its own keeps that sentence.
+Default compact responses to a committed durable write — the compiled page writers `remember`, `edit_memory`, `observe_memory` and `replace_memory`, and the structured writers `record_memory` and `plan_memory` — MAY carry the capture-sweep advisory as one `next_action` sentence that asks the agent to check the recent conversation once for anything else worth keeping, to save what memory lacks, and to stay silent when nothing qualifies. The default response SHALL NOT carry the producer's `capture_sweep` block: its `boundary`, `rule`, `consider` and `written_recently` keys stay at the post-commit seam and in the leaf. A call with `response_detail="full"` SHALL carry the block under `diagnostics.capture_sweep`. The block's `unpaged_mentions` names, at most five, travel as one top-level `unpaged_mentions` list beside the `next_action` sentence, because they are data the pass acts on. A response that already carries a `next_action` sentence of its own SHALL carry both in the one `next_action`, its own first and the capture-sweep sentence after it, and SHALL keep the `unpaged_mentions` list.
 
 The advisory SHALL follow the established advisory posture: produced at the post-commit seam, validated and bounded again at the mutation terminal rather than trusted, never a key a client branches on for the mutation outcome, and absent — never null, never empty — when there is nothing to say. It SHALL NOT alter the result fields, mutation identity, or replay behaviour. The `legacy` response detail SHALL omit it. Tool descriptions, tool input schemas and the packaged tool-surface digest SHALL NOT change.
 
@@ -11,12 +11,23 @@ A fault anywhere in producing, validating or attaching the advisory SHALL cost t
 #### Scenario: The first write after a quiet interval carries the block
 
 - **WHEN** a caller commits a durable write and that caller has not written durably within the quiet interval
-- **THEN** the default compact response carries the capture-sweep `next` sentence, any `unpaged_mentions` the page reached for, and no `capture_sweep` key
+- **THEN** the default compact response carries the capture-sweep `next_action` sentence, any `unpaged_mentions` the page reached for, and no `capture_sweep` key
+
+#### Scenario: A write that already has its own next step keeps both
+
+- **WHEN** a caller commits a durable write that carries its own `next_action` sentence and the capture-sweep ledger judges it the first of a new episode
+- **THEN** the `next_action` reads the write's own sentence followed by the capture-sweep sentence
+- **AND** the response still carries any `unpaged_mentions`
+
+#### Scenario: Full detail carries the capture-sweep block
+
+- **WHEN** the same first write is made with `response_detail="full"`
+- **THEN** `diagnostics.capture_sweep` holds the producer's block
 
 #### Scenario: A following write inside the interval is silent
 
 - **WHEN** the same caller commits a second durable write inside the quiet interval
-- **THEN** that response carries no capture-sweep `next` sentence and the write is otherwise unchanged
+- **THEN** that response carries no capture-sweep `next_action` sentence and the write is otherwise unchanged
 
 #### Scenario: The legacy detail omits the advisory
 
@@ -26,12 +37,12 @@ A fault anywhere in producing, validating or attaching the advisory SHALL cost t
 #### Scenario: A malformed or oversized block is dropped rather than widened
 
 - **WHEN** a leaf attaches a block whose boundary is outside the closed vocabulary, or whose references or mentions exceed their bounds
-- **THEN** the terminal discards the whole block, never repairing it to fit, emits no `next` sentence for it, and the response stays valid
+- **THEN** the terminal discards the whole block, never repairing it to fit, emits no `next_action` sentence for it, and the response stays valid
 
 #### Scenario: A multi-write command emits at most once
 
 - **WHEN** one product-command invocation commits many governed writes
-- **THEN** the invocation's response carries at most one capture-sweep `next` sentence
+- **THEN** the invocation's response carries at most one capture-sweep `next_action` sentence
 
 ### Requirement: The capture-sweep advisory is governed by a caller-scoped quiet interval
 
@@ -44,12 +55,12 @@ The advisory SHALL be emitted only while the resolved delegation envelope permit
 #### Scenario: Distinct callers are not collapsed
 
 - **WHEN** an HTTP call carries no stable principal or credential scope
-- **THEN** no capture-sweep `next` sentence is emitted for that call
+- **THEN** no capture-sweep `next_action` sentence is emitted for that call
 
 #### Scenario: A quiet profile never emits
 
 - **WHEN** the resolved envelope disposition for proactive capture is `off`
-- **THEN** no response carries the capture-sweep `next` sentence
+- **THEN** no response carries the capture-sweep `next_action` sentence
 
 #### Scenario: The ledger records a write that emitted nothing
 
@@ -76,9 +87,9 @@ Only the bootstrap payload SHALL carry the `due_state` block: per-category open 
 
 ### Requirement: An MCP refusal names what happened to the data and the exact retry
 
-A tool call that the MCP surface refuses, a rendered tool included, SHALL return `{"error": {"code", "message", "retry"?, "candidates"?}}` and nothing else at the top level, except `diagnostics` when the call asked for `response_detail="full"`. `code` SHALL be the specific code of the refusal. When the semantic contract blocks a write, the umbrella `SEMANTIC_CONTRACT_BLOCKED` SHALL NOT be the code: the code of the finding it blocked on SHALL be promoted. `message` SHALL say what was refused. When the refusal has no `retry`, the next sentence SHALL be the first sentence of its remediation, because that sentence is the only fix the agent gets; a refusal with a `retry` SHALL keep its message short. A refused write's message SHALL end with what happened to the data: "Nothing was saved.", "The change was saved." or "Whether it was saved is not known.". A refusal that states its own outcome, such as `MUTATION_BUSY`, SHALL keep that one sentence.
+A tool call that the MCP surface refuses, a rendered tool included, SHALL return `{"error": {"code", "message", "retry"?, "candidates"?}}` and nothing else at the top level, except `diagnostics` when the call asked for `response_detail="full"`. `code` SHALL be the specific code of the refusal. When the semantic contract blocks a write, the umbrella `SEMANTIC_CONTRACT_BLOCKED` SHALL NOT be the code: the code of the finding it blocked on SHALL be promoted. `message` SHALL say what was refused. When the refusal has no `retry`, the message SHALL carry the whole of its remediation after that, because the remediation is the only fix the agent gets; a refusal with a `retry` SHALL keep its message short. A refusal that names the fields it failed on SHALL name at most three of them, then "and N more". A refused write's message SHALL end with what happened to the data: "Nothing was saved.", "The change was saved." or "Whether it was saved is not known.". The producer states that sentence when its outcome is none of these: a refused records write that kept the candidate as a held candidate SHALL say so, and SHALL NOT say "Nothing was saved.". A refusal that states its own outcome, such as `MUTATION_BUSY`, SHALL keep that one sentence.
 
-`retry` SHALL be the exact next call, and SHALL be absent when no retry can succeed. It holds `tool`, and `arguments` only for the arguments to add or change. `retry.arguments` SHALL be a delta that the agent merges key by key, nested objects included, into the arguments it sent; every other argument is unchanged. A value the agent must supply SHALL be a placeholder in angle brackets. `retry.after_s` SHALL give the whole seconds to wait when the refusal names a wait. The tool name in `retry` SHALL be the name of the tool the agent called, and an argument SHALL sit where that tool's own schema takes it.
+`retry` SHALL be the exact next call, and SHALL be absent when no retry can succeed. It holds `tool`, and `arguments` only for the arguments to add or change. `retry.arguments` SHALL be a delta that the agent merges key by key, nested objects included, into the arguments it sent; every other argument is unchanged. A `null` value in the delta clears the argument it names. A value the agent must supply SHALL be a placeholder in angle brackets. `retry.after_s` SHALL give the whole seconds to wait when the refusal names a wait. The producer SHALL state the next call in command terms, and the refusal seam SHALL spell it with `capabilities.active_spell_call`, so the tool name and the placement of every argument come from the surface that served the call and never from the producer's own signature. When the next call is to a different tool, `retry.arguments` SHALL hold the whole call, because the agent has no sent arguments to merge into. `retry` SHALL be absent when the spelled delta is empty. A refusal that leaves a resumable handle SHALL put it in `retry`: a held candidate's id, or the id of the running job.
 
 `candidates` SHALL hold at most five titles or valid registry values the agent can choose from, and SHALL be absent when there are none. They come from the producer's own `candidates`, then its `allowed` set, then the `key` of each of its ranked `options`. A refusal that names the field it failed on SHALL keep that field and its repair in the message.
 
@@ -101,11 +112,23 @@ The refusal's operational detail SHALL move under `diagnostics`, shown only with
 - **WHEN** an edit is refused with `RELATION_DISPOSITION_STALE` because the page changed its connections after a reviewed-none decision
 - **THEN** `retry.arguments` holds the same `relation_disposition` and `relation_review_reason` placeholders, placed where the edit tool takes them
 
-#### Scenario: A refusal with no retry carries its fix
+#### Scenario: A refusal with no retry carries its whole fix
 
 - **WHEN** an approval is refused because the page changed since it was read
 - **THEN** the error reads "The page changed since it was read. Read the page again, then approve its current content_hash. Nothing was saved."
 - **AND** the error carries no `retry`
+
+#### Scenario: A stale decision on an observation retries inside its operation
+
+- **WHEN** `change_observations` is refused with `RELATION_DISPOSITION_STALE`
+- **THEN** `retry.arguments` holds `relation_disposition` and `relation_review_reason` inside `operation`, where that tool takes them
+- **AND** the agent's own call, merged with `retry.arguments` and the reason filled in, commits
+
+#### Scenario: A refused records write keeps its held candidate
+
+- **WHEN** a records append is refused because the item carries an undeclared field
+- **THEN** the message names the field and says the candidate is kept as a held candidate, and does not say "Nothing was saved."
+- **AND** `retry` carries the same tool with the `held` id, so that calling it resumes the candidate with that field cleared
 
 #### Scenario: A ranked menu reaches the agent as candidates
 
@@ -120,7 +143,7 @@ The refusal's operational detail SHALL move under `diagnostics`, shown only with
 
 ### Requirement: A default search reply leads with a summary and carries one notice
 
-The default `search_memory` reply SHALL be an object that leads with `user_summary`, one sentence that counts the matches, then `hits`. A hit SHALL carry only what the agent reads or passes to a later call. It SHALL NOT carry the page's `ref` beside its path, a `scope` label, or a unit's `parent_ref`, because the path or the unit's own reference is the one identifier its next call accepts. The reply SHALL NOT carry `due_state`, `warming`, `degraded` or `budget` blocks. When results may really be incomplete — the store is unreadable, a page saved in the last minute may be missing, an index is still warming, the answer is degraded or the budget cut it short — the reply SHALL carry exactly one `notice` sentence that says so, and SHALL carry none otherwise. A call that asks for `include_timings` or `explain` SHALL still receive the raw `warming`, `degraded` and `budget` detail it asked for. The reply SHALL keep `next_action` and `continuation`, because the tool descriptions name them.
+The default `search_memory` reply SHALL be an object that leads with `user_summary`, one sentence that counts the matches, then `hits`. A hit SHALL carry only what the agent reads or passes to a later call. It SHALL carry the page `ref` beside its path, because `record_episode` takes only refs. It SHALL NOT carry a `scope` label or a unit's `parent_ref`, because the unit's own reference names the parent. The reply SHALL NOT carry `due_state`, `warming`, `degraded` or `budget` blocks. When results may really be incomplete — the store is unreadable, a page saved in the last minute may be missing, an index is still warming, the answer is degraded or the budget cut it short — the reply SHALL carry exactly one `notice` sentence that says so, and SHALL carry none otherwise. A call that asks for `include_timings` or `explain` SHALL still receive the raw `warming`, `degraded` and `budget` detail it asked for. The reply SHALL keep `next_action` and `continuation`, because the tool descriptions name them.
 
 #### Scenario: A warm search is short and quiet
 

@@ -29,7 +29,7 @@ A pending derived update is the normal state after a commit, so it gives no noti
 
 ### One identifier per object
 
-A hit carries its path, because `read_memory` takes it. It drops the page `ref`, the `scope` label and a unit's `parent_ref`. Review refs, fingerprints and hashes that the next call does not take stay out of the default reply. A title is not an identity here.
+A hit carries its path and its page `ref`, because `read_memory` takes either and `record_episode` takes only refs in `about`. It drops the `scope` label and a unit's `parent_ref`. Review refs, fingerprints and hashes that the next call does not take stay out of the default reply. A title is not an identity here.
 
 ### Search has no `response_detail`
 
@@ -37,18 +37,18 @@ A hit carries its path, because `read_memory` takes it. It drops the page `ref`,
 
 ### The capture sweep is one sentence plus data
 
-The rule text becomes the `next` sentence, sent once per episode through the existing quiet-interval rule. The names the page reached for that have no page (`unpaged_mentions`) are data the pass acts on, so they stay as a top-level list beside `next`. The rule, boundary and `written_recently` fields stay in the leaf.
+The rule text becomes the `next_action` sentence, sent once per episode through the existing quiet-interval rule. The names the page reached for that have no page (`unpaged_mentions`) are data the pass acts on, so they stay as a top-level list beside `next_action`. The rule, boundary and `written_recently` fields stay in the leaf. A write that has its own `next_action` carries both sentences in it, its own first. `response_detail="full"` carries the block under `diagnostics.capture_sweep`.
 
 ### Refusals
 
-- `message` says what was refused. A refusal with no `retry` carries the first sentence of its remediation next, because that sentence is the only fix the agent gets; a refusal with a `retry` keeps its message short. For a refused write the message ends with what happened to the data: nothing saved, saved, or not known.
+- `message` says what was refused. A refusal with no `retry` carries its whole remediation next, because that text is the only fix the agent gets; a refusal with a `retry` keeps its message short. For a refused write the message ends with what happened to the data: nothing saved, saved, or not known. A producer that keeps something, such as a held candidate, states its own outcome sentence.
 - `retry` holds the tool name, `arguments` and `after_s`. A refusal that advises a wait carries `retry` even when its status is not `retryable`, because warming recall advises a wait without that status.
-- `retry.arguments` is a delta. The agent merges it key by key, nested objects included, into the arguments it sent. The placement of `relation_disposition` (top level, or inside `operation`) is read from the tool's visible parameters.
+- `retry.arguments` is a delta. The agent merges it key by key, nested objects included, into the arguments it sent, and a `null` clears one. A retry to a different tool holds the whole call. The producer states the next call in command terms (`retry_with` for a patch onto the refused call, `retry_call` for a different call), and the seam spells it once with `capabilities.active_spell_call`, so argument placement comes from the serving surface and no producer or seam guesses it. A resumable handle (a held candidate's id, a running job's id) goes in `retry`.
 - `candidates` come from the producer that knows the valid values and are capped at five. A refusal that names the closed set a refused argument accepts (`allowed`) supplies them next. A producer that only ranks `options` by `key`, such as the generic-relation barrier, supplies them last.
 - A refusal that names the field it failed on (`at`) and its repair keeps both in the message, because the agent cannot correct the call without them. A refusal that flags itself `retryable` carries `retry`.
 - The umbrella `SEMANTIC_CONTRACT_BLOCKED` moves to diagnostics. The code of the finding the contract blocked on becomes the code.
-- Remediation prose moves to diagnostics, except its first sentence when the refusal has no `retry`. Where a route is still named, it uses the called surface's `capabilities.active_call_text`.
-- A refusal reaches `diagnostics` only on a tool that has the `response_detail` parameter. Read tools and rendered tools have none, so their refusals show the compact error only.
+- Remediation prose moves to diagnostics, except when the refusal has no `retry`: then the whole of it stays in the message. Where a route is still named, it uses the called surface's `capabilities.active_call_text`.
+- A refusal reaches `diagnostics` only on a tool that has the `response_detail` parameter. Read tools and rendered tools have none, so their refusals show the compact error only. A command that defaults to `full` (`govern_memory`) refuses with `diagnostics` when the call names no detail.
 
 ### Reuse check
 
@@ -60,3 +60,4 @@ The MCP spec has an `isError` flag on tool results. This change does not set it:
 - **Dead producers.** The write-side due-state producers still compute a block that the terminal now drops. Removing them touches the records and semantic-write leaves and is a separate change.
 - **A latency row without samples.** `governed-stage-due_state` in the request latency contract reads "not run" for search now that search runs no due-state stage.
 - **Multi-sentence legacy messages.** Refusals whose producer already writes a multi-sentence message keep it. Only the shared seam and the common codes were rewritten.
+- **Placeholders in a resumed records retry.** A held-candidate retry carries a `<corrected field>` placeholder for each failing field that is not an undeclared one. Calling it unchanged refuses again, which tells the agent the value is its own to supply.

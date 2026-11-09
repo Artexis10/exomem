@@ -6,11 +6,11 @@ An agent that calls Exomem reads every key of every reply. Today a committed wri
 
 The decision: **a default reply carries only what the agent tells the user and what its next call needs. Everything operational moves behind `response_detail=full`. A refusal names what happened to the data and the exact retry.**
 
-- A write reply leads with `user_summary` and carries the result fields a later call takes, plus `next` (one sentence, only when the agent must act) and `notice` (one sentence, only when the outcome is partial, unknown or stale). The operational fields move to `diagnostics.operational`, shown only with `response_detail=full`.
+- A write reply leads with `user_summary` and carries the result fields a later call takes, plus `next_action` (one sentence, only when the agent must act) and `notice` (one sentence, only when the outcome is partial, unknown or stale). The operational fields move to `diagnostics.operational`, shown only with `response_detail=full`.
 - A write reply no longer carries `due_state` or `vocabulary_delta`. A search reply no longer carries `due_state`, a `warming` block or a `scope` label, and names each page once.
-- The capture-sweep rule text (about 750 bytes) becomes one `next` sentence, sent once per episode.
+- The capture-sweep rule text (about 750 bytes) becomes one `next_action` sentence, sent once per episode.
 - An MCP refusal becomes `{"error": {"code", "message", "retry"?, "candidates"?}}`. `message` is one sentence that ends with what happened to the data. `retry` is the exact next call. The old envelope moves to `diagnostics` under `response_detail=full`.
-- Bootstrap guidance for post-write replies teaches `user_summary`, `next` and `notice`, and names no sync field.
+- Bootstrap guidance for post-write replies teaches `user_summary`, `next_action` and `notice`, and names no sync field.
 - Tool names, request schemas, tool descriptions, write governance and the `recall_context` packet do not change. The CLI and REST facades keep their `{success, data}` wrapper and their public error block.
 
 ## Impact
