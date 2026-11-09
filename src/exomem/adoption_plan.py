@@ -27,6 +27,7 @@ from typing import Any
 from . import (
     access,
     context_refs,
+    duplicates,
     find_results,
     held_fs,
     import_stage,
@@ -35,6 +36,7 @@ from . import (
     reserved_paths,
     source_taxonomy,
 )
+from .governance import raw_protection
 from .vault import (
     GENERATION_RACY_WINDOW_NS,
     kb_root,
@@ -193,41 +195,112 @@ def sources_seal(paths: Iterable[str]) -> str:
     return hashlib.sha256("\n".join(sorted(set(paths))).encode("utf-8")).hexdigest()
 
 
-def read_import_entry(root: Path, page: Path) -> EarlierImport | None:
-    """The entry a Source page's parsed front matter gives, or None when it names no original."""
-    try:
-        frontmatter = _leading_frontmatter(root, page)
-    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-        return None
-    if frontmatter is None:
-        return None
-    spelled_from = frontmatter.get("imported_from")
-    imported_from = _text_field(spelled_from)
-    if imported_from is None:
-        return None
-    aliases = frontmatter.get("aliases")
-    return EarlierImport(
-        path=page.relative_to(root).as_posix(),
-        imported_from=imported_from,
-        import_collection=_text_field(frontmatter.get("import_collection")),
-        collection_path=_text_field(frontmatter.get("collection_path")),
-        original_sha256=_text_field(frontmatter.get("original_sha256")),
-        captured=str(frontmatter.get("captured") or ""),
-        aliases=tuple(
-            nfc(a) for a in aliases if isinstance(a, str) and a.strip()
-        ) if isinstance(aliases, list) else (),
-        spelled_from=spelled_from,
+def import_mapping(
+    original_path: str, *, collection: str | None, collection_path: str
+) -> dict[str, str]:
+    """The `also_imported_from` entry that records one more path of an original on the Source that holds its bytes."""
+    mapping = {"imported_from": original_path}
+    if collection is not None:
+        mapping["import_collection"] = nfc(collection)
+        mapping["collection_path"] = collection_path
+    return mapping
+
+
+def recorded_mappings(frontmatter: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The well-formed `also_imported_from` entries of a Source page, as written."""
+    raw = frontmatter.get("also_imported_from")
+    entries: list[dict[str, str]] = []
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, Mapping) or _text_field(item.get("imported_from")) is None:
+            continue
+        entries.append({key: item[key] for key in _PATH_FIELDS if _text_field(item.get(key)) is not None})
+    return entries
+
+
+# The three fields that name one path of an original, on a Source page and in each of its mappings.
+_PATH_FIELDS = ("imported_from", "import_collection", "collection_path")  # nosemgrep: ep-word-set -- the closed field names of an import record, fixed by the page format.
+
+
+def _path_identity(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """What names one path of an original: its collection and collection path, else the path it was read from."""
+    collection, collection_path = _text_field(entry.get("import_collection")), _text_field(entry.get("collection_path"))
+    if collection is not None or collection_path is not None:
+        return ("collection", collection or "", collection_path or "")
+    return ("path", _text_field(entry.get("imported_from")) or "")
+
+
+def mapping_recorded(frontmatter: Mapping[str, Any], mapping: Mapping[str, str]) -> bool:
+    """Whether the Source page already names this path of the original: as its first path or as a mapping."""
+    first = {key: frontmatter.get(key) for key in _PATH_FIELDS}
+    return any(
+        _path_identity(entry) == _path_identity(mapping) for entry in (first, *recorded_mappings(frontmatter))
     )
 
 
+def mapping_fields(frontmatter: Mapping[str, Any], mapping: Mapping[str, str]) -> dict[str, Any] | None:
+    """The frontmatter field that adds `mapping` to a page's `also_imported_from`, or None when the field is not a list."""
+    raw = frontmatter.get("also_imported_from")
+    if raw is not None and not isinstance(raw, list):
+        return None
+    return {"also_imported_from": [*(raw or []), dict(mapping)]}
+
+
+def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
+    """The earlier imports a Source page records: its first path, then each `also_imported_from` path.
+
+    A page that names no original and no mapping gives none.
+    """
+    try:
+        frontmatter = _leading_frontmatter(root, page)
+    except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return []
+    if frontmatter is None:
+        return []
+    rel = page.relative_to(root).as_posix()
+    captured = str(frontmatter.get("captured") or "")
+    digest = _text_field(frontmatter.get("original_sha256"))
+    entries: list[EarlierImport] = []
+    spelled_from = frontmatter.get("imported_from")
+    imported_from = _text_field(spelled_from)
+    if imported_from is not None:
+        aliases = frontmatter.get("aliases")
+        entries.append(
+            EarlierImport(
+                path=rel,
+                imported_from=imported_from,
+                import_collection=_text_field(frontmatter.get("import_collection")),
+                collection_path=_text_field(frontmatter.get("collection_path")),
+                original_sha256=digest,
+                captured=captured,
+                aliases=tuple(
+                    nfc(a) for a in aliases if isinstance(a, str) and a.strip()
+                ) if isinstance(aliases, list) else (),
+                spelled_from=spelled_from,
+            )
+        )
+    for mapped in recorded_mappings(frontmatter):
+        entries.append(
+            EarlierImport(
+                path=rel,
+                imported_from=nfc(mapped["imported_from"]),
+                import_collection=_text_field(mapped.get("import_collection")),
+                collection_path=_text_field(mapped.get("collection_path")),
+                original_sha256=digest,
+                captured=captured,
+                aliases=(),
+                spelled_from=mapped["imported_from"],
+            )
+        )
+    return entries
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
-    """Every Source page whose parsed front matter names its original.
+    """Every import that a Source page's parsed front matter records: its original and each mapped path.
 
     The decision is the parsed ``imported_from`` field, never a substring of the
     page, so a page that merely quotes a path does not count as an import.
     """
-    entries = (read_import_entry(root, page) for page in _source_pages(root))
-    return [entry for entry in entries if entry is not None]
+    return [entry for page in _source_pages(root) for entry in read_import_entries(root, page)]
 
 
 def latest_earlier_import(
@@ -868,8 +941,16 @@ def plan_item(
     notes: NoteIndex,
     ceiling: int,
     vouched: tuple[import_stage.Identity, str] | None = None,
+    seen: dict[tuple[str, bool], Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
-    """Facts, identity and a frozen destination for one original; or a refusal dict."""
+    """Facts, identity and a frozen destination for one original; or a refusal dict.
+
+    An original whose exact bytes are stored once already is not planned a second write. An earlier
+    import of this path or the vault's duplicate index gives `already-imported` with the Source that holds
+    them and, when the vault holds them under another path, the `mapping` that `apply` records on it.
+    `seen` holds the writes the plan has made so far, by digest and protection class (`seen_in_plan`);
+    an original that repeats one gives `duplicate-of` and the same mapping. A write this call plans joins `seen`.
+    """
     read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
         return {"path": original_path, **read}
@@ -893,19 +974,10 @@ def plan_item(
     # to carry the identity the next run finds it by.
     note_rule = (classification or {}).get("note")
     owes_note = bool(note_rule) and text is not None and collection is not None and is_markdown(original_path)
-    earlier = earlier_with_same_bytes(
-        index, collection=collection, collection_path=item["collection_path"],
-        original_path=original_path, sha256=item["original_sha256"],
-    )
-    if earlier is not None:
-        item["action"] = "already-imported"
-        item["target_path"] = earlier.path
-        item["target_ref"] = context_refs.source_ref(earlier.path)
-        item["existing_ref"] = item["target_ref"]
-        item["artifact_path"] = artifact_of(root, earlier.path)
+    def holds_source(item: dict[str, Any]) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
+        """Finish an item that stores nothing: its Source exists, so only its note may be owed."""
         if owes_note:
-            # The Source exists: the note may too (a re-run), or may be owed (a crash, or
-            # an earlier import that had no note rule).
+            # The note may exist too (a re-run), or may be owed (a crash, or an earlier import that had no note rule).
             existing = find_note(
                 root, notes, collection=collection, collection_path=item["collection_path"]
             )
@@ -919,6 +991,18 @@ def plan_item(
                     return {"path": original_path, **planned_note}
                 item["note"] = planned_note
         return item, text
+
+    earlier = earlier_with_same_bytes(
+        index, collection=collection, collection_path=item["collection_path"],
+        original_path=original_path, sha256=item["original_sha256"],
+    )
+    if earlier is not None:
+        item["action"] = "already-imported"
+        item["target_path"] = earlier.path
+        item["target_ref"] = context_refs.source_ref(earlier.path)
+        item["existing_ref"] = item["target_ref"]
+        item["artifact_path"] = artifact_of(root, earlier.path)
+        return holds_source(item)
     changed = latest_earlier_import(
         index, collection=collection, collection_path=item["collection_path"],
         original_path=original_path,
@@ -938,6 +1022,33 @@ def plan_item(
     if isinstance(folder, str):
         return {"path": original_path, "code": folder,
                 "reason": "the Source taxonomy no longer accepts this rule's kind or domain"}
+    protected = raw_protection.marked(folder.relative_to(root).as_posix())
+    mapping = import_mapping(
+        original_path, collection=collection, collection_path=item["collection_path"]
+    )
+    first = (seen or {}).get((item["original_sha256"], protected))
+    if first is not None:
+        item.update(
+            action="duplicate-of", duplicate_of=first["original_path"], mapping=mapping,
+            target_path=first["target_path"], target_ref=first["target_ref"],
+            artifact_path=first["artifact_path"],
+        )
+        return holds_source(item)
+    lookup = duplicates.find_duplicate(
+        root, sha256=item["original_sha256"], lane=duplicates.SOURCES, protected=protected,
+        needs_original=item["form"] == "artifact",
+    )
+    if not lookup.available:
+        item["duplicate_check_unavailable"] = True
+    # A copy that the caller cannot write takes no mapping, so this import keeps a copy of its own.
+    if lookup.hit is not None and access.writable_reason(root, lookup.hit.path) is None:
+        item.update(
+            action="already-imported", mapping=mapping, target_path=lookup.hit.path,
+            target_ref=context_refs.source_ref(lookup.hit.path),
+            artifact_path=lookup.hit.payload.artifact_path,
+        )
+        item["existing_ref"] = item["target_ref"]
+        return holds_source(item)
     slug, slug_warning = slugify_with_truncation_check(item["title"])
     suffix = None
     if item["form"] == "artifact":
@@ -962,7 +1073,18 @@ def plan_item(
         if "code" in planned_note:
             return {"path": original_path, **planned_note}
         item["note"] = planned_note
+    if seen is not None:
+        seen.setdefault((item["original_sha256"], protected), item)
     return item, text
+
+
+def seen_in_plan(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, bool], Mapping[str, Any]]:
+    """The writes a plan holds, by the digest and protection class of what each stores (the first of each)."""
+    seen: dict[tuple[str, bool], Mapping[str, Any]] = {}
+    for item in items:
+        if item.get("action") == "copy-as-source":
+            seen.setdefault((item["original_sha256"], raw_protection.marked(item["target_path"])), item)
+    return seen
 
 
 def artifact_of(root: Path, page_path: str) -> str | None:
@@ -1092,11 +1214,13 @@ def resolve_links(
                 resolved.append(link)
         item["links"] = {"resolved": resolved, "unresolved": unresolved}
     # A note's own links point at the notes of the items it links to, not at their Sources.
-    note_of = {
-        item["target_path"]: (item.get("note") or {}).get("target_path") or item["existing_note"]
-        for item in items
-        if item.get("note") or item.get("existing_note")
-    }
+    # Items that share one Source (a repeat of its bytes) share its first note.
+    note_of: dict[str, str] = {}
+    for item in items:
+        if item.get("note") or item.get("existing_note"):
+            note_of.setdefault(
+                item["target_path"], (item.get("note") or {}).get("target_path") or item["existing_note"]
+            )
     for item in items:
         if item.get("note"):
             item["note"]["links"] = {
@@ -1143,11 +1267,11 @@ def item_digest(item: Mapping[str, Any]) -> str:
 
 
 def plan_total_bytes(items: Iterable[Mapping[str, Any]]) -> int:
-    """Bytes `apply` will write for the originals: existing Sources write none."""
+    """Bytes `apply` will write for the originals: an item that stores nothing (an existing Source, a repeat) counts none."""
     return sum(
         int(item.get("original_bytes") or 0)
         for item in items
-        if item.get("action") != "already-imported"
+        if item.get("action") == "copy-as-source"
     )
 
 
@@ -1160,21 +1284,24 @@ __all__ = [
     "ACCEPTED_STATUSES",
     "IMPORTED_FOLDER",
     "INLINE_TEXT_MAX_BYTES",
+    "OVER_CEILING",
     "Destinations",
     "EarlierImport",
     "LinkResolver",
     "NoteIndex",
-    "OVER_CEILING",
-    "item_digest",
     "artifact_of",
     "collection_path_of",
     "decode_text",
     "earlier_import_of",
     "earlier_with_same_bytes",
     "find_note",
+    "import_mapping",
     "is_markdown",
+    "item_digest",
     "item_frontmatter",
     "latest_earlier_import",
+    "mapping_fields",
+    "mapping_recorded",
     "normalize_aliases",
     "normalize_tags",
     "note_extra_frontmatter",
@@ -1182,9 +1309,11 @@ __all__ = [
     "plan_item",
     "plan_note",
     "plan_total_bytes",
-    "read_import_entry",
+    "read_import_entries",
     "read_import_index",
+    "recorded_mappings",
     "resolve_links",
+    "seen_in_plan",
     "source_page_paths",
     "sources_seal",
     "title_from_text",

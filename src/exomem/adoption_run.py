@@ -35,25 +35,30 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, get_args
 from urllib.parse import urlencode
 
-from . import adopt as adopt_module
 from . import (
+    access,
     adoption_consume,
     adoption_plan,
     capabilities,
     context_refs,
     due_state,
+    duplicates,
+    frontmatter_update,
     held_fs,
     import_rename,
     import_stage,
     knowledge_packs,
+    lexstore,
     note_types,
     rename_journal,
     request_budget,
     reserved_paths,
     source_taxonomy,
 )
+from . import adopt as adopt_module
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
+from .governance import raw_protection
 from .kbdir import kb_dirname
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
@@ -1707,6 +1712,7 @@ def plan(
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations(root)
+        seen = adoption_plan.seen_in_plan(draft["items"])
         for planned in draft["items"]:
             frozen_paths = [(planned.get("note") or {}).get("target_path")]
             if planned["action"] == "copy-as-source":
@@ -1727,7 +1733,7 @@ def plan(
                 classification=classification.get(rel), taxonomy=taxonomy,
                 text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
                 date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
-                ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel),
+                ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel), seen=seen,
             )
             draft["next"] += 1
             handled += 1
@@ -1766,6 +1772,11 @@ def plan(
                 skipped.append(
                     {"path": planned["original_path"], "code": "SLUG_TRUNCATED",
                      "reason": planned["slug_warning"]}
+                )
+            if planned.get("duplicate_check_unavailable"):
+                skipped.append(
+                    {"path": planned["original_path"], "code": "DUPLICATE_CHECK_UNAVAILABLE",
+                     "reason": duplicates.unavailable_warning(planned["original_path"])}
                 )
         run["plan"] = {
             "plan_format": PLAN_FORMAT,
@@ -1891,6 +1902,71 @@ def _earlier_with_same_bytes(
         if adoption_plan.artifact_of(root, earlier.path) is None:
             return None
     return earlier
+
+
+def _settle_on_stored(
+    root: Path, planned: dict, *, label: str | None, holder: str | None, stats: Counter
+) -> dict | None:
+    """Settle an item whose exact bytes the vault already stores: name that Source, write nothing else.
+
+    The duplicate lookup repeats here, under the apply's mutation guard, so a Source that another run or door
+    filed since the plan decides, and a copy the plan named that has gone does not. `holder` is the Source the
+    plan froze for the item; it is the one named while it still holds the bytes. The Source gains this
+    item's path as one mapping, through a write that checks the page's content hash and touches no other
+    field. The outcome is `already-applied`, with `mapped: true` when this call recorded the mapping. A
+    failed outcome means the mapping could not be recorded. None means no usable copy holds the bytes:
+    the vault has none, the index cannot answer, or the caller cannot write the Source that holds them.
+    """
+    lookup = duplicates.find_duplicate(
+        root, sha256=planned["original_sha256"], lane=duplicates.SOURCES,
+        protected=raw_protection.marked(planned["target_path"]), needs_original=planned["form"] == "artifact",
+        prefer=(lambda hit: hit.path == holder) if holder else None,
+    )
+    if not lookup.available:
+        stats["duplicate_check_unavailable"] += 1
+        return None
+    hit = lookup.hit
+    if hit is None or access.writable_reason(root, hit.path) is not None:
+        return None
+    if planned["form"] == "artifact" and not _original_unchanged(root, planned):
+        return _failed("SOURCE_CHANGED", "the original differs from the plan at apply time")
+    mapping = adoption_plan.import_mapping(
+        planned["original_path"], collection=label, collection_path=planned["collection_path"]
+    )
+    mapped = not adoption_plan.mapping_recorded(hit.payload.frontmatter, mapping)
+    if mapped and not frontmatter_update.update_page_frontmatter(
+        root, hit.path, lambda frontmatter: adoption_plan.mapping_fields(frontmatter, mapping)
+    ):
+        return _failed(
+            "PLAN_STALE", "the Source that holds these bytes changed or cannot take this path; re-plan this import"
+        )
+    outcome = _already_applied(hit.path, hit.payload.artifact_path, planned["original_sha256"])
+    if mapped:
+        outcome["mapped"] = True
+        stats["mapped"] += 1
+    return outcome
+
+
+def _held_by(planned: dict, outcome: dict) -> dict:
+    """`planned` as the Source that now holds its bytes records it: its page and artifact, not the frozen ones."""
+    return {**planned, "target_path": outcome["target_path"], "artifact_path": outcome.get("artifact_path")}
+
+
+def _record_stored(
+    root: Path, run: dict, reads: _CallReads, planned: dict, outcome: dict, *, settled: list[dict]
+) -> None:
+    """Keep the outcome of an item `_settle_on_stored` settled; a found Source then settles its staged copy and note."""
+    label = (run.get("collection") or {}).get("label")
+    run["outcomes"][planned["original_path"]] = outcome
+    if outcome["status"] != "already-applied":
+        return
+    held = _held_by(planned, outcome)
+    _hold_for_note(outcome, held)
+    settled.append(held)
+    if outcome.get("mapped") and reads.index is not None:
+        reads.index.append(
+            adoption_plan.earlier_import_of(held, collection=label, captured=run["plan"]["date"])
+        )
 
 
 class _ApplyPacer:
@@ -2156,8 +2232,7 @@ class _CallReads:
         self.open_sources(root, run)
         if self.index is not None:
             return self.index
-        entry = adoption_plan.read_import_entry(root, root / planned["target_path"])
-        return [] if entry is None else [entry]
+        return adoption_plan.read_import_entries(root, root / planned["target_path"])
 
     def whole_index(self, root: Path, run: dict) -> list[adoption_plan.EarlierImport]:
         """Every earlier import, walked now: for a batch that raised, which left unknown pages."""
@@ -2313,6 +2388,8 @@ def _apply_chunk(
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
     settled: list[dict] = []
+    # Items that repeat another item of the plan wait for the Source of the item they repeat.
+    deferred: list[dict] = []
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
     stage = reads.filing_stage(root, run)
@@ -2385,7 +2462,7 @@ def _apply_chunk(
             survivors.append((planned, item))
             continue
         index = reads.earlier_imports(root, run, planned)
-        if planned["action"] == "already-imported":
+        if planned["action"] == "already-imported" and not planned.get("mapping"):
             frozen = [entry for entry in index if entry.path == planned["target_path"]]
             if _earlier_with_same_bytes(root, frozen, label, planned) is None:
                 outcomes[path] = _failed(
@@ -2406,6 +2483,22 @@ def _apply_chunk(
             )
             _hold_for_note(outcomes[path], planned)
             settled.append(planned)
+            continue
+        if planned["action"] == "duplicate-of":
+            deferred.append(planned)
+            continue
+        # An item that was renamed into the vault already sits at its frozen artifact path: its Source completes the filing.
+        stored = None if moved is not None else _settle_on_stored(
+            root, planned, label=label, stats=stats,
+            holder=planned["target_path"] if planned["action"] == "already-imported" else None,
+        )
+        if stored is not None:
+            _record_stored(root, run, reads, planned, stored, settled=settled)
+            continue
+        if planned["action"] == "already-imported":
+            outcomes[path] = _failed(
+                "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
+            )
             continue
         occupied = [
             target for target in (planned["target_path"], planned.get("artifact_path"))
@@ -2446,6 +2539,25 @@ def _apply_chunk(
                     reads.index.append(
                         adoption_plan.earlier_import_of(planned, collection=label, captured=plan["date"])
                     )
+        # The lookups below, and every later chunk's, must find the Sources this chunk just filed.
+        lexstore.record_payload_commit(
+            root, [
+                planned["target_path"] for planned in landed
+                if _source_status(outcomes[planned["original_path"]]) == "applied"
+            ],
+        )
+    for planned in deferred:
+        repeated = outcomes.get(planned["duplicate_of"]) or {}
+        stored = None
+        if repeated.get("status") in (*_APPLIED_STATUSES, _SOURCE_ONLY):
+            stored = _settle_on_stored(
+                root, planned, label=label, stats=stats, holder=repeated["target_path"]
+            )
+        if stored is None:
+            stored = _failed(
+                "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
+            )
+        _record_stored(root, run, reads, planned, stored, settled=settled)
     landed_paths = {planned["original_path"] for planned in landed}
     for planned in [*settled, *landed]:
         outcome = outcomes[planned["original_path"]]
@@ -2900,8 +3012,8 @@ def _legacy_apply_invocation(
             continue
         outcome = (run.get("outcomes") or {}).get(path) or {}
         if outcome.get("status") in _APPLIED_STATUSES or outcome.get("status") == _SOURCE_ONLY:
-            earlier = adoption_plan.read_import_entry(root, root / planned["target_path"])
-            if _earlier_with_same_bytes(root, [earlier] if earlier else [], label, planned) is not None:
+            earlier = adoption_plan.read_import_entries(root, root / planned["target_path"])
+            if _earlier_with_same_bytes(root, earlier, label, planned) is not None:
                 continue
             raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "an earlier committed outcome no longer proves Source custody")
         if any(os.path.lexists(root / target) for target in (planned["target_path"], planned.get("artifact_path")) if target):
@@ -3159,6 +3271,10 @@ def apply(
                     "created": stats["notes_created"],
                     "found": stats["notes_found"],
                     "failed": stats["notes_failed"],
+                },
+                "duplicates": {
+                    "mapped": stats["mapped"],
+                    "check_unavailable": stats["duplicate_check_unavailable"],
                 },
             },
             "progress": _progress(run),

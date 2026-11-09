@@ -19,7 +19,7 @@ from typing import Any
 
 from . import memory_refs, reserved_paths, vault
 from .governance import raw_protection
-from .source_coverage import CAPTURE_HEADING
+from .source_coverage import CAPTURE_HEADING, fenced_capture
 
 #: The two lanes that hold originals. The layout fixes them (`vault.APPEND_ONLY_KB_SUBPATHS`).
 SOURCES, EVIDENCE = vault.APPEND_ONLY_KB_SUBPATHS
@@ -89,8 +89,9 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
     """The payload identity of the page at `rel` whose bytes are `raw`, or None when it holds none.
 
     One function decides it for the catalogue's column (every build and upsert) and for the lookup's
-    re-derivation, so the two cannot drift. A text Source's payload is its captured text; an original's is
-    the digest its page records, which `find_duplicate` re-hashes against the file itself.
+    re-derivation, so the two cannot drift. A text Source's payload is its captured text; an imported text
+    file's is its fenced text exactly as stored, which equals the file's bytes; an original's is the digest
+    its page records, which `find_duplicate` re-hashes against the file itself.
     """
     lane = vault.in_append_only_tree(rel)
     if lane is None or not rel.lower().endswith(".md"):
@@ -117,11 +118,19 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
         source_url = canonical_url(url) if isinstance(url, str) else None
         artifact, digest = frontmatter.get("evidence_file"), frontmatter.get("binary_sha256")
         if artifact is None and digest is None:
-            captured = _stored_text(body)
-            if captured is None:
-                return None
+            if "original_sha256" in frontmatter:
+                # An imported text file: its bytes are the file's, so its fenced text is hashed exactly as stored.
+                imported = fenced_capture(text)
+                if imported is None:
+                    return None
+                payload_sha256 = hashlib.sha256(imported.encode("utf-8")).hexdigest()
+            else:
+                captured = _stored_text(body)
+                if captured is None:
+                    return None
+                payload_sha256 = text_payload_sha256(captured)
             return PagePayload(
-                sha256=text_payload_sha256(captured), lane=lane, protected=protected, artifact_path=None,
+                sha256=payload_sha256, lane=lane, protected=protected, artifact_path=None,
                 source_url=source_url, ref=memory_refs.ref_from_markdown(text), frontmatter=frontmatter, text=text,
             )
     if not (isinstance(artifact, str) and artifact and is_sha256(digest)):

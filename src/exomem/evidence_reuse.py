@@ -12,10 +12,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import duplicates, preserve, vault
+from . import duplicates, frontmatter_update, preserve
 from .held_fs import vault_name_key
 from .preserve import DuplicateArtifact
-from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
 from .vault import kb_root
 
 Family = tuple[str, str]
@@ -63,42 +62,14 @@ def listed_families(frontmatter: Mapping[str, object], home: Family) -> tuple[Fa
     return (home, *(pair for pair in listed if not _same_family(pair, home)))
 
 
-def _with_family(text: str, families: tuple[Family, ...], tags: list[str]) -> str:
-    """`text` with `families` listed and `tags` present; every other frontmatter field and the body stay as written."""
-    updated = splice_markdown_frontmatter(
-        text, {"families": [{"scope": scope, "category": category} for scope, category in families]}
-    )
-    for tag in tags:
-        updated = vault.append_frontmatter_list_item(updated, "tags", tag)
-    before_fm, before_body, _ = vault.parse_frontmatter(text, strict=True)
-    after_fm, after_body, _ = vault.parse_frontmatter(updated, strict=True)
-    kept = {key: value for key, value in before_fm.items() if key not in {"families", "tags"}}  # nosemgrep: ep-word-set -- the two fields this write owns; every other field must survive unchanged.
-    if after_body != before_body or {key: after_fm.get(key) for key in kept} != kept:
-        raise FrontmatterSpliceError("INVALID_FRONTMATTER", "the family addition changed more than the family fields")
-    return updated
-
-
 def _add_family(vault_root: Path, page: str, families: tuple[Family, ...], added: Family) -> bool:
-    """Write `families` to the page at `page`. False when the page changed or cannot be written as asked."""
-    from . import add
-    from .vault import ContentHashMismatchError, PathGuardError
-
-    path = vault_root / page
-    try:
-        text, guard = vault.read_guarded_text(vault_root, path)
-        updated = _with_family(text, families, preserve.family_tags(*added))
-        intents: list[object] = []
-        committed = preserve.commit_media_sidecar_writes(
-            vault_root,
-            (vault.PlannedWrite(path, updated, guard=guard, expected_hash=vault.content_hash(text)),),
-            post_commit_fanout=False,
-            publication_intents_out=intents,
-        )
-    except (FrontmatterSpliceError, vault.FrontmatterError, PathGuardError, ContentHashMismatchError, OSError):
-        return False
-    # The page is already committed: its index and graph refresh follows the way a new Source's does.
-    add.deferred_fanout(vault_root, list(committed), created_paths=[], publication_intents=intents)
-    return True
+    """Write `families` and the added family's tags to the page at `page`. False when it did not land."""
+    return frontmatter_update.update_page_frontmatter(
+        vault_root,
+        page,
+        {"families": [{"scope": scope, "category": category} for scope, category in families]},
+        appended={"tags": preserve.family_tags(*added)},
+    )
 
 
 def _find(vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool):

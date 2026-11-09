@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import itertools
 import os
+import threading
 import types
 from pathlib import Path
 
@@ -1111,13 +1112,13 @@ def test_a_continuing_apply_call_does_not_open_the_sources_an_earlier_run_filed(
     run_id, planned = _import(vault, path="New", include=["New"])
     own_pages = {item["target_path"] for item in planned["plan"]["items"]}
     opened: list[str] = []
-    real_entry = adoption_plan.read_import_entry
+    real_entries = adoption_plan.read_import_entries
 
-    def recording_entry(root: Path, page: Path):
+    def recording_entries(root: Path, page: Path):
         opened.append(page.relative_to(root).as_posix())
-        return real_entry(root, page)
+        return real_entries(root, page)
 
-    monkeypatch.setattr(adoption_plan, "read_import_entry", recording_entry)
+    monkeypatch.setattr(adoption_plan, "read_import_entries", recording_entries)
 
     applied, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
 
@@ -1299,3 +1300,157 @@ def test_a_call_leaves_a_byte_heavy_artifact_to_the_next_call_when_it_does_not_f
     assert max(elapsed) <= 12.0 - 2.0
     assert last["phase"] == "applied"
     assert (vault / last["outcomes"]["Coll/z-archive.zip"]["artifact_path"]).stat().st_size == 2 * 2**20
+
+
+# --- store each original once ---------------------------------------------------
+PHOTO = b"\x89PNG\r\n\x1a\n" + b"same pixels" * 20
+
+
+def _kept_files(vault: Path) -> dict[str, bytes]:
+    """Every file the vault keeps outside the run objects, by path."""
+    return {
+        path.relative_to(vault).as_posix(): path.read_bytes()
+        for path in vault.rglob("*")
+        if path.is_file() and "_Adoption" not in path.parts
+    }
+
+
+def _stored_photos(vault: Path) -> list[Path]:
+    return sorted((vault / SOURCES).rglob("*.png"))
+
+
+def test_two_identical_photos_plan_one_write_and_apply_stores_one_original_with_both_paths(
+    tmp_path: Path,
+) -> None:
+    note = "# Notes\n\nother\n"
+    vault = _vault(
+        tmp_path,
+        {
+            "_Imports/first/Coll/trip/IMG_1.png": PHOTO,
+            "_Imports/first/Coll/backup/IMG_1 copy.png": PHOTO,
+            "_Imports/first/Coll/notes.md": note,
+            "_Imports/second/Coll/trip/IMG_1.png": PHOTO,
+            "_Imports/second/Coll/backup/IMG_1 copy.png": PHOTO,
+            "_Imports/second/Coll/notes.md": note,
+        },
+    )
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    photos = [item for item in planned["plan"]["items"] if item["form"] == "artifact"]
+
+    assert [item["action"] for item in photos] == ["copy-as-source", "duplicate-of"]
+    assert photos[1]["duplicate_of"] == photos[0]["original_path"]
+    assert photos[1]["target_path"] == photos[0]["target_path"]
+    assert planned["plan"]["total_bytes"] == len(PHOTO) + len(note)
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    outcomes = [first["outcomes"][item["original_path"]] for item in photos]
+    assert [outcome["status"] for outcome in outcomes] == ["applied", "already-applied"]
+    assert outcomes[1]["mapped"] is True
+    assert first["apply_result"]["duplicates"]["mapped"] == 1
+    assert outcomes[1]["source_ref"] == outcomes[0]["source_ref"]
+    [stored] = _stored_photos(vault)
+    assert stored.read_bytes() == PHOTO
+    frontmatter, _body = _page(vault, outcomes[0]["target_path"])
+    assert frontmatter["imported_from"] == photos[0]["original_path"]
+    assert frontmatter["also_imported_from"] == [
+        {
+            "imported_from": photos[1]["original_path"],
+            "import_collection": "Coll",
+            "collection_path": photos[1]["collection_path"],
+        }
+    ]
+
+    # A second run, and a run of the collection staged under a new root, find both paths and write nothing.
+    before = _kept_files(vault)
+    for root in ("_Imports/first", "_Imports/second"):
+        run_id, planned = _import(vault, path=root, include=[root])
+        rerun, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+        assert {item["action"] for item in planned["plan"]["items"]} == {"already-imported"}
+        assert planned["plan"]["total_bytes"] == 0
+        assert {outcome["status"] for outcome in rerun["outcomes"].values()} == {"already-applied"}
+        assert not any(outcome.get("mapped") for outcome in rerun["outcomes"].values())
+        # No mapping was recorded, so this call reports none and the snapshot below shows no write.
+        assert rerun["apply_result"]["duplicates"]["mapped"] == 0
+    assert _kept_files(vault) == before
+
+
+def test_a_photo_the_vault_stores_under_another_collection_plans_no_write_and_records_its_path(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path, {"Trip/IMG_1.png": PHOTO, "Archive/holiday.png": PHOTO})
+    run_id, planned = _import(vault, path="Trip", include=["Trip"])
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    held = first["outcomes"]["Trip/IMG_1.png"]
+    before = _kept_files(vault)
+
+    run_id, planned = _import(vault, path="Archive", include=["Archive"])
+
+    [item] = planned["plan"]["items"]
+    assert item["action"] == "already-imported"
+    assert item["existing_ref"] == held["source_ref"]
+    assert item["mapping"] == {
+        "imported_from": "Archive/holiday.png", "import_collection": "Archive", "collection_path": "holiday.png",
+    }
+    assert planned["plan"]["total_bytes"] == 0
+    assert _kept_files(vault) == before
+    second, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    outcome = second["outcomes"]["Archive/holiday.png"]
+    assert (outcome["status"], outcome["mapped"], outcome["source_ref"]) == ("already-applied", True, held["source_ref"])
+    assert _stored_photos(vault) == [vault / held["artifact_path"]]
+    frontmatter, _body = _page(vault, held["target_path"])
+    assert frontmatter["also_imported_from"] == [item["mapping"]]
+
+
+def test_a_renamed_file_in_an_imported_collection_records_its_new_path_and_the_next_run_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path, {"Coll/IMG_1.png": PHOTO})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    held = first["outcomes"]["Coll/IMG_1.png"]
+    (vault / "Coll/IMG_1.png").rename(vault / "Coll/holiday.png")
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    renamed, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    outcome = renamed["outcomes"]["Coll/holiday.png"]
+    assert (outcome["status"], outcome["mapped"], outcome["source_ref"]) == ("already-applied", True, held["source_ref"])
+    assert _stored_photos(vault) == [vault / held["artifact_path"]]
+    frontmatter, _body = _page(vault, held["target_path"])
+    assert [entry["collection_path"] for entry in frontmatter["also_imported_from"]] == ["holiday.png"]
+    before = _kept_files(vault)
+
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+    rerun, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert "mapping" not in planned["plan"]["items"][0]
+    assert not rerun["outcomes"]["Coll/holiday.png"].get("mapped")
+    assert _kept_files(vault) == before
+
+
+def test_two_runs_planned_before_either_applies_store_one_original(tmp_path: Path) -> None:
+    """Each run's plan sees an empty vault, so only the lookup at apply time, in the same hold as the commit, finds the other's copy."""
+    vault = _vault(tmp_path, {"Trip/IMG_1.png": PHOTO, "Archive/holiday.png": PHOTO})
+    plans = [_import(vault, path=root, include=[root]) for root in ("Trip", "Archive")]
+    assert [planned["plan"]["items"][0]["action"] for _run_id, planned in plans] == ["copy-as-source"] * 2
+    start = threading.Barrier(2)
+    results: list[dict] = []
+
+    def apply_run(run_id: str, plan_id: str) -> None:
+        start.wait()
+        results.append(adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY))
+
+    threads = [
+        threading.Thread(target=apply_run, args=(run_id, planned["plan"]["plan_id"])) for run_id, planned in plans
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(next(iter(result["outcomes"].values()))["status"] for result in results) == [
+        "already-applied", "applied",
+    ]
+    [stored] = _stored_photos(vault)
+    assert stored.read_bytes() == PHOTO
+    assert len(list((vault / SOURCES / "Imported").glob("*.md"))) == 1
