@@ -361,6 +361,11 @@ def plan_snapshot(
     return version, write
 
 
+def _is_snapshot_name(name: str, suffix: str = ".yaml") -> bool:
+    """Whether ``name`` is a snapshot file's name: a version stamp, then ``suffix``."""
+    return name.endswith(suffix) and VERSION_RE.match(name[: -len(suffix)]) is not None
+
+
 def _snapshot_names(
     filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory, suffix: str = ".yaml"
 ) -> list[str]:
@@ -373,8 +378,7 @@ def _snapshot_names(
             for child in children.require()
             if child.identity.kind == "file"
             and child.identity.link_count == 1
-            and child.relative_path.endswith(suffix)
-            and VERSION_RE.match(child.relative_path[: -len(suffix)])
+            and _is_snapshot_name(child.relative_path, suffix)
         ),
         reverse=True,
     )
@@ -452,31 +456,29 @@ def _prune_in_store(root: Path, stem: str, writer: Any) -> None:
     from .vault_store import batch, read, write
 
     relative = history_dir(root, stem).relative_to(root).as_posix()
-    with read.snapshot(root) as view:
-        names = sorted(
-            (
-                meta.path
-                for meta in view.pages(f"{relative}/")
-                # One file level, as the disk listing sees the directory's children.
-                if "/" not in meta.path[len(relative) + 1 :]
-                and meta.path.endswith(".yaml")
-                and VERSION_RE.match(meta.path[len(relative) + 1 : -len(".yaml")])
-            ),
-            reverse=True,
-        )
-    stale = names[HISTORY_KEEP:]
-    if not stale:
-        return
     try:
-        batch.commit_batch(
-            writer,
-            [],
-            vault_root=root,
-            lifecycle=batch.Lifecycle(deletes=tuple(write.PageDelete(rel) for rel in stale)),
-        )
-    except write.StoreConflict:
+        with read.snapshot(root) as view:
+            names = sorted(
+                (
+                    meta.path
+                    for meta in view.pages(f"{relative}/")
+                    # One file level, as the disk listing sees the directory's children.
+                    if "/" not in meta.path[len(relative) + 1 :]
+                    and _is_snapshot_name(meta.path[len(relative) + 1 :])
+                ),
+                reverse=True,
+            )
+        stale = names[HISTORY_KEEP:]
+        if stale:
+            batch.commit_batch(
+                writer,
+                [],
+                vault_root=root,
+                lifecycle=batch.Lifecycle(deletes=tuple(write.PageDelete(rel) for rel in stale)),
+            )
+    except Exception:  # noqa: BLE001 - a prune never fails the save that triggered it
         # The commit rolled back whole; the prune is best effort and a later save runs it again.
-        log.debug("registry history snapshots not pruned: %s", stem)
+        log.debug("registry history snapshots not pruned: %s", stem, exc_info=True)
 
 
 def _prune(vault_root: Path, stem: str) -> None:

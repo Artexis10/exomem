@@ -13,6 +13,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 import test_vault_store_read_write as read_write
@@ -32,7 +33,10 @@ from test_vault_store_write_path import (
 from exomem import (
     delete_directory,
     delete_file,
+    extraction_parts,
     move_file,
+    preserve,
+    reconcile,
     recover_from_trash,
     registry_history,
     relation_review,
@@ -40,10 +44,11 @@ from exomem import (
     scene_frames,
     semantic_writes,
 )
+from exomem import init as init_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
-from exomem.governance import membership, policy
+from exomem.governance import catalog_publication, membership, policy
 from exomem.governance.principal import owner_principal
 from exomem.governance.tool import op_govern_memory
 from exomem.vault_store import availability, batch, projection, read, verify, write
@@ -62,10 +67,23 @@ GAMMA_TEXT = (
 )
 
 
+DELTA = "Knowledge Base/Notes/Delta.md"
+DELTA_TEXT = "---\ntitle: Delta\ntype: note\n---\n# Delta\n\nSee [[Gamma]] for the tide ledger.\n"
+
+
 def store_gamma(root):
     """A page that only the store holds: it has no file until the projector writes one."""
     vault_module.batch_atomic_write(
         [planned(root, GAMMA, GAMMA_TEXT, create_only=True)],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+
+
+def store_delta(root):
+    """A second stored page, which links to the first and has no file either."""
+    vault_module.batch_atomic_write(
+        [planned(root, DELTA, DELTA_TEXT, create_only=True)],
         vault_root=root,
         post_commit_fanout=False,
     )
@@ -141,6 +159,65 @@ def gamma_rows(root):
         "identities": store_rows(root, "SELECT * FROM identities WHERE path = ?", GAMMA),
         "search": bm25_paths(root, "harbour"),
     }
+
+
+def test_delete_of_a_page_that_a_stored_page_links_to_refuses_before_the_link_has_a_file(served):
+    """A delete that trashes a page whose only linking page the projector has not written yet."""
+    store_gamma(served)
+    store_delta(served)
+    assert not (served / DELTA).exists(), "the link must exist in the store alone for this check"
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS"
+    assert f"{DELTA}:7" in refused.value.reason
+    assert revision(served) == start
+    assert tree(served) == before
+    assert stored_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+
+    forced = delete_file.delete_file(served, path=GAMMA, confirm=True, force_orphan=True)
+
+    assert forced.inbound_link_count == 1
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
+    assert stored_bytes(served, forced.trash_path) == GAMMA_TEXT.encode()
+
+
+def test_delete_of_a_page_that_gains_a_link_after_the_check_refuses_and_commits_nothing(
+    served, writer, monkeypatch
+):
+    """A delete that passed its link check, then trashed a page that a commit then linked to."""
+    store_gamma(served)
+    original_check = batch._check_held
+    raced = []
+
+    def check_then_link(plan):
+        original_check(plan)
+        if not raced:
+            raced.append(1)
+            write.commit(
+                writer,
+                write.StoreChange(
+                    write.Origin.GOVERNED,
+                    "race",
+                    puts=(write.PagePut(DELTA, DELTA_TEXT.encode()),),
+                ),
+            )
+
+    monkeypatch.setattr(batch, "_check_held", check_then_link)
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert refused.value.code == "STALE_DELETE"
+    assert f"{DELTA} now links to it" in refused.value.reason
+    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert stored_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+    assert tree(served) == before, "the refused commit must roll back the sidecar it published"
 
 
 def test_a_delete_then_a_move_back_through_the_store_restores_the_page_and_rows(served, writer):
@@ -297,7 +374,7 @@ def test_a_registry_history_prune_deletes_from_the_store_snapshots_that_have_no_
     assert tree(served) == before, "no Markdown or YAML file may be written or removed"
 
 
-def test_lifecycle_prepared_cleanup_refuses_by_name_and_changes_nothing(served):
+def test_lifecycle_prepared_cleanup_names_each_slot_unrouted_and_changes_nothing(served):
     """A stale judgement made from the files that deletes a slot whose page the store holds."""
     page_id = _LIFECYCLE_IDS["stale"]
     _, prepared, _, _ = _install_lifecycle_slot(
@@ -309,11 +386,15 @@ def test_lifecycle_prepared_cleanup_refuses_by_name_and_changes_nothing(served):
     before = tree(served)
     start = revision(served)
 
-    with pytest.raises(OpError) as refused:
-        relation_review.cleanup_stale_lifecycle_prepared_batch(served, inspected.inspections)
+    batch_result = relation_review.cleanup_stale_lifecycle_prepared_batch(
+        served, inspected.inspections
+    )
 
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "lifecycle prepared cleanup" in refused.value.message
+    # Reconcile reads the issues and goes on, as it does for a snapshot mismatch.
+    assert batch_result.cleaned == ()
+    assert [(issue.code, issue.page_identity) for issue in batch_result.blocked] == [
+        (availability.WRITER_UNROUTED, page_id)
+    ]
     assert prepared.exists()
     assert revision(served) == start
     assert tree(served) == before
@@ -389,3 +470,135 @@ def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served)
         served, f"{DIAGRAM}.meta.json", b"{}", expected_identity=None
     )
     assert (served / f"{DIAGRAM}.meta.json").read_bytes() == b"{}"
+
+
+FRAME_SIDECAR = "Knowledge Base/Media/gone.mp4.frames/scene-000-t0ms.jpg.md"
+
+
+def test_reconcile_names_a_stored_frame_folder_it_kept_and_still_finishes(served):
+    """A reconcile that dies on a stored frame sidecar, or counts it as removed when it stayed."""
+    frames = served / FRAME_SIDECAR
+    frames.parent.mkdir(parents=True)
+    frames.write_text("# Frame\n", encoding="utf-8")
+
+    report = reconcile.reconcile(served)
+
+    assert report.frame_orphans_kept == ["Knowledge Base/Media/gone.mp4.frames"]
+    assert report.frame_orphans_removed == 0
+    assert frames.read_text(encoding="utf-8") == "# Frame\n"
+
+
+RAW_SOURCE = "Knowledge Base/Sources/__exomem_raw_v1__minutes.md"
+
+
+def stored_part(root, number):
+    """A part page of a raw-marked Source page: its folder is no dot folder, so it is stored."""
+    rel = extraction_parts.part_path(Path(RAW_SOURCE), number).as_posix()
+    vault_module.batch_atomic_write(
+        [planned(root, rel, f"# Part {number}\n", create_only=True)],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    return rel
+
+
+def test_retiring_a_stored_part_page_refuses_by_name_and_changes_nothing(served):
+    """A retire that unlinks the projection of a part page and leaves the stored page behind."""
+    part = stored_part(served, 3)
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(OpError) as refused:
+        extraction_parts.retire(served, (served / part,))
+
+    assert refused.value.code == availability.WRITER_UNROUTED
+    assert "part page retirement" in refused.value.message
+    assert revision(served) == start
+    assert tree(served) == before
+    assert read.owned_bytes(served, part) == b"# Part 3\n"
+
+
+def test_the_part_sweep_leaves_a_stored_surplus_part_as_unowned_in_a_preview_and_a_run(served):
+    """A sweep that aborts reconcile on a stored part, or lists it as removed when it stayed."""
+    source = served / RAW_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n\n"
+        f"{preserve._EXTRACTED_HEADING}\n\nFirst part.\n",
+        encoding="utf-8",
+    )
+    part = served / stored_part(served, 3)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_text(
+        "---\npart: 3\npart_of: Minutes\n---\n# Part 3\n", encoding="utf-8"
+    )
+    before = tree(served)
+
+    for dry_run in (True, False):
+        swept = extraction_parts.sweep(served, dry_run=dry_run)
+        assert swept.removed == [], dry_run
+        assert swept.unowned == [part.relative_to(served).as_posix()], dry_run
+
+    assert tree(served) == before
+
+
+def test_init_overlay_refuses_in_store_mode_and_replaces_nothing(served):
+    """A forced init whose overlay copies the scaffold's log over a page that the store holds."""
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(OpError) as refused:
+        init_module.init_vault(served, force=True)
+
+    assert refused.value.code == availability.WRITER_UNROUTED
+    assert "exomem init --force" in refused.value.message
+    assert revision(served) == start
+    assert tree(served) == before
+
+
+def test_reclaim_schema_previews_but_refuses_to_delete_in_store_mode(served):
+    """A reclaim that deletes the legacy `_Schema` copies from disk where the store holds pages."""
+    source = next(iter(init_module.shipped_schema_sources()))
+    relative = source.relative_to(init_module._SCAFFOLD).as_posix().split("/", 1)[1]
+    legacy = served / "Knowledge Base/_Schema" / relative
+    deployed = init_module.shipped_schema_target(served) / relative
+    for copy in (legacy, deployed):
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes(source.read_bytes())
+    before = tree(served)
+    start = revision(served)
+
+    preview = init_module.reclaim_legacy_shipped_schema(served)
+    assert preview["removed"] == [relative], "the preview reads the disk and stays available"
+    with pytest.raises(OpError) as refused:
+        init_module.reclaim_legacy_shipped_schema(served, apply=True)
+
+    assert refused.value.code == availability.WRITER_UNROUTED
+    assert "exomem reclaim-schema --apply" in refused.value.message
+    assert legacy.is_file()
+    assert revision(served) == start
+    assert tree(served) == before
+
+
+def test_delete_validation_refuses_what_the_commit_refuses_for_an_active_catalog(
+    served, monkeypatch
+):
+    """A plan that validates and then fails at its commit, because the catalog has no store form."""
+    store_gamma(served)
+    # The real publication needs an enrolled governance vault; its answer is the boundary here.
+    monkeypatch.setattr(
+        catalog_publication,
+        "prepare_catalog_membership_batch",
+        lambda *args, **kwargs: object(),
+    )
+    before = tree(served)
+    start = revision(served)
+
+    for validate_only in (True, False):
+        with pytest.raises(OpError) as refused:
+            delete_file.delete_file(served, path=GAMMA, confirm=True, validate_only=validate_only)
+        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
+        assert "catalog publication" in refused.value.message
+
+    assert revision(served) == start
+    assert tree(served) == before

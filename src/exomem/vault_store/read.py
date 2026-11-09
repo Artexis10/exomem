@@ -130,6 +130,10 @@ class StoreSnapshot:
             # "0" is the code point after "/", so every path below "name/" sorts before it.
             lower = prefix + name + ("0" if slash else "\x00")
 
+    def inbound_sources(self, rel: str) -> frozenset[str]:
+        """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from."""
+        return inbound_sources(self.connection, rel)
+
     def binary(self, rel: str) -> BinaryMeta | None:
         """The record of one binary, or None when the store records no such path."""
         row = self.connection.execute(
@@ -152,6 +156,20 @@ class StoreSnapshot:
             page = self.page(meta.path)
             title = None if page is None else vault.title_key_from_bytes(page.body, meta.path)
             yield meta.path, title
+
+
+def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
+    """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from.
+
+    A commit derives a page's graph rows in its own transaction, so these are current at the
+    revision that ``connection`` sees, which the projector's lag does not change. The page key's
+    ``file:`` prefix is how the graph names a page, as ``epistemic_graph`` writes it.
+    """
+    rows = connection.execute(
+        "SELECT DISTINCT source_path FROM graph_edges WHERE dst_page_key = ? AND source_path != ?",
+        (f"file:{rel}", rel),
+    )
+    return frozenset(row[0] for row in rows)
 
 
 def _walk_member(rel: str) -> bool:

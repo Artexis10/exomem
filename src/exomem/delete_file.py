@@ -282,6 +282,9 @@ def _delete_file_local(
         refusal = _store_form_gap(vault_root, rel_path, fm)
         if refusal is not None:
             raise store_availability.unrouted("delete_file", refusal)
+        # Before validation returns, so a plan that validates is a plan that commits.
+        assert catalog_before_hash is not None  # a page that reaches here is Markdown and was read
+        _refuse_active_catalog(vault_root, rel_path, catalog_before_hash)
 
     # Normalize expected_dead_inbound for filtering.
     expected_set: set[str] = set()
@@ -302,11 +305,13 @@ def _delete_file_local(
     from .governance import egress
 
     visible = egress.restricted_release_filter(vault_root)
-    inbound_all = [
-        match
-        for match in find_inbound_wikilinks(vault_root, rel_path)
-        if visible is None or visible(match.path)
-    ]
+    # A stored page's links are in the store as of the last commit; the disk shows the projection.
+    linked = (
+        find_inbound_wikilinks(vault_root, rel_path)
+        if store_writer is None
+        else store_targets.inbound_links(vault_root, rel_path)
+    )
+    inbound_all = [match for match in linked if visible is None or visible(match.path)]
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
     inbound = [m for m in inbound_all if m.path not in expected_set]
 
@@ -435,6 +440,15 @@ def _delete_file_local(
         log_body += " force_superseded=true."
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."
+    if store_writer is not None:
+        assert catalog_before_hash is not None and prior_markdown is not None
+        return _trash_in_store(
+            store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
+            metadata_bytes=metadata_bytes, source_hash=catalog_before_hash,
+            linked_from=frozenset(match.path for match in linked), prior_markdown=prior_markdown,
+            log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
+            inbound_ignored=len(inbound_ignored), warnings=warnings,
+        )
     log_plan = plan_log_entry(
         vault_root,
         date_iso=today_iso,
@@ -473,18 +487,6 @@ def _delete_file_local(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             reason=str(error),
         ) from error
-    if store_writer is not None:
-        if catalog_target is not None:
-            raise store_availability.unrouted(
-                "delete_file", "the vault's active catalog publication has no store form"
-            )
-        assert catalog_before_hash is not None  # a page that reaches here is Markdown and was read
-        return _trash_in_store(
-            store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
-            metadata_bytes=metadata_bytes, source_hash=catalog_before_hash,
-            log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
-            inbound_ignored=len(inbound_ignored), warnings=warnings,
-        )
     from .media_store import local_originals
 
     originals_context.enter_context(local_originals(vault_root, (rel_path,)))
@@ -783,10 +785,41 @@ def _store_form_gap(vault_root: Path, rel_path: str, fm: dict) -> str | None:
         return "only a Markdown page is held by the store, and a file's bytes stay on disk"
     if lifecycle.policy_governs_anything(vault_root):
         return "a governance policy is declared, and its tombstones and receipts go to files"
-    parts_folder = Path(vault_root) / extraction_parts.folder_for(Path(rel_path))
-    if "stored_object" in fm or extraction_parts.count_of(fm) > 1 or parts_folder.is_dir():
+    # The folder is a dot folder, on disk, except for a page marked raw, whose parts are pages.
+    parts_folder = extraction_parts.folder_for(Path(rel_path)).as_posix()
+    if (
+        "stored_object" in fm
+        or extraction_parts.count_of(fm) > 1
+        or (Path(vault_root) / parts_folder).is_dir()
+        or store_targets.holds_pages_under(vault_root, parts_folder)
+    ):
         return "its stored original or its part pages move with it, and they have no store form"
     return None
+
+
+def _refuse_active_catalog(vault_root: Path, rel_path: str, before_hash: str) -> None:
+    """Refuse a store-mode delete while the vault's catalog publication is active.
+
+    The catalog publishes a removal in files after the delete commits, and the store has no form
+    for them, so a delete that committed would leave the catalog naming a page that is gone. It
+    prevents that, and a wrong refusal costs a rollback of store mode. It is the same call that
+    file mode makes before it changes anything, with no log or graph writes: they matter only to a
+    publication that the store never carries, and an enrolled vault is refused with or without them.
+    """
+    try:
+        target = catalog_publication.prepare_catalog_membership_batch(
+            vault_root,
+            removals=(catalog_publication.CatalogRemoval(rel_path, before_hash),),
+            now=int(time.time()),
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise DeleteFileError(
+            code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
+        ) from error
+    if target is not None:
+        raise store_availability.unrouted(
+            "delete_file", "the vault's active catalog publication has no store form"
+        )
 
 
 def _trash_in_store(
@@ -798,6 +831,8 @@ def _trash_in_store(
     meta_rel: str,
     metadata_bytes: bytes,
     source_hash: str,
+    linked_from: frozenset[str],
+    prior_markdown: str,
     log_entry: tuple[str, str, str],
     inbound: int,
     inbound_ignored: int,
@@ -806,8 +841,9 @@ def _trash_in_store(
     """Move one stored page to the trash in a single store transaction.
 
     The page keeps its bytes at the trash path and loses its rows at the old one, and the sidecar
-    lands on disk inside the same rollback window. A stale page refuses the whole commit with
-    nothing changed. No Markdown is written: the projector moves the file afterwards.
+    lands on disk inside the same rollback window. A stale page, or a link from a page that the
+    caller's inbound check did not see, refuses the whole commit with nothing changed. No Markdown
+    is written: the projector moves the file afterwards.
     """
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import batch as store_batch
@@ -816,20 +852,26 @@ def _trash_in_store(
     root = Path(vault_root)
     sidecar = PlannedWrite(root / meta_rel, metadata_bytes.decode("utf-8"), create_only=True)
     moves = store_batch.Lifecycle(
-        moves=(PageMove(rel_path, trash_rel),), expect={rel_path: Expect(sha256=source_hash)}
+        moves=(PageMove(rel_path, trash_rel),),
+        expect={rel_path: Expect(sha256=source_hash, linked_from=linked_from)},
     )
     try:
         store_batch.commit_batch(writer, [sidecar], vault_root=root, lifecycle=moves)
     except StoreConflict as conflict:
         if conflict.path == rel_path:
             raise DeleteFileError(
-                "STALE_DELETE", "delete source changed since it was read"
+                "STALE_DELETE", f"delete source changed since it was read ({conflict.message})"
             ) from conflict
         raise DeleteFileError(
             "DELETE_FAILED", "Trash placement could not be published"
         ) from conflict
     except (CreateOnlyConflict, PathGuardError, OSError) as error:
         raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from error
+    from . import due_state
+
+    due_state.refresh_after_writes(
+        root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
+    )
     today_iso, rel_no_ext, body = log_entry
     log_warning = write_log_entry(
         root, date_iso=today_iso, op="delete_file (trash)", rel_path_no_ext=rel_no_ext, body=body

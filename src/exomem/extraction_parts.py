@@ -261,11 +261,31 @@ def plan(
     return Plan(tuple(writes), surplus)
 
 
+def _holds_stored_parts(vault_root: Path, rels: list[str]) -> bool:
+    """Whether the store holds any of these part pages, which ``retire`` cannot remove."""
+    from .vault_store import targets as store_targets
+
+    return store_targets.owns_any(vault_root, files=tuple(rels))
+
+
 def retire(vault_root: Path, pages: tuple[Path, ...]) -> None:
-    """Remove part pages that no extraction owns any more, and the folder once it is empty."""
+    """Remove part pages that no extraction owns any more, and the folder once it is empty.
+
+    A part page that the store holds (the folder of a raw-marked page is not a dot folder) has no
+    file-side removal: the unlink would leave the store's page in place. It refuses before any page
+    goes, and a false refusal costs one rollback of store mode. A dot folder is on disk and passes.
+    """
     if not pages:
         return
     from . import file_watcher, index_sync
+    from .vault_store import targets as store_targets
+
+    store_targets.refuse_unrouted(
+        vault_root,
+        "part page retirement",
+        "it removes part pages from disk, and the store holds them",
+        files=tuple(page.relative_to(vault_root).as_posix() for page in pages),
+    )
 
     # The removal is ours, so the watcher need not report it again (as `delete_file` does for frames).
     try:
@@ -550,7 +570,8 @@ class Sweep:
     #: Source pages with a part that is missing and could not be rebuilt.
     missing: list[str] = field(default_factory=list)
     #: Pages at a part's path that the sweep leaves alone: their Source page is gone or holds no
-    #: extraction, or the page is not a part written for it. A person decides about these.
+    #: extraction, the page is not a part written for it, or the store holds it in a store-mode
+    #: vault. A person decides about these.
     unowned: list[str] = field(default_factory=list)
 
 
@@ -644,7 +665,12 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
                 surplus.append(entry)
             else:
                 result.unowned.append(entry.relative_to(root).as_posix())
-        result.removed += [entry.relative_to(root).as_posix() for entry in surplus]
+        removable = [entry.relative_to(root).as_posix() for entry in surplus]
+        # The same test `retire` refuses on, so a dry run and a real run name the same parts.
+        if _holds_stored_parts(root, removable):
+            result.unowned += removable
+            surplus, removable = [], []
+        result.removed += removable
         if not dry_run:
             retire(root, tuple(surplus))
         missing = [number for number in range(2, count + 1) if number not in present]
