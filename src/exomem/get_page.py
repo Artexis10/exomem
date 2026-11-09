@@ -131,6 +131,8 @@ def unreadable_or_absent(
 def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     """Normalize, resolve, and bind one direct read to an immutable snapshot."""
 
+    from .vault_store import read
+
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
@@ -143,17 +145,37 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if len(named) > 1 and not (vault_root / rel).exists() and (vault_root / named[1]).exists():
+        if (
+            len(named) > 1
+            and not read.page_exists(vault_root, rel)
+            and read.page_exists(vault_root, named[1])
+        ):
             rel = named[1]
 
+        # A page that the store serves is read at its store key. Resolving the whole path would
+        # follow a link at the page's own name, to another page's bytes or out of the vault.
         try:
-            resolution = resolve_under_vault(vault_root, rel, return_details=True)
-        except VaultPathError as e:
+            key = read.served_key(vault_root, rel)
+        except FileNotFoundError:
             raise GetError(
-                code="INVALID_PATH",
-                reason=f"path escapes vault or is unreadable: {e.reason}",
+                code="NOT_FOUND", reason=f"file does not exist: {missing_path}"
             ) from None
-        assert isinstance(resolution, VaultPathResolution)
+        if key is not None:
+            resolution = VaultPathResolution(
+                candidate=vault_root / rel,
+                relative=rel,
+                resolved=vault_root / key,
+                resolved_relative=key,
+            )
+        else:
+            try:
+                resolution = resolve_under_vault(vault_root, rel, return_details=True)
+            except VaultPathError as e:
+                raise GetError(
+                    code="INVALID_PATH",
+                    reason=f"path escapes vault or is unreadable: {e.reason}",
+                ) from None
+            assert isinstance(resolution, VaultPathResolution)
 
     # `excluded` paths (_access.yaml) refuse identically to a missing file —
     # never a distinct error, never echoed differently — so the response is
@@ -178,25 +200,33 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
         # filesystem (Linux ext4) -- and refuses outright rather than guess
         # if two physical spellings collide; `physical=True` below then opens
         # exactly that confirmed spelling instead of re-normalizing it away.
-        with call_spans.span("read.prepare.resolve_physical"):
-            physical_relative = reserved_paths.resolve_physical_relative(
-                vault_root, resolution.resolved_relative
-            )
-        with call_spans.span("read.prepare.inspect"):
-            expected_identity = reserved_paths.inspect_generic_file(
-                vault_root, physical_relative, physical=True
-            )
-        with call_spans.span("read.prepare.held_read"):
-            snapshot = reserved_paths.read_generic_bytes(
-                vault_root, physical_relative, physical=True
-            )
-        if snapshot.identity != expected_identity:
-            raise unreadable_or_absent(
-                vault_root,
-                (resolution.relative, resolution.resolved_relative),
-                missing_path,
-                "file changed while being read",
-            )
+        if read.serves(vault_root, resolution.resolved_relative):
+            # The store holds the page's exact bytes and reads them in one snapshot: there is no
+            # file to find under another spelling and no file identity to prove unchanged.
+            with call_spans.span("read.prepare.stored_read"):
+                snapshot = reserved_paths.read_generic_bytes(
+                    vault_root, resolution.resolved_relative, physical=True
+                )
+        else:
+            with call_spans.span("read.prepare.resolve_physical"):
+                physical_relative = reserved_paths.resolve_physical_relative(
+                    vault_root, resolution.resolved_relative
+                )
+            with call_spans.span("read.prepare.inspect"):
+                expected_identity = reserved_paths.inspect_generic_file(
+                    vault_root, physical_relative, physical=True
+                )
+            with call_spans.span("read.prepare.held_read"):
+                snapshot = reserved_paths.read_generic_bytes(
+                    vault_root, physical_relative, physical=True
+                )
+            if snapshot.identity != expected_identity:
+                raise unreadable_or_absent(
+                    vault_root,
+                    (resolution.relative, resolution.resolved_relative),
+                    missing_path,
+                    "file changed while being read",
+                )
     except reserved_paths.ReservedPathLeafError as error:
         if error.code == "AMBIGUOUS_PATH":
             # Only a caller who may see the page learns it has two spellings;

@@ -11262,6 +11262,7 @@ _ADOPTION_STUDIO_ACTIONS = (  # nosemgrep: ep-word-set -- adoption_studio's acti
     "select",
     "plan",
     "apply",
+    "file",
     "cancel",
     "finish",
     "work-item",
@@ -11325,9 +11326,11 @@ def op_adoption_studio(
     Never rewrite or move originals; apply deletes filed staged copies.
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
-    start scans; select chooses; plan previews; apply copies into Sources and
-    drafts notes under own-note rules; cancel closes pre-apply; finish reports
-    recall and coverage. Resume plan/apply with `continuation`.
+    file imports a staged folder in one repeatable call: repeat it with the
+    `continuation` it returns until `filing` is not `working`. Other actions are
+    the step path. start scans; select chooses; plan previews; apply copies into
+    Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
+    reports recall and coverage. Resume plan/apply with `continuation`.
     work-item reads context; propose submits; apply-proposal approves.
     acknowledge is the person's decision: it ends the keep-source warning for paths
     of a window's "discarded, not filed" record; no tool undoes it.
@@ -11338,11 +11341,11 @@ def op_adoption_studio(
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `start`, subtree (default: whole vault; ask which folder).
-            For `status`, count filed originals under it.
+        path: For `file`, the staged folder `_Imports/<id>`. For `start`, subtree
+            (default: whole vault; ask which folder). For `status`, count filed originals under it.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
-        collection: For `start`, a name kept across re-imports.
+        collection: For `file` or `start`, a name kept across re-imports.
         include: For `select`, paths or folder rules {path, source_kind?,
             domain?} using registered keys; {path, adopt_as: note, note_type,
             project?, domain?} drafts a note for each Markdown file.
@@ -11350,7 +11353,7 @@ def op_adoption_studio(
         overrides: For `select`, files to force-select.
         include_junk: For `select`, include demoted junk files.
         plan_id: For `apply`, from `plan`/`status`.
-        continuation: For `plan`/`apply`, from the previous result.
+        continuation: For `file`/`plan`/`apply`, from the previous result.
         retry_failed: For `apply`, re-apply only failures.
         only_paths: For `apply`, restrict to these originals.
         why: Required for `apply-proposal`; also the `cancel` reason.
@@ -11377,7 +11380,7 @@ def op_adoption_studio(
     if action not in _ADOPTION_STUDIO_ACTIONS:
         raise ValueError(
             "INVALID_MODE: adoption_studio action must be start, status, select, "
-            "plan, apply, cancel, finish, work-item, propose, apply-proposal, or acknowledge"
+            "plan, apply, file, cancel, finish, work-item, propose, apply-proposal, or acknowledge"
         )
     try:
         if action == "start":
@@ -11424,6 +11427,15 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
             return _carrying_batch_advisories(vault_root, applied)
+        if action == "file":
+            from . import due_state as due_state_module
+
+            # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
+            with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
+                filed = adoption_run_module.file(
+                    vault_root, path=path, collection=collection, continuation=continuation
+                )
+            return _carrying_batch_advisories(vault_root, filed)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -11487,8 +11499,10 @@ def op_observe_transfer(
        capture_source, within their per-call bounds.
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
-    3. File it: start on the `next` path (`_Imports/<id>`), and again with `next_after` while a
-       reply has one; select, plan and apply (at `apply_stop`, stop until space is free); finish.
+    3. File it: import_memory `file` on the `next` path (`_Imports/<id>`), repeated with its
+       `continuation` until `filing` is not `working`. An older server refuses `file`: start on
+       the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
+       until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
     Finish removes each verified file's staged copy; the rest stay until discard.
     When an export is ready, status gives a Home link and a CLI command to download it.

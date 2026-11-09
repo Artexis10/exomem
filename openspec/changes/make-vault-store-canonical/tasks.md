@@ -19,6 +19,8 @@
 
 - [ ] 3.1 Point every reader of page bytes or derived rows at the store in store mode: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision), governance frontmatter reads and the registry overlay loaders.
 - [ ] 3.2 Remove freshness witnesses, mtime checks and sync-on-first-use repair from the store-mode read path.
+  - Left from 3.1: in store mode, `find`'s keyword mode answers the typed warming outcome once pages exist only in the store, because it reads the sidecar that is built from files; the managed browse and keyword readers and the semantic-unit and filter-eligibility catalogue readers read the same sidecar and are not yet probed.
+  - Left from 3.1: store-mode `find` costs about 7 to 14 ms per page, because each `FrontmatterCache.get` opens its own snapshot. Before the gate opens, search must use one snapshot per request and meet a stated latency budget.
 
 ## 4. Projection and outside edits
 

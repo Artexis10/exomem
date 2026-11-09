@@ -81,6 +81,7 @@ class Window:
     and the members that the person acknowledged. An unreadable one has a record that cannot be used, or a
     stage and no record, so nothing about its members is known; `staged` says whether its stage folder exists.
     `renames_pending` names the Knowledge Base paths that a refused discard found renamed and not committed.
+    `filing_done` says whether a `file` call on a landed window answers `done`, so a sender that files leaves it alone.
     """
 
     import_id: str
@@ -90,6 +91,7 @@ class Window:
     problem: str | None = None
     staged: bool = False
     renames_pending: tuple[str, ...] = ()
+    filing_done: bool = False
 
 
 def census(root: Path) -> list[Window]:
@@ -105,7 +107,8 @@ def census(root: Path) -> list[Window]:
             staged = {path for path, _size in import_stage.staged_files(root, import_id)}
             unfiled = adoption_run.unfiled_members(root, import_id, runs.get(import_id, ()))
             members = tuple({**member, "staged": member["path"] in staged} for member in unfiled)
-            windows.append(Window(import_id, import_stage.WINDOW_LANDED, members, **common))
+            done = adoption_run.filing_done(root, f"{import_stage.STAGE_DIR}/{import_id}", runs.get(import_id, ()))
+            windows.append(Window(import_id, import_stage.WINDOW_LANDED, members, filing_done=done, **common))
         elif record.kind == import_stage.WINDOW_DISCARDED:
             windows.append(Window(import_id, import_stage.WINDOW_DISCARDED, record.members, record.acknowledged, **common))
         else:
@@ -144,6 +147,7 @@ def _window_entry(window: Window, listed: dict[bool, list[dict]]) -> dict:
         staged = [member for member in window.members if member["staged"]]
         entry["unfiled"] = {"count": len(window.members), "bytes": total}
         entry["unfiled_staged"] = {"count": len(staged), "bytes": sum(member["bytes"] for member in staged)}
+        entry["filing_done"] = window.filing_done
         entry["members"] = [{**member, "state": "unfiled"} for member in listed[False]]
     elif window.state == import_stage.WINDOW_DISCARDED:
         entry["residual"] = {"count": len(window.members), "bytes": total}
