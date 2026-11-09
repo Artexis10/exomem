@@ -1320,7 +1320,11 @@ class _LinkProjector:
                     vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
             except (vault.VaultPathError, vault.PathGuardError):
                 return False
-            return self._remember(f"forward:{relative}", False)
+            # A converted collection's retired item path names its stored row, which the alias read
+            # releases under that collection's governed query (design §17).
+            from .collection_store import aliases
+
+            return self._remember(f"forward:{relative}", aliases.link_target(self.root, relative) is not None)
         except (memory_refs.ReferenceError, vault.PathGuardError):
             return False
         if relative in self.verdicts:

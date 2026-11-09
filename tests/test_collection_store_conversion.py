@@ -16,6 +16,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from record_fixtures import LEDGER_COLLECTION_PATH as LEDGER
 from record_presentation_fixtures import COLLECTION_PATH as OBSERVED
 from record_presentation_fixtures import ITEM_KEY as OBSERVATION
 from record_presentation_fixtures import manifest_text as observed_manifest
@@ -404,6 +405,56 @@ def test_a_note_that_links_to_an_old_item_path_resolves_it_to_the_store_row(serv
     audit = call(root, "review_memory", mode="audit", categories=["broken_wikilink", "forward_reference"])
     assert [finding for finding in audit["findings"] if finding["path"] == saved["path"]] == []
     assert not (root / item).exists()
+
+
+def test_a_query_keeps_a_link_to_an_old_item_path_when_the_reader_may_read_that_row(
+        env, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: after conversion a query drops a link field whose value names an old item path, though a
+    read of that path answers the stored row; or two rows that link to each other's old paths make
+    the link check read rows without end."""
+    root = legacy_vault(env, relationships=True)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        call(root, "record_memory", action="append", collection=WORK, item={"title": "Two", "count": 1},
+             why="a second row")
+        _until(lambda: settled(root, CID) and len(item_files(root, WORK)) == 2, 30)
+        one, two = (path.removeprefix("Knowledge Base/").removesuffix(".md")
+                    for path in sorted(item_files(root, WORK), key=lambda path: "Original" not in path))
+        # Each row links to the other's item file, so after conversion each link names an old path.
+        for title, target in (("One", two), ("Two", one)):
+            work = call(root, "record_memory", action="query", collection=WORK)
+            row = next(row for row in work["rows"] if row["title"] == title)
+            call(root, "record_memory", action="update", collection=WORK, item_key=row["record_id"],
+                 changes={"related": f"[[{target}]]"}, why="link the other row",
+                 expected_container_hash=work["snapshot"], expected_item_version=row["item_version"])
+        _until(lambda: settled(root, CID), 30)
+        before = {row["title"]: row.get("related")
+                  for row in call(root, "record_memory", action="query", collection=WORK)["rows"]}
+        assert before == {"One": f"[[{two}]]", "Two": f"[[{one}]]"}
+
+        convert(root, WORK)
+        assert item_files(root, WORK) == {}
+        after = {row["title"]: row.get("related")
+                 for row in call(root, "record_memory", action="query", collection=WORK)["rows"]}
+        assert after == before
+        # The stored value is unchanged, and following it reads the other stored row.
+        assert call(root, "read_memory", path=two)["store_row"]["title"] == "Two"
+    finally:
+        service.stop()
+
+
+def test_the_history_page_of_a_converted_collection_links_only_pages_that_exist(served):
+    """Defect: after conversion the generated history page keeps each imported event's link to its
+    retired item path, a dead link in the vault."""
+    root = served
+    page = root / Path(LEDGER).parent / "_history.md"
+    convert(root, LEDGER)
+    # The page renders again after the conversion, with the events the writer imported for each item.
+    _until(lambda: page.exists() and "cutover to summary storage" in page.read_text(), 30)
+    links = [line.removeprefix("- [[").removesuffix("]]") for line in page.read_text().splitlines()
+             if line.startswith("- [[")]
+    assert links and all((root / link).is_file() for link in links), links
 
 
 def test_conversion_refuses_while_an_edit_to_the_manifest_view_is_unsettled(served, monkeypatch):

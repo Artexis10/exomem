@@ -1505,7 +1505,7 @@ Manifests declare `storage.strategy: sqlite`. A manifest that still declares `ma
 
 **Create follows the vault until P6.** A vault with an enrolled store creates only `sqlite` collections, through every create path. A vault without one keeps file-canonical create until the cutover or P6.1 moves it. In P6, a fresh vault enrolls its store at init, so file-canonical create can be deleted.
 
-**Conversion keeps every row and every decision.** Converting a populated store collection rewrites no row. One store transaction writes a new manifest version and retires the item projection state. Each row keeps its former view path as a retired alias, so references to old item paths still resolve to the row.
+**Conversion keeps every row and every decision.** Converting a populated store collection rewrites no row. One store transaction writes a new manifest version and retires the item projection state. Each row keeps its former view path as a retired alias, so references to old item paths still resolve to the row. A `query` keeps a link value that names a retired item path when the reader may read that row, through the same governed read as the alias; the stored value does not change. The history pages of a summary collection link the collection page, because the item page no longer exists.
 
 A summary row's governance subject is the collection path (§7). The conversion therefore refuses a collection when that change would alter any row's disclosure decision for any standing audience, and it names the scope. The owner adjusts the scope first; the conversion never widens or narrows access as a side effect.
 
@@ -1516,6 +1516,8 @@ A summary row's governance subject is the collection path (§7). The conversion 
 2. migrate the remaining file-canonical collections through the existing importer;
 3. convert every store collection;
 4. check parity against the backup.
+
+The backup is a verified snapshot of the store, and parity measures against it. The backup names the derived database by path, size and sha256 and does not copy it: its rows rebuild from the store's import log and the sources that the vault preserves, and a copy of a large one would hold most of the stop window. The offline owner hands the store back with a bound sized for the whole store, not one mutation's timeout, so a run whose last publication is slow still exits as complete.
 
 The first `sqlite` create or the first conversion, whichever comes first, records the state compatibility descriptor `collections-sqlite-only-v1`. A release without that descriptor refuses the state as an unknown descriptor instead of rendering item views again. Before the cutover, rollback is the previous release. After the cutover, the rollback is the copy of the vault root and the state root that the operator takes with the service stopped, before the apply. Restoring both roots whole also restores the state manifest without `collections-sqlite-only-v1`, so the previous release accepts the state again. The cutover backup and the archive are recovery material for rows and item files, not a rollback: no step restores them under the previous release.
 
