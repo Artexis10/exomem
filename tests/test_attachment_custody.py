@@ -194,8 +194,8 @@ _LOCAL_PATH_ARGUMENT = re.compile(
     r"|(^|[._\[\]])filepath$",
     re.IGNORECASE,
 )
-#: Every argument of a command that receives a file's bytes.
-_FILE_INTAKE_COMMANDS = ("capture_source", "preserve_artifacts", "preserve_evidence", "transfer_artifact")
+#: Every listed tool that receives a file's bytes.
+_FILE_INTAKE_TOOLS = ("save_source", "save_evidence", "upload_files")
 
 
 def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
@@ -205,10 +205,10 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
     for name, tool in schemas.items():
         names = _schema_property_names(tool["inputSchema"])
         assert not [n for n in names if _LOCAL_PATH_ARGUMENT.search(n)], name
-    for name in _FILE_INTAKE_COMMANDS:
+    for name in _FILE_INTAKE_TOOLS:
         names = _schema_property_names(schemas[name]["inputSchema"])
         assert not [n for n in names if "path" in n.lower() or "dir" in n.lower()], name
-    for name in ("capture_source", "preserve_artifacts"):
+    for name in ("save_source", "save_evidence"):
         files = schemas[name]["inputSchema"]["properties"]["files"]
         assert list(files["items"]["properties"]) == [
             "download_url",
@@ -216,8 +216,6 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
             "mime_type",
             "file_name",
         ]
-    transcriptions = schemas["preserve_artifacts"]["inputSchema"]["properties"]["transcriptions"]
-    assert sorted(transcriptions["items"]["properties"]) == ["file_id", "text"]
 
 
 # ---- Local clients: held uploads -------------------------------------------------

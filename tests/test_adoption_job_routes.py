@@ -14,34 +14,33 @@ build = pilot_mcp.build
 @pytest.mark.parametrize(
     "tool,source,selector,kind,fields",
     [
-        ("read_import", "adopt_vault", "mode", "scan-only", {"path": "Legacy"}),
-        ("import_memory", "adopt_vault", "mode", "copy-as-sources",
+        ("inspect_memory", "adopt_vault", "mode", "scan-only", {"path": "Legacy"}),
+        ("manage_memory", "adopt_vault", "mode", "copy-as-sources",
          {"selected_paths": ["Legacy/source.md"]}),
-        ("read_import", "adoption_studio", "action", "status", {}),
-        ("import_memory", "adoption_studio", "action", "start", {"collection": "Example collection"}),
-        ("import_memory", "adoption_studio", "action", "start", {"after": "run-1:after-0001-ab12cd34", "consume": False}),
-        ("import_memory", "adoption_studio", "action", "select", {
+        ("inspect_memory", "adoption_studio", "action", "status", {}),
+        ("manage_memory", "adoption_studio", "action", "start", {"collection": "Example collection"}),
+        ("manage_memory", "adoption_studio", "action", "start", {"after": "run-1:after-0001-ab12cd34", "consume": False}),
+        ("manage_memory", "adoption_studio", "action", "select", {
             "run_id": "run", "include": [{"path": "Legacy", "source_kind": "article", "domain": "science"}],
         }),
-        ("import_memory", "adoption_studio", "action", "apply", {
+        ("manage_memory", "adoption_studio", "action", "apply", {
             "run_id": "run", "plan_id": "plan", "continuation": "opaque-cursor", "retry_failed": True,
         }),
-        ("import_memory", "adoption_studio", "action", "finish", {
+        ("manage_memory", "adoption_studio", "action", "finish", {
             "run_id": "run", "write_manifest": False,
         }),
     ],
 )
 def test_adoption_jobs_preserve_exact_collection_arguments(tool, source, selector, kind, fields):
-    command, flat = resolve_invocation(tool, {"operation": {"kind": kind, **fields}}, commands.PRODUCT_COMMANDS)
-    assert command.name == source
-    assert flat == {selector: kind, **fields}
-    assert operation_entries.spell_call(source, flat, "nested") == (tool, {"operation": {"kind": kind, **fields}})
-    assert operation_entries.unspell_call(tool, {"operation": {"kind": kind, **fields}}, "nested") == (source, flat)
+    flat = {selector: kind, **fields}
+    spelled_tool, arguments = operation_entries.spell_call(source, flat, "public")
+    assert spelled_tool == tool
+    assert operation_entries.unspell_call(spelled_tool, arguments, "public") == (source, flat)
 
 
 @pytest.mark.parametrize("kind,fields", [("plan", {"run_id": "run"}), ("finish", {"run_id": "run", "write_manifest": False})])
 def test_adoption_previews_and_reports_keep_their_persisted_write_effect(kind, fields):
-    command, flat = resolve_invocation("import_memory", {"operation": {"kind": kind, **fields}}, commands.PRODUCT_COMMANDS)
+    command, flat = resolve_invocation("adoption_studio", {"action": kind, **fields}, commands.PRODUCT_COMMANDS)
     assert commands.invocation_is_read_only(command, flat) is False
 
 
@@ -57,15 +56,8 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
 
     async def scenario(client):
         tools = {tool.name: tool for tool in await client.list_tools()}
-        assert {"read_import", "import_memory"} <= tools.keys()
-        assert not {"adopt_vault", "adoption_studio"} & tools.keys()
-        branches = {branch["properties"]["kind"]["const"]: branch
-                    for branch in tools["import_memory"].input_schema["properties"]["operation"]["oneOf"]}
-        include = branches["select"]["properties"]["include"]["items"]["anyOf"]
-        assert {item["type"] for item in include} == {"string", "object"}
-        assert "collection" in branches["start"]["properties"]
-        assert "continuation" in branches["apply"]["properties"]
-        assert "report" not in branches
+        assert {"inspect_memory", "manage_memory"} <= tools.keys()
+        assert not {"adopt_vault", "adoption_studio", "import_memory", "read_import"} & tools.keys()
 
         async def change(kind, **fields):
             result = await _call(client, "import_memory", {
@@ -115,7 +107,7 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
             assert (frontmatter["source_type"], frontmatter["domain"]) == ("book", "media")
         finished = await change("finish", run_id=run_id, write_manifest=False)
         assert finished["verified_unchanged"] == finished["verified_total"] == len(originals)
-        assert "import_memory" in finished["finish"]["handoff"]["prompt_text"]
+        assert "imports.work_item" in finished["finish"]["handoff"]["prompt_text"]
         assert "adoption_studio(" not in finished["finish"]["handoff"]["prompt_text"]
 
     try:

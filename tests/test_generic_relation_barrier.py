@@ -124,8 +124,8 @@ def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_thre
     assert set(routes) == {"specific", "propose", "plain_link"}
     assert f"- {error['options'][0]['key']} [[{anchor}]]" in routes["specific"]["do"]
     assert f"- links_to [[{anchor}]]" in routes["plain_link"]["do"]
-    assert routes["propose"]["propose"]["args"]["operation"]["kind"] == "propose-relation"
-    assert routes["propose"]["save"]["args"]["operation"]["kind"] == "save-relations"
+    assert routes["propose"]["propose"]["args"]["operation"] == "schema.propose_relation"
+    assert routes["propose"]["save"]["args"]["operation"] == "schema.save_relations"
     assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
 
 
@@ -341,6 +341,7 @@ def test_a_successor_is_refused_for_a_generic_edge_it_adds_but_not_for_one_it_ca
             "supersede_note",
             {
                 "old_path": old,
+                "why": "revise the crane note",
                 "title": title,
                 "note_type": "insight",
                 "content": _body(title, *rows),
@@ -349,7 +350,7 @@ def test_a_successor_is_refused_for_a_generic_edge_it_adds_but_not_for_one_it_ca
         )
 
     added = supersede("Crane revised", f"relates_to [[{anchor}]]", f"relates_to [[{other}]]")
-    assert added["error"]["code"] == CODE
+    assert added["error"]["code"] == CODE, added
 
     carried = supersede("Crane revised", f"relates_to [[{anchor}]]")
     assert "error" not in carried, carried

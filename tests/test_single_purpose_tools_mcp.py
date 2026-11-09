@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_authorization_session_wire_reconnect as wire
+from _public_call import public_call
 from fastmcp import Client
 from record_fixtures import LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT
 
@@ -138,7 +139,9 @@ def _session(mcp, scenario):
 
 
 async def _call(client, name, arguments, *, key=None):
+    """Call a tool as an agent does; a retired or grouped name is sent as its public call."""
     meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key} if key else None
+    name, arguments = public_call(name, arguments)
     result = await client.call_tool(name, arguments, raise_on_error=False, meta=meta)
     return result.structured_content if result.structured_content is not None else {
         "is_error": result.is_error,
