@@ -539,11 +539,21 @@ def test_a_migration_whose_claim_cannot_be_published_stays_in_file_mode_and_leav
     join_as_other_root(vault, tmp_path, monkeypatch)
     service_indexes = index_paths(vault)
 
-    def fail(*_args, **_kwargs):
-        raise connection.CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING", "drill")
+    real_publish = replica.publish_replica
+
+    def fail_once_the_store_says_store(vault_root, *args, **kwargs):
+        # The admission that opens the migration still publishes; the claim's publication does not.
+        uri = f"{connection.store_path(vault_root).as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as store:
+            row = store.execute(
+                "SELECT value FROM store_meta WHERE key = ?", (marker.KEY,)
+            ).fetchone()
+        if row is not None and row[0] == marker.ACTIVE:
+            raise connection.CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING", "drill")
+        return real_publish(vault_root, *args, **kwargs)
 
     with monkeypatch.context() as broken:
-        broken.setattr(replica, "publish_replica", fail)
+        broken.setattr(replica, "publish_replica", fail_once_the_store_says_store)
         assert migrate_apply(vault) == 1
     assert not mode.store_mode_active(vault)
     assert marker.read_replica(vault).state == marker.CLEAR
