@@ -13,6 +13,7 @@ from test_activate_context_maps import _activate
 from test_context_catalogue import _built, _page
 
 from exomem import epistemic_graph, lexstore
+from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress
 
 TURN = "Inspect the optical alignment before the workshop"
@@ -126,3 +127,29 @@ def test_a_page_the_turn_names_still_lists_its_links(vault: Path, monkeypatch: p
     packet = _discover_packet(vault, monkeypatch, turn_slice="on")
     assert lead in str(packet["turn_slice"])
     assert {link["target_ref"] for link in _lead(packet["task_context"], lead)["links"]} == set(targets)
+
+
+def test_the_hook_renders_the_links_of_a_served_lead_under_its_lead_line(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hook-served agent reads the links that the real packet carries, under the lead they belong to."""
+    report = _linked(vault, "calibration-report", frontmatter=f"exomem_id: {REPORT_ID}\n")
+    plain = _linked(vault, "site-notes")
+    lead = _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\n## Relations\n\n- links_to [[{plain.removesuffix('.md')}]]\n- evidenced_by [[{report.removesuffix('.md')}]]\n"
+    ))
+    packet = _discover_packet(vault, monkeypatch)
+    lines = hook._format_map_with_slice(packet, 8000, "")[0].splitlines()
+    position = next(index for index, line in enumerate(lines) if line.startswith("- task lead:") and lead in line)
+    assert lines[position + 1] == (
+        f'  links: evidenced_by "calibration-report" [exomem://memory/{REPORT_ID}]; links_to "site-notes" [{plain}]'
+    )
+
+
+def test_the_hook_renders_a_named_pages_links_without_repeating_its_lead_line(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The turn slice already lists the named page, so the hook adds its links only, attributed to the slice's ref."""
+    target = _linked(vault, "calibration-report")
+    lead = _page(vault, "optical-alignment-workshop", body=f"{LEAD_BODY}\n- [[{target.removesuffix('.md')}]]\n")
+    packet = _discover_packet(vault, monkeypatch, turn_slice="on")
+    lines = hook._format_map_with_slice(packet, 8000, "")[0].splitlines()
+    assert not any(line.startswith("- task lead:") and f"[{lead}]" in line for line in lines)
+    assert f'  links from [{lead}]: links_to "calibration-report" [{target}]' in lines
+    assert sum(line.startswith("- named") and f"[{lead}]" in line for line in lines) == 1
