@@ -236,6 +236,8 @@ authority and can be rolled back independently.
       arrival order (`_FairCaptureQueue`) around `idempotency.run`.
 - [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
       maximal capture and `contention_absorbed` log rows show the waits.
+      Partial evidence, ordinary traffic only: on installed 0.168.0, 2026-11-09 07:39 to 15:48 UTC, no write of 185 reached its caller with `MUTATION_BUSY`, and one `contention_absorbed` row shows a wait.
+      Maximal capture was not exercised, so this stays open.
 - [x] 10.4 Prepare managed episode reference owners outside the canonical guard;
       seal exact batch ownership and reload pending custody and policy under it.
       Share eligible preparation retries with existing capture allowance and waiter admission.
@@ -306,6 +308,10 @@ authority and can be rolled back independently.
       `test_queued_mutation_timeout_never_executes`
       and `test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay`
       keep the refusals that must not run again.
-- [ ] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`
+- [x] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`
       reaches a caller of a store-routed write while the store or the boundary
       is busy for less than the request budget.
+      Evidence: installed 0.168.0 after the SQLite-only collection cutover, 2026-11-09 07:39 to 15:48 UTC.
+      The mutation journal holds 185 writes and none failed with `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`.
+      Store-routed writes waited out a busy store instead: `store.queue_wait` reached p95 9.6 s and 26.2 s at most, with no refusal.
+      Three `record_memory` reads (no mutation phase) were refused `COLLECTION_STORE_BUSY` after a 5 s queue wait while import batches ran; reads are outside this task.
