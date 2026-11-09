@@ -7,7 +7,7 @@
 
 ## 2. Thread, pass and budget (D1, D4)
 
-- [x] 2.1 Start the fixity thread from `server_runtime.py`, as `_start_graph_drain` is started. Verify: with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set, the thread runs passes. With `EXOMEM_DISABLE_ORIGINAL_FIXITY=1`, no thread starts and status reports `off`. A failing start logs and the server still serves.
+- [x] 2.1 Start the fixity thread from `server_runtime.py`, as `_start_graph_drain` is started. Verify: with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set, the thread runs passes. With `EXOMEM_DISABLE_ORIGINAL_FIXITY=1`, no thread starts and status reports `off`. A failing start logs and the server still serves, through the shared `_start_component` that starts the other background parts.
 - [x] 2.2 Implement the pass: the presence check, the same-pass hash of a changed identity, and the budgeted re-hash. Verify with tests:
   - a pass hashes no more bytes than its budget;
   - an evicted original causes no store request;
