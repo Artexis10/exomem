@@ -844,7 +844,9 @@ def _end_orphan_server(tap_events: Sequence[dict]) -> bool:
         try:
             if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
                 break
-        except FileNotFoundError:
+        except OSError:
+            # The killed process can vanish mid-read: Linux then raises ESRCH
+            # (ProcessLookupError), not only ENOENT. Either way it has stopped.
             break
         if time.monotonic() >= deadline:
             raise StateError(f"session server {pid} did not stop; preserved the vault in its slot")
