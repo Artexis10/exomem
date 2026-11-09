@@ -29,6 +29,7 @@ from .vault import (
     in_append_only_tree,
     in_curated_tree,
     kb_root,
+    parse_frontmatter,
     plan_log_writes,
     read_guarded_text,
     render_frontmatter_document,
@@ -191,7 +192,10 @@ def set_frontmatter_field(
         raise SetFrontmatterError(error.code, error.reason) from error
 
     value = _governed_enum_value(
-        field, value, page_type=_read_yaml_field(fm_text, "type"), vault_root=vault_root
+        field,
+        value,
+        page_type=_read_yaml_field(fm_text, "type"),
+        page=(vault_root, rel_path, parse_frontmatter(text)[0]),
     )
 
     topic_writes: tuple[PlannedWrite, ...] = ()
@@ -345,7 +349,7 @@ def _plan_project_keys(
 
 
 def _governed_enum_value(
-    field: str, value: Any, *, page_type: Any, vault_root: Path
+    field: str, value: Any, *, page_type: Any, page: tuple[Path, str, dict[str, Any]]
 ) -> Any:
     """Return the canonical value, or refuse a governed field written wrongly.
 
@@ -355,7 +359,7 @@ def _governed_enum_value(
     field-setter needs and a creation path does not: normalizing an accepted
     spelling on the way in, so a file never carries two spellings of one state.
     """
-    reason = governed_frontmatter_reason(field, value, page_type, vault_root=vault_root)
+    reason = governed_frontmatter_reason(field, value, page_type, page=page)
     if reason is not None:
         raise SetFrontmatterError(code="INVALID_OUTCOME", reason=reason)
     if field.strip().casefold() == "outcome":

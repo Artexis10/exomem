@@ -189,12 +189,17 @@ def excluded_frontmatter_reason(field: str) -> str | None:
 
 
 def governed_frontmatter_reason(
-    field: str, value: Any, page_type: Any, *, vault_root: Path | None = None
+    field: str,
+    value: Any,
+    page_type: Any,
+    *,
+    page: tuple[Path, str, Mapping[str, Any]] | None = None,
 ) -> str | None:
     """A refusal reason if `field` breaks a governed enum contract, else None.
 
-    `vault_root` selects the verdict registry an `outcome` is checked against, so a verdict
-    the vault added is accepted; without it only the shipped verdicts are.
+    `page` is the vault root, vault-relative path and frontmatter of the page written. The
+    verdict registry of that page's instance checks an `outcome`, so a verdict the instance
+    added is accepted; without `page` only the shipped verdicts are.
 
     This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
     is refused by that function at every governed write boundary, and
@@ -218,8 +223,8 @@ def governed_frontmatter_reason(
             "instead."
         )
     keys = (
-        semantic_language_registry.load_registry(vault_root)
-        if vault_root is not None
+        semantic_language_registry.load_for_page(*page)
+        if page is not None
         else semantic_language_registry.core_registry()
     ).verdict_keys()
     # An outcome takes a key only; a unit verdict also takes a label.

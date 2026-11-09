@@ -288,7 +288,9 @@ def observe_memory(
             )
         base_unit = current_unit if proposal_mode == "update" else None
         normalized_verdict = _resolve_verdict(
-            verdict, base_unit, semantic_language_registry.load_registry(vault_root)
+            verdict,
+            base_unit,
+            semantic_language_registry.load_for_page(vault_root, editable.rel_path, frontmatter),
         )
         normalized_check_by = _resolve_check_by(check_by, base_unit)
         normalized_as_of = _resolve_governed_value(
