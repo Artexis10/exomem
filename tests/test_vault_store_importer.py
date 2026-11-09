@@ -424,6 +424,31 @@ def test_a_binary_that_changes_or_disappears_is_recorded_from_the_disk(stored, w
     assert (stored / fresh).read_bytes() == b"\x09\x09"
 
 
+def test_an_import_that_settles_a_held_binary_ends_the_hold_in_the_same_commit(
+    stored, writer, importing
+):
+    """An importer that names a held binary's row wrongly, so that the commit conflicts and holds
+    the path again, or that clears the hold in a second step that a kill can leave undone."""
+    held = f"{NOTES}/held-diagram.bin"
+    (stored / held).write_bytes(b"\x00\x01")
+    importing.import_paths([held])
+    commit(writer, binary_deletes=(write.BinaryDelete(held),))
+    (stored / held).write_bytes(b"\x09\x09")
+    assert importing.import_paths([held]).held == [held]
+    commit(writer, binaries=(write.BinaryRecord(held, sha(b"\x00\x01"), 2),))
+    (stored / held).write_bytes(b"\x08\x08")
+    before = revision(stored)
+
+    settled = importing.import_paths([held])
+
+    assert (settled.imported, settled.held) == ([held], [])
+    assert rows(stored, "SELECT COUNT(*) FROM store_held WHERE path = ?", held) == [(0,)]
+    assert revision(stored) == before + 1, "the record and the end of the hold are one revision"
+    assert rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", held) == [
+        (sha(b"\x08\x08"),)
+    ]
+
+
 def test_a_renamed_binary_moves_its_record_by_hash(stored, importing):
     """An importer that records a renamed binary as a new file and a deleted one, or pairs two
     binaries that only share a name."""
@@ -964,19 +989,35 @@ def test_a_running_watcher_imports_a_media_file_without_calling_media_processing
     stored, store_thread, caplog
 ):
     """A watcher that hands an imported media file to a media writer that store mode refuses off
-    the store thread, so that the log shows a traceback for every binary a person adds."""
-    picture = f"{NOTES}/plain.png"
+    the store thread, so that the log shows a traceback for every binary a person adds, or that
+    names the media state for a file that is not media."""
+    reports = []
+
+    class Recording(importer.Importer):
+        def import_paths(self, rels, moves=None):
+            report = super().import_paths(rels, moves)
+            reports.append(report)
+            return report
+
+    plain, picture = f"{NOTES}/data.bin", f"{NOTES}/plain.png"
     caplog.set_level(logging.INFO, logger="exomem.file_watcher")
     watching = file_watcher.FileWatcher(
-        stored, debounce_seconds=0.2, importer=importer.Importer(stored, run=store_thread.run)
+        stored, debounce_seconds=0.2, importer=Recording(stored, run=store_thread.run)
     )
     assert watching.start()
     try:
         assert watching.wait_until_seeded(120)
+        (stored / plain).write_bytes(b"\x00\x01 not media")
+        wait_for(lambda: any(plain in report.imported for report in reports), "the data file")
+        assert not any(importer.MEDIA_WAITS in record.getMessage() for record in caplog.records)
         (stored / picture).write_bytes(b"\x89PNG plain")
         wait_for(
+            lambda: any(picture in report.media_waiting for report in reports),
+            "the report that names the imported media file",
+        )
+        wait_for(
             lambda: any(importer.MEDIA_WAITS in record.getMessage() for record in caplog.records),
-            "the watcher's report of the imported media file",
+            "the watcher's log of the media state",
         )
     finally:
         watching.stop()

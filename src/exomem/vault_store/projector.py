@@ -118,11 +118,9 @@ class Facts:
     intent: Intent | None
     page: read.PageMeta | None
     manifest: Manifest | None
-    held: bool
-    #: The hash of the bytes that the hold keeps, or None when nothing is held at this path.
-    held_sha256: str | None
-    #: ``HELD_EDIT`` or ``HELD_DELETE`` for the hold at this path, or None when nothing is held.
-    held_kind: str | None
+    #: The hold at this path as its row reads, or None when nothing is held. A commit that settles
+    #: the path names this row in ``StoreChange.resolves_held``.
+    held_row: write.HeldRow | None
     #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here, which a kill
     #: may have put on disk before the manifest heard of them: those after the manifest's revision,
     #: or with no manifest, those of this path's current life. For a binary, whose file the store
@@ -138,6 +136,20 @@ class Facts:
     moves_away: bool = False
 
     @property
+    def held(self) -> bool:
+        return self.held_row is not None
+
+    @property
+    def held_sha256(self) -> str | None:
+        """The hash of the bytes that the hold keeps, or None when nothing is held at this path."""
+        return None if self.held_row is None else self.held_row.sha256
+
+    @property
+    def held_kind(self) -> str | None:
+        """``HELD_EDIT`` or ``HELD_DELETE`` for the hold at this path, or None when none is held."""
+        return None if self.held_row is None else self.held_row.kind
+
+    @property
     def stored_sha256(self) -> str | None:
         """The hash of the page or binary that the store holds at this path, or None."""
         if self.page is not None:
@@ -148,9 +160,9 @@ class Facts:
     def own_hashes(self) -> frozenset[str]:
         """The hashes of a file that Exomem put at this path and that a person did not change.
 
-        With no manifest row, no queued intent, no queued move away and nothing stored, Exomem's life
-        at this path has ended: a file with bytes of that life is a person's restore, so none are
-        Exomem's.
+        With no manifest row, no queued intent, no queued move away and nothing stored, Exomem's
+        life at this path has ended: a file with bytes of that life is a person's restore, so none
+        are Exomem's.
         """
         if (
             self.manifest is None
@@ -674,7 +686,7 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
             "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
         ).fetchone()
         held = database.execute(
-            "SELECT sha256, kind FROM store_held WHERE path = ?", (rel,)
+            "SELECT kind, detected_at, sha256 FROM store_held WHERE path = ?", (rel,)
         ).fetchone()
         manifest_revision = None if recorded is None else recorded[3]
         moving = database.execute(
@@ -687,9 +699,7 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
             intent=None if queued is None else Intent(*queued),
             page=view.page_meta(rel),
             manifest=None if recorded is None else Manifest(*recorded),
-            held=held is not None,
-            held_sha256=None if held is None else held[0],
-            held_kind=None if held is None else held[1],
+            held_row=None if held is None else write.HeldRow(rel, *held),
             audited=_audited(database, rel, manifest_revision),
             removed=_removed_since(database, rel, manifest_revision),
             binary=view.binary(rel),
@@ -876,7 +886,9 @@ def _with_file(
 ) -> _Found | None:
     """``use`` of the held file at ``rel``, or None when it is missing; other refusals raise."""
     folder, leaf = _split(rel)
-    opened = _parent(filesystem, folder, access="mutate")
+    # A look changes nothing, so it holds the folder for reading: "read" is the only access that the
+    # Windows backend grants on the vault root, where a root-level Markdown file lives.
+    opened = _parent(filesystem, folder)
     if _missing(opened):
         return None
     with opened.require() as parent:

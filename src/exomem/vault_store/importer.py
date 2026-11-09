@@ -401,6 +401,8 @@ class Importer:
             )
         else:
             # The store has no binary move: the new record and the old one's removal are one commit.
+            # A hold on a binary keeps no bytes, so the commit that settles either path ends it.
+            destination = projector.read_facts(self._root, rename.dst)
             change = write.StoreChange(
                 write.Origin.OUTSIDE_EDITOR,
                 "an outside rename",
@@ -410,13 +412,12 @@ class Importer:
                     rename.src: write.Expect(revision=stored.revision, sha256=source.stored_sha256),
                     rename.dst: write.Expect(absent=True),
                 },
+                resolves_held=_held_rows(source, destination),
             )
         try:
             write.commit(writer, change)
         except write.StoreConflict:
             return False
-        if not rename.page:
-            self._clear_binary_holds(writer, rename.src, rename.dst)
         return True
 
     @staticmethod
@@ -550,6 +551,8 @@ class Importer:
             "an outside change",
             binaries=(write.BinaryRecord(rel, disk.sha256, disk.size),),
             expect={rel: expect},
+            # A hold on a binary keeps no bytes, so the import that settles the path ends it.
+            resolves_held=_held_rows(facts),
         )
         try:
             write.commit(writer, change)
@@ -558,7 +561,6 @@ class Importer:
         except OpError as refusal:
             self._not_owned(rel, refusal, report)
         else:
-            self._clear_binary_holds(writer, rel)
             report.imported.append(rel)
 
     def _remove_binary(
@@ -571,6 +573,7 @@ class Importer:
             "an outside delete",
             binary_deletes=(write.BinaryDelete(rel, on_disk=True),),
             expect={rel: write.Expect(revision=binary.revision, sha256=binary.sha256)},
+            resolves_held=_held_rows(facts),
         )
         try:
             write.commit(writer, change)
@@ -579,7 +582,6 @@ class Importer:
         except OpError as refusal:
             self._not_owned(rel, refusal, report)
         else:
-            self._clear_binary_holds(writer, rel)
             report.removed.append(rel)
 
     @staticmethod
@@ -587,15 +589,6 @@ class Importer:
         if refusal.code != write.NOT_OWNED:
             raise refusal
         report.unjudged[rel] = refusal.code
-
-    @staticmethod
-    def _clear_binary_holds(writer: CollectionWriter, *paths: str) -> None:
-        """Drop the holds on binaries that a commit has just settled.
-
-        A hold on a binary keeps no bytes, so an import that settles the path ends it.
-        """
-        with writer.handle.transaction() as tx:
-            tx.executemany("DELETE FROM store_held WHERE path = ?", [(path,) for path in paths])
 
     @staticmethod
     def _clear_held_delete(writer: CollectionWriter, rel: str) -> None:
@@ -780,6 +773,11 @@ class Importer:
     def _note_refresh(self, rel: str, rowless_sha256: str | None = None) -> None:
         with self._refresh_lock:
             self._refresh[rel] = rowless_sha256
+
+
+def _held_rows(*facts: Facts) -> tuple[write.HeldRow, ...]:
+    """The holds that ``facts`` read, which the commit of their paths resolves."""
+    return tuple(found.held_row for found in facts if found.held_row is not None)
 
 
 def _below_any(rel: str, skipped: list[ownership.Skipped]) -> bool:
