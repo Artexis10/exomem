@@ -3218,16 +3218,26 @@ def run_jobs(
 def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) -> dict[str, int]:
     summary = {"batches": 0, "paused": 0, "deferred": 0, "errors": 0}
     running = [
-        row[0]
-        for row in writer.connection.execute(
-            "SELECT job_id FROM import_jobs WHERE state='running' ORDER BY created_at, job_id"
+        (created, job_id)
+        for created, job_id in writer.connection.execute(
+            "SELECT created_at, job_id FROM import_jobs WHERE state='running' ORDER BY created_at, job_id"
         )
     ]
-    for job_id in running:
-        # The deadline bounds further batches, not the first: a stall before it must not idle a tick.
-        while (max_batches is None or summary["batches"] < max_batches) and (
-            deadline is None or not summary["batches"] or time.monotonic() < deadline
-        ):
+    # Jobs take one batch each in turn, starting after the job that took the last batch, so a
+    # small job is not left waiting until an older long one completes.
+    last = writer.handle.import_last_turn
+    if last is not None:
+        running = [turn for turn in running if turn > last] + [
+            turn for turn in running if turn <= last
+        ]
+    while running:
+        for turn in list(running):
+            # The deadline bounds further batches, not the first: a stall before it must not idle a tick.
+            if not (max_batches is None or summary["batches"] < max_batches) or not (
+                deadline is None or not summary["batches"] or time.monotonic() < deadline
+            ):
+                return summary
+            job_id = turn[1]
             job = _load(writer.connection, job_id)
             sequence = job.checkpoint["batch"] if job is not None else None
             try:
@@ -3239,12 +3249,15 @@ def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) 
                     _after_error(root, writer, job_id, sequence, error)
                 except Exception:  # noqa: BLE001 - the store refused even the settlement
                     log.warning("import job settlement deferred to a later tick", exc_info=True)
-                break
+                running.remove(turn)
+                continue
             if outcome != "batch":
                 summary["paused"] += outcome == "paused"
                 summary["deferred"] += outcome == "deferred"
-                break
+                running.remove(turn)
+                continue
             summary["batches"] += 1
+            writer.handle.import_last_turn = turn
     return summary
 
 
