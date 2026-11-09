@@ -1816,8 +1816,11 @@ def governed_row_values(
     """The projected value of each governed row that `_governed_rows` reads, by key.
 
     Stored structural summaries carry no diagnostics, so they read the values alone; the
-    parser reads the same values with their problems, so the two never disagree.
+    parser reads the same values with their problems, so the two never disagree. Most units
+    carry none of these rows, so they return no values without reading the registry.
     """
+    if not any(key in metadata for key in UNIT_ROW_KEYS):
+        return {}
     return _governed_rows(metadata, kind=kind, language=language)[0]
 
 
