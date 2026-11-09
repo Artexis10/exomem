@@ -6,8 +6,8 @@ folder, sees none of them and would write Markdown beside pages that the store o
 therefore holds one ``store_meta`` key. Activation writes it in the transaction that records store
 mode and rollback removes it in the transaction that records file mode. The lease handback copies
 ``store_meta`` into the replica under the vault, so the key travels with the vault. A file-mode
-start reads it there. A takeover carries the replica's key forward (``carry``), so only the root
-that migrated or rolled back decides it.
+start reads it there. A takeover carries the replica's key forward (``carry``), so only a root that
+holds the store, or that rolled back and has not yet published the clear replica, decides it.
 
 Only a readable replica that says store refuses. An absent or unreadable replica starts the vault,
 because the replica arrives by sync and a half-arrived copy is a normal state, not a sign that the
@@ -32,6 +32,9 @@ log = logging.getLogger(__name__)
 #: schema carries this.
 KEY = "vault_store_mode"
 ACTIVE = "store"
+#: Set by the rollback's transaction and removed by the publication that copies the clear replica:
+#: while it stands, this root's file mode is not yet in the replica, so this root still decides.
+CLEAR_UNPUBLISHED_KEY = "vault_store_clear_unpublished"
 
 #: What a replica reading reports: the closed set of this module's own states, never a vault's
 #: vocabulary.
@@ -53,16 +56,26 @@ class Replica:
 
 def record(tx: sqlite3.Connection) -> None:
     """Write the marker inside the transaction that activates store mode."""
-    tx.execute(
-        "INSERT INTO store_meta(key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (KEY, ACTIVE),
-    )
+    _put(tx, KEY, ACTIVE)
+    tx.execute("DELETE FROM store_meta WHERE key = ?", (CLEAR_UNPUBLISHED_KEY,))
 
 
 def clear(tx: sqlite3.Connection) -> None:
-    """Remove the marker inside the transaction that returns the vault to file mode."""
+    """Remove the marker inside the transaction that returns the vault to file mode.
+
+    The replica still says store until a publication copies this store, so the same transaction
+    marks the clear as unpublished: until then this root decides the marker (``settle`` ends it).
+    """
     tx.execute("DELETE FROM store_meta WHERE key = ?", (KEY,))
+    _put(tx, CLEAR_UNPUBLISHED_KEY, "1")
+
+
+def _put(tx: sqlite3.Connection, key: str, value: str) -> None:
+    tx.execute(
+        "INSERT INTO store_meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
 
 
 def read_replica(vault_root: Path) -> Replica:
@@ -103,27 +116,28 @@ def carry(conn: sqlite3.Connection, replica_meta: Mapping[str, str]) -> None:
     """Make a takeover's store say about the marker what the replica it continues from says.
 
     A takeover starts a tenure on the replica's bytes (adopt) or on a store that carries the same
-    head (continue). It never decides the marker: a root without a ``store_mode`` row has not
-    migrated or rolled back, so it copies the replica's key or its absence. A root with the row
-    decided the marker in its own transaction and keeps its own key: the replica may be behind
-    that decision, and a copy would drop a marker that was not published yet.
+    head (continue). It never decides the marker: a root that does not decide (see
+    ``_decided_mode``) copies the replica's key or its absence. A root that decides keeps its own
+    key: the replica may be behind that decision, and a copy would drop a marker, or restore one,
+    that was not published yet.
     """
     if _decided_mode(conn) is not None:
         return
+    # Adopted bytes can carry the previous holder's unpublished-clear key; it means nothing here.
+    conn.execute("DELETE FROM store_meta WHERE key = ?", (CLEAR_UNPUBLISHED_KEY,))
     if replica_meta.get(KEY) is None:
-        clear(conn)
+        conn.execute("DELETE FROM store_meta WHERE key = ?", (KEY,))
     else:
-        conn.execute(
-            "INSERT INTO store_meta(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (KEY, replica_meta[KEY]),
-        )
+        _put(conn, KEY, replica_meta[KEY])
 
 
 def _decided_mode(conn: sqlite3.Connection) -> str | None:
-    """The mode this store recorded, or None while it has not migrated or rolled back.
+    """The mode this store decides the marker for, or None when the replica decides it.
 
-    A store from a release before store schema 15 has no ``store_mode`` table, so it never decided.
+    A store in store mode decides. A store in file mode decides only while its rollback's clear is
+    unpublished (``CLEAR_UNPUBLISHED_KEY``): once the clear replica exists, a later root may migrate
+    and this one must carry that root's marker like any root that never migrated. A store from a
+    release before store schema 15 has no ``store_mode`` table, so it never decided.
     """
     table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_mode'"
@@ -131,7 +145,29 @@ def _decided_mode(conn: sqlite3.Connection) -> str | None:
     if table is None:
         return None
     row = conn.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
-    return None if row is None else row[0]
+    if row is None:
+        return None
+    if row[0] == mode.STORE_MODE:
+        return mode.STORE_MODE
+    unpublished = conn.execute(
+        "SELECT 1 FROM store_meta WHERE key = ?", (CLEAR_UNPUBLISHED_KEY,)
+    ).fetchone()
+    return mode.FILE_MODE if unpublished is not None else None
+
+
+def settle(vault_root: Path, handle) -> None:
+    """End this root's say over the marker once the clear replica is published.
+
+    Call it after a publication succeeded. The replica then reads clear, so the key that kept this
+    root deciding is spent. A replica that does not read clear keeps the key: the clear is owed.
+    """
+    pending = handle.connection.execute(
+        "SELECT 1 FROM store_meta WHERE key = ?", (CLEAR_UNPUBLISHED_KEY,)
+    ).fetchone()
+    if pending is None or read_replica(vault_root).state != CLEAR:
+        return
+    with handle.transaction() as conn:
+        conn.execute("DELETE FROM store_meta WHERE key = ?", (CLEAR_UNPUBLISHED_KEY,))
 
 
 def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
@@ -140,11 +176,12 @@ def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
     The replica is published by head, and store mode changes no head: activation and rollback
     commit the marker without a collection-chain commit. Without this answer the hand-back would
     find the head unchanged and keep the old replica, so a file-mode service elsewhere would never
-    see the marker. Only a root that holds a ``store_mode`` row decides, because only a root that
-    migrated or rolled back knows the mode: any other root carries the replica's marker through its
-    takeovers (``carry``) and never forces. A store in store mode needs a replica that says store,
-    and a store in file mode needs only that no replica still says store. An unreadable replica
-    forces nothing: it is no evidence, and a copy would replace a replica that a newer build wrote.
+    see the marker. Only a root that decides forces (``_decided_mode``): one that holds the store,
+    or that rolled back and has not published the clear replica yet. Any other root carries the
+    replica's marker through its takeovers (``carry``) and never forces. A store in store mode
+    needs a replica that says store, and a store in file mode needs only that no replica still
+    says store. An unreadable replica forces nothing: it is no evidence, and a copy would replace
+    a replica that a newer build wrote.
     """
     decided = _decided_mode(store)
     if decided is None:
@@ -164,10 +201,11 @@ def report(vault_root: Path) -> dict:
 def conflict(vault_root: Path) -> Replica | None:
     """The replica when it says store and this state root does not hold that store, else None.
 
-    This state root holds the published store when the replica carries its own tenure and the
-    store's own record says file: a rollback that committed here whose replica has not yet been
-    republished. That root must start, or no service could ever publish the replica that clears the
-    marker.
+    This state root holds the published store when the replica carries its own tenure and its own
+    store decides file: a rollback that committed here whose clear replica has not yet been
+    published. That root must start, or no service could ever publish the replica that clears the
+    marker. A rollback whose clear replica was published decides nothing, so a root that migrated
+    elsewhere since is refused.
     """
     found = read_replica(vault_root)
     if found.state == UNREADABLE:
@@ -195,11 +233,11 @@ def _rolled_back_here(vault_root: Path, found: Replica) -> bool:
                     (schema.META_STORE_ID, schema.META_INSTANCE_ID),
                 )
             )
-            row = reader.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
+            decided = _decided_mode(reader)
         except sqlite3.Error:
             return False
     same_tenure = (ids.get(schema.META_STORE_ID), ids.get(schema.META_INSTANCE_ID)) == (
         found.store_id,
         found.instance_id,
     )
-    return same_tenure and row is not None and row[0] == mode.FILE_MODE
+    return same_tenure and decided == mode.FILE_MODE

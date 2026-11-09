@@ -771,6 +771,7 @@ class CollectionStoreRuntime:
                 raise connection.CollectionStoreError(
                     "COLLECTION_STORE_FLUSH_PENDING", "publication did not reach the committed head"
                 )
+            vault_marker.settle(self.root, writer)
             # Every orderly boundary also leaves the store file alone holding this head. A
             # reader mid-transaction can hold that back; the replica already carries the head,
             # so the flush stands and the WAL keeps the commits.

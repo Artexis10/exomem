@@ -231,7 +231,8 @@ def preflight(vault_root: Path) -> dict:
     """Refuse a vault that cannot enter store mode; otherwise count what a migration would take. It takes no lease.
 
     Each refusal costs the owner one command to fix: the release gate, the lease topology, the collection store,
-    the mode and the two sidecars are the facts that a migration started on the wrong footing would fail on late.
+    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong footing would
+    fail on late.
     """
     admission.require_owner(vault_root, "store-mode migrate")
     if not capability.vault_store_enabled():
@@ -253,6 +254,8 @@ def preflight(vault_root: Path) -> dict:
         )
     if mode.store_mode_active(vault_root):
         raise OpError("VAULT_STORE_ALREADY_ACTIVE", "this vault is already in store mode")
+    # Its replica says another state root holds the store: a second migration would fork the pages.
+    availability.require_no_store_elsewhere(vault_root)
     _require_sidecars(vault_root)
     skipped: list[ownership.Skipped] = []
     owned = Counter(

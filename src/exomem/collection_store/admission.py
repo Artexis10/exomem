@@ -1430,6 +1430,7 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
         # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy
         # is made, so no new published head needs checking against the chain.
         head = json.loads(unchanged.evidence[0])
+        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)
@@ -1450,6 +1451,7 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
     if published.status == "published":
         if chain.verify_store_chain(writer.connection) != (published.commit_seq, published.head_hash):
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "publication did not reach current head")
+        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)

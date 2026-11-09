@@ -1044,9 +1044,8 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
             "vault_store_records", "warn",
             "This vault is in store mode but its replica does not say so yet, so a file-mode "
             "service on another state root would start on it.",
-            "This root copies the replica when it next hands back the writer lease, at the end of "
-            "its next `--apply` step of `exomem store-mode` or `exomem collections`. Until then, "
-            "keep services on other state roots stopped.",
+            "This root copies the replica at its next writer-lease hand-back, and no command "
+            "forces one yet. Until then, keep services on other state roots stopped.",
             details={"vault_marker": found.state})
     return None
 

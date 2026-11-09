@@ -13,14 +13,20 @@ import logging
 import shutil
 import sqlite3
 import sys
+import time
 from contextlib import closing
 
 import pytest
 from test_collection_store_migration import OPERATOR
 from test_managed_collections_migration import OPERATOR_SECRET, coordinator_url  # noqa: F401
-from test_vault_store_migration import migrate_apply, rollback_apply, vault  # noqa: F401
+from test_vault_store_migration import (  # noqa: F401
+    migrate_apply,
+    rollback_apply,
+    store_mode,
+    vault,
+)
 
-from exomem import doctor, server_runtime
+from exomem import doctor, epistemic_graph, lexstore, memory_refs, server_runtime
 from exomem.collection_store import admission, connection, replica, schema
 from exomem.vault_store import availability, marker, mode
 
@@ -54,6 +60,56 @@ def admit_once(vault_root):
     with pytest.MonkeyPatch.context() as shell:
         shell.setenv(OPERATOR, OPERATOR_SECRET)
         assert admission._offline_owner(vault_root, "admit", step)["status"] == "admitted"
+
+
+def unpublished_clear(vault_root):
+    """Whether this state root's store still says that its rollback's clear replica is owed."""
+    reader, _ = connection._open_read_only(
+        connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
+    )
+    with closing(reader):
+        return reader.execute(
+            "SELECT 1 FROM store_meta WHERE key = ?", (marker.CLEAR_UNPUBLISHED_KEY,)
+        ).fetchone() is not None
+
+
+def rollback_that_publishes_nothing(vault_root, export, monkeypatch):
+    """A rollback that commits and whose lease hand-back then fails to copy the replica."""
+
+    def fail(*_args, **_kwargs):
+        raise connection.CollectionStoreError("COLLECTION_STORE_FLUSH_PENDING", "drill")
+
+    with monkeypatch.context() as broken:
+        broken.setattr(replica, "publish_replica", fail)
+        rollback_apply(vault_root, export)
+
+
+def admit_after_the_lease_expires(vault_root):
+    """The admission that follows a failed hand-back, which waits for the owner's short lease."""
+    give_up = time.monotonic() + 15
+    while True:
+        try:
+            return admit_once(vault_root)
+        except connection.CollectionStoreError as error:
+            if error.code != "COLLECTION_STORE_SERVICE_ACTIVE" or time.monotonic() > give_up:
+                raise
+            time.sleep(0.5)
+
+
+def index_paths(vault_root):
+    """Where the current root keeps its lexical, graph and reference indexes."""
+    return [
+        find(vault_root)
+        for find in (lexstore.lexical_path, epistemic_graph.sidecar_path, memory_refs.sidecar_path)
+    ]
+
+
+def copy_indexes(sources, targets):
+    """Give a root the indexes that its own first service start would have built."""
+    for source, target in zip(sources, targets, strict=True):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(source)) as found, closing(sqlite3.connect(target)) as copy:
+            found.backup(copy)
 
 
 def refused(vault_root):
@@ -165,16 +221,18 @@ def test_the_state_root_that_rolled_back_starts_while_its_replica_still_says_sto
     """A failed hand-back after the rollback that leaves the replica saying store, and the owner
     locked out of the only root that could publish the replica that clears it."""
     assert migrate_apply(vault) == 0
-    published = tmp_path / "published-at-migration.sqlite"
-    shutil.copyfile(replica.replica_path(vault), published)
-    assert rollback_apply(vault, tmp_path / "export") == 0
-    shutil.copyfile(published, replica.replica_path(vault))
+    rollback_that_publishes_nothing(vault, tmp_path / "export", monkeypatch)
     assert marker.read_replica(vault).state == marker.STORE
+    assert unpublished_clear(vault)
 
     availability.require_servable(vault)
 
     on_state_root(monkeypatch, other_state_root)
     assert refused(vault).code == availability.STORE_ELSEWHERE
+    as_root(monkeypatch, tmp_path, "service", state="state")
+    admit_after_the_lease_expires(vault)
+    assert marker.read_replica(vault).state == marker.CLEAR
+    assert not unpublished_clear(vault), "the published clear ends this root's say over the marker"
 
 
 def test_the_status_and_the_doctor_show_the_marker_that_the_replica_carries(
@@ -235,8 +293,8 @@ def test_a_root_that_adopted_the_marker_does_not_keep_it_after_the_owner_rolls_b
 
 
 def test_a_takeover_copies_the_replicas_marker_but_not_over_the_root_that_decided_it(tmp_path):
-    """A migrated root whose marker was not published yet and that loses it to the next takeover,
-    which leaves a store-mode vault with a replica that says file."""
+    """A migrated or rolled-back root whose decision was not published yet and that loses it to
+    the next takeover, which leaves the replica saying the opposite of the store it holds."""
     says_store = {marker.KEY: marker.ACTIVE}
     with connection.open_writer(tmp_path / "store.sqlite", lease_check=lambda: True) as handle:
 
@@ -262,6 +320,75 @@ def test_a_takeover_copies_the_replicas_marker_but_not_over_the_root_that_decide
         with handle.transaction() as tx:
             marker.carry(tx, {})
         assert stored_marker() == (marker.ACTIVE,), "the root that migrated keeps its own record"
+
+        with handle.transaction() as tx:
+            tx.execute("UPDATE store_mode SET mode = ? WHERE id = 1", (mode.FILE_MODE,))
+            marker.clear(tx)
+        with handle.transaction() as tx:
+            marker.carry(tx, says_store)
+        assert stored_marker() is None, "a rollback whose clear is unpublished keeps deciding"
+        with handle.transaction() as tx:
+            tx.execute(
+                "DELETE FROM store_meta WHERE key = ?", (marker.CLEAR_UNPUBLISHED_KEY,)
+            )
+            marker.carry(tx, says_store)
+        assert stored_marker() == (marker.ACTIVE,), "a published clear leaves the marker to others"
+
+
+def test_a_root_that_rolled_back_carries_the_marker_of_the_root_that_migrated_after_it(
+    vault, tmp_path, monkeypatch  # noqa: F811
+):
+    """A file row left by an old rollback that still decides the marker: the next admission of the
+    root that rolled back publishes a replica that says file over the pages the other root holds."""
+    assert migrate_apply(vault) == 0
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    assert not unpublished_clear(vault), "the rollback's hand-back published the clear replica"
+    service_indexes = index_paths(vault)
+    as_root(monkeypatch, tmp_path, "other", state="other-state")
+    admit_once(vault)
+    copy_indexes(service_indexes, index_paths(vault))
+    assert migrate_apply(vault) == 0
+    assert marker.read_replica(vault).state == marker.STORE
+    as_root(monkeypatch, tmp_path, "service", state="state")
+    assert refused(vault).code == availability.STORE_ELSEWHERE
+
+    admit_once(vault)
+
+    assert marker.read_replica(vault).state == marker.STORE
+    assert refused(vault).code == availability.STORE_ELSEWHERE
+
+
+def test_a_migration_refuses_while_another_root_holds_the_store(
+    vault, tmp_path, monkeypatch, capsys  # noqa: F811
+):
+    """A second migration that forks the pages: the other root moves a vault into store mode that
+    this root already holds there, and both roots then report store mode."""
+    assert migrate_apply(vault) == 0
+    service_indexes = index_paths(vault)
+    as_root(monkeypatch, tmp_path, "other", state="other-state")
+    admit_once(vault)
+    copy_indexes(service_indexes, index_paths(vault))
+    capsys.readouterr()
+
+    assert migrate_apply(vault) == 1
+
+    assert capsys.readouterr().err.startswith(availability.STORE_ELSEWHERE)
+    assert not mode.store_mode_active(vault)
+
+
+def test_the_root_that_rolled_back_can_migrate_again_with_the_clear_replica_published_or_not(
+    vault, tmp_path, monkeypatch, capsys  # noqa: F811
+):
+    """A refusal of the root that holds the vault in store mode: after its own rollback, with the
+    replica still saying store or not, it is the one root that may move the vault back."""
+    assert migrate_apply(vault) == 0
+    assert rollback_apply(vault, tmp_path / "export-1") == 0
+    assert migrate_apply(vault) == 0
+    rollback_that_publishes_nothing(vault, tmp_path / "export-2", monkeypatch)
+    assert marker.read_replica(vault).state == marker.STORE
+    capsys.readouterr()
+
+    assert store_mode(vault, "migrate", "--dry-run") == 0
 
 
 def test_the_doctor_reports_an_unreadable_replica_as_its_own_state_in_both_modes(

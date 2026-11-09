@@ -199,7 +199,7 @@ In store mode, a commit that changes a source of the schema overlay (a page unde
 - **THEN** the write commits at once, and the job derives that page with the policy that the vault holds when it finishes
 
 ### Requirement: A store-mode vault says so beside the vault
-Activation SHALL record a store-mode marker in the collection store's `store_meta` in the transaction that records store mode, and rollback SHALL remove it in the transaction that records file mode. A root that holds a `store_mode` row SHALL force the hand-back to copy the replica under the vault when the replica disagrees with that row, because store mode changes no collection head. A takeover SHALL carry the replica's marker, or its absence, into the new tenure's store and SHALL NOT decide it. A file-mode service on another state root SHALL read the marker from the replica, whatever store schema wrote it, when it starts and SHALL refuse with a named code, the reason and the remediation when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store says file and holds the replica's tenure SHALL start. `exomem store-mode status` and the doctor SHALL show the marker.
+Activation SHALL record a store-mode marker in the collection store's `store_meta` in the transaction that records store mode, and rollback SHALL remove it in the transaction that records file mode. A root SHALL decide the marker while it holds the store and, after a rollback, until the publication that copies the clear replica; a deciding root SHALL force the hand-back to copy the replica under the vault when the replica disagrees with its mode, because store mode changes no collection head. A takeover by any other root SHALL carry the replica's marker, or its absence, into the new tenure's store and SHALL NOT decide it. `exomem store-mode migrate` SHALL refuse with the same code when the replica says that another state root holds the store. A file-mode service on another state root SHALL read the marker from the replica, whatever store schema wrote it, when it starts and SHALL refuse with a named code, the reason and the remediation when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store says file, whose rollback is not yet published and which holds the replica's tenure SHALL start. `exomem store-mode status` and the doctor SHALL show the marker.
 
 #### Scenario: Another state root refuses a store-mode vault
 - **WHEN** a vault is migrated into store mode and a file-mode service starts on another state root over the same vault
@@ -220,6 +220,14 @@ Activation SHALL record a store-mode marker in the collection store's `store_met
 #### Scenario: A rollback is not undone by an adopting root
 - **WHEN** a root that adopted a replica saying store takes the lease again after the owner rolled back
 - **THEN** the replica that it publishes does not say store
+
+#### Scenario: A published rollback decides nothing
+- **WHEN** a root rolled back and published the clear replica, another root then migrated, and the first root takes the lease again
+- **THEN** the replica that it publishes still says store, and the first root refuses to start
+
+#### Scenario: A second root does not migrate a vault that another root holds
+- **WHEN** the replica says store and a root that does not hold the store runs `exomem store-mode migrate --apply`
+- **THEN** the command refuses with `VAULT_STORE_ELSEWHERE` and the vault stays in file mode on that root
 
 ### Requirement: Freshness requirements follow store ownership
 For files the store owns, the requirements that keep derived sidecars in step with Markdown on disk SHALL NOT apply in store mode; a change on disk to such a file SHALL follow the outside-edit requirement of this capability, and caches SHALL key on store revision. For vault content outside the store, those requirements SHALL keep applying in store mode as they do in file mode.
