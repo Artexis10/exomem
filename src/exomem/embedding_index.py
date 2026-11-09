@@ -2476,11 +2476,12 @@ class EmbeddingIndex:
         allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE,
         defer_cold_load: bool = False,
+        incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunks with eager text, preserving the ordinary search API."""
         return cast(list[tuple[str, int, str, float]], self._search(
             query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load,
+            defer_cold_load=defer_cold_load, incomplete_out=incomplete_out,
         ))
 
     def select_chunks(
