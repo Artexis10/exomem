@@ -1,11 +1,11 @@
 {
-  "version": "0.167.0",
+  "version": "0.168.0",
   "skill_contract": "d504378ea76a185561168116d9e68d186629a922400fa89713353dd7da09c677",
   "corpus_digest": "fd20791c3f7e899bcbddd8ef2d07212a2662204fb01beeac82ee8536580ded9c",
   "profile": "product-cloud",
   "resource": "https://exomem.substratesystems.io/mcp",
   "files": {
-    "claude/.claude-plugin/plugin.json": "16b3ef34d7e294a2efe2bfc09f81628d0be4f43f0da6d1772ee4beaf1e1a1c8b",
+    "claude/.claude-plugin/plugin.json": "8034dee416d744145b40a9529b92275cc591babf16426bbb0e4c0b93e5f043f5",
     "claude/.mcp.json": "2cb290a4dcb2c7391aead34040e295a61aeb4d42924c111bcef1fbe77139a37e",
     "claude/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "claude/README.md": "4f49a10bb9c7cd0c538dff05f7b98009bf7c7236fe8707dc2ac137bd42021397",
@@ -211,7 +211,7 @@
     "claude/skills/exomem-review/references/vocabulary.md": "dbd17f16bb7702183b8ef27987235f802822815ebea8bdfcf15ccb1eac97455a",
     "claude/skills/exomem-review/references/write-scope.md": "5452ed12ab82e61ff4544c8dd54082b36b584aef217632fdbd4fc4772e98c2de",
     "claude/skills/exomem-review/references/writing.md": "e005e7c53193434be14069441d2de656823d74568a1b0b4e8f1f7b4af56fd317",
-    "claude-hooks/.claude-plugin/plugin.json": "16b3ef34d7e294a2efe2bfc09f81628d0be4f43f0da6d1772ee4beaf1e1a1c8b",
+    "claude-hooks/.claude-plugin/plugin.json": "8034dee416d744145b40a9529b92275cc591babf16426bbb0e4c0b93e5f043f5",
     "claude-hooks/.mcp.json": "2cb290a4dcb2c7391aead34040e295a61aeb4d42924c111bcef1fbe77139a37e",
     "claude-hooks/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "claude-hooks/README.md": "9a3ab27c85daff1983708f28e9c956e7c2b8ea299898e30a95cc74b5f8925e05",
@@ -421,14 +421,14 @@
     "claude-hooks/skills/exomem-review/references/vocabulary.md": "dbd17f16bb7702183b8ef27987235f802822815ebea8bdfcf15ccb1eac97455a",
     "claude-hooks/skills/exomem-review/references/write-scope.md": "5452ed12ab82e61ff4544c8dd54082b36b584aef217632fdbd4fc4772e98c2de",
     "claude-hooks/skills/exomem-review/references/writing.md": "e005e7c53193434be14069441d2de656823d74568a1b0b4e8f1f7b4af56fd317",
-    "claude-hooks.zip": "830b9295f33730f84eaf52648b7c3483246fb43d6680583c8766ed2dafd935d1",
-    "claude.zip": "ddd40922b42267f8295a0faf889768f257a10f3803d0245d5033d2ee843eef73",
+    "claude-hooks.zip": "1a8bdf4bcd772c0bb0f9a6fa2a740d3e69261545dcf1060fcc33c8461c9dadc7",
+    "claude.zip": "421aab063d8baf769188c4309e64962c38abf50b7a7f04e97c76b43d3de89c5f",
     "openai/LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
     "openai/README.md": "079c767d048ce626935b0af47a9bcbfd6f2c75c88083aa918ade45b616735eb4",
     "openai/assets/icon-small.png": "a71359a1bd315fc7575b3c8f655f01a905ba3ade181957650b922361b95df1a9",
     "openai/assets/icon.png": "33201ed915dbf2fd74fc4356e15741a123a91f8fa7ab4fd40d35b8420dda35e6",
     "openai/mcp.json": "cc1cee8db3dbc22e90a1acc860a35b8f9d1a3a6e24046a1052f49dc544abdb8b",
-    "openai/plugin.json": "bbb9dd177c6ba20763b8185f5400b120cf36a5d095e846c1db1ad7d6991487c7",
+    "openai/plugin.json": "0e75444f1b8973b6dd768f074f52406895d021d5d1f8b8f19edd65c9f08cdd7b",
     "openai/skills/exomem/SKILL.md": "1418c51444f45ea3c9ca3085c13a90e56ac6d27ee6acf46f1ce11ebfca099719",
     "openai/skills/exomem/project-keys.yaml": "e1561ca815b9c381a66c3c3c59ebf33660b121bd60d40765a41541d26347c72e",
     "openai/skills/exomem/references/audit-checks.md": "d8f8fdff0d9c50d59d5365b75c58917daa8193f19a3aa09364ac3fcaf595a70f",
@@ -630,6 +630,6 @@
     "openai/skills/exomem-review/references/vocabulary.md": "dbd17f16bb7702183b8ef27987235f802822815ebea8bdfcf15ccb1eac97455a",
     "openai/skills/exomem-review/references/write-scope.md": "5452ed12ab82e61ff4544c8dd54082b36b584aef217632fdbd4fc4772e98c2de",
     "openai/skills/exomem-review/references/writing.md": "e005e7c53193434be14069441d2de656823d74568a1b0b4e8f1f7b4af56fd317",
-    "openai.zip": "ca62d4ac45b5874ea5e57666d9bdc55bd4f6f24b5e6443da611d73d20f178b6c"
+    "openai.zip": "a52bfda213397e33915e6ba90ff10c8f65ac2e95f524946aa8c1ddcfb3c0fcaa"
   }
 }
