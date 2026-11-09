@@ -3297,6 +3297,18 @@ def _visible(writer, collection: str, job_id: str) -> _Job:
     return job
 
 
+def _require_members(manifest, request: _Request) -> None:
+    """Refuse a derived collection's import of anything but export members, in preview and start alike."""
+    if manifest.derived and request.members is None:
+        _refuse(
+            derived_rows.COLLECTION_DERIVED,
+            "a derived collection imports export members only, so its import log can rebuild its rows",
+            at="import_request.members",
+            expected="members: a glob or list of member paths of an export manifest",
+            repair="preserve the export with archive=members and import from its manifest",
+        )
+
+
 def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     """Bind a new job, or return the live one an identical start already bound."""
     who = principal_module.effective_principal()
@@ -3310,14 +3322,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
         request = _resolved(writer, row, manifest, request)
-        if manifest.derived and request.members is None:
-            _refuse(
-                derived_rows.COLLECTION_DERIVED,
-                "a derived collection imports export members only, so its import log can rebuild its rows",
-                at="import_request.members",
-                expected="members: a glob or list of member paths of an export manifest",
-                repair="preserve the export with archive=members and import from its manifest",
-            )
+        _require_members(manifest, request)
         if request.reimport is not None and request.members is None:
             _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
         plan = compile_mapping(request.mapping, manifest, request.format)
@@ -3655,6 +3660,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         if not writer._operation.field_plan(manifest).owner:
             _source_not_found()
         request = _resolved(writer, row, manifest, request)
+        _require_members(manifest, request)
         source, sha256, size = resolve_source(root, writer._operation, request.source_ref)
         members = () if request.members is None else _export(root, source.ref, sha256, request.members)
         plan, findings, rows = None, [], None
