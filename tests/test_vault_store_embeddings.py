@@ -10,6 +10,7 @@ that dies in the resume case is a real child process, killed by the operating sy
 from __future__ import annotations
 
 import hashlib
+import logging
 import multiprocessing
 import os
 import signal
@@ -22,16 +23,23 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import test_vault_store_migration as migration
 import test_vault_store_read_write as read_write
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, vault  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA
 
-from exomem import embeddings, lexstore, readiness, semantic_drain
-from exomem.embedding_index import STORE_CURSOR_REVISION, STORE_CURSOR_SEQ, EmbeddingIndex
-from exomem.vault_store import read, vectors, write
+from exomem import embeddings, find, index_paths, lexstore, readiness, recall_space, semantic_drain
+from exomem.embedding_index import (
+    STORE_CURSOR_REVISION,
+    STORE_CURSOR_SEQ,
+    EmbeddingIndex,
+    StoreStamp,
+)
+from exomem.vault_store import mode, read, vectors, write
 
 # The store-mode vault and its writer are that suite's fixtures; a name here is how pytest finds
 # them.
+vault = migration.vault
 stored = read_write.stored
 writer = read_write.writer
 put = read_write.put
@@ -407,3 +415,209 @@ def test_a_drain_killed_between_publications_resumes_with_the_rows_of_an_uninter
         if any(text in encoder.texts for text in chunk_texts(stored, rel))
     ]
     assert reembedded_by_the_dead_drain == [], "the pages that the dead drain finished were kept"
+
+
+def note(title: str, text: str) -> bytes:
+    return f"---\ntitle: {title}\ntype: note\n---\n# {title}\n\n{text}\n".encode()
+
+
+def foreign_rows(index: EmbeddingIndex, rel: str, text: str) -> None:
+    """Rows for `rel` as a writer other than the store drain leaves them: no stamp."""
+    vector = Encoder()([text])
+    index.upsert_batch([(rel, [text], vector, 1.0)], identity=index.identity)
+
+
+def sidecar_execute(root, sql: str, *arguments) -> None:
+    with closing(sqlite3.connect(index_of(root).path)) as database, database:
+        database.execute(sql, arguments)
+
+
+def unreadable_mode(_root):
+    raise OSError("the mode record is unreadable")
+
+
+def test_a_census_keeps_the_rows_of_files_the_store_does_not_own_and_drops_a_gone_pages(
+    stored, encoder
+):
+    """A census that deletes the vectors of notes in a dot-folder or outside the Knowledge Base:
+    the file-mode walk embedded them and store mode never embeds them again, so find loses them."""
+    unowned = ("Knowledge Base/.drafts/Outside.md", "Elsewhere/Outside.md")
+    gone = "Knowledge Base/Notes/Gone.md"
+    catch_up(stored)
+    index = index_of(stored)
+    for rel in (*unowned, gone):
+        foreign_rows(index, rel, "outside lantern text")
+    sidecar_execute(
+        stored, "DELETE FROM meta WHERE key IN (?, ?)", STORE_CURSOR_REVISION, STORE_CURSOR_SEQ
+    )
+
+    served = hit_paths(stored, "outside lantern text")
+    assert all(rel in served for rel in unowned), "the census gate does not withhold them"
+    assert gone not in served, "a page the store does not hold has no proof"
+
+    drained = catch_up(stored)
+
+    assert drained.purged == 1
+    assert chunk_texts(stored, gone) == []
+    assert all(chunk_texts(stored, rel) == ["outside lantern text"] for rel in unowned)
+
+
+def test_find_reports_the_unit_lane_unavailable_when_the_store_cannot_say_what_to_trust(
+    stored, encoder, monkeypatch
+):
+    """A store that cannot be read withholds every page, and the unit lane then answers with
+    nothing: `find` must call that unproved coverage, never a proved miss."""
+    catch_up(stored)
+    monkeypatch.setattr(mode, "store_mode_for_reads", unreadable_mode)
+
+    hits, profile, _scope = find._vector_unit_candidates(
+        stored,
+        query="lighthouse keeper",
+        candidate_limit=5,
+        allowed_unit_refs=None,
+        allowed_parent_paths={ALPHA, BETA},
+        degraded_out=[],
+        failed_out=[],
+        timings=None,
+    )
+
+    assert hits == []
+    assert (profile["status"], profile["reason"]) == ("unavailable", "coverage_incomplete")
+
+
+def test_an_unreadable_store_logs_once_until_the_state_changes(stored, encoder, caplog):
+    """A warning per vector query, which fills the log for as long as the store stays unreadable."""
+    catch_up(stored)
+    index = index_of(stored)
+
+    def withheld_everything_while_unreadable(queries: int) -> int:
+        caplog.clear()
+        with pytest.MonkeyPatch.context() as broken, caplog.at_level(logging.WARNING):
+            broken.setattr(mode, "store_mode_for_reads", unreadable_mode)
+            for _ in range(queries):
+                assert vectors.withheld(stored, index).everything
+        return sum("withheld" in record.getMessage() for record in caplog.records)
+
+    assert withheld_everything_while_unreadable(3) == 1
+    assert not vectors.withheld(stored, index), "readable again"
+    assert withheld_everything_while_unreadable(2) == 1, "a new outage is logged again"
+
+
+def test_a_file_mode_vault_runs_its_drain_turn_when_its_mode_record_is_unreadable(
+    vault, monkeypatch
+):
+    """A file-mode vault whose drain turn dies with its mode probe: nothing embeds it again."""
+    monkeypatch.setattr(mode, "store_mode_for_reads", unreadable_mode)
+
+    def the_store_turn(*_arguments, **_keywords):
+        raise AssertionError("a vault outside store mode took the store turn")
+
+    monkeypatch.setattr(vectors, "drain", the_store_turn)
+
+    assert vectors.in_store_mode(vault) is False
+    semantic_drain.SemanticDrain(vault)._turn()
+
+
+def test_a_store_mode_vault_with_an_unreadable_mode_record_fails_its_turn(
+    stored, encoder, monkeypatch
+):
+    """A vault the store says is in store mode, run as a file-mode vault on a mode record it
+    cannot read: the file turn would embed the lagging projection."""
+    monkeypatch.setattr(mode, "store_mode_for_reads", unreadable_mode)
+
+    with pytest.raises(OSError, match="mode record"):
+        semantic_drain.SemanticDrain(stored)._turn()
+
+
+def test_a_cursor_beyond_the_audit_trail_makes_the_drain_compare_every_page(stored, encoder):
+    """A sidecar that another store left behind keeps a cursor that this store's audit trail never
+    reaches: followed, it would show the drain no page and every row would stay unproven."""
+    catch_up(stored)
+    index = index_of(stored)
+    cursor = index.store_cursor()
+    sidecar_execute(stored, "DELETE FROM store_page_vectors WHERE file_path = ?", ALPHA)
+    index.set_store_cursor(cursor[0], cursor[1] + 1000)
+    assert ALPHA not in hit_paths(stored, "lighthouse keeper tide")
+
+    drained = catch_up(stored)
+
+    assert drained.embedded == 1
+    assert ALPHA in hit_paths(stored, "lighthouse keeper tide")
+    assert index.store_cursor() == cursor
+
+
+def test_a_page_that_keeps_failing_does_not_keep_the_pages_behind_it_owed(stored, writer, encoder):
+    """A retry that takes the same four owed pages each turn: pages that fail for good, ahead of a
+    page that would succeed, keep it owed (and withheld) for ever."""
+    stubborn = [f"Knowledge Base/Notes/Aa{number}.md" for number in range(4)]
+    fine = "Knowledge Base/Notes/Zz.md"
+    catch_up(stored)
+    encoder.refuse = "kettle"
+    for rel in stubborn:
+        commit(writer, note(rel, "stubborn kettle"), rel)
+    commit(writer, note("Zz", "fine kettle"), fine)
+    catch_up(stored)
+    assert index_of(stored).store_stamps([fine])[fine].owed
+    encoder.refuse = "stubborn"
+
+    first = vectors.drain(stored)
+    second = vectors.drain(stored)
+
+    assert not index_of(stored).store_stamps([fine])[fine].owed
+    assert (first.more, second.more) == (False, True), "more owed pages wait after a gain"
+
+
+def test_a_sidecar_gets_its_stamp_table_with_its_first_stamp_and_not_before(vault, encoder):
+    """A file-mode sidecar that carries stamp triggers: every row insert and delete of its rebuilds
+    runs a lookup that can never match."""
+    index = index_of(vault)
+    identity = recall_space.current_identity(embeddings.VECTOR_DIM)
+    index.upsert_batch([(ALPHA, ["a chunk"], encoder(["a chunk"]), 1.0)], identity=identity)
+
+    with closing(sqlite3.connect(index.path)) as database:
+        objects = database.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'store_page_vectors%'"
+        ).fetchall()
+    assert objects == []
+    assert index.store_stamps() == {} and index.store_owed_paths(4) == []
+    assert ALPHA in index.row_paths()
+    assert index.purge_paths_if_present([ALPHA]) == 1
+
+    index.upsert_batch([(ALPHA, ["a chunk"], encoder(["a chunk"]), 1.0)], identity=identity)
+    index.record_store_stamps({ALPHA: StoreStamp("a" * 64, 7)})
+    assert index.store_stamps([ALPHA])[ALPHA] == StoreStamp("a" * 64, 7)
+    index.upsert_batch([(ALPHA, ["another"], encoder(["another"]), 1.0)], identity=identity)
+    assert index.store_stamps([ALPHA])[ALPHA].owed, "the stamp table now watches the rows"
+
+
+def test_the_store_drain_embeds_the_pages_that_the_file_mode_walk_embeds(vault):
+    """A path rule that drifts from the walk: store mode would embed pages that search never
+    reaches, or leave out pages that it does."""
+    names = [
+        "Notes/Plain.md",
+        "Notes/Deep/Deeper/Plain.md",
+        ".drafts/Hidden.md",
+        "_trash/Gone.md",
+        "_archive/Old.md",
+        "_attachments/Note.md",
+        "_Governance/Policy.md",
+        ".exomem-batch-1/Part.md",
+        "Notes/Plain.sync-conflict-20260101-ab.md",
+        "Notes/index.md",
+        "Notes/readme.txt",
+    ]
+    knowledge_base = vault / "Knowledge Base"
+    for name in names:
+        (knowledge_base / name).parent.mkdir(parents=True, exist_ok=True)
+        (knowledge_base / name).write_text("---\ntitle: T\n---\n# T\n\nA page.\n")
+    walked = {
+        Path(path).relative_to(vault).as_posix() for path in index_paths.iter_index_markdown(vault)
+    }
+
+    disagreements = {
+        name: (f"Knowledge Base/{name}" in walked, vectors.embeddable(f"Knowledge Base/{name}"))
+        for name in names
+        if (f"Knowledge Base/{name}" in walked) != vectors.embeddable(f"Knowledge Base/{name}")
+    }
+
+    assert disagreements == {}

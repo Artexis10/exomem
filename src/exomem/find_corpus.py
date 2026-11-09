@@ -421,16 +421,21 @@ def _classify_walk_entry(
         return None, None
     kind = entry_kind(child, info)
     if kind is EntryKind.DIRECTORY:
-        if child.name in EXCLUDED_DIR_NAMES or child.name.startswith(EXCLUDED_DIR_PREFIXES):
-            return None, info
-        return "dir", info
-    if (
-        kind is EntryKind.REGULAR
-        and child.suffix.lower() == ".md"
-        and not is_sync_conflict_copy(child.name)
-    ):
+        return ("dir" if walk_name_admits(child.name, directory=True) else None), info
+    if kind is EntryKind.REGULAR and walk_name_admits(child.name, directory=False):
         return "md", info
     return None, info
+
+
+def walk_name_admits(name: str, *, directory: bool) -> bool:
+    """The walk's rule that reads an entry's name alone, for a folder to enter or a file to yield.
+
+    A folder is entered unless it is excluded by name; a file is yielded when it is Markdown and
+    not a sync conflict copy. The entry's kind and the reserved registry are the caller's to add.
+    """
+    if directory:
+        return name not in EXCLUDED_DIR_NAMES and not name.startswith(EXCLUDED_DIR_PREFIXES)
+    return Path(name).suffix.lower() == ".md" and not is_sync_conflict_copy(name)
 
 
 def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):

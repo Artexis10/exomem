@@ -12,8 +12,11 @@ store, never ahead of it.
 Change detection reads the store's audit rows past the sidecar's cursor, never a file event or a
 file time. The cursor is ``(revision, audit seq)``: the audit trail has no index by revision, and
 its ``seq`` is the key that a range scan follows. A migration or a rollback writes one audit row
-with no path, which says that every page's life restarts, and a sidecar with no cursor has never
-caught up: both make the drain compare every stored page with the sidecar.
+with no path, which says that every page's life restarts. A sidecar with no cursor has never caught
+up, and one whose cursor lies past the end of the audit trail belongs to another store: all three
+make the drain compare every stored page with the sidecar. That census judges only the pages that
+the store owns; the sidecar's rows for other files (collection layers, dot-folders, the vault
+outside the Knowledge Base) are not the store's to keep or to delete.
 
 The cursor moves only after every page that its audit rows name is stamped, purged or owed. A page
 whose attempt failed is owed: its stamp says so, readers withhold it, and a turn with nothing newer
@@ -23,6 +26,7 @@ retries it.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -31,8 +35,8 @@ from typing import TYPE_CHECKING
 
 from .. import index_paths, kbdir, recall_policy, reserved_paths, runtime_resources, vault
 from ..embedding_index import EmbeddingIndex, StoreStamp
-from ..find_corpus import EXCLUDED_DIR_NAMES, EXCLUDED_DIR_PREFIXES
-from . import mode, read
+from ..find_corpus import walk_name_admits
+from . import mode, ownership, read
 
 if TYPE_CHECKING:
     from ..embeddings import ParentRows
@@ -66,23 +70,51 @@ class Withheld:
 
 NOTHING_WITHHELD = Withheld()
 
+#: Per vault, why `withheld` last found the mode or the store unreadable: it logs when this changes.
+_UNREADABLE: dict[str, str] = {}
+
+
+def in_store_mode(vault_root: Path) -> bool:
+    """Whether this vault's vectors follow the store, as ``mode.store_mode_for_reads`` says.
+
+    A mode record that cannot be read does not stop a vault that the store itself says is not in
+    store mode (its mode row is absent or says ``file``): it runs as a file-mode vault. Where the
+    store says ``store`` or cannot be read either, the mode is unknown and the first error stands.
+    """
+    try:
+        return mode.store_mode_for_reads(vault_root)
+    except Exception:  # noqa: BLE001 - re-raised unless the store's own row rules store mode out
+        try:
+            recorded = mode._stored_mode(vault_root)
+        except Exception:  # noqa: BLE001 - an unreadable store leaves the mode unknown
+            recorded = mode.STORE_MODE
+        if recorded == mode.STORE_MODE:
+            raise
+        return False
+
 
 def withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
     """The pages whose vectors the store does not vouch for; nothing when the vault is in file mode.
 
     A page is proven when its stamp, written with its rows, names the bytes that the store holds
     now. The cursor says which pages can have changed since the sidecar last caught up, so only
-    those, and the owed ones, are compared; with no cursor every page that the sidecar holds rows
-    for is. A mode or a store that cannot be read withholds everything: an unknown state is never
-    proof.
+    those, and the owed ones, are compared; where the cursor cannot be followed (`_needs_census`)
+    every owned page that the sidecar holds rows for is. A mode or a store that cannot be read
+    withholds everything: an unknown state is never proof.
     """
+    key = os.fspath(vault_root)
     try:
-        if not mode.store_mode_for_reads(vault_root):
-            return NOTHING_WITHHELD
-        return _withheld(vault_root, index)
+        found = _withheld(vault_root, index) if in_store_mode(vault_root) else NOTHING_WITHHELD
     except Exception as error:  # noqa: BLE001 - an unreadable store withholds, not breaks, a query
-        log.warning("store-mode vectors withheld: the mode or the store was unreadable (%s)", error)
+        reason = f"{type(error).__name__}: {error}"
+        if _UNREADABLE.get(key) != reason:  # a query per second must not log per second
+            _UNREADABLE[key] = reason
+            log.warning(
+                "store-mode vectors withheld: the mode or the store was unreadable (%s)", reason
+            )
         return Withheld(everything=True)
+    _UNREADABLE.pop(key, None)
+    return found
 
 
 def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
@@ -90,9 +122,9 @@ def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
         return NOTHING_WITHHELD  # no sidecar, no rows to serve
     with index.store_record() as record, read.snapshot(vault_root) as view:
         cursor = record.cursor()
-        if cursor is None or _restarted_after(view, cursor[1]):
+        if _needs_census(view, cursor):
             stored = {meta.path: meta.sha256 for meta in view.pages()}
-            candidates = record.row_paths()
+            candidates = {path for path in record.row_paths() if owned(path)}
             stamps = record.stamps()
         else:
             candidates = {
@@ -119,11 +151,26 @@ def _proves(stamp: StoreStamp | None, sha256: str | None) -> bool:
     return stamp is not None and not stamp.owed and sha256 is not None and stamp.sha256 == sha256
 
 
-def _restarted_after(view: read.StoreSnapshot, seq: int) -> bool:
-    """Whether a migration or a rollback ran past `seq`: its audit row has no path."""
+def owned(path: str) -> bool:
+    """Whether the store owns the page at `path`; its rows for other files are not the drain's."""
+    return ownership.classify(path) is ownership.Ownership.PAGE
+
+
+def _audit_head(view: read.StoreSnapshot) -> int:
+    return view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
+
+
+def _needs_census(view: read.StoreSnapshot, cursor: tuple[int, int] | None) -> bool:
+    """Whether the audit trail past the cursor cannot say what changed, so every page is compared.
+
+    That holds with no cursor, with a cursor beyond the end of the trail (a cursor from another or
+    an older store), and after a migration or a rollback, whose audit row has no path.
+    """
+    if cursor is None or cursor[1] > _audit_head(view):
+        return True
     return (
         view.connection.execute(
-            "SELECT 1 FROM store_audit WHERE seq > ? AND path IS NULL LIMIT 1", (seq,)
+            "SELECT 1 FROM store_audit WHERE seq > ? AND path IS NULL LIMIT 1", (cursor[1],)
         ).fetchone()
         is not None
     )
@@ -146,10 +193,9 @@ def embeddable(rel: str) -> bool:
         if not rel.startswith(prefix):
             return False
         inside = rel[len(prefix) :]
-        folders = inside.split("/")[:-1]
-        if any(
-            folder in EXCLUDED_DIR_NAMES or folder.startswith(EXCLUDED_DIR_PREFIXES)
-            for folder in folders
+        *folders, name = inside.split("/")
+        if not walk_name_admits(name, directory=False) or not all(
+            walk_name_admits(folder, directory=True) for folder in folders
         ):
             return False
     parts = inside.split("/")
@@ -190,6 +236,8 @@ class _Plan:
     cursor: tuple[int, int] | None = None
     #: The audit read stopped at its limit, so more rows may follow the cursor.
     more_audit: bool = False
+    #: A retry took as many owed pages as one turn may, so more may be owed.
+    retry_full: bool = False
 
 
 def needs_vectors(stamp: StoreStamp | None, sha256: str) -> bool:
@@ -233,7 +281,7 @@ def drain(
 def _plan(vault_root: Path, index: EmbeddingIndex, audit_rows: int) -> _Plan:
     cursor = index.store_cursor()
     with read.snapshot(vault_root) as view:
-        if cursor is None or _restarted_after(view, cursor[1]):
+        if _needs_census(view, cursor):
             return _census_plan(index, view)
         rows = view.connection.execute(
             "SELECT seq, revision, path, from_path FROM store_audit WHERE seq > ? "
@@ -256,19 +304,20 @@ def _plan(vault_root: Path, index: EmbeddingIndex, audit_rows: int) -> _Plan:
 
 def _census_plan(index: EmbeddingIndex, view: read.StoreSnapshot) -> _Plan:
     """Every page against every stamp: the first pass, and the one after a migration or rollback."""
-    head = view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
-    plan = _Plan(cursor=(view.revision, head))
+    plan = _Plan(cursor=(view.revision, _audit_head(view)))
     stored = {meta.path: meta for meta in view.pages()}
     _file_pages(plan, view, sorted(stored), index.store_stamps(), metas=stored)
-    # A path that only the sidecar knows (a page deleted before the sidecar caught up) has no meta.
-    plan.drop += sorted(path for path in index.row_paths() if path not in stored)
+    # A path that only the sidecar knows, and that the store would own (a page deleted before the
+    # sidecar caught up), has no meta. The sidecar's rows for files the store does not own stay.
+    plan.drop += sorted(path for path in index.row_paths() if path not in stored and owned(path))
     return plan
 
 
 def _retry_plan(index: EmbeddingIndex, view: read.StoreSnapshot) -> _Plan:
-    """A few of the longest-owed pages, when the sidecar is level with the store."""
+    """A few of the owed pages that were tried least, when the sidecar is level with the store."""
     plan = _Plan()
     owed = index.store_owed_paths(OWED_RETRIES_PER_TURN)
+    plan.retry_full = len(owed) == OWED_RETRIES_PER_TURN
     for path in owed:
         meta = view.page_meta(path)
         if meta is None or not embeddable(path):
@@ -364,7 +413,7 @@ def _carry_out(
         embedded=embedded,
         purged=purged,
         owed=owed,
-        more=not finished or plan.more_audit,
+        more=not finished or plan.more_audit or (plan.retry_full and bool(embedded or purged)),
     )
 
 

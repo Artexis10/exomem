@@ -107,6 +107,8 @@ class StoreRecord:
 
     def __init__(self, conn: sqlite3.Connection | None) -> None:
         self._conn = conn
+        # A sidecar gets its stamp table with its first stamp: before that it holds none.
+        self._stamped = conn is not None and _has_store_stamps(conn)
 
     def cursor(self) -> tuple[int, int] | None:
         if self._conn is None:
@@ -124,7 +126,7 @@ class StoreRecord:
     def stamps(
         self, paths: Iterable[str] | None = None, *, with_owed: bool = False
     ) -> dict[str, StoreStamp]:
-        if self._conn is None:
+        if self._conn is None or not self._stamped:
             return {}
         columns = "SELECT file_path, sha256, revision, owed FROM store_page_vectors"
         if paths is None:
@@ -141,13 +143,13 @@ class StoreRecord:
         return {path: StoreStamp(sha, revision, bool(owed)) for path, sha, revision, owed in rows}
 
     def owed_paths(self, limit: int) -> list[str]:
-        if self._conn is None:
+        if self._conn is None or not self._stamped:
             return []
         return [
             path
             for (path,) in self._conn.execute(
                 "SELECT file_path FROM store_page_vectors WHERE owed = 1 "
-                "ORDER BY revision, file_path LIMIT ?",
+                "ORDER BY attempts, file_path LIMIT ?",
                 (limit,),
             )
         ]
@@ -157,12 +159,12 @@ class StoreRecord:
             return set()
         found = set(indexed_parent_paths(self._conn))
         found.update(
-            path
-            for (path,) in self._conn.execute(
-                "SELECT parent_path FROM semantic_unit_vectors "
-                "UNION SELECT file_path FROM store_page_vectors"
-            )
+            path for (path,) in self._conn.execute("SELECT parent_path FROM semantic_unit_vectors")
         )
+        if self._stamped:
+            found.update(
+                path for (path,) in self._conn.execute("SELECT file_path FROM store_page_vectors")
+            )
         return found
 
 
@@ -676,6 +678,15 @@ def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -
     conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
 
 
+def _has_store_stamps(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_page_vectors'"
+        ).fetchone()
+        is not None
+    )
+
+
 def _ensure_store_stamps(conn: sqlite3.Connection) -> None:
     """The stamp table of a store-mode vault's rows, and the triggers that keep each stamp honest.
 
@@ -683,18 +694,22 @@ def _ensure_store_stamps(conn: sqlite3.Connection) -> None:
     of those rows (a file-mode upsert, a rebuild, a purge) leaves rows that the stamp no longer
     describes, so each insert or delete on either table turns that page's existing stamp into an
     owed one, which no reader serves; the stamping transaction writes its stamp last. A page that
-    has no stamp is not touched, so a file-mode vault pays one failed key lookup per row. The table
-    is created, never migrated: an older binary that shares this sidecar keeps working.
+    has no stamp is not touched. A sidecar gets all of this inside its first stamping transaction,
+    so a file-mode vault never has the table, and never pays a lookup per row. The table is created,
+    never migrated: an older binary that shares this sidecar keeps working.
     """
     conn.execute(
         "CREATE TABLE IF NOT EXISTS store_page_vectors ("
         "file_path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, revision INTEGER NOT NULL, "
-        "owed INTEGER NOT NULL DEFAULT 0 CHECK(owed IN (0, 1)))"
+        "owed INTEGER NOT NULL DEFAULT 0 CHECK(owed IN (0, 1)), "
+        "attempts INTEGER NOT NULL DEFAULT 0)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS store_page_vectors_owed ON store_page_vectors(file_path) "
         "WHERE owed = 1"
     )
+    # Both pairs are closed sets that this schema fixes: the two row tables with the column that
+    # names each row's page, and the two row events that leave a stamp describing other rows.
     for table, column in (("chunks", "file_path"), ("semantic_unit_vectors", "parent_path")):
         for event, row in (("INSERT", "NEW"), ("DELETE", "OLD")):
             conn.execute(
@@ -706,16 +721,26 @@ def _ensure_store_stamps(conn: sqlite3.Connection) -> None:
 
 
 def _write_store_stamps(conn: sqlite3.Connection, stamps: dict[str, StoreStamp]) -> None:
+    """Write the stamps, creating the table on the first. An owed stamp counts one more attempt."""
+    if not stamps:
+        return
+    _ensure_store_stamps(conn)
     conn.executemany(
-        "INSERT OR REPLACE INTO store_page_vectors(file_path, sha256, revision, owed) "
-        "VALUES (?, ?, ?, ?)",
-        ((path, stamp.sha256, stamp.revision, int(stamp.owed)) for path, stamp in stamps.items()),
+        "INSERT INTO store_page_vectors(file_path, sha256, revision, owed, attempts) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+        "sha256 = excluded.sha256, revision = excluded.revision, owed = excluded.owed, "
+        "attempts = CASE WHEN excluded.owed = 1 THEN store_page_vectors.attempts + 1 ELSE 0 END",
+        (
+            (path, stamp.sha256, stamp.revision, int(stamp.owed), int(stamp.owed))
+            for path, stamp in stamps.items()
+        ),
     )
 
 
 def _clear_store_stamps(conn: sqlite3.Connection) -> None:
     """Forget every stamp and the cursor: the drain then compares every stored page again."""
-    conn.execute("DELETE FROM store_page_vectors")
+    if _has_store_stamps(conn):
+        conn.execute("DELETE FROM store_page_vectors")
     conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ))
 
 
@@ -1026,7 +1051,6 @@ class EmbeddingIndex:
                 "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
                 "ON semantic_unit_vectors(parent_path, parent_generation)"
             )
-            _ensure_store_stamps(conn)
             if not current_unit_schema:
                 # Dropping the table dropped its stamp trigger, so the stamps of rows it held go
                 # too: a stamp may only outlive its rows as the stamping write left them.
@@ -1576,10 +1600,11 @@ class EmbeddingIndex:
                     removed += 1
                     removed_paths.append(rel_path)
                 # After the row deletes, whose triggers owe the stamp: a purged page has no stamp.
-                conn.executemany(
-                    "DELETE FROM store_page_vectors WHERE file_path = ?",
-                    ((path,) for path in paths),
-                )
+                if _has_store_stamps(conn):
+                    conn.executemany(
+                        "DELETE FROM store_page_vectors WHERE file_path = ?",
+                        ((path,) for path in paths),
+                    )
                 if removed:
                     # ONE bump for the whole batch — hence the explicit path list:
                     # the generation delta alone could never say how many, or
@@ -1682,7 +1707,7 @@ class EmbeddingIndex:
             return record.stamps(paths, with_owed=with_owed)
 
     def store_owed_paths(self, limit: int) -> list[str]:
-        """Up to `limit` owed pages, the longest-owed first: a retry that fails goes to the back."""
+        """Up to `limit` owed pages, the least tried first: a failed retry moves behind the rest."""
         with self.store_record() as record:
             return record.owed_paths(limit)
 
@@ -2927,6 +2952,10 @@ class EmbeddingIndex:
             return []
         withheld = self._withheld()
         if withheld.everything:
+            if incomplete_out is not None:
+                # The store could not say which pages' rows to trust, so nothing was proved, and an
+                # empty answer must not read as a miss. "." is the vault itself, as a witness.
+                incomplete_out.append(".")
             return []
         from .governance import egress
 

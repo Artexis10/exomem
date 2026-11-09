@@ -35,6 +35,7 @@
 ## 6. Embeddings, Cloud and Windows
 
 - [x] 6.1 Key vector rows by page hash and store revision; keep the semantic drain asynchronous.
+  - Known gap: a page that recall policy did not admit keeps a stamp without rows, so a later policy relaxation does not re-embed it until the page changes.
 - [ ] 6.2 Let a Cloud cell run without per-write projection and export Markdown on request.
 - [ ] 6.3 Run the acceptance set on native Windows/NTFS.
 

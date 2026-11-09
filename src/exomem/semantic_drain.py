@@ -215,9 +215,9 @@ class SemanticDrain:
         sets no cadence, because the writer hints (``signal``/``_wake``) and
         the idle poll deliver that change.
         """
-        from .vault_store import mode as store_mode
+        from .vault_store import vectors
 
-        if store_mode.store_mode_for_reads(self.root):
+        if vectors.in_store_mode(self.root):
             return self._store_turn()
         with self._lock:
             hints = self._hints
