@@ -147,14 +147,14 @@ class StoreSnapshot:
         a resolver adds those entries from the disk walk.
         """
         for meta in self.pages():
-            if not _walk_member(meta.path):
+            if not walk_member(meta.path):
                 continue
             page = self.page(meta.path)
             title = None if page is None else vault.title_key_from_bytes(page.body, meta.path)
             yield meta.path, title
 
 
-def _walk_member(rel: str) -> bool:
+def walk_member(rel: str) -> bool:
     """Whether ``vault.walk_vault_md`` would reach this stored page, judged by path alone.
 
     The walk's own entry rule (``vault._walk_vault_md_entry``) also lstat's the file for a symlink,

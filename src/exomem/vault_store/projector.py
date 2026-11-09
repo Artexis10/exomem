@@ -113,6 +113,8 @@ class Facts:
     page: read.PageMeta | None
     manifest: Manifest | None
     held: bool
+    #: The hash of the bytes that the hold keeps, or None when nothing is held at this path.
+    held_sha256: str | None
     #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here, which a kill
     #: may have put on disk before the manifest heard of them: those after the manifest's revision,
     #: or with no manifest, those of this path's current life. For a binary, whose file the store
@@ -121,6 +123,15 @@ class Facts:
     #: The audit trail shows Exomem removed this path after the manifest's revision, so a missing
     #: file is the removal that a kill left unrecorded and not an outside delete.
     removed: bool = False
+    #: The record of a binary at this path; None for a page, or when the store records none.
+    binary: read.BinaryMeta | None = None
+
+    @property
+    def stored_sha256(self) -> str | None:
+        """The hash of the page or binary that the store holds at this path, or None."""
+        if self.page is not None:
+            return self.page.sha256
+        return None if self.binary is None else self.binary.sha256
 
     @property
     def own_hashes(self) -> frozenset[str]:
@@ -235,7 +246,7 @@ class Projector:
         """Project every intent that is queued now and not held, oldest first, and report it."""
         report = PassReport()
         with self._pass_lock:
-            acquired = held_fs.acquire(self._anchor())
+            acquired = held_fs.acquire(anchor(self._root))
             if not acquired.ok:
                 raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
             with acquired.require() as filesystem:
@@ -251,10 +262,6 @@ class Projector:
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
 
-    def _anchor(self) -> Path:
-        # Windows resolves a root junction before no-follow anchoring, as the store's own routes do.
-        return self._root.resolve() if os.name == "nt" or self._root.is_symlink() else self._root
-
     def _list(self, after: tuple[str, str]) -> list[Intent]:
         """The next intents after ``after`` in queue order, without bodies or held paths."""
         with read.snapshot(self._root) as view:
@@ -267,27 +274,7 @@ class Projector:
         return [Intent(*row) for row in rows]
 
     def _facts(self, rel: str) -> Facts:
-        with read.snapshot(self._root) as view:
-            database = view.connection
-            queued = database.execute(
-                "SELECT path, revision, operation, from_path, queued_at "
-                "FROM store_projection_queue WHERE path = ?",
-                (rel,),
-            ).fetchone()
-            recorded = database.execute(
-                "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
-            ).fetchone()
-            held = database.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
-            manifest_revision = None if recorded is None else recorded[3]
-            return Facts(
-                path=rel,
-                intent=None if queued is None else Intent(*queued),
-                page=view.page_meta(rel),
-                manifest=None if recorded is None else Manifest(*recorded),
-                held=held is not None,
-                audited=_audited(database, rel, manifest_revision),
-                removed=_removed_since(database, rel, manifest_revision),
-            )
+        return read_facts(self._root, rel)
 
     def _stored_body(self, expected: read.PageMeta) -> bytes | None:
         """The body of the page that ``expected`` describes, or None when a commit changed it."""
@@ -345,7 +332,7 @@ class Projector:
         assert intent is not None
         if page is None:
             raise Deferred("a write intent names a path with no stored page")
-        disk = _observe(filesystem, intent.path)
+        disk = observe(filesystem, intent.path)
         self._apply_write(filesystem, facts, disk, _judge_write(facts, disk), report)
 
     def _apply_write(
@@ -391,7 +378,7 @@ class Projector:
     ) -> None:
         intent = facts.intent
         assert intent is not None
-        disk = _observe(filesystem, intent.path)
+        disk = observe(filesystem, intent.path)
         removed = report.removed
         if self._remove(filesystem, facts, disk, report, store_revision=None):
             self._record_removed(intent.path, intent.revision)
@@ -442,8 +429,8 @@ class Projector:
         old = self._facts(intent.from_path)
         if old.held:
             return
-        old_disk = _observe(filesystem, old.path)
-        new_disk = _observe(filesystem, intent.path)
+        old_disk = observe(filesystem, old.path)
+        new_disk = observe(filesystem, intent.path)
         if (
             old_disk is not None
             and old.manifest is not None
@@ -478,7 +465,7 @@ class Projector:
 
         A file above ``HELD_BODY_LIMIT`` is held by its hash alone; its bytes stay in the file.
         """
-        kept = _observe(filesystem, facts.path, keep_body=True)
+        kept = observe(filesystem, facts.path, keep_body=True)
         if kept is None:
             raise Deferred("the file vanished while it was being held")
         self._hold(
@@ -502,21 +489,9 @@ class Projector:
         sha256: str,
         body: bytes | None,
     ) -> None:
-        # One row for each path: a second outside change replaces the bytes and keeps the first
-        # detection time, so a person's repeated saves are one held item.
-        detected = write.timestamp()
-
         def work(writer: CollectionWriter) -> None:
             with writer.handle.transaction() as tx:
-                tx.execute(
-                    "INSERT INTO store_held(path, kind, base_revision, store_revision, sha256, "
-                    "body, detected_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(path) DO UPDATE SET "
-                    "kind = excluded.kind, base_revision = excluded.base_revision, "
-                    "store_revision = excluded.store_revision, sha256 = excluded.sha256, "
-                    "body = excluded.body",
-                    (rel, kind, base_revision, store_revision, sha256, body, detected),
-                )
+                record_held(tx, rel, kind, base_revision, store_revision, sha256, body)
 
         self._run(work)
         report.held += 1
@@ -533,7 +508,7 @@ class Projector:
 
         def work(writer: CollectionWriter) -> None:
             with writer.handle.transaction() as tx:
-                _record_file(tx, page.path, page.sha256, size, mtime_ns, page.revision)
+                record_file(tx, page.path, page.sha256, size, mtime_ns, page.revision)
                 tx.execute(
                     "DELETE FROM store_projection_queue WHERE path = ? AND revision <= ?",
                     (page.path, page.revision),
@@ -560,7 +535,7 @@ class Projector:
         def work(writer: CollectionWriter) -> None:
             with writer.handle.transaction() as tx:
                 tx.execute("DELETE FROM store_manifest WHERE path = ?", (old_path,))
-                _record_file(
+                record_file(
                     tx, page.path, page.sha256, renamed.size, renamed.mtime_ns, page.revision
                 )
                 tx.execute(
@@ -600,7 +575,7 @@ class Projector:
                 if path
             }
         removed = 0
-        acquired = held_fs.acquire(self._anchor())
+        acquired = held_fs.acquire(anchor(self._root))
         if not acquired.ok:
             raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
         with acquired.require() as filesystem:
@@ -660,6 +635,64 @@ def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
 # -- store reads ----------------------------------------------------------------------------------
 
 
+def anchor(vault_root: Path) -> Path:
+    """The root that the held filesystem anchors to, which the importer's reads share."""
+    # Windows resolves a root junction before no-follow anchoring, as the store's own routes do.
+    return vault_root.resolve() if os.name == "nt" or vault_root.is_symlink() else vault_root
+
+
+def read_facts(vault_root: Path, rel: str) -> Facts:
+    """What the store records about ``rel``, read in one snapshot; the importer reads it too."""
+    with read.snapshot(vault_root) as view:
+        database = view.connection
+        queued = database.execute(
+            "SELECT path, revision, operation, from_path, queued_at "
+            "FROM store_projection_queue WHERE path = ?",
+            (rel,),
+        ).fetchone()
+        recorded = database.execute(
+            "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
+        ).fetchone()
+        held = database.execute("SELECT sha256 FROM store_held WHERE path = ?", (rel,)).fetchone()
+        manifest_revision = None if recorded is None else recorded[3]
+        return Facts(
+            path=rel,
+            intent=None if queued is None else Intent(*queued),
+            page=view.page_meta(rel),
+            manifest=None if recorded is None else Manifest(*recorded),
+            held=held is not None,
+            held_sha256=None if held is None else held[0],
+            audited=_audited(database, rel, manifest_revision),
+            removed=_removed_since(database, rel, manifest_revision),
+            binary=view.binary(rel),
+        )
+
+
+def record_held(
+    tx: Connection,
+    rel: str,
+    kind: str,
+    base_revision: int | None,
+    store_revision: int | None,
+    sha256: str,
+    body: bytes | None,
+) -> None:
+    """Hold ``rel`` for a person to resolve, inside the caller's transaction.
+
+    One row for each path: a second outside change replaces the bytes and keeps the first
+    detection time, so a person's repeated saves are one held item.
+    """
+    tx.execute(
+        "INSERT INTO store_held(path, kind, base_revision, store_revision, sha256, "
+        "body, detected_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(path) DO UPDATE SET "
+        "kind = excluded.kind, base_revision = excluded.base_revision, "
+        "store_revision = excluded.store_revision, sha256 = excluded.sha256, "
+        "body = excluded.body",
+        (rel, kind, base_revision, store_revision, sha256, body, write.timestamp()),
+    )
+
+
 def _audited(database: Connection, rel: str, manifest_revision: int | None) -> frozenset[str]:
     """The hashes that ``Facts.audited`` names.
 
@@ -717,7 +750,7 @@ def _removed_since(database: Connection, rel: str, manifest_revision: int | None
     return row is not None
 
 
-def _record_file(
+def record_file(
     tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
 ) -> None:
     """Record what the file at ``rel`` holds; the page's mtime then says what a stat does."""
@@ -749,7 +782,7 @@ def _split(rel: str) -> tuple[str, str]:
     return folder, leaf
 
 
-def _observe(
+def observe(
     filesystem: held_fs.HeldFilesystem, rel: str, *, keep_body: bool = False
 ) -> OnDisk | None:
     """The file at ``rel`` with its hash, or None when no file is there.

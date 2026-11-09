@@ -22,8 +22,8 @@
 ## 4. Projection and outside edits
 
 - [x] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path. Optional, for D12: project a store move as a rename, through the queue's move intent, when the file on disk matches the manifest.
-- [ ] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
-- [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
+- [x] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
+- [x] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
 
 ## 5. Stage 2: semantic units and canonicity
 
