@@ -14,6 +14,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
@@ -143,6 +144,11 @@ class SemanticUnit:
     check_by: str | None = None
     as_of: str | None = None
     until: str | None = None
+    # A belief unit's rows. `credence` is the matched value: a belief-level key, or the stated
+    # probability exactly as written. `metadata` keeps the stated text.
+    credence: str | None = None
+    credence_holder: str | None = None
+    credence_basis: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
@@ -199,10 +205,7 @@ class SemanticUnit:
             # a shape change. The other two are presence-sensitive — `$exists`
             # has to be able to distinguish "no verdict yet" from any value, and
             # a hit omits what it has nothing to say about.
-            "verdict": self.verdict,
-            "check_by": self.check_by,
-            "as_of": self.as_of,
-            "until": self.until,
+            **{key: getattr(self, key) for key in GOVERNED_UNIT_METADATA_KEYS},
         }
 
 
@@ -1021,7 +1024,8 @@ def parse_semantic_units(
             language=language_registry,
         )
         if validate:
-            errors.extend(unit_errors)
+            errors.extend(item for item in unit_errors if item.severity == "error")
+            warnings.extend(item for item in unit_errors if item.severity != "error")
         units.append(unit)
 
     if validate:
@@ -1124,6 +1128,10 @@ def _rich_unit(
     rich_check_by, check_by_error = _rich_date(block, key="check_by", path=path, line_by_number=line_by_number)
     rich_as_of, as_of_error = _rich_date(block, key="as_of", path=path, line_by_number=line_by_number)
     rich_until, until_error = _rich_date(block, key="until", path=path, line_by_number=line_by_number)
+    rows, row_problems = _governed_rows(
+        block.metadata, kind=block.type,
+        language=language or semantic_language_registry.core_registry(),
+    )
     order_error = None
     if rich_as_of and rich_until and dt.date.fromisoformat(rich_until) < dt.date.fromisoformat(rich_as_of):
         order_error = replace(_invalid_rich_metadata(
@@ -1157,11 +1165,18 @@ def _rich_unit(
         check_by=rich_check_by,
         as_of=rich_as_of,
         until=rich_until,
+        **rows,
     )
     return unit, [
-        error
-        for error in (category_error, tags_error, context_error, verdict_error, check_by_error, as_of_error, until_error, order_error)
-        if error is not None
+        *(
+            error
+            for error in (category_error, tags_error, context_error, verdict_error, check_by_error, as_of_error, until_error, order_error)
+            if error is not None
+        ),
+        *(
+            _row_diagnostic(block, problem, path=path, line_by_number=line_by_number)
+            for problem in row_problems
+        ),
     ]
 
 
@@ -1726,6 +1741,161 @@ def _rich_verdict(
             remediation=verdict_remediation(language.label_keys(semantic_labels.VERDICTS)),
         )
     return verdict, None
+
+
+# The probability or number shape a governed row accepts: plain decimal notation, so `nan`,
+# `inf`, `1_000` and a percentage are refused. It checks a field's format, not its meaning.
+_DECIMAL = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+_NUMBER_RE = re.compile(rf"^{_DECIMAL}(?:[eE][+-]?\d+)?$")
+_PERCENT_RE = re.compile(rf"^(?P<number>{_DECIMAL})\s*%$")
+# The language spec ties the credence rows to the core kind `belief`. A vault cannot redefine
+# a core kind, so this names a value the spec fixes, not vocabulary a vault defines.
+_BELIEF_KIND = "belief"
+# Task 4.5 of `make-epistemic-language-dynamic` turns these into errors one release after the
+# keys became reserved; until then a page written before the keys existed keeps parsing.
+_FIRST_RELEASE_SEVERITY = "warning"
+BELIEF_FORM = (
+    "Record a degree of belief as its own `## Belief` unit with `- credence_holder: <whose "
+    "belief>`, `- credence: <a belief level, or a probability from 0 to 1>`, `- credence_basis: "
+    "<why the holder believes it>` (required with a probability) and `- relations: assesses: "
+    "<the claim>`, then the belief in prose."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RowProblem:
+    """One governed row that does not validate, before it is bound to its source line."""
+
+    key: str
+    code: str
+    message: str
+    remediation: str
+    severity: str = "error"
+
+
+def governed_row_values(
+    metadata: Mapping[str, str],
+    *,
+    kind: str,
+    language: semantic_language_registry.LanguageRegistryView,
+) -> dict[str, str | None]:
+    """The projected value of each governed row that `_governed_rows` reads, by key.
+
+    Stored structural summaries carry no diagnostics, so they read the values alone; the
+    parser reads the same values with their problems, so the two never disagree.
+    """
+    return _governed_rows(metadata, kind=kind, language=language)[0]
+
+
+def _governed_rows(
+    metadata: Mapping[str, str],
+    *,
+    kind: str,
+    language: semantic_language_registry.LanguageRegistryView,
+) -> tuple[dict[str, str | None], list[_RowProblem]]:
+    """Validate the belief rows. A row that does not validate projects no value."""
+    values: dict[str, str | None] = dict.fromkeys(semantic_blocks.BELIEF_UNIT_METADATA_KEYS)
+    problems: list[_RowProblem] = []
+    present = [key for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS if key in metadata]
+    if kind != _BELIEF_KIND:
+        if present:
+            problems.append(_RowProblem(
+                present[0], "misplaced_rich_credence",
+                f"{', '.join(present)} {'belongs' if len(present) == 1 else 'belong'} on a "
+                f"belief unit, not on a {kind or 'plain'} unit",
+                BELIEF_FORM,
+            ))
+        return values, problems
+    if not present:
+        problems.append(_RowProblem(
+            "credence_holder", "incomplete_rich_belief",
+            "belief unit names no credence_holder and no credence",
+            "Add `- credence_holder: <whose belief>` and `- credence: <a belief level, or a "
+            "probability from 0 to 1>`, or rename the heading if the section is not one "
+            "holder's belief.",
+            severity=_FIRST_RELEASE_SEVERITY,
+        ))
+        return values, problems
+    holder = _row_text(metadata.get("credence_holder"))
+    basis = _row_text(metadata.get("credence_basis"))
+    if holder is None:
+        problems.append(_RowProblem(
+            "credence_holder", "missing_rich_credence_holder",
+            "belief unit has no credence_holder",
+            "Add `- credence_holder: <whose belief>`, a plain name or a link to an entity page. "
+            "Every belief names its holder.",
+        ))
+    credence, problem = _credence(metadata.get("credence"), basis=basis, language=language)
+    if problem is not None:
+        problems.append(problem)
+    values.update(credence=credence, credence_holder=holder, credence_basis=basis)
+    return values, problems
+
+
+def _credence(
+    raw: str | None,
+    *,
+    basis: str | None,
+    language: semantic_language_registry.LanguageRegistryView,
+) -> tuple[str | None, _RowProblem | None]:
+    """A belief level's key, or a probability as written; a probability needs a basis."""
+    levels = ", ".join(language.label_keys(semantic_labels.BELIEF_LEVELS))
+    stated = _row_text(raw)
+    if stated is None:
+        return None, _RowProblem(
+            "credence", "missing_rich_credence", "belief unit has no credence",
+            f"Add `- credence:` with one of {levels}, or a probability from 0 to 1 together "
+            "with `- credence_basis:`.",
+        )
+    level = language.resolve_label(semantic_labels.BELIEF_LEVELS, stated)
+    if level is not None:
+        return level, None
+    if _NUMBER_RE.match(stated) and 0 <= float(stated) <= 1:
+        if basis is None:
+            return None, _RowProblem(
+                "credence_basis", "missing_rich_credence_basis",
+                "a probability credence needs a credence_basis",
+                "Add `- credence_basis: <why the holder gives this number>`, or state a belief "
+                f"level instead: {levels}.",
+            )
+        return stated, None
+    percent = _PERCENT_RE.match(stated)
+    fix = (
+        f"Write the probability as a number from 0 to 1, such as "
+        f"{_percent_as_probability(percent.group('number'))} for {stated}."
+        if percent is not None
+        else f"Use one of {levels}, or a probability from 0 to 1."
+    )
+    return None, _RowProblem(
+        "credence", "invalid_rich_credence",
+        "credence is neither a belief level nor a probability from 0 to 1", fix,
+    )
+
+
+def _percent_as_probability(number: str) -> str:
+    """`80` as `0.8`, exactly: a decimal shift, never a float."""
+    return format((Decimal(number) / 100).normalize(), "f")
+
+
+def _row_text(raw: str | None) -> str | None:
+    """A free-text governed row's value as written, or None when it is absent or empty."""
+    if raw is None or not str(raw).strip():
+        return None
+    return str(raw).strip()
+
+
+def _row_diagnostic(
+    block: semantic_blocks.SemanticBlock,
+    problem: _RowProblem,
+    *,
+    path: str,
+    line_by_number: dict[int, _SourceLine],
+) -> SemanticUnitDiagnostic:
+    diagnostic = _invalid_rich_metadata(
+        block, key=problem.key, path=path, line_by_number=line_by_number,
+        message=problem.message, remediation=problem.remediation,
+    )
+    return replace(diagnostic, code=problem.code, severity=problem.severity)
 
 
 def calendar_date(raw: object) -> str | None:

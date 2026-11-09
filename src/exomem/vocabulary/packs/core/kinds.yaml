@@ -34,6 +34,7 @@ kinds:
   entity: {description: Portable entity semantic block, heading_aliases: [entities]}
   project: {description: Portable project semantic block, heading_aliases: [projects]}
   media_segment: {description: Portable media segment semantic block, heading_aliases: [media_segments, segments]}
+  belief: {description: Portable belief semantic block, heading_aliases: [beliefs]}
 # A compact kind has no heading: it is the kind of a unit written as one line, so no `##`
 # heading resolves to it.
 compact_kinds:

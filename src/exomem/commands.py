@@ -1606,10 +1606,11 @@ def op_bootstrap(
                 "Last current date (YYYY-MM-DD); activation marks it expired afterward "
                 "and omits it from stance."
             ),
+            # Names the list above rather than repeating it, so the rule costs no bytes per key.
             "metadata_form": (
-                f"{', '.join(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS)} use "
-                "`- key: value` rows in rich `## Heading` units. Compact `- [category] ...` "
-                "units have no metadata. Governed rows survive an edit to unit text."
+                "Each governed_unit_metadata key is a `- key: value` row in a rich `## Heading` "
+                "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
+                "an edit to unit text."
             ),
             "kinds": {
                 "open_question": "a question this store has not answered yet",

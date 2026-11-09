@@ -13,6 +13,7 @@ import pytest
 
 from exomem import commands, lexstore, semantic_units, working_set_index, working_set_runtime
 from exomem import semantic_language_registry as language_registry
+from exomem import vault as vault_module
 from exomem._hooks import exomem_retrieve_nudge as hook
 
 PATH = "Knowledge Base/Notes/Release outlook.md"
@@ -39,7 +40,7 @@ def test_a_belief_heading_with_its_holder_and_level() -> None:
         "The release will slip a week.\n"
     )
 
-    assert [unit.kind for unit in document.units] == []  # FLIPS slice4: was [] (no belief kind)
+    assert [unit.kind for unit in document.units] == ["belief"]  # FLIPS slice4: was [] (no belief kind)
     assert _codes(document.errors) == []  # CORE
     assert _codes(document.warnings) == []  # CORE
 
@@ -47,9 +48,9 @@ def test_a_belief_heading_with_its_holder_and_level() -> None:
 def test_a_plain_beliefs_heading_written_before_the_kind() -> None:
     document = _parse("# Release outlook\n\n## Beliefs\n\nThe team trusts the new pipeline.\n")
 
-    assert [unit.kind for unit in document.units] == []  # FLIPS slice4: was [] (no belief kind)
+    assert [unit.kind for unit in document.units] == ["belief"]  # FLIPS slice4: was [] (no belief kind)
     assert _codes(document.errors) == []  # CORE
-    assert _codes(document.warnings) == []  # FLIPS slice4: was [] (no first-release warning)
+    assert _codes(document.warnings) == ["incomplete_rich_belief"]  # FLIPS slice4: was []
 
 
 def test_a_credence_row_on_a_claim() -> None:
@@ -57,7 +58,7 @@ def test_a_credence_row_on_a_claim() -> None:
 
     assert [unit.kind for unit in document.units] == ["claim"]  # CORE
     assert document.units[0].metadata["credence"] == "0.8"  # CORE
-    assert _codes(document.errors) == []  # FLIPS slice4: was [] (no misplaced-credence error)
+    assert _codes(document.errors) == ["misplaced_rich_credence"]  # FLIPS slice4: was []
 
 
 @pytest.mark.parametrize(
@@ -101,6 +102,128 @@ def test_a_new_governed_row_below_a_nested_heading() -> None:
 
     assert [unit.kind for unit in document.units] == ["claim"]  # FLIPS slice4: was ["claim"]
     assert _codes(document.errors) == []  # FLIPS slice4: was [] (row not reserved)
+
+
+# ---------------------------------------------------------------------------
+# Belief units
+# ---------------------------------------------------------------------------
+
+
+def test_a_sourced_forecast_keeps_its_holder_probability_basis_and_claim() -> None:
+    """Catches a belief whose probability is rounded, dropped or detached from its claim."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: [[Finance lead]]\n- credence: 0.70\n"
+        "- credence_basis: the last six release cycles\n- relations: assesses: [[Release date]]\n\n"
+        "The release will slip a week.\n"
+    )
+
+    (belief,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert belief.kind == "belief"
+    assert belief.credence == "0.70"
+    assert belief.credence_holder == "[[Finance lead]]"
+    assert belief.credence_basis == "the last six release cycles"
+    assert [(relation.kind, relation.target) for relation in belief.relations] == [
+        ("assesses", "[[Release date]]"),
+    ]
+    assert belief.to_dict()["credence"] == "0.70"
+
+
+def test_an_unsourced_probability_is_refused_and_names_the_basis_row() -> None:
+    """Catches a bare number that reads as calibrated when nobody said why."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: 0.7\n\n"
+        "The release will slip a week.\n"
+    )
+
+    (error,) = document.errors
+    assert error.code == "missing_rich_credence_basis"
+    assert "credence_basis" in error.remediation
+
+
+def test_a_percentage_is_refused_with_the_probability_to_write_instead() -> None:
+    """Catches `80%` stored as an unreadable credence, or read as a probability of 80."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: 80%\n"
+        "- credence_basis: the last six release cycles\n\nThe release will slip a week.\n"
+    )
+
+    (error,) = document.errors
+    assert error.code == "invalid_rich_credence"
+    assert "0.8" in error.remediation
+
+
+def test_a_belief_level_needs_no_basis_and_keeps_its_stated_label() -> None:
+    """Catches a level that demands a basis, or a label that the parser rewrites in the page."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: Likely\n\n"
+        "The release will slip a week.\n"
+    )
+
+    (belief,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert belief.credence == "likely"
+    assert belief.metadata["credence"] == "Likely"
+
+
+def test_a_number_on_a_claim_is_refused_with_the_belief_form() -> None:
+    """Catches a claim that silently gains a confidence number nobody owns."""
+    document = _parse("# Release outlook\n\n## Claim\n- credence: 0.8\n\nThe launch slips.\n")
+
+    (error,) = document.errors
+    assert error.code == "misplaced_rich_credence"
+    assert "## Belief" in error.remediation
+    assert "credence_holder" in error.remediation
+    assert "credence_basis" in error.remediation
+
+
+def test_a_belief_with_a_credence_but_no_holder_is_refused() -> None:
+    """Catches a belief that nobody holds, which reads as the vault's own view."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence: likely\n\nThe release will slip a week.\n"
+    )
+
+    assert _codes(document.errors) == ["missing_rich_credence_holder"]
+
+
+def test_a_plain_beliefs_heading_warns_with_both_repairs_and_still_parses() -> None:
+    """Catches an old page with a `## Beliefs` section that this release stops parsing."""
+    document = _parse("# Release outlook\n\n## Beliefs\n\nThe team trusts the new pipeline.\n")
+
+    (warning,) = document.warnings
+    assert document.errors == ()
+    assert [unit.content for unit in document.units] == ["The team trusts the new pipeline."]
+    assert warning.severity == "warning"
+    assert "credence_holder" in warning.remediation
+    assert "rename the heading" in warning.remediation
+
+
+def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path) -> None:
+    """Catches the writer stripping hand-written credence rows when an agent edits the prose."""
+    page = tmp_path / PATH
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntitle: Release outlook\ntype: insight\nstatus: active\n"
+        "exomem_id: 33333333-3333-4333-8333-333333333333\nupdated: 2026-10-01\n---\n\n"
+        "# Release outlook\n\n## Belief\n- id: slip\n- credence_holder: Finance lead\n"
+        "- credence: likely\n\nThe release will slip a week.\n",
+        encoding="utf-8",
+    )
+    (belief,) = semantic_units.parse_semantic_units(
+        page.read_text(encoding="utf-8"), path=PATH,
+        parent_ref="exomem://memory/33333333-3333-4333-8333-333333333333",
+    ).units
+
+    updated = commands.op_observe_memory(
+        tmp_path, path=PATH, operation="update", category="belief",
+        content="The release will slip two weeks.", kind="belief",
+        unit_ref=belief.unit_ref, expected_fingerprint=belief.fingerprint,
+        expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
+    )
+
+    assert updated["unit"]["credence_holder"] == "Finance lead"
+    assert updated["unit"]["credence"] == "likely"
+    assert "- credence: likely" in page.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

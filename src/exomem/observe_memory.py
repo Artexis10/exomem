@@ -41,6 +41,12 @@ _UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
 _TAG_RE = re.compile(r"^[^\s#]{1,64}$")
 _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 
+#: The governed unit-metadata keys this command takes as arguments. The language's other
+#: governed rows, such as a belief unit's credence, are written by hand and carried through
+#: an edit as written, so this command never writes a belief on a holder's behalf.
+# nosemgrep: ep-word-set -- this command's own argument names, fixed by its tool schema
+_GOVERNED_ARGUMENT_KEYS = ("verdict", "check_by", "as_of", "until")
+
 #: Metadata rows this module renders from its own arguments. Every *other*
 #: authored row is carried through a reconstruction with its value intact.
 #:
@@ -58,7 +64,7 @@ _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 #: delete bytes it does not understand.
 _OWNED_METADATA_KEYS: frozenset[str] = frozenset(
     {"category", "id", "tags", "context", "relations"}
-) | frozenset(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
+) | frozenset(_GOVERNED_ARGUMENT_KEYS)
 
 
 @dataclass(slots=True)

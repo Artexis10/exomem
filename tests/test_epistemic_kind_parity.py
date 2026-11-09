@@ -69,13 +69,13 @@ def kind_vault(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 # Migration guard: these copies of the kinds pack's tables retire with this change's archive.
-# The 27 portable kinds and the compact `observation`, with the description
+# The 28 portable kinds and the compact `observation`, with the description
 # every schema read shows for each.
 CORE_KINDS = (
     "claim finding evidence decision assumption inference constraint risk open_question "
     "hypothesis prediction result metric failure pattern record case timeline_event "
     "requirement action definition procedure source experiment entity project media_segment"
-).split()
+).split() + ["belief"]  # FLIPS slice4: `belief` joins; was absent
 
 # Every heading spelling that names a kind other than the kind's own key.
 HEADING_SPELLINGS = {
@@ -117,6 +117,7 @@ HEADING_SPELLINGS = {
     "projects": "project",
     "media_segments": "media_segment",
     "segments": "media_segment",
+    "beliefs": "belief",  # FLIPS slice4: was absent
 }
 
 

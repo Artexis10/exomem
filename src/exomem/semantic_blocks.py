@@ -39,8 +39,12 @@ _NORMALIZE_RE = re.compile(r"[\s-]+")
 # here for the same reason `category` does: they are governed metadata, so a
 # `## Prediction` carrying only a verdict must still report `empty_rich_unit`
 # rather than pass as authored.
-# Closed metadata keys of the semantic-unit language, shared with the writer.
-GOVERNED_UNIT_METADATA_KEYS = ("verdict", "check_by", "as_of", "until")
+# The rows of a belief unit: whose belief it is, how strong, and on what basis.
+# nosemgrep: ep-word-set -- closed keys of the unit language, fixed by its spec
+BELIEF_UNIT_METADATA_KEYS = ("credence", "credence_holder", "credence_basis")
+# Closed metadata keys of the semantic-unit language, shared with the writer and the bootstrap.
+# nosemgrep: ep-word-set -- closed keys of the unit language, fixed by its spec
+GOVERNED_UNIT_METADATA_KEYS = ("verdict", "check_by", "as_of", "until", *BELIEF_UNIT_METADATA_KEYS)
 _RESERVED_METADATA_KEYS = frozenset(
     {"category", "id", "tags", "context", "relations", *GOVERNED_UNIT_METADATA_KEYS}
 )

@@ -334,10 +334,13 @@ def test_compact_observations_carry_no_governed_metadata() -> None:
 def test_the_governed_key_list_agrees_across_the_language_and_the_writer() -> None:
     """One declaration, so a future key cannot be reserved but not preserved."""
     governed = set(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
+    written = set(observe_module._GOVERNED_ARGUMENT_KEYS)
 
-    assert governed == {"verdict", "check_by", "as_of", "until"}
     assert governed <= semantic_blocks._RESERVED_METADATA_KEYS
-    assert governed <= observe_module._OWNED_METADATA_KEYS
+    # The writer renders the governed keys it takes as arguments and carries every other
+    # governed row through an edit as written.
+    assert written <= governed
+    assert governed & observe_module._OWNED_METADATA_KEYS == written
 
 
 # --------------------------------------------------------------------------
@@ -1022,7 +1025,7 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     assert "never discards an authored metadata row" not in description
     for replaced in ("tags", "context", "relations"):
         assert "Replaces on update" in properties[replaced]["description"]
-    for preserved in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
+    for preserved in observe_module._GOVERNED_ARGUMENT_KEYS:
         assert "'' clears" in properties[preserved]["description"]
 
 
