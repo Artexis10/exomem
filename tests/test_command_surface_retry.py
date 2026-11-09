@@ -1803,7 +1803,8 @@ def test_bound_mcp_committed_failure_replays_sanitized_without_second_leaf_call(
         "code": "BATCH_CLEANUP_INCOMPLETE",
         "message": (
             "The batch workspace cleanup is incomplete. "
-            "Do not retry the write; committed destinations are preserved. The change was saved."
+            "Do not retry the write; committed destinations are preserved. "
+            "Reconcile retained workspace state. The change was saved."
         ),
     }
     assert replay == first

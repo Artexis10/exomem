@@ -939,7 +939,7 @@ def bind_vault(
                     kwargs,
                     (p.name for p in visible),
                     write=False,
-                    default_detail=command.response_detail,
+                    default_detail=getattr(command, "response_detail", None),
                 )
             from .commands import invocation_is_read_only
             from .governance.egress import SelectorCoverageError
@@ -1082,7 +1082,7 @@ def bind_vault(
                     kwargs,
                     (p.name for p in visible),
                     write=not invocation_read_only,
-                    default_detail=command.response_detail,
+                    default_detail=getattr(command, "response_detail", None),
                 )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
