@@ -122,14 +122,20 @@ def structure_problems(project: dict) -> list[str]:
 def store_name_problems(project: dict) -> list[str]:
     """Each place where case text holds a store name, which the judge would read masked as an arm's note."""
     places: list[tuple[str, object]] = []
+
+    def files_of(item: dict) -> dict:
+        # `structure_problems` already names a `files` value that is not an object.
+        files = item.get("files")
+        return files if isinstance(files, dict) else {}
+
     for s in project.get("sessions") or []:
         places.append((f"session {s.get('session')} task", s.get("task")))
-        for path, text in (s.get("files") or {}).items():
+        for path, text in files_of(s).items():
             places.append((f"session {s.get('session')} file {path}", f"{path}\n{text}"))
     for p in project.get("probes") or []:
         name = p.get("probe_id")
         places.append((f"probe {name} task", p.get("task")))
-        for path, text in (p.get("files") or {}).items():
+        for path, text in files_of(p).items():
             places.append((f"probe {name} file {path}", f"{path}\n{text}"))
         key = p.get("key") if isinstance(p.get("key"), dict) else {}
         for field in ("value", "trap"):

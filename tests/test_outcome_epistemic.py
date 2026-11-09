@@ -14,6 +14,7 @@ import json
 import stat
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -491,6 +492,27 @@ def test_case_text_that_holds_a_store_name_is_refused_because_the_judge_would_re
     assert problems == [
         "probe p-early key.rubric[0] holds a store name the judge masks (memory/, exomem); reword it"
     ]
+
+
+def test_the_mask_reads_a_long_unbroken_token_in_linear_time():
+    """A minified line can fill the diff up to its cap; a backtracking mask took seconds per item."""
+    diff = "a" * epistemic_run.MAX_DIFF_CHARS
+
+    started = time.monotonic()
+    shown = epistemic_judge.hide_store_names(diff)
+
+    assert shown == diff
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_files_value_that_is_not_an_object_is_named_not_a_crash():
+    """An authoring lane that writes `files` as a list must get the shape problem back, not a traceback."""
+    project = invented_project()
+    project["probes"][0]["files"] = ["notes/a.md"]
+
+    problems = cases.structure_problems(project)
+
+    assert problems == ["probe p-early needs a `task` string and a `files` object"]
 
 
 def test_a_solvable_gate_answer_whose_probe_the_case_file_dropped_is_skipped_with_a_reason(
