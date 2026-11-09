@@ -92,8 +92,6 @@ class Intent:
     operation: str
     from_path: str | None
     queued_at: str
-    #: Why the projector could not finish this intent at its last attempt, or None.
-    deferred: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +259,7 @@ class Projector:
         """The next intents after ``after`` in queue order, without bodies or held paths."""
         with read.snapshot(self._root) as view:
             rows = view.connection.execute(
-                "SELECT path, revision, operation, from_path, queued_at, deferred "
+                "SELECT path, revision, operation, from_path, queued_at "
                 "FROM store_projection_queue q WHERE (queued_at, path) > (?, ?) "
                 f"AND {mode.UNHELD_INTENT} ORDER BY queued_at, path LIMIT ?",
                 (*after, LISTING_PAGE),
@@ -272,7 +270,7 @@ class Projector:
         with read.snapshot(self._root) as view:
             database = view.connection
             queued = database.execute(
-                "SELECT path, revision, operation, from_path, queued_at, deferred "
+                "SELECT path, revision, operation, from_path, queued_at "
                 "FROM store_projection_queue WHERE path = ?",
                 (rel,),
             ).fetchone()
@@ -308,37 +306,17 @@ class Projector:
     # -- one intent -------------------------------------------------------------------------------
 
     def _project(self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport) -> None:
-        facts: Facts | None = None
         try:
             facts = self._facts(rel)
             if facts.intent is None or facts.held:
                 return  # a commit or a hold settled the path after the listing
             self._dispatch(filesystem, facts, report)
         except Deferred as refusal:
-            self._defer(report, facts, rel, str(refusal))
+            report.deferred[rel] = str(refusal)
         except held_fs.HeldFsError as refusal:
-            self._defer(report, facts, rel, refusal.code)
+            report.deferred[rel] = refusal.code
         except OSError as refusal:
-            self._defer(
-                report, facts, rel, f"{type(refusal).__name__}: the file system refused"
-            )
-
-    def _defer(self, report: PassReport, facts: Facts | None, rel: str, reason: str) -> None:
-        """Leave the intent queued, and note why on its row for ``status``, once for each reason."""
-        report.deferred[rel] = reason
-        intent = None if facts is None else facts.intent
-        if intent is None or intent.deferred == reason:
-            return
-
-        def work(writer: CollectionWriter) -> None:
-            with writer.handle.transaction() as tx:
-                tx.execute(
-                    "UPDATE store_projection_queue SET deferred = ? "
-                    "WHERE path = ? AND revision = ?",
-                    (reason, intent.path, intent.revision),
-                )
-
-        self._run(work)
+            report.deferred[rel] = f"{type(refusal).__name__}: the file system refused"
 
     def _dispatch(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
@@ -395,8 +373,9 @@ class Projector:
             self._hold_edit(filesystem, report, facts, store_revision=page.revision)
         elif verdict is Judgement.IN_PLACE:
             assert disk is not None
-            # A retry after a refused flush finds the file in place; its name is made durable first.
-            _flush_folder(filesystem, _split(facts.path)[0])
+            # A retry after a refused flush or install finds the file in place. It cannot know which
+            # folders the first attempt made, so every folder up to the root is flushed first.
+            _flush_through_root(filesystem, _split(facts.path)[0])
             self._record_projected(page, disk.size, disk.mtime_ns)
             report.projected += 1
         else:
@@ -665,7 +644,9 @@ def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
     assert page is not None
     if disk is None:
         # A projected file that is gone is an outside delete, unless Exomem removed it and a kill
-        # came before the manifest heard of it.
+        # came before the manifest heard of it. A person's delete while a store delete or move-away
+        # is queued, followed by a store put, is therefore not held; no bytes are lost, because the
+        # store holds the page and the removal was already queued.
         if manifest is not None and not facts.removed:
             return Judgement.HOLD_DELETE
         return Judgement.PUBLISH
@@ -684,9 +665,10 @@ def _audited(database: Connection, rel: str, manifest_revision: int | None) -> f
 
     A page with a manifest row takes the rows after the manifest's revision. A page with none has no
     file that the projector recorded, so only its latest life counts: the writes after the last
-    removal that came before the latest write. A removal after that write may still be queued, and
-    the file that it removes is this life's. The bytes of an earlier life never count, because a
-    person may have restored them. A binary takes its last row.
+    removal that came before the latest write, and after the latest migration or rollback of the
+    vault. A removal after that write may still be queued, and the file that it removes is this
+    life's. The bytes of an earlier life never count, because a person may have restored them. A
+    binary takes its last row.
     """
     if ownership.classify(rel) is not ownership.Ownership.PAGE:
         rows = database.execute(
@@ -701,15 +683,26 @@ def _audited(database: Connection, rel: str, manifest_revision: int | None) -> f
             (rel, manifest_revision),
         )
     else:
+        latest_write = _last_audit(database, f"path = ? AND {write.BEGINS_A_LIFE}", rel)
+        last_end = _last_audit(
+            database, f"path = ? AND {write.ENDS_A_LIFE} AND seq < ?", rel, latest_write
+        )
+        life_starts_after = max(last_end, _last_audit(database, write.RESETS_EVERY_LIFE))
         rows = database.execute(
             "SELECT DISTINCT sha256 FROM store_audit "
-            f"WHERE path = ? AND sha256 IS NOT NULL AND {write.BEGINS_A_LIFE} AND seq > "
-            "COALESCE((SELECT MAX(seq) FROM store_audit "
-            f"WHERE path = ? AND {write.ENDS_A_LIFE} AND seq < "
-            f"(SELECT MAX(seq) FROM store_audit WHERE path = ? AND {write.BEGINS_A_LIFE})), 0)",
-            (rel, rel, rel),
+            f"WHERE path = ? AND {write.BEGINS_A_LIFE} AND sha256 IS NOT NULL AND seq > ?",
+            (rel, life_starts_after),
         )
     return frozenset(row[0] for row in rows)
+
+
+def _last_audit(database: Connection, condition: str, *arguments: object) -> int:
+    """The sequence of the newest audit row that ``condition`` selects, or 0 when none."""
+    # ``condition`` is built from the closed audit rules in ``write``, never from a path.
+    (seq,) = database.execute(
+        f"SELECT COALESCE(MAX(seq), 0) FROM store_audit WHERE {condition}", arguments
+    ).fetchone()
+    return seq
 
 
 def _removed_since(database: Connection, rel: str, manifest_revision: int | None) -> bool:
@@ -738,7 +731,7 @@ def _record_file(
 def _turn_into_write(tx: Connection, intent: Intent) -> None:
     """A move whose bytes need a rewrite is a write of its new path, unless a commit changed it."""
     tx.execute(
-        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL, deferred = NULL "
+        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL "
         "WHERE path = ? AND revision = ? AND operation = 'move'",
         (intent.path, intent.revision),
     )
@@ -909,11 +902,21 @@ def _flush_above(filesystem: held_fs.HeldFilesystem, created: list[str]) -> None
         _flush_folder(filesystem, _split(folder)[0])
 
 
+def _flush_through_root(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
+    """Make the name changes in ``folder`` and in every folder above it, up to the root, durable."""
+    while True:
+        _flush_folder(filesystem, folder)
+        if not folder:
+            return
+        folder = _split(folder)[0]
+
+
 def _flush_folder(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
     """Make the name changes in ``folder`` durable; a folder that does not exist has none."""
     if os.name == "nt":
         return
-    opened = filesystem.parent(folder, access="flush")
+    # The held filesystem names its root ".", and it refuses the empty string.
+    opened = filesystem.parent(folder or ".", access="flush")
     if _missing(opened):
         return
     with opened.require() as directory:

@@ -12,17 +12,28 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shutil
 import signal
+import subprocess
 import sys
+import tarfile
 import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import (  # noqa: F401
+    ALPHA,
+    BETA,
+    build_indexes,
+    migrate_apply,
+    rollback_apply,
+    vault,
+)
 
-from exomem import _held_fs_posix, held_fs, server_runtime
+from exomem import _held_fs_posix, held_fs, lexstore, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import mode, projector, read, write
@@ -335,11 +346,9 @@ def test_the_service_starts_the_projector_only_for_a_store_mode_vault(vault, mon
     assert not worker._thread.is_alive()
 
 
-def test_the_status_counts_a_deferred_intent_apart_from_the_age_of_the_queue(
-    stored, writer, projecting
-):
-    """A status whose queue age is the age of an intent that only a person can unblock, or that
-    leaves a deferred intent uncounted, so that a stuck projection looks like a healthy queue."""
+def test_the_status_ages_an_intent_that_the_projector_deferred(stored, writer, projecting):
+    """A status that drops a deferred intent from the age of the queue, so that a projection
+    which cannot proceed looks like a healthy, empty queue."""
     commit(writer, **put(NEW, b"# Gamma\n"))
     projecting.run_pass()
     os.link(stored / NEW, stored.parent / "another-name-for-gamma")
@@ -349,11 +358,9 @@ def test_the_status_counts_a_deferred_intent_apart_from_the_age_of_the_queue(
 
     assert report.deferred == {NEW: "IDENTITY_CHANGED"}, "a file with two names is never replaced"
     status = mode.status(stored)
-    assert (status["queued_projections"], status["deferred_projections"]) == (1, 1)
-    assert status["oldest_projection_age_seconds"] is None
-    assert rows(stored, "SELECT deferred FROM store_projection_queue") == [("IDENTITY_CHANGED",)]
-    commit(writer, **put(NEW, b"# Gamma\n\nA third version.\n"))
-    assert rows(stored, "SELECT deferred FROM store_projection_queue") == [(None,)]
+    assert status["queued_projections"] == 1
+    assert isinstance(status["oldest_projection_age_seconds"], int)
+    assert status["oldest_projection_age_seconds"] >= 0
 
 
 @pytest.mark.parametrize("ending", ["delete", "move"])
@@ -399,6 +406,45 @@ def test_a_delete_never_removes_an_earlier_version_that_a_person_restored(
 
     assert (report.removed, report.held) == (0, 0)
     assert (stored / NEW).read_bytes() == first
+
+
+def test_a_put_never_replaces_a_version_that_a_person_restored_across_a_rollback(stored, tmp_path):
+    """A projector that counts the writes from before a rollback as Exomem's own, so that it
+    replaces a restored file with the store's newer bytes, though the vault ran in file mode and a
+    person changed it in between."""
+    first = b"# Gamma\n\nThe first version, written before the rollback.\n"
+    path = connection.store_path(stored)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        writing = CollectionWriter(stored, handle)
+        commit(writing, **put(NEW, first))
+        projector.Projector(stored, run=lambda work: work(writing)).run_pass()
+    assert rollback_apply(stored, tmp_path / "export") == 0
+    (stored / NEW).unlink()  # a person's delete, in file mode
+    lexstore.delete_after_remove(stored, [NEW])  # the indexes follow the delete, as in file mode
+    build_indexes(stored)
+    assert migrate_apply(stored) == 0
+    (stored / NEW).write_bytes(first)  # the person restores the first version
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        writing = CollectionWriter(stored, handle)
+        commit(writing, **put(NEW, b"# Gamma\n\nA third version, written after the migration.\n"))
+
+        report = projector.Projector(stored, run=lambda work: work(writing)).run_pass()
+
+    assert (report.held, report.projected) == (1, 0)
+    assert (stored / NEW).read_bytes() == first
+    assert rows(stored, "SELECT kind, body FROM store_held") == [("edit", first)]
+
+
+def test_the_top_folder_of_the_vault_is_made_durable_without_a_refusal(stored, writer, projecting):
+    """A projector that asks the held filesystem for the folder "" when it creates the top folder,
+    which the filesystem refuses, so that a page is deferred as an unsafe path."""
+    shutil.rmtree(stored / "Knowledge Base")
+    commit(writer, **put(NEW, b"# Gamma\n"))
+
+    report = projecting.run_pass()
+
+    assert (report.projected, report.deferred) == (1, {})
+    assert (stored / NEW).read_bytes() == b"# Gamma\n"
 
 
 def test_a_delete_removes_a_file_that_a_kill_left_unrecorded(stored, writer, projecting):
@@ -527,6 +573,122 @@ def test_a_projection_flushes_every_folder_it_changes_before_the_manifest_record
     commit(writer, deletes=(write.PageDelete(deep),))
     projecting.run_pass()
     assert [folder for folder, _ in flushed] == [str(root / NOTES / "Fresh" / "Deeper")]
+
+
+def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folder_above(
+    stored, writer, projecting, monkeypatch
+):
+    """A projector whose retry trusts an earlier attempt's flush of the folders that attempt
+    made, so that a kill between the install and the flush leaves a folder entry in the cache."""
+    deep = f"{NOTES}/Fresh/Deeper/Page.md"
+    body = b"# Page\n"
+    commit(writer, **put(deep, body))
+    (stored / deep).parent.mkdir(parents=True)
+    (stored / deep).write_bytes(body)  # the first attempt installed it and died before a flush
+    flushed = []
+    flush_directory = _held_fs_posix.PosixHeldFilesystem.flush_directory
+
+    def spy(self, directory):
+        flushed.append(
+            (
+                os.readlink(f"/proc/self/fd/{directory.descriptor}"),
+                bool(rows(stored, "SELECT 1 FROM store_manifest WHERE path = ?", deep)),
+            )
+        )
+        return flush_directory(self, directory)
+
+    monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "flush_directory", spy)
+
+    assert projecting.run_pass().projected == 1
+
+    root = stored.resolve()
+    assert {folder for folder, _ in flushed} >= {
+        str(root / NOTES / "Fresh" / "Deeper"),
+        str(root / NOTES / "Fresh"),
+        str(root / NOTES),
+        str(root / "Knowledge Base"),
+        str(root),
+    }
+    assert not any(recorded for _, recorded in flushed), "the manifest came before a flush"
+
+
+RELEASE_WITH_STORE_SCHEMA = "v0.167.0"
+#: Run by the interpreter that imports the released code: it creates the store as that release
+#: did, and puts it in store mode.
+CREATE_A_STORE_AS_RELEASED = """
+import sys
+from pathlib import Path
+
+import exomem
+from exomem.collection_store import connection
+
+released_source, root = Path(sys.argv[1]), Path(sys.argv[2])
+assert Path(exomem.__file__).resolve().is_relative_to(released_source), exomem.__file__
+with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+    with handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_mode(id, mode, revision, changed_at, release) "
+            "VALUES (1, 'store', 0, '2026-11-08 00:00:00', 'released')"
+        )
+"""
+
+
+def test_a_store_that_the_released_code_created_takes_a_commit_a_pass_and_a_status(
+    tmp_path, monkeypatch
+):
+    """A store schema step that a released version already ran is never rewritten, so a column
+    that only this version's migration adds fails every commit and projector pass on such a
+    store with "no such column"."""
+    repository = Path(__file__).resolve().parents[1]
+    tag = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            RELEASE_WITH_STORE_SCHEMA,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if tag.returncode != 0:
+        if os.environ.get("CI"):
+            pytest.fail(f"CI must fetch the tag {RELEASE_WITH_STORE_SCHEMA}: use fetch-depth 0")
+        pytest.skip(f"the tag {RELEASE_WITH_STORE_SCHEMA} is not in this clone")
+    released_source = tmp_path / "released"
+    released_source.mkdir()
+    archive = subprocess.run(
+        ["git", "-C", str(repository), "archive", RELEASE_WITH_STORE_SCHEMA, "src"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    (tmp_path / "released.tar").write_bytes(archive)
+    with tarfile.open(tmp_path / "released.tar") as tar:
+        tar.extractall(released_source, filter="data")
+    root = tmp_path / "vault"
+    root.mkdir()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    source = (released_source / "src").resolve()
+    subprocess.run(
+        [sys.executable, "-c", CREATE_A_STORE_AS_RELEASED, str(source), str(root)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(source)},
+        check=True,
+    )
+
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        writing = CollectionWriter(root, handle)
+        commit(writing, **put(NEW, b"# Gamma\n"))
+        report = projector.Projector(root, run=lambda work: work(writing)).run_pass()
+        commit(writing, **put(NEW, b"# Gamma\n\nA second version.\n"))
+
+    assert (report.projected, report.deferred) == (1, {})
+    assert (root / NEW).read_bytes() == b"# Gamma\n"
+    monkeypatch.setattr(mode.state_migration, "vault_store_recorded", lambda _root: True)
+    figures = mode.status(root)
+    assert (figures["queued_projections"], "unreadable" in figures) == (1, False)
 
 
 # -- the kill trial -------------------------------------------------------------------------------

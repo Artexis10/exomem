@@ -1073,16 +1073,13 @@ def _migrate_to_16(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE store_projection_queue RENAME TO store_projection_queue_v15")
     conn.execute("DROP INDEX store_projection_queue_by_age")
     # The operation column is a closed set that this schema fixes: the projector writes, deletes or
-    # renames a file. Only a rename has an old path. ``deferred`` is the projector's note of why it
-    # cannot finish an intent now (a linked file, an unowned path); a new intent for the path clears
-    # it.
+    # renames a file. Only a rename has an old path.
     conn.execute("""CREATE TABLE store_projection_queue(
       path TEXT PRIMARY KEY,
       revision INTEGER NOT NULL,
       operation TEXT NOT NULL CHECK(operation IN ('write', 'delete', 'move')),
       from_path TEXT,
       queued_at TEXT NOT NULL,
-      deferred TEXT,
       CHECK((operation = 'move') = (from_path IS NOT NULL))
     ) STRICT""")
     conn.execute(

@@ -306,6 +306,10 @@ BEGINS_A_LIFE = (
     "(operation IN ('write', 'import') OR (operation = 'move' AND from_path IS NOT NULL))"
 )
 ENDS_A_LIFE = "(operation = 'delete' OR (operation = 'move' AND from_path IS NULL))"
+#: A migration or a rollback writes one audit row for the whole vault, with no path. Every path's
+#: life starts after the latest one: the vault ran in file mode in between, so no byte that the
+#: audit trail names from before it is known to be Exomem's.
+RESETS_EVERY_LIFE = "(path IS NULL AND operation IN ('migrate', 'rollback'))"
 
 
 class _Trail:
@@ -480,7 +484,7 @@ def _enqueue(
         "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
         "revision = excluded.revision, operation = excluded.operation, "
-        "from_path = excluded.from_path, deferred = NULL",
+        "from_path = excluded.from_path",
         [
             (rel, revision, operation, from_path, now)
             for rel, (operation, from_path) in intents.items()
