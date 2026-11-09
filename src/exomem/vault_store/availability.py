@@ -30,10 +30,36 @@ ELSEWHERE_REASON = (
     "The vault's replica says another state root holds this vault's pages in the collection store, "
     "so a file-mode service here would write Markdown beside them."
 )
-ELSEWHERE_REMEDY = (
-    f"Start the service on the state root that holds the store, or run {ROLLBACK} there and let "
-    "the replica sync back to this machine."
-)
+
+
+def elsewhere_remedy(decision) -> str:
+    """What the owner does about ``VAULT_STORE_ELSEWHERE``: the release command and the claim id.
+
+    ``decision`` is the store claim that the replica carries (``marker.Decision``), or None when the
+    replica says store without a decision that this build can read: such a replica carries no id to
+    name, so the owner cannot release it from here.
+    """
+    start = (
+        f"Start the service on the state root that holds the store, or run {ROLLBACK} there and "
+        "let the replica sync back to this machine."
+    )
+    if decision is None:
+        return (
+            f"{start} This replica carries no store claim that this build can read, so `exomem "
+            "store-mode release` is not available: use a build that reads it."
+        )
+    return (
+        f"{start} If that root is gone, stop every service, set "
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN and run "
+        f"`exomem store-mode release --apply --claim {decision.id} --why REASON` on this root."
+    )
+
+
+def elsewhere_error(decision) -> connection.CollectionStoreError:
+    """The refusal for a root that another root's store claim stands against."""
+    return connection.CollectionStoreError(
+        STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {elsewhere_remedy(decision)}"
+    )
 
 
 def require_supported_lease(config) -> None:
@@ -86,16 +112,15 @@ def require_no_store_elsewhere(vault_root: Path) -> None:
 
     It prevents this service from writing Markdown beside pages that the other root's store owns. A
     false refusal needs a replica that says store after the owner rolled back and before the new
-    replica arrives, and the owner's way out is to let the replica sync or to run the rollback's
-    hand-back again. Only a readable replica that says store refuses: an absent or unreadable one is
-    a normal state of a synced vault.
+    replica arrives, and the owner's way out is to let the replica sync, to run the rollback's
+    hand-back again or, when the holder is gone, to release its claim. Only a readable replica that
+    says store refuses: an absent or unreadable one is a normal state of a synced vault.
     """
     from . import marker
 
-    if marker.conflict(vault_root) is not None:
-        raise connection.CollectionStoreError(
-            STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {ELSEWHERE_REMEDY}"
-        )
+    found = marker.conflict(vault_root)
+    if found is not None:
+        raise elsewhere_error(found.order.decision)
 
 
 def marker_inconsistency(vault_root: Path) -> str | None:

@@ -1023,10 +1023,19 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
     if elsewhere is not None:
         return _check(
             "vault_store_records", "fail",
-            availability.ELSEWHERE_REASON, availability.ELSEWHERE_REMEDY,
+            availability.ELSEWHERE_REASON, availability.elsewhere_remedy(elsewhere.order.decision),
             details={"vault_marker": elsewhere.state})
     if inconsistency is not None:
         return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")
+    if in_store_mode and marker.view(vault_root).claim(in_store_mode=True) == marker.DISPLACED:
+        return _check(
+            "vault_store_records", "warn",
+            "This root's store claim no longer stands: another root claimed the vault, or the "
+            "owner released this root's claim, so its store rows are not the vault's pages.",
+            f"Run {availability.ROLLBACK} here to return this root to file mode. The store's "
+            "versions of the files are written, and `--export-held` keeps edits made on disk in "
+            "the export.",
+            details={"vault_claim": marker.DISPLACED})
     if found.state == marker.UNREADABLE:
         consequence = (
             "a file-mode service on another state root cannot see that this vault is in store mode."

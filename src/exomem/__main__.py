@@ -2614,7 +2614,24 @@ def _store_mode_main(argv: list[str]) -> int:
         "--export-held", action="store_true",
         help="keep each unimported edit in the export, then restore the store's version of its file",
     )
-    for command in (status, migrate, rollback):
+    release = subcommands.add_parser(
+        "release",
+        help="decide file mode over another state root's store claim, for a refused root whose "
+        "holder is gone; run apply with every service stopped and "
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    release_step = release.add_mutually_exclusive_group(required=True)
+    release_step.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="name the claim that a release would override; writes nothing",
+    )
+    release_step.add_argument("--apply", action="store_true", help="release the claim")
+    release.add_argument(
+        "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
+    )
+    release.add_argument("--why", help="reason for the release (required with --apply)")
+    for command in (status, migrate, rollback, release):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2631,6 +2648,12 @@ def _store_mode_main(argv: list[str]) -> int:
     if args.command == "rollback" and applying and args.export_to is None:
         print("store-mode rollback: --apply needs --export-to", file=sys.stderr)
         return 2
+    if args.command == "release" and applying and not (args.claim or "").strip():
+        print(
+            "store-mode release: --apply needs --claim, the id that a refusal or --dry-run names",
+            file=sys.stderr,
+        )
+        return 2
 
     from . import state_migration
     from .cli_ops import OpError
@@ -2638,6 +2661,7 @@ def _store_mode_main(argv: list[str]) -> int:
     from .governance.principal import library_scope
     from .vault_store import migrate as store_migrate
     from .vault_store import mode as store_mode
+    from .vault_store import release as store_release
     from .vault_store import rollback as store_rollback
 
     root = Path(args.vault)
@@ -2647,13 +2671,20 @@ def _store_mode_main(argv: list[str]) -> int:
                 result = store_mode.status(root)
             elif args.command == "migrate":
                 result = store_migrate.apply_route(root, why=args.why) if applying else store_migrate.dry_run(root)
+            elif args.command == "release":
+                result = (
+                    store_release.apply_route(root, claim=args.claim, why=args.why)
+                    if applying
+                    else store_release.dry_run(root)
+                )
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        print(json.dumps(result, sort_keys=True))
+        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command != "release"))
     except (
         CollectionStoreError,
         OpError,

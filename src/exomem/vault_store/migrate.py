@@ -336,6 +336,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "VAULT_STORE_COLLECTION_OPERATION_PENDING",
             "a collection store operation is still pending; finish it before entering store mode",
         )
+    _require_no_other_claim(root, writer)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
     resumed = state_migration.VAULT_STORE_COMPATIBILITY_ID in (
@@ -426,17 +427,88 @@ def _install(
     state_migration.record_vault_store_compatibility(
         root, authority_check=authority_check, active=True
     )
+    claimed = None
+    before: dict[str, str] = {}
     try:
+        before, claimed = _record_claim(root, writer)
+        _require_published(root, session, token, writer, claimed)
         with closing(sqlite3.connect(f"{staged_path.as_uri()}?mode=ro", uri=True)) as source:
             with writer.handle.transaction() as conn:
                 _install_rows(root, conn, source, staged, revision=revision, why=why)
     except BaseException:
         if not _store_row_says_store(writer.connection):
             with suppress(Exception):
+                if claimed is not None:
+                    _withdraw(root, writer, before, claimed)
+            with suppress(Exception):
                 state_migration.record_vault_store_compatibility(
                     root, authority_check=authority_check, active=False
                 )
         raise
+
+
+def _require_no_other_claim(root: Path, writer) -> None:
+    """Merge the replica under the lease and refuse while another root's store claim stands.
+
+    The preflight's check is the fast refusal, before the lease. This one holds for two roots that
+    both passed it: the lease serialises them, so the second merges the first's claim and refuses
+    before it stages anything. A wrong refusal costs the owner the other root's rollback or release.
+    """
+    try:
+        with writer.handle.transaction() as tx:
+            marker.require_free(tx, root)
+    except marker.HeldElsewhere as held:
+        raise availability.elsewhere_error(held.decision) from None
+
+
+def _record_claim(root: Path, writer) -> tuple[dict[str, str], marker.Decision]:
+    """Record this root's store claim in its own store; return the keys as they were, and the claim.
+
+    A root that installs first and publishes at the hand-back can lose the race: another root that
+    migrates meanwhile publishes its claim, and both then hold the vault's pages. So the claim goes
+    first, in the transaction that merges the replica and refuses another root's claim.
+    """
+    try:
+        with writer.handle.transaction() as tx:
+            before = marker.read_meta(tx)
+            return before, marker.record(tx, root)
+    except marker.HeldElsewhere as held:
+        raise availability.elsewhere_error(held.decision) from None
+
+
+def _require_published(root: Path, session, token, writer, claimed: marker.Decision) -> None:
+    """Publish the claim and read it back from the replica; refuse before any row if it is absent.
+
+    It prevents an install whose claim no other root can see: that root would migrate too and both
+    would hold the pages. A wrong refusal costs the owner a rerun once the publication works.
+    """
+    published = admission.publish_current_epoch(session, writer, token)
+    shown = marker.read_replica(root).order.decision
+    if shown is None or shown.id != claimed.id:
+        raise OpError(
+            "VAULT_STORE_CLAIM_NOT_PUBLISHED",
+            "the vault replica does not carry this root's store claim, so nothing was installed: "
+            f"{published.reason or published.status}",
+            "Fix what the publication reports, then run this command again.",
+        )
+
+
+def _withdraw(root: Path, writer, before: dict[str, str], claimed: marker.Decision) -> None:
+    """Take back a claim whose install failed, so a refused migration leaves no claim behind.
+
+    A claim that the replica never carried is undone as it was. One that the replica carries, or
+    that cannot be told apart because the replica cannot be read, is superseded by a ``file``
+    decision: another root may have merged it already.
+    """
+    shown = marker.read_replica(root)
+    unseen = shown.state in (marker.CLEAR, marker.ABSENT) and (
+        shown.order.decision is None or shown.order.decision.id != claimed.id
+    )
+    with writer.handle.transaction() as tx:
+        if unseen:
+            marker.restore(tx, before)
+        else:
+            marker.clear(tx, root)
 
 
 def _install_rows(
@@ -497,8 +569,6 @@ def _install_rows(
         "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
         (revision, Origin.MIGRATION.value, why, now),
     )
-    # The vault-side marker commits with the mode row, so no replica says store for a file vault.
-    marker.record(conn)
     rederive.record_derived_from_files(conn, revision)
 
 
