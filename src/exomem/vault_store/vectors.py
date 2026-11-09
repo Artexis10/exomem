@@ -98,7 +98,7 @@ def withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
 
     A page is proven when its stamp, written with its rows, names the bytes that the store holds
     now. The cursor says which pages can have changed since the sidecar last caught up, so only
-    those, and the owed ones, are compared; where the cursor cannot be followed (`_needs_census`)
+    those, and the owed ones, are compared; where the cursor cannot be followed (`_followed_seq`)
     every owned page that the sidecar holds rows for is. A mode or a store that cannot be read
     withholds everything: an unknown state is never proof.
     """
@@ -122,7 +122,8 @@ def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
         return NOTHING_WITHHELD  # no sidecar, no rows to serve
     with index.store_record() as record, read.snapshot(vault_root) as view:
         cursor = record.cursor()
-        if _needs_census(view, cursor):
+        seq = _followed_seq(view, cursor)
+        if seq is None:
             stored = {meta.path: meta.sha256 for meta in view.pages()}
             candidates = {path for path in record.row_paths() if owned(path)}
             stamps = record.stamps()
@@ -131,7 +132,7 @@ def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
                 path
                 for (path,) in view.connection.execute(
                     "SELECT DISTINCT path FROM store_audit WHERE seq > ? AND path IS NOT NULL",
-                    (cursor[1],),
+                    (seq,),
                 )
             }
             stored = {
@@ -160,20 +161,19 @@ def _audit_head(view: read.StoreSnapshot) -> int:
     return view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
 
 
-def _needs_census(view: read.StoreSnapshot, cursor: tuple[int, int] | None) -> bool:
-    """Whether the audit trail past the cursor cannot say what changed, so every page is compared.
+def _followed_seq(view: read.StoreSnapshot, cursor: tuple[int, int] | None) -> int | None:
+    """The audit seq to read past, or None when the trail cannot say what changed (a census).
 
-    That holds with no cursor, with a cursor beyond the end of the trail (a cursor from another or
-    an older store), and after a migration or a rollback, whose audit row has no path.
+    The trail cannot say with no cursor, with a cursor beyond the end of the trail (one that
+    another or an older store left), and after a migration or a rollback, whose audit row has no
+    path. Every page is then compared with the sidecar.
     """
     if cursor is None or cursor[1] > _audit_head(view):
-        return True
-    return (
-        view.connection.execute(
-            "SELECT 1 FROM store_audit WHERE seq > ? AND path IS NULL LIMIT 1", (cursor[1],)
-        ).fetchone()
-        is not None
-    )
+        return None
+    restarted = view.connection.execute(
+        "SELECT 1 FROM store_audit WHERE seq > ? AND path IS NULL LIMIT 1", (cursor[1],)
+    ).fetchone()
+    return None if restarted is not None else cursor[1]
 
 
 def embeddable(rel: str) -> bool:
@@ -281,12 +281,13 @@ def drain(
 def _plan(vault_root: Path, index: EmbeddingIndex, audit_rows: int) -> _Plan:
     cursor = index.store_cursor()
     with read.snapshot(vault_root) as view:
-        if _needs_census(view, cursor):
+        seq = _followed_seq(view, cursor)
+        if seq is None:
             return _census_plan(index, view)
         rows = view.connection.execute(
             "SELECT seq, revision, path, from_path FROM store_audit WHERE seq > ? "
             "ORDER BY seq LIMIT ?",
-            (cursor[1], audit_rows),
+            (seq, audit_rows),
         ).fetchall()
         if not rows:
             return _retry_plan(index, view)
