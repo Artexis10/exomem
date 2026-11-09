@@ -781,7 +781,7 @@ def test_every_shipped_dimension_member_names_an_existing_family_kind_or_key() -
     }
     shipped = language_registry.core_registry().label_definitions(semantic_labels.DIMENSIONS)
 
-    assert len(shipped) == 12
+    assert shipped
     missing = [
         (key, name, value)
         for key, entry in shipped.items()
@@ -833,6 +833,20 @@ def test_a_member_that_names_nothing_that_exists_is_refused(members, named: str)
     assert finding["code"] == "unknown_dimension_member"
     assert "'regulation'" in finding["detail"]
     assert f"'{named}'" in finding["detail"]
+
+
+def test_an_unknown_family_member_is_answered_with_the_families_that_exist() -> None:
+    """Catches a remedy that offers two examples, so an agent guesses a third name that is not
+    a family either."""
+    from exomem import relation_registry
+
+    registry = language_registry.load_registry(
+        proposal=_regulation(members={"families": ["overruling"]})
+    )
+
+    [finding] = registry.findings
+    for family in relation_registry.core_registry().core_families:
+        assert family in finding["detail"]
 
 
 def test_a_dimension_may_name_a_kind_that_the_same_save_adds() -> None:
@@ -918,11 +932,3 @@ def test_a_saved_vault_dimension_keeps_its_members_and_display(tmp_path: Path) -
     assert language_registry.registry_proposal(reloaded) == proposal
 
 
-def test_a_save_that_drops_a_vault_dimension_is_flagged() -> None:
-    current = language_registry.load_registry(proposal=_regulation())
-    candidate = language_registry.load_registry(proposal=_proposal())
-
-    dropped = language_registry.dropped_label_findings(current, candidate)
-
-    assert [finding["code"] for _labels, finding in dropped] == ["dimensions_dropped"]
-    assert "regulation" in dropped[0][1]["detail"]

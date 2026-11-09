@@ -28,12 +28,15 @@ class LabelRegistry:
     """One label registry. `section` names its pack file and its vault section; `noun`
     names one of its entries in a finding or an error code. `beside_probabilities` marks a
     registry whose row also takes a probability, so none of its labels may look like one.
-    `has_members` marks a registry whose entries also list `members` and `display`."""
+    `has_members` marks a registry whose entries also list `members` and `display`.
+    `on_pages` marks a registry whose keys a unit row writes, so a page depends on each saved
+    key; a dimension key appears only in a filter, which names the keys that exist."""
 
     section: str
     noun: str
     beside_probabilities: bool = False
     has_members: bool = False
+    on_pages: bool = True
 
     @property
     def entry_fields(self) -> frozenset[str]:
@@ -59,7 +62,7 @@ VERDICTS = LabelRegistry("verdicts", "verdict")
 BELIEF_LEVELS = LabelRegistry("belief_levels", "belief_level", beside_probabilities=True)
 MODALITIES = LabelRegistry("modalities", "modality")
 INFERENCE_MODES = LabelRegistry("inference_modes", "inference_mode")
-DIMENSIONS = LabelRegistry("dimensions", "dimension", has_members=True)
+DIMENSIONS = LabelRegistry("dimensions", "dimension", has_members=True, on_pages=False)
 # The label registries the language implements. Code reads each one for its own unit-metadata
 # key or its own filter field, so this set is fixed by the code; the entries of each registry
 # are data.
@@ -76,10 +79,10 @@ MEMBER_LISTS = ("families", "kinds", "keys")
 # The one wildcard a member list takes, and only `kinds` takes it: every kind in the page's
 # registry, so a vault kind joins the dimension without a registry save.
 ALL_KINDS = "*"
-# The closed display-behaviour set. Each is something compiled context does within one
-# dimension's group; a display behaviour changes only the order and annotation of the context.
-# Adding one is a code change and a schema change, as for a kind trait.
-# nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text
+# The closed display-behaviour set. Each names something compiled context is to do within one
+# dimension's group, changing only the order and annotation of the context. The schema accepts
+# only these names; no reader applies one yet. Adding one is a schema change, as for a kind trait.
+# nosemgrep: ep-word-set -- the closed set this schema declares for a vault to choose from, not text
 DISPLAY_BEHAVIOURS = frozenset(("lead_with_current", "show_origin", "flag_open", "order_in_time"))
 # The shape a key has: lower-case letters, digits and underscores.
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")

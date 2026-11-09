@@ -769,13 +769,16 @@ def dropped_label_findings(
     saved, with the registry it names.
 
     A page that uses a saved verdict, level, modality or mode stops parsing once a save drops
-    it, and a saved dimension stops filtering. A save may still add an entry or change a label,
-    so only a lost key is refused. A shipped
+    it. A save may still add an entry or change a label, so only a lost key is refused. A shipped
     key still resolves without its vault entry, so removing an entry that only labels a shipped
-    key is no loss. Validation and the save both read these findings.
+    key is no loss. No page stores a key of a registry that is not `on_pages`, such as a
+    dimension, so a vault may remove its own entry there; a filter that still names it is refused
+    with the keys that exist. Validation and the save both read these findings.
     """
     findings = []
     for labels in semantic_labels.REGISTRIES:
+        if not labels.on_pages:
+            continue
         section = labels.section
         dropped = sorted(
             set(current.label_entries.get(section, {}))
@@ -1156,10 +1159,10 @@ def _check_dimension_members(
 
 
 def _member_remedy(list_name: str, exists: Iterable[str]) -> str:
+    """What to write instead: the families and keys that exist, which are few; the kinds by
+    where they live, because a vault may hold many."""
     if list_name == "kinds":
         return "name a shipped kind or a kind in this registry's `kinds` section"
-    if list_name == "families":
-        return "name a family from the relation registry, such as supersession or support"
     return "use one of " + ", ".join(sorted(exists))
 
 
