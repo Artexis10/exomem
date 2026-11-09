@@ -26,6 +26,7 @@ from exomem import (
     commands,
     due_state,
     lexstore,
+    structured_collections,
     working_set_index,
     working_set_runtime,
     writer_lease,
@@ -249,12 +250,17 @@ def test_routing_a_write_to_a_records_collection_asks_the_store_once_for_the_col
 ) -> None:
     """A semantic write routes its terms through every records collection the writer may see.
 
-    Each collection's manifest and items pass the release plane. Asked one at a time, every store-owned
-    page queued its own store request after every write.
+    Each collection's manifest, its storage source and its items pass the release plane. Asked one at a
+    time, every store-owned page queued its own store request after every write.
     """
     root, who = service.root, _who(caller)
     pages = _seed(root, caller)
-    claims = {page: {"items": [{"path": page, "key": "k"}], "manifest_hash": "other"} for page in pages}
+    # Current rows, as the claims projection holds them, so each one reaches its storage source check.
+    claims = {
+        page: {"manifest_hash": structured_collections.load_manifest(root, root / page).manifest_version.hash,
+               "items": []}
+        for page in pages
+    }
 
     store_requests.kwargs.clear()
     with request_scope(who):
