@@ -62,9 +62,8 @@ def test_ask_memory_returns_filtered_semantic_units(tmp_path: Path) -> None:
         kinds=["decision"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 3}},
         result_level="unit",
-    )
+    )["hits"]
 
-    assert isinstance(hits, list)
     assert len(hits) == 1
     assert hits[0]["result_type"] == "semantic_unit"
     assert hits[0]["category"] == "config"
@@ -90,7 +89,8 @@ def test_deep_semantic_unit_recall_returns_a_citable_context_pack(tmp_path: Path
     entry = result["pack"]["semantic_units"][hit["parent_path"]]
     assert entry["units"][0]["unit_ref"] == hit["unit_ref"]
     assert entry["units"][0]["kind"] == "decision"
-    assert entry["parent"]["ref"] == hit["parent_ref"]
+    assert entry["parent"]["ref"], "a pack entry names its parent page, which the hit no longer repeats"
+    assert "parent_ref" not in hit
 
 
 @pytest.mark.parametrize(

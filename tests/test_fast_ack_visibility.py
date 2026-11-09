@@ -91,13 +91,14 @@ def _governed_write(
         vault.batch_atomic_write(planned, vault_root=vault_root, semantic_states=states)
         return {"path": rel_path, "warnings": []}
 
-    return _manager(tmp_path).invoke(
+    terminal = _manager(tmp_path).invoke(
         SimpleNamespace(name="remember", leaf=leaf, read_only=False),
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=None,
         mutation_request_id=mutation_request_id,
     )
+    return terminal["diagnostics"]["operational"]
 
 
 def _only_receipt(root: Path) -> derived_receipts.DerivedBatchReceipt:

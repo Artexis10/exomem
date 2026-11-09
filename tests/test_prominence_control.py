@@ -193,12 +193,14 @@ def test_rest_set_and_cli_inspect_share_the_local_owner_preference(vault, monkey
             "action": "set",
             "prominence": "maximal",
             "expected_revision": before.json()["data"]["revision"],
+            "response_detail": "full",
         },
     )
     assert saved.status_code == 200, saved.text
     receipt = saved.json()["data"]
-    assert receipt["terminal"] and receipt["state"] == "committed"
-    assert receipt["receipt_id"]
+    operational = receipt["diagnostics"]["operational"]
+    assert operational["terminal"] and operational["state"] == "committed"
+    assert operational["receipt_id"]
     assert receipt["engagement"]["level"] == "maximal"
     stale = client.post(
         "/api/configure_memory",
@@ -298,15 +300,17 @@ def test_clear_through_the_registry_removes_only_that_context(vault):
             context="conversation",
         )
         cleared = _invoke(
-            vault, action="clear", context="conversation", expected_revision=saved["revision"]
+            vault, action="clear", context="conversation", expected_revision=saved["revision"],
+            response_detail="full",
         )
         absent = _invoke(
             vault, action="clear", context="conversation", expected_revision=cleared["revision"]
         )
 
-    assert cleared["mutated"] is True
+    assert cleared["diagnostics"]["operational"]["mutated"] is True
     assert cleared["contexts"] == {}
     assert cleared["stored"] == "maximal"
+    # A clear that changes nothing commits nothing, so the lease returns the leaf unwrapped.
     assert absent["mutated"] is False
     assert absent["revision"] == cleared["revision"]
 
@@ -408,10 +412,11 @@ def test_a_clear_proceeds_under_an_operator_override_and_reports_it(vault, monke
         )
         monkeypatch.setenv("EXOMEM_PROMINENCE", "light")
         cleared = _invoke(
-            vault, action="clear", context="coding", expected_revision=saved["revision"]
+            vault, action="clear", context="coding", expected_revision=saved["revision"],
+            response_detail="full",
         )
 
-    assert cleared["mutated"] is True
+    assert cleared["diagnostics"]["operational"]["mutated"] is True
     assert cleared["contexts"] == {}
     assert cleared["stored"] == "maximal", "clear must not touch the identity-wide value"
     assert cleared["engagement"]["preference"]["operator_override"] == "light"
@@ -439,11 +444,13 @@ def test_rest_context_set_and_cli_clear_share_the_local_owner_preference(
             "prominence": "off",
             "expected_revision": before.json()["data"]["revision"],
             "context": "conversation",
+            "response_detail": "full",
         },
     )
     assert saved.status_code == 200, saved.text
     receipt = saved.json()["data"]
-    assert receipt["terminal"] and receipt["state"] == "committed"
+    operational = receipt["diagnostics"]["operational"]
+    assert operational["terminal"] and operational["state"] == "committed"
     assert receipt["contexts"] == {"conversation": "off"}
     assert receipt["context"] in prominence.CONTEXTS
     stale = client.post(

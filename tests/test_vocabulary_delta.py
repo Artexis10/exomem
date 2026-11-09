@@ -33,9 +33,9 @@ def _promote(call, key: str) -> None:
     saved = call("schema_memory", {
         "subject": "relations", "operation": "save", "expected_hash": inspected["content_hash"],
         "proposal": {"upsert": {key: {"parent": "relates_to", "description": f"Synthetic relation {key}."}}},
-        "why": "Register a synthetic relation.",
+        "why": "Register a synthetic relation.", "response_detail": "full",
     })
-    assert saved["status"] == "committed", saved
+    assert saved["diagnostics"]["operational"]["status"] == "committed", saved
 
 
 def _keys(block: dict | None) -> list[str]:
@@ -50,7 +50,7 @@ def _write(call, name: str, **extra) -> dict:
     })
 
 
-def test_another_session_is_told_once_per_door_and_a_new_promotion_tells_it_again(
+def test_another_session_is_told_once_at_the_activation_door_and_a_new_promotion_tells_it_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
@@ -71,14 +71,15 @@ def test_another_session_is_told_once_per_door_and_a_new_promotion_tells_it_agai
     _as(monkeypatch, "session-a")
     _promote(call, "vault.runs")
 
-    # The mutating door carries the new entry alone, and the activation after it carries nothing.
+    # A write reply never carries it, so the next activation still owes the new entry alone.
     _as(monkeypatch, "session-b")
-    assert _keys(_write(call, "Harbour Reconciliation").get("vocabulary_delta")) == ["vault.runs"]
-    assert "vocabulary_delta" not in _write(call, "Quiet Ferry")
+    assert "vocabulary_delta" not in _write(call, "Harbour Reconciliation")
+    again = call("recall_context", {"turn": "which relations exist in this vault?"})
+    assert _keys(again.get("vocabulary_delta")) == ["vault.runs"]
     assert "vocabulary_delta" not in call("recall_context", {"turn": "which relations exist in this vault?"})
 
 
-def test_a_legacy_response_neither_carries_nor_spends_the_delta(
+def test_a_write_reply_neither_carries_nor_spends_the_delta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
@@ -86,9 +87,10 @@ def test_a_legacy_response_neither_carries_nor_spends_the_delta(
     _promote(call, "vault.hosts")
 
     _as(monkeypatch, "session-b")
-    legacy = _write(call, "Legacy Ledger", response_detail="legacy")
-    assert "vocabulary_delta" not in legacy
-    assert _keys(_write(call, "Compact Ledger").get("vocabulary_delta")) == ["vault.hosts"]
+    assert "vocabulary_delta" not in _write(call, "Legacy Ledger", response_detail="legacy")
+    assert "vocabulary_delta" not in _write(call, "Compact Ledger")
+    activation = call("recall_context", {"turn": "which relations exist in this vault?"})
+    assert _keys(activation.get("vocabulary_delta")) == ["vault.hosts"]
 
 
 def test_the_delta_is_cut_to_five_entries_and_counted_inside_limit_chars(

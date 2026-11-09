@@ -750,86 +750,28 @@ def test_transient_settlement_is_state_based_and_rejects_false_writes(tmp_path: 
     )
 
 
-def test_carrier_witness_comes_from_successful_write_tool_result() -> None:
-    from epistemic.journeys.role_state_replay import ORIGIN
-    from epistemic.journeys.role_state_replay_driver import carrier_items_from_transcript
+def test_a_replay_turn_is_refused_before_it_runs_when_no_stream_can_witness_the_carrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from epistemic.journeys.f27_replay import AgentEnvelope
+    from epistemic.journeys.role_state_replay import corpus_for
+    from epistemic.journeys.role_state_replay_driver import run_development
 
-    block = {
-        "due_state": {
-            "total": 3,
-            "categories": {"artifact_role_promotion": 3},
-            "top": [
-                {"category": "artifact_role_promotion", "ref": f"exomem://review/{i}"}
-                for i in range(3)
-            ],
-        },
-        "status": "committed",
-    }
-
-    def stream(*, tool="mcp__exomem__edit_memory", result=True):
-        rows = [
-            {
-                "type": "assistant",
-                "message": {
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": "write-1",
-                            "name": tool,
-                            "input": {"path": ORIGIN},
-                        }
-                    ]
-                },
-            }
-        ]
-        if result:
-            rows.append(
-                {
-                    "type": "user",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": "write-1",
-                                "content": json.dumps(block),
-                            }
-                        ]
-                    },
-                }
-            )
-        rows.append({"type": "result", "subtype": "success", "result": "Finished."})
-        return "\n".join(map(json.dumps, rows))
-
-    review_index = {
-        f"exomem://review/{i}": {
-            "category": "artifact_role_promotion",
-            "path": ORIGIN,
-            "role": "reusable_method" if i < 2 else "research_synthesis",
-            "evidence_refs": [f"exomem://memory/id#method-{i}"],
-        }
-        for i in range(3)
-    }
-    delivered = carrier_items_from_transcript(
-        stream(), turn_id="t05-consent", review_index=review_index
+    monkeypatch.setattr("epistemic.journeys.f27_replay.refuse_unsafe_out_dir", lambda path: path)
+    report = run_development(
+        corpus_for("f30-role-positive-v1"),
+        out_dir=tmp_path / "run",
+        taken_at="2026-09-12T00:00:00Z",
+        envelope=AgentEnvelope(Path("/usr/bin/false"), "fake"),
+        arm_ids=("hooked",),
+        prominence_writer=lambda *_: None,
+        parent_env={"PATH": "/usr/bin"},
     )
-    assert len(delivered) == 2
-    assert delivered[0].raw["surface"] == "client_carrier"
-    assert delivered[0].raw["count"] == "3"
-    assert delivered[1].raw["surface"] == "client_action"
-    assert (
-        carrier_items_from_transcript(
-            stream(tool="mcp__exomem__read_memory"),
-            turn_id="t05-consent",
-            review_index=review_index,
-        )
-        == ()
-    )
-    assert (
-        carrier_items_from_transcript(
-            stream(result=False), turn_id="t05-consent", review_index=review_index
-        )
-        == ()
-    )
+    arm = report["arms"][0]
+    assert arm["harness_fault"] and "post-write client carrier cannot be measured" in arm["reason"]
+    assert arm["turns_executed"] == 0
+    assert report["score"] is None and arm["score"] is None
+    assert {result["outcome"] for result in arm["assertions"].values()} == {"blocked"}
 
 
 def test_native_runner_classifies_isolation_refusal_without_a_product_score(tmp_path: Path) -> None:

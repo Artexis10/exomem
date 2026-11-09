@@ -202,7 +202,7 @@ def test_op_ask_memory_passes_relation_filter(tmp_path: Path) -> None:
     from exomem import commands
 
     vault = _vault(tmp_path)
-    hits = commands.op_ask_memory(vault, query="", relations=["supports"], limit=15)
+    hits = commands.op_ask_memory(vault, query="", relations=["supports"], limit=15)["hits"]
     # compact detail projects hits as dicts; the relation_match annotation rides through.
     assert {h["path"] for h in hits} == {A, B}
     assert any(h.get("relation_match", {}).get("relation_type") == "supports" for h in hits)

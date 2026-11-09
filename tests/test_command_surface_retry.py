@@ -947,11 +947,11 @@ def test_mcp_explicit_metadata_key_survives_lost_response_and_preserves_mismatch
 
     with pytest.raises(asyncio.CancelledError):
         bound(**inputs)
-    replay = bound(**inputs)
+    replay = bound(**inputs, response_detail="full")
     mismatch = bound(**{**inputs, "content": "Different text"})
 
     assert mismatch["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
-    assert replay["idempotency_key"] == "capture-attempt-1"
+    assert replay["diagnostics"]["operational"]["idempotency_key"] == "capture-attempt-1"
     assert len(list((vault / "Knowledge Base/Sources/Sessions").glob("*replayed-source.md"))) == 1
 
 
@@ -1272,12 +1272,14 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
     )
 
     result = bound(**_EXPORT_APPLY)
+    full = bound(**_EXPORT_APPLY, response_detail="full")
 
-    assert result["success"] is False
     assert result["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"
-    assert result["error"]["status"] == "terminal"
-    assert result["error"]["committed"] is False
-    assert "exomem collections export" in result["error"]["remediation"]
+    assert result["error"]["message"].endswith("Nothing was saved.")
+    assert "retry" not in result["error"]
+    refusal = full["diagnostics"]["error"]
+    assert (refusal["status"], refusal["committed"]) == ("terminal", False)
+    assert "exomem collections export" in refusal["remediation"]
 
 
 @pytest.mark.parametrize(
@@ -1454,9 +1456,12 @@ def test_bound_mcp_tool_returns_public_operation_error_as_failure_content(
     )
 
     result = bound()
+    full = bound(response_detail="full")
 
-    assert result["success"] is False
-    assert result["error"] == public_error.as_public_dict()
+    assert result["error"]["code"] == "MUTATION_BUSY"
+    assert result["error"]["message"].endswith("so this was not saved. Retry the same call.")
+    assert result["error"]["retry"] == {"tool": "mutate", "after_s": 1}
+    assert full["diagnostics"]["error"] == public_error.as_public_dict()
 
 
 def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
@@ -1479,11 +1484,14 @@ def test_bound_mcp_legacy_review_refusal_explains_confirmed_backfill(
     )
 
     result = bound()
+    full = bound(response_detail="full")
 
-    assert result["success"] is False
     assert result["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
-    assert result["error"]["message"] == refusal.reason
-    remediation = result["error"]["remediation"]
+    # With no structured retry, the message carries the first sentence of the fix.
+    message = result["error"]["message"]
+    assert message.startswith(f"{refusal.reason.capitalize()}. Preview maintain_memory(mode='backfill-ids')")
+    assert message.endswith(" Nothing was saved.")
+    remediation = full["diagnostics"]["error"]["remediation"]
     assert "maintain_memory(mode='backfill-ids')" in remediation
     assert "confirmation" in remediation
     assert "plan_id" in remediation
@@ -1522,7 +1530,7 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
         )
         legacy = await client.call_tool(
             "edit_note",
-            {"path": "Knowledge Base/Notes/legacy.md", "why": "test",
+            {"path": "Knowledge Base/Notes/legacy.md", "why": "test", "response_detail": "full",
              "operation": {"kind": "replace_tags", "tags": ["a"]}},
             raise_on_error=False,
         )
@@ -1540,8 +1548,7 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     assert {"search_memory", "check_memory", "repair_memory"} <= listed
     assert {"ask_memory", "maintain_memory"}.isdisjoint(listed)
     assert missing["error"]["code"] == "NOT_FOUND"
-    assert "`search_memory`" in missing["error"]["remediation"]
-    remediation = legacy["error"]["remediation"]
+    remediation = legacy["diagnostics"]["error"]["remediation"]
     assert legacy["error"]["code"] == "RELATION_REVIEW_STABLE_ID_REQUIRED"
     assert "check_memory(operation={'kind': 'backfill-ids'})" in remediation
     assert "run repair_memory with dry_run=false, its plan_id" in remediation
@@ -1587,7 +1594,7 @@ def test_the_entity_observation_remediation_names_the_edit_tool_the_client_lists
     finally:
         writer_lease.reset_managers_for_tests()
 
-    text = f"{refused['error']['message']} {refused['error']['remediation']}"
+    text = refused["error"]["message"]
     assert "edit_note" in listed and "edit_memory" not in listed
     assert "edit_note(" in text
     assert "edit_memory" not in text
@@ -1669,10 +1676,12 @@ def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
 
     for _ in range(2):
         result = asyncio.run(mcp.call_tool("mutate", {}, run_middleware=False))
-        assert result.structured_content["success"] is False
-        assert result.structured_content["error"]["code"] == "MUTATION_BUSY"
-        assert result.structured_content["error"]["request_id"] == "req-fastmcp"
-        assert result.structured_content["error"]["receipt_id"] == "receipt-fastmcp"
+        # The agent reads one coded error with its retry; correlation ids stay out of it.
+        assert result.structured_content == {"error": {
+            "code": "MUTATION_BUSY",
+            "message": "Memory was busy with another write, so this was not saved. Retry the same call.",
+            "retry": {"tool": "mutate", "after_s": 1},
+        }}
 
     read = asyncio.run(mcp.call_tool("inspect", {}, run_middleware=False))
     assert read.structured_content == {"available": True}
@@ -1790,12 +1799,19 @@ def test_bound_mcp_committed_failure_replays_sanitized_without_second_leaf_call(
     first = bound()
     replay = bound()
 
-    assert first == {"success": False, "error": original.as_public_dict()}
-    assert first["error"]["code"] == "BATCH_CLEANUP_INCOMPLETE"
-    assert first["error"]["outcome"]["committed"] is True
+    assert first["error"] == {
+        "code": "BATCH_CLEANUP_INCOMPLETE",
+        "message": (
+            "The batch workspace cleanup is incomplete. "
+            "Do not retry the write; committed destinations are preserved. "
+            "Reconcile retained workspace state. The change was saved."
+        ),
+    }
     assert replay == first
+    full = bound(response_detail="full")
+    assert full["diagnostics"]["error"] == original.as_public_dict()
     for secret in (str(tmp_path), ".exomem-batch-", "stage-0.tmp", "low-level detail"):
-        assert secret not in json.dumps(first)
+        assert secret not in json.dumps([first, full])
     assert calls == 1
 
 
@@ -2081,13 +2097,13 @@ def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     result = command_surface.bind_vault(leaf, vault, command=command)(value=7)
 
     assert written.read_text(encoding="utf-8") == "done"
-    assert result["success"] is False
     assert result["error"]["code"] == code
-    assert result["error"]["committed"] is committed
     if read_only:
+        assert result["error"]["retry"] == {"tool": "probe_write"}
         return
-    assert result["error"]["status"] == "uncertain"
-    assert result["error"]["post_leaf_refusal"] == "COLLECTION_STORE_BUSY"
+    # The write ran, so the message must not claim nothing was saved.
+    assert result["error"]["message"].endswith("Whether it was saved is not known.")
+    assert "retry" not in result["error"]
     retried = command_surface.bind_vault(leaf, vault, command=command)(value=7)
     assert runs == 1
     assert retried == {"value": 7}
@@ -2125,11 +2141,12 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
 
     monkeypatch.setattr(egress, "postfilter", stale_terminal_pass)
     bound = command_surface.bind_vault(leaf, vault, command=command)
-    result = bound(value=7)
+    result = bound(value=7, response_detail="full")
     assert written.read_text() == "done" and runs == 1
     assert result["error"]["code"] == "MUTATION_ACKNOWLEDGEMENT_PENDING"
-    assert result["error"]["committed"] is None
-    assert result["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
+    assert result["error"]["message"].endswith("Whether it was saved is not known.")
+    assert result["diagnostics"]["error"]["committed"] is None
+    assert result["diagnostics"]["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
     assert bound(value=7) == {"value": 7}
     assert runs == 1
 

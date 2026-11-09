@@ -188,15 +188,21 @@ def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay
             "expected_container_hash"
         ],
         "why": "clarify collection title",
-        "response_detail": "compact",
+        "response_detail": "full",
     }
 
-    first = manager.invoke(
-        command,
-        (tmp_path,),
-        kwargs,
-        idempotency_key="lifecycle-revise-graph-handoff",
-        public_idempotency_key="lifecycle-revise-graph-handoff",
+    def flat(terminal: dict) -> dict:
+        # The receipt and the sync state live under `diagnostics.operational` in a full reply.
+        return {**terminal, **terminal["diagnostics"]["operational"]}
+
+    first = flat(
+        manager.invoke(
+            command,
+            (tmp_path,),
+            kwargs,
+            idempotency_key="lifecycle-revise-graph-handoff",
+            public_idempotency_key="lifecycle-revise-graph-handoff",
+        )
     )
     receipt = {
         key: first[key]
@@ -255,12 +261,14 @@ def test_public_revise_keeps_the_closed_receipt_through_graph_handoff_and_replay
         )
     }
 
-    replay = manager.invoke(
-        command,
-        (tmp_path,),
-        kwargs,
-        idempotency_key="lifecycle-revise-graph-handoff",
-        public_idempotency_key="lifecycle-revise-graph-handoff",
+    replay = flat(
+        manager.invoke(
+            command,
+            (tmp_path,),
+            kwargs,
+            idempotency_key="lifecycle-revise-graph-handoff",
+            public_idempotency_key="lifecycle-revise-graph-handoff",
+        )
     )
 
     assert replay["status"] == "replayed"

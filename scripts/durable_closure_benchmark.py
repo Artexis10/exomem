@@ -1596,9 +1596,11 @@ async def run_public_workflow(
 
         source_gate = await run_after_dependencies(source_dependencies, write_evidence_backed_note)
 
+        # Timings keep the raw `warming` components the closure report names; the agent reply folds them into a `notice`.
         recall = await workflow_call(
             "ask_memory",
-            {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 10}, phase="verification",
+            {"query": marker, "mode": "hybrid", "graph": True, "rerank": False, "limit": 10, "include_timings": True},
+            phase="verification",
         )
         direct = await workflow_call("read_memory", {"path": path}, phase="verification") if path else {"success": False}
         tracker_read = await workflow_call("read_memory", {"path": tracker_path}, phase="verification")

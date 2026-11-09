@@ -205,6 +205,7 @@ def test_public_delta_save_replays_without_recommit(
         "proposal": _delta(),
         "expected_hash": relation_registry.load_registry(root).extension_hash,
         "why": "Reviewed durable recurring meaning.",
+        "response_detail": "full",
     }
 
     first = manager.invoke(
@@ -223,7 +224,7 @@ def test_public_delta_save_replays_without_recommit(
         read_only=False,
     )
 
-    assert first["state"] == "committed"
+    assert first["diagnostics"]["operational"]["state"] == "committed"
     assert replay == first
     assert registry_path.read_bytes() == committed_bytes
     assert registry_batches == 1

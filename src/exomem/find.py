@@ -4686,13 +4686,11 @@ def _resolve_relation_filter(
     for raw in relations or ():
         resolution = registry.resolve(raw)
         if resolution.canonical is None or resolution.status == "unregistered":
+            suggestions = _nearest_relation_keys(registry, raw)
             raise cli_ops.OpError(
                 "INVALID_RELATION_FILTER",
                 f"unknown relation {raw!r}",
-                details={
-                    "relation": raw,
-                    "suggestions": _nearest_relation_keys(registry, raw),
-                },
+                details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
     result = graph_index.relation_participants(

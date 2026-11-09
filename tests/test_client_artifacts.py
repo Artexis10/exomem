@@ -66,6 +66,11 @@ def _command(name: str):
     return next(command for command in commands.PRODUCT_COMMANDS if command.name == name)
 
 
+def _operational(reply: dict) -> dict:
+    """The operational block a write reply carries only under `response_detail="full"`."""
+    return reply["diagnostics"]["operational"]
+
+
 def test_preserve_artifacts_has_openai_file_parameter_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -716,16 +721,18 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
     ]
 
     first = writer_lease.invoke_command(
-        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files"
+        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files",
+        response_detail="full",
     )
     replay = writer_lease.invoke_command(
-        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files"
+        command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files",
+        response_detail="full",
     )
 
     assert first == replay
     assert [row["file_id"] for row in first["files"]] == [file["file_id"] for file in files]
     assert first["summary"] == {"stored": 8, "already_stored": 0, "failed": 0}
-    assert first["warnings_count"] == 1
+    assert _operational(first)["warnings_count"] == 1
     assert first["paths"] == [
         f"Knowledge Base/Evidence/case/raw/file-{index}.bin" for index in range(8)
     ]
@@ -1333,13 +1340,15 @@ def test_all_duplicate_batch_still_carries_the_mutation_terminal(
         category="raw",
         files=[{"download_url": "https://files.example/b", "file_id": "file-retry"}],
         idempotency_key="all-duplicate-retry",
+        response_detail="full",
     )
 
-    assert duplicate["ok"] is True
-    assert duplicate["status"] == "committed"
-    assert duplicate["terminal"] is True
-    assert duplicate["request_id"]
-    assert duplicate["receipt_id"]
+    operational = _operational(duplicate)
+    assert operational["ok"] is True
+    assert operational["status"] == "committed"
+    assert operational["terminal"] is True
+    assert operational["request_id"]
+    assert operational["receipt_id"]
     assert duplicate["files"][0]["state"] == "already_stored"
     assert duplicate["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
     assert not (vault / "Knowledge Base" / "Evidence" / "case" / "raw" / "two.bin").exists()
@@ -1365,7 +1374,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
         content=content,
         idempotency_key="evidence-first",
     )
-    assert stored["status"] == "committed"
+    assert stored["user_summary"].startswith("Saved")
 
     duplicate = writer_lease.invoke_command(
         command,
@@ -1375,13 +1384,15 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
         filename="letter-copy.txt",
         content=content,
         idempotency_key="evidence-retry",
+        response_detail="full",
     )
 
-    assert duplicate["ok"] is True
-    assert duplicate["status"] == "committed"
-    assert duplicate["terminal"] is True
-    assert duplicate["request_id"]
-    assert duplicate["receipt_id"]
+    operational = _operational(duplicate)
+    assert operational["ok"] is True
+    assert operational["status"] == "committed"
+    assert operational["terminal"] is True
+    assert operational["request_id"]
+    assert operational["receipt_id"]
     assert not (
         vault / "Knowledge Base" / "Evidence" / "case" / "letters" / "letter-copy.txt"
     ).exists()
@@ -1858,15 +1869,16 @@ def test_media_fanout_never_runs_inside_the_guard_or_before_the_terminal(
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         adoption=adoption,
         idempotency_key=f"media-fanout-{adoption is not None}",
+        response_detail="full",
     )
 
-    assert terminal["status"] == "committed"
+    assert _operational(terminal)["status"] == "committed"
     sidecar_only = [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]]
     assert sidecar_only, "the media sidecar produced no index or graph work at all"
     assert [row for row in sidecar_only if row["inside_media_guard"]] == []
     assert [row for row in sidecar_only if not row["after_terminal"]] == []
-    assert terminal["derived_sync"] == "completed"
-    assert "derived_sync_components" not in terminal
+    assert _operational(terminal)["derived_sync"] == "completed"
+    assert "derived_sync_components" not in _operational(terminal)
     assert [receipt.rel_path for receipt in deferred_index.snapshot_full(vault)] == [
         next(vault.rglob("proof.png.md")).relative_to(vault).as_posix()
     ]
@@ -1879,10 +1891,11 @@ def test_media_fanout_never_runs_inside_the_guard_or_before_the_terminal(
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         adoption=adoption,
         idempotency_key=f"media-fanout-{adoption is not None}",
+        response_detail="full",
     )
 
-    assert replay["derived_sync"] == "completed"
-    assert replay.get("derived_sync_components") == terminal.get(
+    assert _operational(replay)["derived_sync"] == "completed"
+    assert _operational(replay).get("derived_sync_components") == _operational(terminal).get(
         "derived_sync_components"
     )
     assert [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]] == sidecar_only
@@ -1940,6 +1953,7 @@ def test_terminal_persistence_failure_does_not_run_media_fanout(
             files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
             adoption=adoption,
             idempotency_key=f"media-persist-failure-{adoption is not None}",
+            response_detail="full",
         )
 
     assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
@@ -1957,9 +1971,10 @@ def test_terminal_persistence_failure_does_not_run_media_fanout(
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         adoption=adoption,
         idempotency_key=f"media-persist-failure-{adoption is not None}",
+        response_detail="full",
     )
 
-    assert replay["derived_sync"] == "pending"
+    assert _operational(replay)["derived_sync"] == "pending"
     assert [row for row in watch.fanouts if row["paths"] == ["proof.png.md"]] == []
     assert deferred_index.snapshot_full(vault) == pending
     assert staged == ["file-media"]
@@ -1996,11 +2011,12 @@ def test_a_fast_acknowledgement_session_carries_the_media_sidecar(
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         adoption=adoption,
         idempotency_key=f"media-derived-{adoption is not None}",
+        response_detail="full",
     )
 
-    assert terminal["status"] == "committed"
+    assert _operational(terminal)["status"] == "committed"
     assert watch.fanouts == []
-    assert terminal["derived_sync"] in {"pending", "completed", "failed"}
+    assert _operational(terminal)["derived_sync"] in {"pending", "completed", "failed"}
 
 
 def test_a_fresh_image_is_one_canonical_commit_with_its_media_job_queued(
@@ -2112,9 +2128,10 @@ def test_one_artifact_batch_publishes_each_pending_custody_once(
             for index in range(3)
         ],
         idempotency_key="shared-artifact-custody",
+        response_detail="full",
     )
 
-    assert terminal["status"] == "committed", terminal
+    assert _operational(terminal)["status"] == "committed", terminal
     assert terminal["summary"] == {"stored": 3, "already_stored": 0, "failed": 0}
     overlay = pending_recall.overlay(vault)
     assert overlay.outcome == "ready", overlay.failure_code
@@ -2137,8 +2154,8 @@ def test_one_artifact_batch_publishes_each_pending_custody_once(
         }
     assert "prepared" not in states
     assert "retired" in states
-    assert terminal["derived_sync"] == "pending"
-    assert set(terminal["derived_sync_components"]) == owed
+    assert _operational(terminal)["derived_sync"] == "pending"
+    assert set(_operational(terminal)["derived_sync_components"]) == owed
     assert len({batch_id for batch_id, _states in publications}) >= 3
     assert all("prepared" in states for _batch_id, states in publications), publications
 
@@ -2221,12 +2238,14 @@ def test_default_media_fanout_reports_non_graph_component_outcome(
         category="raw",
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         idempotency_key=f"media-{expected_sync}",
+        response_detail="full",
     )
 
-    assert terminal["derived_sync"] == expected_sync
-    assert terminal["derived_sync_components"] == expected_components
+    operational = _operational(terminal)
+    assert operational["derived_sync"] == expected_sync
+    assert operational["derived_sync_components"] == expected_components
     if expected_sync == "failed":
-        assert terminal["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
+        assert operational["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
 
 
 def test_media_fanout_does_not_retire_readded_background_demand(
@@ -2286,9 +2305,10 @@ def test_media_fanout_does_not_retire_readded_background_demand(
         category="raw",
         files=[{"download_url": "https://files.example/p", "file_id": "file-media"}],
         idempotency_key="media-fanout-aba",
+        response_detail="full",
     )
 
-    assert terminal["derived_sync"] == "completed"
+    assert _operational(terminal)["derived_sync"] == "completed"
     assert deferred_index.snapshot_full(vault) == [
         deferred_index.DeferredReceipt(
             next(vault.rglob("proof.png.md")).relative_to(vault).as_posix(), 1
