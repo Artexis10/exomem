@@ -36,15 +36,21 @@ class Inspection:
     rows: int | None = None
 
 
+def is_dataset_name(filename: str) -> bool:
+    """Whether preserve files `filename` as a dataset, which stays on the volume with the notes (design D1)."""
+    return Path(filename).suffix.lower() in query_data.ALLOWED_SUFFIXES
+
+
 def inspect_source(stream: BinaryIO, *, filename: str, size: int) -> Inspection | None:
     """Inspect a bounded prefix and restore the private stage's seek position."""
     suffix = Path(filename).suffix.lower()
-    if suffix not in query_data.ALLOWED_SUFFIXES and suffix not in LITERAL_SUFFIXES:
+    dataset = is_dataset_name(filename)
+    if not dataset and suffix not in LITERAL_SUFFIXES:
         return None
     position = stream.tell()
     try:
         stream.seek(0)
-        if suffix in query_data.ALLOWED_SUFFIXES:
+        if dataset:
             if size > DATASET_PREVIEW_BYTES:
                 return _dataset_unavailable(suffix, "byte_limit")
             data = stream.read(DATASET_PREVIEW_BYTES + 1)

@@ -105,22 +105,29 @@ class AllowanceDecision:
     code: str | None
 
 
-def admission(
-    usage: ReferenceUsage, binary: originals.BinaryBinding,
-    reference: originals.StoredObject | None, allowance_bytes: int | None,
+def decide(
+    used_bytes: int | None, projected: int | None, allowance_bytes: object, observed_at: str,
 ) -> AllowanceDecision:
-    """Admit one proposed plaintext version against the current reference union."""
+    """Judge a projected total against the allowance; an unknown total or allowance is unknown, never 0."""
     allowance = allowance_bytes if type(allowance_bytes) is int and allowance_bytes >= 0 else None
-    try:
-        projected = projected_bytes(usage, binary, reference)
-    except ValueError:
-        projected = None
     code = None
     if allowance is None or projected is None:
         code = MEDIA_ALLOWANCE_UNKNOWN
     elif projected > allowance:
         code = MEDIA_ALLOWANCE_EXCEEDED
-    return AllowanceDecision(usage.used_bytes, projected, allowance, usage.observed_at, code)
+    return AllowanceDecision(used_bytes, projected, allowance, observed_at, code)
+
+
+def admission(
+    usage: ReferenceUsage, binary: originals.BinaryBinding,
+    reference: originals.StoredObject | None, allowance_bytes: int | None,
+) -> AllowanceDecision:
+    """Admit one proposed plaintext version against the current reference union."""
+    try:
+        projected = projected_bytes(usage, binary, reference)
+    except ValueError:
+        projected = None
+    return decide(usage.used_bytes, projected, allowance_bytes, usage.observed_at)
 
 
 def _binding(

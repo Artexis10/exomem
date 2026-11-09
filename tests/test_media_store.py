@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from test_agent_upload_handoff import _post, _prepare
+from test_agent_upload_handoff import upload_env as upload_env
 
 from exomem import held_fs, originals, reserved_paths
 from exomem.governance.principal import library_scope
@@ -561,6 +563,76 @@ def test_hydration_reports_local_disk_exhaustion_as_local(vault: Path, selected_
     assert [entry.name for entry in path.parent.iterdir() if entry.name.startswith(".exomem-held-publish-")] == []
 
 
+def test_a_hydration_downloads_the_ciphertext_without_holding_the_vault_guard(vault: Path, selected_store, monkeypatch):
+    """Defect: a hydration that holds the vault guard through the download makes every vault write wait for it,
+    minutes for a large recording."""
+    import threading
+
+    from exomem import media_store, writer_lease
+
+    path = _stored(vault, "recording", 3_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    opened, entered_during_download = media_store.FilesystemStore.open, []
+
+    def open_while_an_owner_writes(store, *args, **kwargs):
+        entered = threading.Event()
+
+        def owner_write() -> None:
+            with writer_lease.get_manager().mutation_guard(vault, request_id="owner-write", operation="edit"):
+                entered.set()
+
+        writer = threading.Thread(target=owner_write)
+        writer.start()
+        entered_during_download.append(entered.wait(10))
+        writer.join(10)
+        return opened(store, *args, **kwargs)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", open_while_an_owner_writes)
+
+    with media_store.open_original(vault, path) as source:
+        assert source.stream.read() == expected
+
+    assert entered_during_download == [True]
+
+
+def test_a_hydration_writes_one_temporary_beside_the_original_and_no_ciphertext_copy(vault: Path, selected_store, monkeypatch):
+    """Defect: a hydration that stages the downloaded ciphertext before it decrypts needs room for two copies, so
+    a recording that fits on the volume fails to hydrate, or fills the volume."""
+    import contextlib
+    import tempfile
+
+    from exomem import media_store
+
+    path = _stored(vault, "recording", 300_000)
+    expected = path.read_bytes()
+    assert media_store.evict(vault, path)
+    before = {entry.name for entry in path.parent.iterdir()}
+    staged, at_download_end = [], []
+    # The standard library's ways to stage a named or an anonymous temporary file.
+    for name in ("TemporaryFile", "NamedTemporaryFile", "mkstemp"):
+        real = getattr(tempfile, name)
+        monkeypatch.setattr(tempfile, name, lambda *a, _real=real, _name=name, **k: staged.append(_name) or _real(*a, **k))
+    opened = media_store.FilesystemStore.open
+
+    @contextlib.contextmanager
+    def open_and_list_the_folder_once_read(store, *args, **kwargs):
+        with opened(store, *args, **kwargs) as stream:
+            yield stream
+        # The whole ciphertext has arrived, so a staged copy would sit beside the hydration's temporary now.
+        at_download_end.append({entry.name for entry in path.parent.iterdir()} - before)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", open_and_list_the_folder_once_read)
+
+    with media_store.open_original(vault, path) as source:
+        assert source.stream.read() == expected
+
+    assert staged == []
+    [added] = at_download_end
+    assert len(added) == 1 and next(iter(added)).startswith(".exomem-held-publish-")
+    assert {entry.name for entry in path.parent.iterdir()} - before == {path.name}
+
+
 def test_page_move_refuses_the_catalog_before_hydrating(vault: Path, selected_store, monkeypatch):
     """An unavailable object store must not mask a move's catalog refusal or change its files."""
     from exomem import media_jobs, media_processing, media_store, move_file, preserve
@@ -975,6 +1047,32 @@ def test_eviction_survives_real_reconciliation_and_deletion_fanout(vault: Path, 
     assert sidecar.read_bytes() == canonical
     with media_store.open_original(vault, path) as source:
         assert source.stream.read() == b"original video bytes"
+
+
+def test_the_restart_scan_queues_the_pending_extraction_of_an_evicted_original(vault: Path, selected_store):
+    """Defect: the worker's restart scan takes an evicted original for a deleted one and leaves its extraction unqueued.
+
+    The scan also skips the page when offload's companion rewrite leaves a capture time that the page check refuses.
+    """
+    import base64
+
+    from exomem import extract, media_jobs, media_processing, media_store, media_worker, preserve
+
+    ledger = media_jobs.MediaJobStore(vault)
+    report = vault / preserve.preserve(vault, scope="Test", category="documents", filename="report.pdf",
+                                       content_base64=base64.b64encode(b"pending pdf bytes").decode()).path
+    media_processing.reconcile_media(vault, report)
+    _offload(vault, report)
+    # The ledger loses the OCR stage while the companion still says pending: the restart scan must queue it again.
+    ledger.retire_ocr(report, extract.media_type_for(report))
+    assert media_store.evict(vault, report)
+    companion = report.with_name(report.name + ".md").read_bytes()
+
+    assert media_worker.MediaWorker(vault, execution_mode="process")._scan_pending_ocr() == 1
+    assert ledger.get_by_binary(report).do_ocr
+    assert not report.exists()
+    assert originals.original_state(vault, report).state == "evicted"
+    assert report.with_name(report.name + ".md").read_bytes() == companion
 
 
 def test_hydration_reservation_bounds_concurrency(vault: Path, selected_store, monkeypatch):
@@ -1565,6 +1663,47 @@ def test_allowance_refusal_reports_the_current_unknown_or_exceeded_code(vault: P
     assert originals.original_state(vault, path).state == "cached"
 
 
+def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_on_a_confirmed_figure(
+        vault: Path, selected_store, upload_env, monkeypatch):
+    """Defect: each upload walks every note under the consistency guard to admit it, or one the allowance cannot hold is kept.
+
+    An aged record that says the upload does not fit still refuses, after one confirming walk. A Source upload
+    charges the allowance whatever its name, while an Evidence dataset stays on the volume (D1). The refusal
+    names the requested size and the allowance, never the owner's total in use (D10).
+    """
+    import re
+
+    from exomem import held_uploads, media_jobs
+
+    used = _recorded_by_a_batch(vault)
+    walks = _count_censuses(monkeypatch)
+    data = b"exact original\n"
+
+    admitted = _post(upload_env, _prepare(upload_env, data), data)
+
+    assert admitted.status_code == 201, admitted.text
+    assert walks == []
+    values, config = selected_store
+    allowance = used + len(data) - 1
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": allowance}}}))
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        connection.execute("UPDATE media_owner_census SET observed_at = ?",
+                           ((datetime.now(UTC) - timedelta(hours=1)).isoformat(),))
+    held = sorted(held_uploads._store(vault).iterdir())
+
+    refused = _post(upload_env, _prepare(upload_env, data), data, filename="table.csv")
+
+    assert refused.status_code == 413, refused.text
+    assert refused.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert len(walks) == 1
+    assert sorted(held_uploads._store(vault).iterdir()) == held
+    # The number tokens of the reason: only the upload's size and the allowance may appear.
+    assert re.findall(r"[\d,]*\d", refused.json()["reason"]) == [f"{len(data):,}", f"{allowance:,}"]
+    evidence = _post(upload_env, _prepare(upload_env, data, lane="evidence"), data, filename="table.csv",
+                     lane="evidence")
+    assert evidence.status_code == 201, evidence.text
+
+
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
     from exomem import media_jobs, media_store
 
@@ -2008,6 +2147,28 @@ def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, m
     assert media_store.evict_to_target(vault) == 1
 
     assert damaged.exists() and not sound.exists()
+
+
+@pytest.mark.parametrize("query", ["eviction batch", "eligible bytes", "hydrated claims"])
+def test_the_ledger_queries_of_each_eviction_pass_and_claim_read_through_an_index(vault: Path, query):
+    """Defect: an edit to a query's condition stops it using its index, so each pass or claim reads the whole cache
+    or job table. The reservation query lost its index this way (design.md D3, query plans)."""
+    from exomem import media_jobs, media_store
+
+    sql = {
+        "eviction batch": "SELECT binary_rel, size " + media_store._ELIGIBLE + " " + media_store._EVICTION_ORDER
+                          + " LIMIT :batch OFFSET :offset",
+        "eligible bytes": "SELECT COALESCE(SUM(size), 0) " + media_store._ELIGIBLE,
+        "hydrated claims": media_jobs._HYDRATED_CLAIMS,
+    }[query]
+    parameters = {"hydration": 1 << 30, "idle_before": 0.0, "batch": 64, "offset": 0}
+
+    # Without ANALYZE statistics, as at runtime, an empty ledger gets the same plan as a populated one.
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
+
+    # SQLite's plan names a read of a whole table or index SCAN, and a lookup through an index SEARCH.
+    assert not [step for step in plan if step.startswith("SCAN ")], plan
 
 
 def test_a_store_outage_ends_the_eviction_pass_at_its_first_head(vault: Path, selected_store, monkeypatch):
@@ -3509,6 +3670,35 @@ def test_the_media_workers_eviction_tick_drains_a_retained_store(vault: Path, se
     media_worker._evict(vault)
 
     assert originals.original_state(vault, path).state == "cached"
+    assert media_store.drain_record(vault).latched
+
+
+def test_an_evicted_original_in_trash_is_counted_and_drained_back_into_trash(vault: Path, selected_store, monkeypatch):
+    """Defect: the census refuses a stored reference in Trash whose payload was evicted, so a retained store that
+    ever evicted a Trash original stays unknown, never drains it and never releases its key."""
+    from exomem import delete_file, media_jobs, media_processing, media_store, preserve
+
+    data = b"t" * 300
+    path = vault / "Knowledge Base" / "Notes" / "Media" / "trashed.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(data)
+    media_processing.reconcile_media(vault, path)
+    preserve.update_sidecar_extraction(vault, path.with_name(path.name + ".md"), text="extracted text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = vault / delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True).trash_path
+    with media_store.open_original(vault, trashed, read=True):  # A preview records the Trash copy, so eviction may take it.
+        pass
+    assert media_store.evict(vault, trashed)
+    _retained(selected_store, vault)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 1_000, trashed))
+
+    assert media_store.drain_census(vault) == (1, len(data))
+    assert media_store.drain_step(vault) == 1
+
+    assert trashed.read_bytes() == data
+    assert originals.original_state(vault, trashed).state == "cached"
+    assert media_store.drain_census(vault) == (0, 0)
     assert media_store.drain_record(vault).latched
 
 

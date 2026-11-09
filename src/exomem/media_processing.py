@@ -32,6 +32,7 @@ from . import (
     recall_policy,
     rename_journal,
     reserved_paths,
+    temporal,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
 from .cli_ops import OpError
@@ -923,13 +924,8 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
     A non-empty `tags` list was required for the same reason, and did the same
     to a capture that legitimately has none.
     """
-    captured = frontmatter.get("captured")
-    try:
-        if isinstance(captured, dt.date):
-            captured.isoformat()
-        else:
-            dt.date.fromisoformat(str(captured))
-    except (TypeError, ValueError):
+    # A frontmatter rewrite, such as offload's, stores a read timestamp as quoted text with a time.
+    if temporal.parse(frontmatter.get("captured")) is None:
         return False
     title = frontmatter.get("title")
     source_type = frontmatter.get("source_type")
