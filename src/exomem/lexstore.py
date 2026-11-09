@@ -2330,6 +2330,20 @@ def _mark_runtime_retrieval_unavailable_if_current(vault_root: Path) -> None:
     readiness.mark_unready("retrieval_catalog")
 
 
+def _file_repair_is_moot(vault_root: Path) -> bool:
+    """Whether a repair of the lexical catalogue cannot help this vault.
+
+    The repair rebuilds from files, so it never converges in a store-mode vault, whose pages are in
+    the store. A mode that cannot be read counts as moot: no repair is scheduled on a guess.
+    """
+    from . import find_corpus
+
+    try:
+        return find_corpus.store_serves(vault_root)
+    except (RuntimeError, OSError, sqlite3.Error):
+        return True
+
+
 def _schedule_runtime_catalog_repair(
     vault_root: Path,
     *,
@@ -11054,12 +11068,14 @@ class LexicalStore:
         Every non-`available` outcome is reported (never raised); raw SQLite is
         classified here and never escapes this seam.
         """
-        from . import find_corpus
         from . import freshness as freshness_module
 
-        # The repair rebuilds from files, so in a store-mode vault it never converges.
-        schedule_repair = schedule_repair and not find_corpus.store_serves(self.vault_root)
         backend_name = backend()
+
+        def repair_wanted() -> bool:
+            # Asked only where an outcome is incomplete, so a vault that is ready reads no mode.
+            return schedule_repair and not _file_repair_is_moot(self.vault_root)
+
         # Explicit checkpoints belong to strict proofs or independent callers.
         # Only an ambient request query may borrow its selection transaction.
         view = _admitted_catalog_view(self.vault_root)
@@ -11072,7 +11088,7 @@ class LexicalStore:
                 return CatalogReadiness("definitions_unavailable", False, backend_name)
             except sqlite3.Error as error:
                 return self._catalog_readiness_error(
-                    error, backend_name, schedule_repair=schedule_repair
+                    error, backend_name, schedule_repair=repair_wanted()
                 )
         if recall_checkpoint is None:
             recall_checkpoint = _admitted_catalog_checkpoint(self.vault_root, scope)
@@ -11083,7 +11099,7 @@ class LexicalStore:
         )
         target_state = checkpoint_state(target_checkpoint)
         if not _checkpoint_policy_current(self.vault_root, target_checkpoint):
-            if schedule_repair:
+            if repair_wanted():
                 _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         if backend_name == "python":
@@ -11098,11 +11114,11 @@ class LexicalStore:
             # single failed attempt would strand the store as fatal for the
             # process. `_schedule_repair` is itself single-flight, so this cannot
             # storm.
-            if schedule_repair:
+            if repair_wanted():
                 _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if not self.path.exists():
-            if schedule_repair:
+            if repair_wanted():
                 _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         try:
@@ -11111,12 +11127,12 @@ class LexicalStore:
                 if not self._schema_is_current(conn):
                     # Read-only probe: an absent/old-shape (v4) or version-stale
                     # sidecar defers to the atomic rebuild — this seam emits no DDL.
-                    if schedule_repair:
+                    if repair_wanted():
                         _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 checkpoint = self._meta_checkpoint(conn, scope)
                 if checkpoint is None:
-                    if schedule_repair:
+                    if repair_wanted():
                         _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 if checkpoint_state(checkpoint) == target_state:
@@ -11125,7 +11141,7 @@ class LexicalStore:
                         != catalog_semantic_identity(self.vault_root)
                         or not _checkpoint_policy_current(self.vault_root, target_checkpoint)
                     ):
-                        if schedule_repair:
+                        if repair_wanted():
                             _schedule_runtime_catalog_repair(self.vault_root)
                         return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
@@ -11151,7 +11167,7 @@ class LexicalStore:
                             # from under this delta (no longer bound), so it could
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
-                            if schedule_repair:
+                            if repair_wanted():
                                 _schedule_runtime_catalog_repair(
                                     self.vault_root,
                                     lag_only=True,
@@ -11165,7 +11181,7 @@ class LexicalStore:
                             schedule_repair=schedule_repair,
                             recall_checkpoint=target_checkpoint,
                         )
-            if schedule_repair:
+            if repair_wanted():
                 # The stored checkpoint differs from the target; the worker's catch-up
                 # must prove it exactly current, or the full pass runs.
                 _schedule_runtime_catalog_repair(
@@ -11176,7 +11192,7 @@ class LexicalStore:
             return self._catalog_readiness_error(
                 e,
                 backend_name,
-                schedule_repair=schedule_repair,
+                schedule_repair=repair_wanted(),
             )
 
     def holds_content_identities(

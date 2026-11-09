@@ -103,6 +103,8 @@ def damage_every_owned_projection(root, damage):
             path.symlink_to(inside if damage == "a link into the vault" else outside)
 
 
+# Each case commits GENERATED pages and answers twice; a busy runner can exceed the 60 s default.
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("damage", DAMAGE)
 def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_file_is_damaged(
     stored, writer, damage, monkeypatch  # noqa: F811
@@ -124,10 +126,16 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
         assert any(hit[0].startswith(stored_only) for hit in answered), (
             "pages that only the store holds must be among the answers"
         )
-    # The catalogue is built from files, so it does not cover those pages: the answer says so.
-    assert before["notice"] == commands._SEARCH_NOTICE_CATALOG_LAG
+    # Every lexical lane read the store corpus, so the answer is whole: the reader gets no notice,
+    # and the owner's diagnostics name the routing.
+    assert before["notice"] is None
+    find_module.clear_cache()  # a cached answer would skip the routing that this reads
     diagnosed = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
-    assert find_module._STORE_CATALOG_LAG_COMPONENT in diagnosed["warming"]["components"]
+    assert not (diagnosed.get("warming") or {}).get("components")
+    assert diagnosed["timings"]["profile"]["lexical_lanes"] == {
+        "corpus": "store",
+        "catalogue": "bypassed",
+    }
     assert len(before["listing"]) == GENERATED
     assert len(before["corpus"]) >= GENERATED + 2
     for listed in before["notes"].values():

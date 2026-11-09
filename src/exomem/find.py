@@ -118,11 +118,6 @@ _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 # of the command; the owner learns that under this name rather than finding them silently missing.
 _STORE_UNAVAILABLE_COMPONENT = "collection_store"
 
-# Store-mode lag disclosure. The lexical catalogue is built from files, so it does not yet cover a
-# page that only the store holds; the in-process lanes serve it, and the answer says so under this
-# name. A file-mode vault's lag keeps `_RECALL_PROJECTION_STALE_COMPONENT`.
-_STORE_CATALOG_LAG_COMPONENT = "catalog_lag"
-
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -5980,29 +5975,24 @@ def _find_semantic(
 
         lexical_freshness = snapshot.for_scope(scope)
         lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-        catalog_lags = False
+        lexical_from_store = False
         if mode != "vector" and lexstore.maintained_content_index_enabled():
-            # The catalogue is built from files, so an inline build would index the files and
-            # present that as the whole store; a store-mode vault only reads the catalogue.
-            store_mode = find_corpus.store_serves(vault_root)
-            if store_mode:
+            if find_corpus.store_serves(vault_root):
+                # The catalogue is built from files, so it never covers the store corpus and an
+                # inline build would present the files as the whole store. Every lexical lane
+                # reads the store corpus instead, so the answer is whole: no notice, only an
+                # owner diagnostic.
+                lexical_from_store = True
                 lexical_repair = False
-            if not lexical_repair:
+                if timings is not None:
+                    timings.profile["lexical_lanes"] = {"corpus": "store", "catalogue": "bypassed"}
+            elif not lexical_repair:
                 catalog = lexstore.get_store(vault_root).catalog_readiness(
                     scope,
                     lexical_freshness,
                 )
                 if not catalog.complete:
-                    if not store_mode:
-                        _raise_catalog_outcome(catalog)
-                    # Pages that only the store holds are not in the catalogue yet: the
-                    # in-process lanes serve them and the answer names the gap.
-                    catalog_lags = True
-                    if (
-                        degraded_out is not None
-                        and _STORE_CATALOG_LAG_COMPONENT not in degraded_out
-                    ):
-                        degraded_out.append(_STORE_CATALOG_LAG_COMPONENT)
+                    _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -6080,7 +6070,7 @@ def _find_semantic(
                 else snapshot.recall_paths(recall_scope or scope) & admitted_paths
             ),
             lexical_repair=lexical_repair,
-            catalog_lags=catalog_lags,
+            from_store=lexical_from_store,
             eligible_paths=eligible_paths,
             filtered=filtered,
             admitted_paths=admitted_paths,
@@ -7248,7 +7238,7 @@ def _keyword_match_paths(
     k: int | None = None,
     pending: Any | None = None,
     allowed_paths: set[str] | None = None,
-    catalog_lags: bool = False,
+    from_store: bool = False,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -7274,8 +7264,8 @@ def _keyword_match_paths(
 
     Both backends bound the result identically, so parity holds at any `k`.
 
-    `catalog_lags` is the caller's proof that the catalogue cannot answer this request and its
-    choice to serve it from the scan below, instead of refusing.
+    `from_store` is the caller's proof that the vault serves its reads from the store: the
+    catalogue is built from files and cannot answer, so the scan below reads the store corpus.
 
     `pending` supplies the exact committed generations the persistent catalogue
     has not published yet. Its identities shadow every catalogue row they own --
@@ -7327,7 +7317,7 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
-    if not catalog_lags and not repair and lexstore.maintained_content_index_enabled():
+    if not from_store and not repair and lexstore.maintained_content_index_enabled():
         catalog_result = lexstore.search_substring_result(
             vault_root,
             query_norm,
@@ -7341,7 +7331,7 @@ def _keyword_match_paths(
         return _merged(list(catalog_result.value or []))
     indexed = (
         None
-        if catalog_lags
+        if from_store
         else lexstore.search_substring(
             vault_root,
             query_norm,
@@ -7354,7 +7344,7 @@ def _keyword_match_paths(
     )
     if indexed is not None:
         return _merged(indexed)
-    if not catalog_lags and lexstore.backend() != "python":
+    if not from_store and lexstore.backend() != "python":
         # The sidecar declined. `search_substring` documents exactly one meaning
         # for None -- "fall back" -- and its causes are a retired store, a
         # catalog that is not on disk, a sqlite error, or a sync that could not
