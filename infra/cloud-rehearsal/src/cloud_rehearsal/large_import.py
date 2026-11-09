@@ -595,10 +595,12 @@ async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
     """The run as `read_import` status reports it, with what the compact `import_memory` replies leave out.
 
     The flow reads its control fields from the compact replies, as an agent does. The measurements also need
-    the inventory, the recorded stage and the finish count. A read changes nothing and keeps those replies
-    compact, where `response_detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
+    the inventory, the recorded stage and the finish count, which only the `full` view carries; the default view
+    is a bounded summary. A read changes nothing and keeps those replies compact, where `response_detail: "full"`
+    would wrap each reply in the terminal envelope and add a payload per call.
     """
-    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id}}, kind="status")
+    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id, "view": "full"}},
+                               kind="status")
     return body
 
 
