@@ -25,6 +25,6 @@
 ## 4. Proof and delivery
 
 - [ ] 4.1 Run one Cloud rehearsal with `file`.
-- [ ] 4.2 Run the real-model import-guidance probe (cost stated first).
-- [ ] 4.3 Independent review of the finished change, with each finding fixed or withdrawn.
-- [ ] 4.4 Merge, release, and archive this change.
+- [x] 4.2 Run the real-model import-guidance probe (cost stated first). **Evidence:** four headless agent runs on subscription models with only the Exomem MCP server and the shipped `exomem-ingest` guidance, each on a fresh temporary vault with a staged folder: a plain import request and an import that asks to delete the leftovers (Sonnet), the plain request (Haiku), and the delete request with one ineligible empty file left over (Sonnet). Every run filed with `import_memory` kind `file` calls only, carried the continuation, reported the whole import and made no discard call; the last named the leftover file and did not delete it.
+- [x] 4.3 Independent review of the finished change, with each finding fixed or withdrawn. **Evidence:** the APPROVE verdicts recorded on the change's PR, with a scoped recheck of each correction.
+- [x] 4.4 Merge, release, and archive this change. **Evidence:** merged as `dbf5dd9f0`, released in v0.170.0; archived by this closure.
