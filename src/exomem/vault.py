@@ -8661,6 +8661,7 @@ def normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -8682,11 +8683,17 @@ def normalize_wikilink(
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
+
+    `retired` answers the item path that a converted collection retired for
+    an unresolved path, or None; `None` checks each link on its own. A caller
+    that resolves many links passes one `collection_store.aliases.LinkTargets`,
+    which reads each collection once.
     """
     canonical, warning, _candidate = _normalize_wikilink(
         target, vault_root, resolver=resolver,
         targeted_namespace_contains=targeted_namespace_contains,
         resolver_factory=resolver_factory, strict=strict, visible=visible,
+        retired=retired,
     )
     return canonical, warning
 
@@ -8705,6 +8712,7 @@ def _normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None, WikilinkCandidate | None]:
     """Normalize a link and retain the physical owner for internal consumers."""
 
@@ -8773,10 +8781,14 @@ def _normalize_wikilink(
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.
     if not strict and "/" in cleaned:
-        from .collection_store import aliases
+        if retired is None:
+            from .collection_store import aliases
 
-        if (retired := aliases.link_target(vault_root, cleaned)) is not None:
-            return _wikilink_path_key(retired) + anchor, None, None
+            found = aliases.link_target(vault_root, cleaned)
+        else:
+            found = retired(cleaned)
+        if found is not None:
+            return _wikilink_path_key(found) + anchor, None, None
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result
