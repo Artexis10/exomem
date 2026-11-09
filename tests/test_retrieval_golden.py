@@ -307,9 +307,9 @@ def test_typed_graph_lane_clears_golden_expectations(
 
     1. The authored `## Relations` bullet is actually indexed as a TYPED edge
        (via `neighbors_for`, the same batch read the find-lane uses) with the
-       expected relation type and a registered (non-"link") family — this is
-       the genuine regression gate: it fails if the fixture edit is lost, the
-       relation type typo'd, or `neighbors_for`/family resolution regresses.
+       expected relation type, not a plain link — this is the genuine
+       regression gate: it fails if the fixture edit is lost, the relation
+       type typo'd, or `neighbors_for`/behaviour resolution regresses.
     2. `find()` still surfaces the grade-3 ideal in the top 10, the graph lane
        expands the typed edge from the ideal to the grade-1 neighbour and the
        neighbour enters fusion as a candidate, and (except for `_FUSED_RANK_NOT_ASSERTED`)
