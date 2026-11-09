@@ -108,7 +108,7 @@ def carry(conn: sqlite3.Connection, replica_meta: Mapping[str, str]) -> None:
     decided the marker in its own transaction and keeps its own key: the replica may be behind
     that decision, and a copy would drop a marker that was not published yet.
     """
-    if conn.execute("SELECT 1 FROM store_mode WHERE id = 1").fetchone() is not None:
+    if _decided_mode(conn) is not None:
         return
     if replica_meta.get(KEY) is None:
         clear(conn)
@@ -118,6 +118,20 @@ def carry(conn: sqlite3.Connection, replica_meta: Mapping[str, str]) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (KEY, replica_meta[KEY]),
         )
+
+
+def _decided_mode(conn: sqlite3.Connection) -> str | None:
+    """The mode this store recorded, or None while it has not migrated or rolled back.
+
+    A store from a release before store schema 15 has no ``store_mode`` table, so it never decided.
+    """
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_mode'"
+    ).fetchone()
+    if table is None:
+        return None
+    row = conn.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
+    return None if row is None else row[0]
 
 
 def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
@@ -132,11 +146,11 @@ def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:
     and a store in file mode needs only that no replica still says store. An unreadable replica
     forces nothing: it is no evidence, and a copy would replace a replica that a newer build wrote.
     """
-    row = store.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
-    if row is None:
+    decided = _decided_mode(store)
+    if decided is None:
         return False
     found = read_replica(vault_root).state
-    return found in (CLEAR, ABSENT) if row[0] == mode.STORE_MODE else found == STORE
+    return found in (CLEAR, ABSENT) if decided == mode.STORE_MODE else found == STORE
 
 
 def report(vault_root: Path) -> dict:
