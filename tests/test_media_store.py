@@ -1704,6 +1704,50 @@ def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_o
     assert evidence.status_code == 201, evidence.text
 
 
+def test_a_source_ticket_upload_that_its_length_shows_above_the_allowance_is_refused_before_its_body(
+        vault: Path, selected_store, upload_env):
+    """Defect: a Source ticket upload far above the remaining allowance is received whole before its refusal.
+
+    Its Content-Length alone shows that the file cannot fit, so no body byte is read and nothing is held. An
+    Evidence dataset of the same length is still received and held, because only its name, in the body, decides.
+    """
+    import asyncio
+
+    import httpx
+
+    from exomem import held_uploads
+
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 1_000}}}))
+    held = sorted(held_uploads._store(vault).iterdir())
+    token = _prepare(upload_env)["token"]
+    body_read: list[bool] = []
+
+    async def body():
+        body_read.append(True)
+        yield b"--part\r\n"
+
+    async def send():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upload_env[-1]), base_url="https://capture.example",
+        ) as client:
+            return await client.post("/upload", content=body(), headers={
+                "Authorization": "Bearer " + token, "Content-Type": "multipart/form-data; boundary=part",
+                "Content-Length": "5000000"})
+
+    refused = asyncio.run(send())
+
+    assert refused.status_code == 413, refused.text
+    assert refused.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert body_read == []
+    assert sorted(held_uploads._store(vault).iterdir()) == held
+    dataset = b"time,reading\n" * 100_000
+    evidence = _post(upload_env, _prepare(upload_env, dataset, lane="evidence"), dataset, filename="table.csv",
+                     lane="evidence")
+    assert evidence.status_code == 201, evidence.text
+
+
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):
     from exomem import media_jobs, media_store
 
