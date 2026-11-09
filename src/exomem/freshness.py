@@ -450,17 +450,14 @@ def recall_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
                 _recall_triples[key] = cached
             return cached
     from . import find as find_module
-    if scope == "vault":
-        from .vault import walk_vault_md
+    from . import find_corpus
 
-        walk = walk_vault_md(root)
-    else:
-        kb = root / kb_dirname()
-        walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    walk = find_module._corpus_walk(root, scope)
+    signature = find_corpus.signature_lookup(walk)
     entries: list[tuple[str, FileSignature]] = []
     for path in recall_policy.iter_recall_markdown(root, walk):
         try:
-            entries.append((str(path), stat_signature(path)))
+            entries.append((str(path), signature(path)))
         except OSError:
             continue
     return triple_from_entries(entries)
@@ -746,21 +743,17 @@ def _cold_recall_projection_scope_snapshot(
         if event_indexes_enabled() and key in _recall_live:
             return None
     identity = recall_policy.recall_policy_identity(root)
-    if scope == "vault":
-        from .vault import walk_vault_md
+    from . import find as find_module
+    from . import find_corpus
 
-        walk = walk_vault_md(root)
-    else:
-        from . import find as find_module
-
-        kb = root / kb_dirname()
-        walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    walk = find_module._corpus_walk(root, scope)
+    signature_of = find_corpus.signature_lookup(walk)
     scope_entries: dict[str, FileSignature] = {}
     projected_entries: dict[str, FileSignature] = {}
     for path in walk:
         admitted = recall_policy.is_recall_candidate(root, path)
         try:
-            signature = stat_signature(path)
+            signature = signature_of(path)
         except OSError:
             continue
         raw_path = str(path)

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import cli_ops
+from ..kbdir import kb_dirname
 
 _LEAN_FALLBACK_VARS = (
     "EXOMEM_DISABLE_EMBEDDINGS",
@@ -186,6 +187,13 @@ class ExomemBackend:
         from .. import state_migration
 
         state_migration.require_vault_state_ready(self._vault)
+        from ..vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self._vault):
+            # The warm-up builds the lexical catalogue, the graph and the drain queues from files; a
+            # store-mode vault has no such files to build from, so the session reads the store and
+            # runs none.
+            return
         try:
             from .. import warmup
 
@@ -465,19 +473,33 @@ class ExomemBackend:
 
         Home states "{n} notes" and must not invent it. This counts markdown
         files in the governed layer — the same thing a user counts in their
-        file browser — rather than running a corpus scan on every launch.
+        file browser — rather than running a corpus scan on every launch. A
+        store-mode vault counts the pages of its corpus instead, as its files
+        are only a projection.
         """
         if self._vault is None:
             return {"notes": 0, "sources": 0, "known": False}
-        kb = Path(self._vault) / "Knowledge Base"
-        if not kb.is_dir():
-            return {"notes": 0, "sources": 0, "known": False}
+        from .. import find_corpus
+        from ..vault_store import mode as store_mode
+
+        root = Path(self._vault)
+        kb = root / kb_dirname()
+        if store_mode.store_mode_for_reads(root):
+            # The corpus holds a stored page whether or not its file exists yet.
+            corpus = tuple(find_corpus.corpus_paths(root, "kb", lambda: find_corpus.walk_md(kb)))
+
+            def files(folder: Path):
+                return (path for path in corpus if path.is_relative_to(folder))
+
+        else:
+            if not kb.is_dir():
+                return {"notes": 0, "sources": 0, "known": False}
+
+            def files(folder: Path):
+                return folder.rglob("*.md") if folder.is_dir() else ()
 
         def count(name: str) -> int:
-            folder = kb / name
-            if not folder.is_dir():
-                return 0
-            return sum(1 for path in folder.rglob("*.md") if path.name != "index.md")
+            return sum(1 for path in files(kb / name) if path.name != "index.md")
 
         return {"notes": count("Notes"), "sources": count("Sources"), "known": True}
 

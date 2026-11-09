@@ -236,6 +236,8 @@ authority and can be rolled back independently.
       arrival order (`_FairCaptureQueue`) around `idempotency.run`.
 - [ ] 10.3 Live: after deploy, `exomem_mutation_busy_total` stays flat under
       maximal capture and `contention_absorbed` log rows show the waits.
+      Partial evidence, ordinary traffic only: on the installed service, 2026-11-09 07:39 to 15:48 UTC, none of 182 write calls reached its caller with `MUTATION_BUSY`, and one `contention_absorbed` row shows a wait.
+      Maximal capture was not exercised, so this stays open.
 - [x] 10.4 Prepare managed episode reference owners outside the canonical guard;
       seal exact batch ownership and reload pending custody and policy under it.
       Share eligible preparation retries with existing capture allowance and waiter admission.
@@ -306,6 +308,12 @@ authority and can be rolled back independently.
       `test_queued_mutation_timeout_never_executes`
       and `test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay`
       keep the refusals that must not run again.
-- [ ] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`
+- [x] 13.2 Live: after deploy, no `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`
       reaches a caller of a store-routed write while the store or the boundary
       is busy for less than the request budget.
+      Evidence: the installed service (0.168.0, then 0.169.0 from 15:23 UTC) after the SQLite-only collection cutover, 2026-11-09 07:39 to 15:48 UTC.
+      The mutation journal holds 184 rows for 182 write calls, and none failed with `COLLECTION_STORE_BUSY` or `MUTATION_BUSY`.
+      Writes waited out a busy store instead: over 93 write rows with `store.queue_wait`, the median was 34 ms and the maximum 26.2 s (`observe_memory`), with no busy refusal.
+      One store-routed `record_memory` write absorbed contention for 24,311 ms over 3 attempts and committed with no busy code.
+      Two store-routed `record_memory` writes ended `MUTATION_ACKNOWLEDGEMENT_PENDING` after about 45 s, mostly inside `store.serve`; that code is not a busy refusal.
+      Three `record_memory` reads (no mutation phase) were refused `COLLECTION_STORE_BUSY` after a 5 s queue wait; reads are outside this task.

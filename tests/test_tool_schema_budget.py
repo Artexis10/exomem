@@ -90,7 +90,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # wire measured 170,945 B with that field alone.
 # With the held kinds and the archive field together, the complete local wire measures 171,520 B,
 # so the budget is 171,550 B.
-TOTAL_BUDGET = 171_550
+# The `file` kind of import_memory adds one variant (kind, path, collection, continuation) and the lead
+# sentence that names it: import_memory measures 6,653 B, 9% over its old size, and its ceiling rounds to
+# 6,700 B. read_import names `file` as the next step and measures 3,119 B, so its ceiling rounds to 3,150 B.
+# The kind replaces a six-call import loop.
+# With every change above, the complete local wire measures 172,142 B, so the budget is 172,150 B.
+TOTAL_BUDGET = 172_150
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -100,7 +105,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3400,
-    "import_memory": 6100,
+    "import_memory": 6700,
     "change_connections": 3250,
     "change_files": 7100,
     "change_governance": 4650,
@@ -130,7 +135,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,
-    "read_import": 3100,
+    "read_import": 3150,
     "read_connections": 3300,
     "read_episode": 2000,
     "read_governance": 2250,
@@ -157,8 +162,10 @@ TOOL_CEILINGS: dict[str, int] = {
 #: A Cloud cell serves the local surface minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
+# observe_transfer step 3 names the `file` call and the older-server fallback, so it measures 1,959 B and its
+# ceiling rounds to 2,000 B.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 1850,
+    "observe_transfer": 2000,
     "transfer_memory": 1650,
 }
 

@@ -6,6 +6,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "check_pr_title.py"
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "pr-title.yml"
@@ -82,11 +83,18 @@ def test_main_accepts_a_valid_title(capsys) -> None:
 
 def test_workflow_checks_edited_titles_with_the_trusted_base_script() -> None:
     assert WORKFLOW.is_file(), "the PR-title workflow must exist"
-    text = WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # PyYAML reads the bare key `on` as the boolean True.
+    triggers = workflow[True]
+    steps = workflow["jobs"]["conventional-title"]["steps"]
 
-    assert "pull_request_target:" in text
-    assert "types: [opened, edited, reopened, synchronize]" in text
-    assert "permissions:\n  contents: read" in text
-    assert "ref: ${{ github.event.pull_request.base.sha }}" in text
-    assert "PR_TITLE: ${{ github.event.pull_request.title }}" in text
-    assert 'python scripts/check_pr_title.py "$PR_TITLE"' in text
+    # A public repository's pull_request_target runs are blocked by default, which
+    # would leave this required check missing on every pull request.
+    assert set(triggers) == {"pull_request"}
+    assert {"opened", "edited", "reopened", "synchronize"} <= set(
+        triggers["pull_request"]["types"]
+    )
+    assert workflow["permissions"] == {"contents": "read"}
+    assert steps[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert steps[1]["env"]["PR_TITLE"] == "${{ github.event.pull_request.title }}"
+    assert steps[1]["run"] == 'python scripts/check_pr_title.py "$PR_TITLE"'

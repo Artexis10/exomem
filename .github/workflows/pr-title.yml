@@ -1,7 +1,9 @@
 name: PR title
 
+# pull_request, not pull_request_target: GitHub blocks pull_request_target in public
+# repositories by default from 2026-12-02, and this check needs no secrets.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
@@ -12,7 +14,8 @@ jobs:
     name: Conventional Commit title
     runs-on: ubuntu-latest
     steps:
-      # Use the base revision so a pull request cannot weaken its own title gate.
+      # Run the base revision's checker, so a pull request cannot weaken the checker
+      # that judges its own title. A change to this workflow file shows in review.
       - name: Check out trusted base revision
         uses: actions/checkout@v4
         with:

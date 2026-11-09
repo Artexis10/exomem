@@ -637,7 +637,8 @@ async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress
         async with McpCell(config, oauth) as cell:
             return await import_folder(
                 args.source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=args.include_hidden,
-                use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual)
+                use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual,
+                file=not args.no_file, collection=args.collection)
     finally:
         await api.aclose()
         await uploads.aclose()
@@ -656,7 +657,12 @@ def main(argv=None) -> int:
     command.add_argument("--checkpoint", type=Path)
     command.add_argument("--resend-residual", action="store_true",
                          help="send the members that discarded windows did not file, as a new series")
+    command.add_argument("--collection", help="the collection name that the cell files the folder under")
+    command.add_argument("--no-file", action="store_true",
+                         help="only upload: leave each landed window staged for your assistant to file")
     args = parser.parse_args(argv)
+    if args.no_file and args.collection:
+        parser.error("--collection names the filing, so it cannot go with --no-file")
     progress = Progress()
     checkpoint = args.checkpoint
     try:
