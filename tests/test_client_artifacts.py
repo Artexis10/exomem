@@ -729,7 +729,7 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
         response_detail="full",
     )
 
-    assert first == replay
+    assert replay == {**first, "replayed": True}
     assert [row["file_id"] for row in first["files"]] == [file["file_id"] for file in files]
     assert first["summary"] == {"stored": 8, "already_stored": 0, "failed": 0}
     assert _operational(first)["warnings_count"] == 1

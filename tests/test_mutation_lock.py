@@ -1492,6 +1492,46 @@ def test_threads_asking_at_once_see_no_waiter_when_none_exists(tmp_path: Path) -
     assert phantoms == []
 
 
+def test_only_interactive_writers_count_as_waiters(tmp_path: Path) -> None:
+    """Background work that yields to every waiter would yield to other background work and stall."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    behind_the_head = [0]
+    coordinator = VaultMutationCoordinator(
+        tmp_path / "state", vault, queued_writers=lambda: behind_the_head[0]
+    )
+
+    def wait_for_the_boundary(holder_kind: str) -> None:
+        with contextlib.suppress(OpError), coordinator.hold(
+            timeout_seconds=_OBSERVE_SECONDS, operation="waiter", holder_kind=holder_kind
+        ):
+            pass
+
+    machines = [
+        threading.Thread(target=wait_for_the_boundary, args=(kind,))
+        for kind in ("graph", "derived-worker", "maintenance-job")
+    ]
+    # A request-driven collection read is a waiter background work steps aside for, as a write is.
+    interactive = [
+        threading.Thread(target=wait_for_the_boundary, args=(kind,)) for kind in ("unknown", "collection-read")
+    ]
+    with coordinator.hold(timeout_seconds=_OBSERVE_SECONDS, holder_kind="maintenance-job"):
+        for thread in machines:
+            thread.start()
+        # A negative observation: the machine waiters have parked by now and none counts.
+        time.sleep(0.3)
+        assert coordinator.waiter_count() == 0
+        behind_the_head[0] = 2
+        assert coordinator.waiter_count() == 2
+        behind_the_head[0] = 0
+        for thread in interactive:
+            thread.start()
+        assert _wait_until(lambda: coordinator.waiter_count() == 2)
+    for thread in (*machines, *interactive):
+        thread.join(_OBSERVE_SECONDS)
+        assert not thread.is_alive()
+
+
 def test_sequential_holds_on_one_thread_reacquire_the_os_boundary(
     tmp_path: Path,
 ) -> None:

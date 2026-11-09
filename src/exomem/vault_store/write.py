@@ -1,11 +1,9 @@
-"""The write entry point of a store-mode vault: the page-table half of one commit (OpenSpec
-make-vault-store-canonical, task 1.6, with 2.2 to build on it).
+"""The write entry point of a store-mode vault (OpenSpec make-vault-store-canonical, 1.6, 2.2, 2.3).
 
 ``commit`` changes the store's pages, binary records, projection manifest, audit trail and
-projection queue in one ``BEGIN IMMEDIATE`` transaction and advances ``store_mode.revision`` by
-exactly one. A reader sees all of a commit or none of it. The derived rows (lexical, graph,
-references) are not written here: the derivation half joins this transaction later, and until
-then nothing in production calls ``commit``.
+projection queue, and the derived rows of those pages (lexical, graph, identity; see ``derive``), in
+one ``BEGIN IMMEDIATE`` transaction and advances ``store_mode.revision`` by exactly one. A reader
+sees all of a commit or none of it.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from typing import TYPE_CHECKING
 from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import mode, ownership
+from . import derive, mode, ownership
 from .read import NOT_ACTIVE
 
 if TYPE_CHECKING:
@@ -161,6 +159,11 @@ class FileSeen:
 class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
+    ``refresh`` names files that the store does not own (a Markdown file outside the Knowledge Base
+    folder, say) and that a caller made durable on disk before the commit: the commit derives their
+    rows from the file's bytes, so a search sees them at the same revision as the pages. The store
+    keeps no page, record or audit row for them.
+
     ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
     ``commit`` applies them in the same transaction as the page changes.
     """
@@ -175,6 +178,7 @@ class StoreChange:
     expect: Mapping[str, Expect] = field(default_factory=dict)
     resolves_held: tuple[HeldRow, ...] = ()
     files_seen: tuple[FileSeen, ...] = ()
+    refresh: tuple[str, ...] = ()
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -188,9 +192,10 @@ class StoreChange:
         )
 
     def __post_init__(self) -> None:
-        if not self.paths:
+        if not self.paths and not self.refresh:
             raise ValueError("a store change names no file")
-        if len(set(self.paths)) != len(self.paths):
+        named = (*self.paths, *self.refresh)
+        if len(set(named)) != len(named):
             raise ValueError("a store change names a path more than once")
         if not {seen.rel for seen in self.files_seen} <= set(self.paths):
             raise ValueError("a store change records a file that it does not change")
@@ -253,8 +258,9 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
-        _check(tx, change.expect)
+        check(tx, change.expect)
         _degrade_moves(tx, change.paths)
+        existing = _held_pages(tx, change)
         now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
@@ -267,6 +273,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
             _delete_binary(tx, binary.rel, audit)
+        derive.apply(tx, writer.root, change, existing)
         _enqueue(tx, audit.intents, revision, now)
         for held in change.resolves_held:
             _drop_held(tx, held)
@@ -276,8 +283,21 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 
+def _held_pages(tx: Connection, change: StoreChange) -> frozenset[str]:
+    """The paths of ``change``'s puts that the store held a page for before the commit."""
+    return frozenset(
+        put.rel
+        for put in change.puts
+        if tx.execute("SELECT 1 FROM store_pages WHERE path = ?", (put.rel,)).fetchone()
+    )
+
+
 def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
+    for rel in change.refresh:
+        _require_safe(rel)
+        if ownership.classify(rel) is not ownership.Ownership.NONE:
+            raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
     pages = (
         *(put.rel for put in change.puts),
         *(delete.rel for delete in change.deletes),
@@ -289,12 +309,16 @@ def _require_owned(change: StoreChange) -> None:
     )
     for rels, kind in ((pages, ownership.Ownership.PAGE), (binaries, ownership.Ownership.BINARY)):
         for rel in rels:
-            try:
-                vault._safe_guard_target(rel)  # the rule that every guarded vault read applies
-            except vault.PathGuardError as error:
-                raise OpError(NOT_OWNED, f"{rel!r} is not a safe vault-relative path") from error
+            _require_safe(rel)
             if ownership.classify(rel) is not kind:
                 raise OpError(NOT_OWNED, f"the store holds no {kind.value} at {rel}")
+
+
+def _require_safe(rel: str) -> None:
+    try:
+        vault._safe_guard_target(rel)  # the rule that every guarded vault read applies
+    except vault.PathGuardError as error:
+        raise OpError(NOT_OWNED, f"{rel!r} is not a safe vault-relative path") from error
 
 
 def timestamp() -> str:
@@ -343,7 +367,8 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
     ).fetchone()
 
 
-def _check(tx: Connection, expect: Mapping[str, Expect]) -> None:
+def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
+    """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
     for rel, want in expect.items():
         have = _stored(tx, rel)
         if want.absent:

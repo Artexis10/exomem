@@ -836,12 +836,12 @@ class Routed(NamedTuple):
     proof: object = None
 
 
-def route(command, vault_root, arguments):
+def route(command, vault_root, arguments, *, write=False):
     """The store thread a request must run on, or None when file collections answer it; see ``route_with_proof``."""
-    return route_with_proof(command, vault_root, arguments).server
+    return route_with_proof(command, vault_root, arguments, write=write).server
 
 
-def route_with_proof(command, vault_root, arguments):
+def route_with_proof(command, vault_root, arguments, *, write=False):
     """The store thread a request must run on, or None when file collections answer it, with the proof.
 
     A selector the vault's marker routes to the store, a NEW summary collection's create,
@@ -850,12 +850,21 @@ def route_with_proof(command, vault_root, arguments):
     a caller that bound its own writer keeps it. Without that service a routed selector
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
+
+    ``write`` says the request is not read-only. A write to a store-mode vault commits its pages
+    through the store, which only the store thread holds, so every such write runs there, and
+    without the service it refuses.
     """
     from .preview import bound_writer
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
         return Routed(None)
+    if write:
+        from ..vault_store import mode as store_mode
+
+        if store_mode.store_mode_active(root):
+            return Routed(_store_mode_server(root))
     if command in _CURATION_COMMANDS:
         return Routed(_curation_route(command, root, arguments))
     # This closed review mode can read store Records through file Planning or discover both profiles.
@@ -890,6 +899,23 @@ def route_with_proof(command, vault_root, arguments):
     if server is None:
         refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
+
+
+def _store_mode_server(root):
+    """The store thread that a store-mode write runs on; without a service, the refusal."""
+    from ..cli_ops import OpError
+    from ..vault_store import availability
+
+    server = _server(root)
+    if server is None:
+        raise OpError(
+            availability.SERVICE_REQUIRED,
+            "this vault's pages live in the collection store, so a write needs the service that "
+            "serves it",
+            "Send the request to the service that serves this vault. "
+            f"Run {availability.ROLLBACK} to return the pages to files.",
+        )
+    return server
 
 
 def refuse_unserved_create(root, marker):

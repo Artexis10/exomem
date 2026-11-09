@@ -162,7 +162,8 @@ def test_exact_retry_replays_original_fast_ack_terminal_byte_for_byte(tmp_path) 
     original = manager.idempotency.run("fast-replay", "a" * 64, leaf)
     replay = manager.idempotency.run("fast-replay", "a" * 64, leaf)
 
-    assert replay == original
+    # Byte for byte, except the marker that says the retry wrote nothing.
+    assert replay == {**original, "replayed": True}
     assert calls == 1
     assert replay["derived_sync"] == "pending"
     assert replay["advisory_result_ref"]
@@ -379,7 +380,7 @@ def test_full_keeps_every_key_the_old_replayed_record_compact_reply_carried() ->
             "affected_paths", "after_container_hash", "after_item_hash", "audit_correlation",
             "before_container_hash", "before_item_hash", "collection_id", "idempotency_key",
             "item_key", "mutated", "ok", "operation", "outcome", "paths", "payload_hash",
-            "receipt_id", "request_id", "status", "warnings_count",
+            "receipt_id", "replayed", "request_id", "status", "warnings_count",
         },
         terminal,
     )
@@ -812,6 +813,7 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
     )
 
     assert mutation_terminal.project_terminal(terminal) == {
+        "replayed": True,
         "paths": ["Knowledge Base/Records/log.md"],
         "operation": "append",
         "collection_id": "11111111-1111-4111-8111-111111111111",
@@ -1225,7 +1227,8 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     assert operational["receipt_id"]
     assert operational["idempotency_key"] == "same-public-key"
     assert operational["warnings_count"] == 1
-    assert full == {**compact, "diagnostics": {"operational": operational, **raw}}
+    assert full == {**compact, "diagnostics": {"operational": operational, **raw}, "replayed": True}
+    assert "replayed" not in compact
     assert legacy == raw
     assert "replayed" not in operational
     assert calls == 1

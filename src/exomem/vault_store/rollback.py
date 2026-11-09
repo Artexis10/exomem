@@ -236,9 +236,11 @@ def _export(
             "sha256": sha256,
             "reason": reason,
             "at": at,
+            "from_path": from_path,
         }
-        for seq, rev, path, operation, origin, sha256, reason, at in conn.execute(
-            "SELECT seq, revision, path, operation, origin, sha256, reason, at FROM store_audit ORDER BY seq"
+        for seq, rev, path, operation, origin, sha256, reason, at, from_path in conn.execute(
+            "SELECT seq, revision, path, operation, origin, sha256, reason, at, from_path "
+            "FROM store_audit ORDER BY seq"
         )
     ]
     projection.write_file(
