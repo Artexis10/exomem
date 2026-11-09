@@ -94,13 +94,14 @@ class ActiveSurfaceDescriptor:
         """
         if self.tool_shape == "grouped":
             return {}
-        routes = {}
-        for command in self.contributing_commands:
-            for rendering in command.renderings:
-                routes.setdefault(rendering.name, []).extend(rendering.kinds)
+        from .public_surface import DOORS, public_surface
+
+        surface = public_surface()
+        doors = {door: sorted(op.name for op in surface.door_operations(door, self.contributing_commands))
+                 for door in DOORS.values()}
         return {"tool_shape": self.tool_shape,
-                **({"available_operations": {name: sorted(set(kinds)) for name, kinds in sorted(routes.items())}}
-                   if routes else {})}
+                **({"available_operations": {door: ops for door, ops in doors.items() if ops}}
+                   if any(doors.values()) else {})}
 
 
 _ACTIVE_SURFACE: ContextVar[ActiveSurfaceDescriptor | None] = ContextVar(
@@ -137,15 +138,7 @@ def current_tool_shape() -> str:
 
 def active_spell_call(command: str, arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """The tool and arguments that call a grouped command on the surface serving this call."""
-    tool, spelled = operation_entries.spell_call(command, arguments, current_tool_shape())
-    active = current_active_surface()
-    if tool == command and active is not None and active.tool_shape != "grouped":
-        # A command without renderings is listed under its public name, which the registry name
-        # can differ from (the same answer `active_tools` gives).
-        source = next((item for item in active.contributing_commands if command in item.callable_names), None)
-        if source is not None and not source.renderings:
-            tool = source.public_name
-    return tool, spelled
+    return operation_entries.spell_call(command, arguments, current_tool_shape())
 
 
 def active_call_text(command: str, arguments: Mapping[str, Any]) -> str:
@@ -156,12 +149,10 @@ def active_call_text(command: str, arguments: Mapping[str, Any]) -> str:
 def active_tools(command: str, effect: operation_entries.Effect | None = None) -> tuple[str, ...]:
     """The tools the surface serving this call lists for a grouped command, one side if asked."""
     active = current_active_surface()
-    if active is not None and active.tool_shape != "grouped" and active.contributing_commands:
-        source = next((item for item in active.contributing_commands if command in item.callable_names), None)
-        if source is None:
-            return ()
-        return tuple(rendering.name for rendering in source.renderings if effect in (None, rendering.effect)) if source.renderings else (source.public_name,)
-    return operation_entries.listed_tools(command, current_tool_shape(), effect)
+    names = operation_entries.listed_tools(command, current_tool_shape(), effect)
+    if active is not None and active.tool_shape != "grouped":
+        return tuple(name for name in names if name in active.product_commands)
+    return names
 
 
 def active_call_route(command: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -184,20 +175,25 @@ def project_call_routes(value: Any) -> Any:
         return value
     result = {key: project_call_routes(item) for key, item in value.items()}
     tool = result.get("tool")
-    operations = operation_entries.OPERATIONS.get(tool) if isinstance(tool, str) else None
-    if operations is None:
+    if not isinstance(tool, str):
         return result
+    from .public_surface import public_surface
+
+    if not public_surface().carries(tool):
+        return result
+    operations = operation_entries.OPERATIONS.get(tool)
     argument_key = "arguments" if "arguments" in result else "args"
     arguments = result.get(argument_key)
     if isinstance(arguments, Mapping) and isinstance(arguments.get("operation"), Mapping):
         return result
     if arguments is None:
-        fields = operations.every_field() | ({operations.selector} if operations.selector else set())
+        fields = (operations.every_field() | ({operations.selector} if operations.selector else set())
+                  if operations is not None else set())
         arguments = {key: result.pop(key) for key in list(result) if key in fields}
-    if operations.selector and operations.selector not in arguments:
+    if operations is not None and operations.selector and operations.selector not in arguments:
         result.pop("tool")
         result["tools"] = list(active_tools(tool))
         return result
     name, arguments = active_spell_call(tool, arguments)
-    result.update(tool=name, **{argument_key: arguments})
+    result.update(tool=name, **({argument_key: arguments} if arguments or argument_key in result else {}))
     return result

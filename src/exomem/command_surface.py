@@ -470,12 +470,11 @@ DEFAULT_TOOL_SHAPE = operation_entries.DEFAULT_TOOL_SHAPE
 def listed_names(command: Command, shape: str) -> tuple[str, ...]:
     """The names MCP discovery lists for a command on a surface of this shape.
 
-    A command with renderings is listed by them, and its own name stays callable but
-    hidden; every other command, and every command on the `grouped` shape, is listed
-    under its public name.
+    On the `public` shape these are the typed tools and doors that carry the command; on the
+    `grouped` shape the command is listed under its public name.
     """
-    if command.renderings and shape != "grouped":
-        return tuple(rendering.name for rendering in command.renderings)
+    if shape == "public":
+        return operation_entries.listed_tools(command.name, shape)
     return (command.public_name,)
 
 
