@@ -92,7 +92,7 @@ _MAX_HELD_LOADS = 500
 _CANDIDATE_CONTENT_CODES = frozenset(
     {"UNREPRESENTABLE_RECORD_VALUE", "SCHEMA_UNKNOWN_FIELD", "SCHEMA_FIELD_TYPE", "SCHEMA_ENUM"}
 )
-_HELD_FATE = "Nothing was added to the collection; the refused candidate is kept as a held candidate."
+HELD_FATE = "Nothing was added to the collection; the refused candidate is kept as a held candidate."
 _HOLD_FAILED_WARNING = (
     "HELD_CANDIDATE_NOT_WRITTEN: the refused candidate could not be preserved; "
     "correct the named fields and resubmit it"
@@ -5158,12 +5158,12 @@ def _hold_refusal(
         details["warnings"] = [_HOLD_FAILED_WARNING]
         return collections.CollectionError(error.code, error.reason, details)
     details["held"] = held
-    details["fate"] = _HELD_FATE
-    details["retry_with"] = _resume_with(attempted_action, held["held_id"], details.get("issues") or ())
+    details["fate"] = HELD_FATE
+    details["retry_with"] = resume_with(attempted_action, held["held_id"], details.get("issues") or ())
     return collections.CollectionError(error.code, error.reason, details)
 
 
-def _resume_with(action: str, held_id: str, issues: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def resume_with(action: str, held_id: str, issues: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The arguments that resume a held candidate, with an override for each field at fault.
 
     `item` (append) or `changes` (update) overrides the held candidate and `null` removes a
