@@ -311,6 +311,74 @@ def test_a_vault_armed_while_the_service_is_stopped_admits_its_store_at_start(en
         service.stop()
 
 
+def test_an_owner_on_a_connection_the_connector_boundary_limits_hears_why_its_collection_write_is_refused(
+        env, tmp_path, monkeypatch):
+    """The owner's local client, limited by the host's connector boundary, gets `COLLECTION_NOT_FOUND`
+    with no remediation for a collection its own inspect just returned, so its agent reports a missing
+    collection; the words it gets instead depend on whether a row is hidden; or a guest with the same
+    limited view can tell that collection from a missing one."""
+    from test_collection_field_admission import GUEST
+    from test_governance_egress import SCOPE_ID, write_scope
+
+    from exomem import commands
+    from exomem.governance import connector_boundary, membership, policy
+    from exomem.governance.principal import local_owner_principal, request_scope
+
+    root = legacy_vault(env)
+    assert migrate(root, "apply") == 0
+    service = start_service(root)
+    try:
+        receipts = [call(root, "plan_memory", action="add", collection=PLANNING,
+                         item={"title": title, "kind": "outcome", "status": "planned",
+                               "commitment": "committed", "horizon": "quarter"}, why="state the plan")
+                    for title in ("Visible plan", "Withheld plan")]
+    finally:
+        service.stop()
+    # The host withholds one plan from every connection it does not map, the owner's local client included.
+    write_scope(root, paths=receipts[1]["affected_paths"][0].removeprefix("Knowledge Base/"))
+    config = tmp_path / "host-boundary.json"
+    config.write_text(json.dumps({"version": 1, "default_denied_scope_ids": [SCOPE_ID],
+                                  "capture_paths": ["Knowledge Base/Inbox"], "clients": []}))
+    monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+    policy._CACHE.clear()
+    membership.clear_memo()
+    state_migration.arm_connector_boundary_offline(
+        root, authority=state_migration.assert_offline_migration_authority(source="limited owner test"))
+    owner = local_owner_principal(surface="mcp")
+    missing = "99999999-9999-4999-8999-999999999999"
+
+    def invoke(who, tool, **arguments):
+        command = next(command for command in commands.product_commands_for("mcp") if command.name == tool)
+        with request_scope(who):
+            return writer_lease.invoke_command(command, root, **arguments)
+
+    def refusal(who, tool, **arguments):
+        with pytest.raises(OpError) as error:
+            invoke(who, tool, **arguments)
+        return error.value.code, error.value.message, error.value.remediation
+
+    service = start_service(root)
+    try:
+        for who in (owner, GUEST):
+            rows_seen = invoke(who, "plan_memory", action="query", collection=PLANNING)["rows"]
+            assert [row["title"] for row in rows_seen] == ["Visible plan"]
+        inspected = invoke(owner, "plan_memory", action="inspect", collection=PLANNING)
+        assert "COLLECTION_CONNECTOR_LIMITED" in {entry["code"] for entry in inspected["diagnostics"]}
+        revise = {"manifest_text": (root / PLANNING).read_text(), "why": "restate the plan",
+                  **inspected["lifecycle_guards"]}
+        limited = refusal(owner, "plan_memory", action="revise", collection=PLANNING, **revise)
+        assert limited[0] == "COLLECTION_CONNECTOR_LIMITED" and limited[2]
+        # A collection with no hidden row gets the same words, so they show the connection no hidden row.
+        assert refusal(owner, "record_memory", action="validate", collection=WORK,
+                       manifest_text=(root / WORK).read_text()) == limited
+        assert refusal(owner, "plan_memory", action="revise", collection=missing, **revise)[0] == "COLLECTION_NOT_FOUND"
+        guest = refusal(GUEST, "plan_memory", action="revise", collection=PLANNING, **revise)
+        assert guest == refusal(GUEST, "plan_memory", action="revise", collection=missing, **revise)
+        assert guest[0] == "COLLECTION_NOT_FOUND"
+    finally:
+        service.stop()
+
+
 def test_a_second_apply_on_a_migrated_vault_reports_nothing_to_migrate(env, capsys):
     """An apply that fails when there is nothing left to migrate, which breaks a script that
     applies and then starts the service on every upgrade."""

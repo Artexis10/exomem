@@ -41,6 +41,14 @@ from . import tokens, types
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
+#: The owner's refusal on a connection that the host's connector boundary limits. Its words never
+#: depend on which subject is withheld, so they show the connection no hidden row.
+CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
+CONNECTOR_LIMITED_REMEDIATION = (
+    "Make this write from the owner's CLI or a stdio connection, which the connector boundary does not "
+    "limit, or have the host give this client an entry in the connector boundary configuration that lets "
+    "it read and write the collection's manifest and every row."
+)
 
 
 def _json(value: Any) -> str:
@@ -1384,7 +1392,7 @@ class OperationAuthorization:
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         manifest_decision = self.decision(manifest)
         if manifest_decision.level < 6:
-            self.refuse()
+            self.refuse_write()
         summary = state.summaries.get(dependency)
         if summary is None:
             undecided = self.undecided
@@ -1448,16 +1456,18 @@ class OperationAuthorization:
             self.require_complete_fields(cid)
         try:
             head = self.summary_manifest(cid)
-            if head is not None:
-                if head[1].level < 6 or (complete and not self._summary_complete(cid, head)):
-                    self.refuse()
-                return ()
+            withheld = head is not None and (head[1].level < 6
+                                             or (complete and not self._summary_complete(cid, head)))
         except collections.CollectionError as error:
             _pass_release_limit(error)
             self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
+        if head is not None:
+            if withheld:
+                self.refuse_write()
+            return ()
         if complete:
             try:
                 state, denied, overlay, _manifest, _decision = self._release_selection(cid)
@@ -1474,12 +1484,16 @@ class OperationAuthorization:
                     subject = _bound(subject, self.logical_vault_id)
                     count += ((self.decision(subject).level < 6)
                               - (self.decision(subject, session=False).level < 6))
-                if count:
-                    self.refuse()
-                return ()
+            except collections.CollectionError as error:
+                if error.code == CONNECTOR_LIMITED:  # The manifest, which `_release_selection` withholds.
+                    raise
+                self.refuse()
             except (ValueError, TypeError, sqlite3.Error,
                     authorization_session_lifecycle.AuthorizationSessionUnavailable):
                 self.refuse()
+            if count:
+                self.refuse_write()
+            return ()
         catalog = self.catalog(cid, refresh=refresh)
         required = catalog if complete else catalog[:1]
         if any(self.decision(subject).level < 6 for subject in required):
@@ -2111,6 +2125,30 @@ class OperationAuthorization:
     def refuse(error_type=collections.CollectionError) -> None:
         # Internal freshness signals retain the same content-free public refusal.
         raise error_type("COLLECTION_NOT_FOUND", "collection was not found")
+
+    def connector_limited_owner(self) -> bool:
+        """Whether the caller is the owner on a connection that the host's connector boundary limits.
+
+        Only the owner may learn why it cannot have a collection whole, as `preview.store_notice`
+        decides; anyone else hears that the collection is absent.
+        """
+        return (raw_protection.has_unrestricted_access(self.root, self.who)
+                and not connector_boundary.unrestricted(self.root, self.who))
+
+    def refuse_write(self) -> None:
+        """Refuse a write that this caller may not make over the whole collection.
+
+        The owner on a limited connection hears why and what to change. Every other caller,
+        and every read, hears `refuse`.
+        """
+        if self.mutation and self.connector_limited_owner():
+            raise collections.CollectionError(
+                CONNECTOR_LIMITED,
+                "this connection may not write this collection, because the host's connector boundary "
+                "limits what it can read and write",
+                {"remediation": CONNECTOR_LIMITED_REMEDIATION},
+            )
+        self.refuse()
 
     def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
         """Decode only released rows; the manifest is an independent L6 gate."""

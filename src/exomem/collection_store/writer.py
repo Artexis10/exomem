@@ -705,6 +705,14 @@ class CollectionWriter:
             (manifest.collection_id, *sorted(held_ids)),
         ).fetchall()
         corrections = [candidate for candidate in held if candidate[4] != "write-refusal"]
+        if self._operation.connector_limited_owner():
+            # The words never depend on whether a row is hidden, so they show the connection none.
+            # A diagnostic is closed to a code and a reason, so the reason carries what to change.
+            diagnostics.insert(0, {
+                "code": governance.CONNECTOR_LIMITED,
+                "reason": "the host's connector boundary limits this connection, so these lifecycle guards "
+                          "cover only the rows it can read and no write accepts them. "
+                          f"{governance.CONNECTOR_LIMITED_REMEDIATION}"})
         if pending:
             diagnostics.append({"code": "PROJECTION_PENDING", "reason": "collection views are pending publication"})
         for code in sorted({candidate[5] for candidate in corrections}):
