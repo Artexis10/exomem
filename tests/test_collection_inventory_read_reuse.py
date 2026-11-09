@@ -6,7 +6,7 @@ from dataclasses import replace
 from test_collection_claims import _write_observation
 from test_collection_store_service import OWNER, call
 from test_collection_store_service import service as service
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import CID, OTHER, manifest_path, manifest_text
 from test_governance_egress import _external, write_rule, write_scope
 
@@ -20,7 +20,7 @@ def test_inventory_rechecks_withheld_canonical_reflectors(service):
     root = service.root
     identity = "77777777-7777-4777-8777-777777777777"
     path = manifest_path().replace("Work", "Reflections")
-    text = summary_text(manifest_text().replace(CID, identity)
+    text = sqlite_text(manifest_text().replace(CID, identity)
         .replace("title: Work", "title: Reflections")
         .replace("lifecycle: active\n", "lifecycle: active\nclaims:\n  terms: [account, subscriptions]\n")
         .replace("    count: {type: integer}\n", "    sources: {type: array, items: {type: link}}\n"))

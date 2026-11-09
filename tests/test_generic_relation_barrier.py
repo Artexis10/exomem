@@ -1,9 +1,10 @@
-"""The generic-relation barrier, end to end (`promote-referents-without-nudges` task 2.8).
+"""The generic-relation barrier, end to end (`refuse-generic-relation-authoring`).
 
-A write that adds a generic edge to an entity, where a registered specific relation
-fits both pages, stops before it commits. The caller names a fitting relation or keeps
-the edge generic with a reason. Every case goes through the public tools over an
-initialized vault; the restricted-caller case calls the same writer in process.
+A write that adds a generic edge, between two notes as much as to an entity, stops before
+it commits. The refusal hands the writer a ranked menu of specific relations and the three
+routes that end it: retry with a specific relation, propose a new relation type, or write
+a plain link. Every case goes through the public tools over an initialized vault; the
+restricted-caller case calls the same writer in process.
 """
 
 from __future__ import annotations
@@ -13,15 +14,17 @@ import re
 from pathlib import Path
 
 import pytest
-from test_governance_egress import _external, write_rule, write_scope
 from test_relation_endpoints import _entity, _extension, _save_extension, _served
 
-from exomem import commands, note
-from exomem import vault as vault_module
-from exomem.governance.principal import request_scope
+from exomem import (
+    note,
+    relation_barrier,
+    relation_registry,
+    semantic_contract,
+    semantic_language_registry,
+)
 
-CODE = "GENERIC_RELATION_NEEDS_REASON"
-REASON = "They crossed paths once, which no listed relation says."
+CODE = "GENERIC_RELATION_REFUSED"
 # Page ids are random per vault, and the digests taken over them differ with them.
 _RANDOM_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64}")
 
@@ -78,15 +81,8 @@ def _target(entity: dict) -> str:
     return entity["path"].removesuffix(".md")
 
 
-def _logged_edges(vault: Path, path: str) -> list[dict]:
-    """The edges the operation log records as added by the one write of `path`."""
-    entries = [
-        entry["provenance"]
-        for entry in vault_module.read_operation_log(vault)["entries"]
-        if entry.get("provenance", {}).get("path") == path
-    ]
-    assert len(entries) == 1, entries
-    return entries[0]["added_edges"]
+def _page(vault: Path, path: str) -> str:
+    return (vault / path).read_text(encoding="utf-8")
 
 
 def _anchored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -97,94 +93,128 @@ def _anchored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return vault, call, anchor["path"].removesuffix(".md")
 
 
-def test_a_generic_edge_to_an_entity_is_refused_and_one_reasoned_retry_commits_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault, call, _anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-    source = _source(call, "Crane")
-    row = f"relates_to [[{ben}]]"
-
-    refused = _create(call, "Crane", source, row)
-
-    error = refused["error"]
-    assert error["code"] == CODE
-    assert len(error["options"]) <= 4
-    assert "about_entity" in [option["key"] for option in error["options"]]
-    assert all(set(option) == {"key", "label", "description", "parent"} for option in error["options"])
-    assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
-
-    retry = {key: error[key] for key in ("draft_id", "draft_token", "draft_hash")}
-    committed = _create(
-        call,
-        "Crane",
-        source,
-        row,
-        relation_disposition="generic",
-        relation_review_reason=REASON,
-        relation_review_hash=error["relation_review_hash"],
-        **retry,
-    )
-
-    assert committed["state"] == "committed", committed
-    [edge] = _logged_edges(vault, committed["path"])
-    assert (edge["relation"], edge["generic"]) == ("relates_to", True)
-    assert (edge["reason"], edge["reason_recorded"]) == (REASON, True)
-
-
-def test_naming_a_fitting_relation_commits_without_a_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    vault, call, _anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-    source = _source(call, "Crane")
-    assert _create(call, "Crane", source, f"relates_to [[{ben}]]")["error"]["code"] == CODE
-
-    committed = _create(call, "Crane", source, f"about_entity [[{ben}]]")
-
-    assert committed["state"] == "committed", committed
-    [edge] = _logged_edges(vault, committed["path"])
-    assert (edge["relation"], edge["generic"]) == ("about_entity", False)
-    assert (edge["reason"], edge["reason_recorded"]) == (None, False)
-
-
-def test_an_edit_adding_a_generic_edge_is_refused_and_a_later_edit_of_the_kept_edge_is_not(
+def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_three_routes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
-    operation = {
-        "kind": "replace_string",
-        "old_string": f"- supports [[{anchor}]]",
-        "new_string": f"- supports [[{anchor}]]\n- relates_to [[{ben}]]",
-    }
 
-    refused = call("edit_note", {"path": page, "why": "link the person", "operation": operation})
+    refused = _create(call, "Crane", _source(call, "Crane"), f"relates_to [[{anchor}]]")
 
     error = refused["error"]
     assert error["code"] == CODE
-    assert "about_entity" in [option["key"] for option in error["options"]]
-    assert f"relates_to [[{ben}]]" not in (vault / page).read_text(encoding="utf-8")
+    assert 0 < len(error["options"]) <= 8
+    assert all(set(option) == {"key", "label", "description", "parent"} for option in error["options"])
+    assert "relates_to" not in [option["key"] for option in error["options"]]
+    routes = error["routes"]
+    assert set(routes) == {"specific", "propose", "plain_link"}
+    assert f"- {error['options'][0]['key']} [[{anchor}]]" in routes["specific"]["do"]
+    assert f"- links_to [[{anchor}]]" in routes["plain_link"]["do"]
+    assert routes["propose"]["propose"]["args"]["operation"]["kind"] == "propose-relation"
+    assert routes["propose"]["save"]["args"]["operation"]["kind"] == "save-relations"
+    assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
 
-    kept = call(
+
+def test_a_generic_edge_inside_a_unit_without_an_anchor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writing guide teaches unit-level relations; an unanchored one is still a new edge."""
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+
+    refused = call(
+        "create_note",
+        {
+            "title": "Crane",
+            "note_type": "insight",
+            "content": (
+                "## Observations\n\n- [fact] Crane was settled.\n\n"
+                f"## Finding\n- relations: relates_to: [[{anchor}]]\n\nCrane lifts the load.\n"
+            ),
+            "sources": [_source(call, "Crane")],
+        },
+    )
+
+    assert refused["error"]["code"] == CODE
+    assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
+
+
+def test_a_retry_with_the_menus_top_relation_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    source = _source(call, "Crane")
+    top = _create(call, "Crane", source, f"relates_to [[{anchor}]]")["error"]["options"][0]["key"]
+
+    committed = _create(call, "Crane", source, f"{top} [[{anchor}]]")
+
+    assert committed["state"] == "committed", committed
+    assert f"- {top} [[{anchor}]]" in _page(vault, committed["path"])
+
+
+def test_a_plain_link_bullet_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    source = _source(call, "Crane")
+    plain = _create(call, "Crane", source, f"relates_to [[{anchor}]]")["error"]["routes"]["plain_link"]
+    bullet = re.search(r"`- (\S+ \[\[[^\]]+\]\])`", plain["do"]).group(1)
+
+    committed = _create(call, "Crane", source, bullet)
+
+    assert committed["state"] == "committed", committed
+    assert f"- {bullet}" in _page(vault, committed["path"])
+
+
+def test_a_relation_the_vault_already_authors_between_these_note_types_ranks_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    refused = _create(call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]")
+    unused = refused["error"]["options"]
+    # Pick a relation the registry order would not rank first, and author it between two insights.
+    chosen = unused[-1]["key"]
+    assert chosen != unused[0]["key"]
+    for title in ("Crane", "Hoist"):
+        committed = _create(call, title, _source(call, title), f"{chosen} [[{anchor}]]")
+        assert committed["state"] == "committed", committed
+
+    ranked = _create(call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]")
+
+    assert ranked["error"]["options"][0]["key"] == chosen
+
+
+def test_an_edit_adding_a_generic_edge_is_refused_and_leaves_the_page_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
+    before = _page(vault, page)
+
+    refused = call(
         "edit_note",
         {
             "path": page,
-            "why": "link the person",
+            "why": "link the anchor again",
             "operation": {
-                **operation,
-                "transition_token": error["transition_token"],
-                "relation_disposition": "generic",
-                "relation_review_reason": REASON,
-                "relation_review_hash": error["relation_review_hash"],
+                "kind": "replace_string",
+                "old_string": f"- supports [[{anchor}]]",
+                "new_string": f"- supports [[{anchor}]]\n- relates_to [[{anchor}]]",
             },
         },
     )
-    assert kept["state"] == "committed", kept
 
-    # The edge now stands on the page; touching other text is not adding it again.
-    later = call(
+    assert refused["error"]["code"] == CODE
+    assert refused["error"]["options"]
+    assert _page(vault, page) == before
+
+
+def test_an_edit_that_leaves_a_legacy_generic_edge_untouched_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
+    # A generic edge written before the barrier existed.
+    legacy = _page(vault, page).replace(f"- supports [[{anchor}]]", f"- relates_to [[{anchor}]]")
+    (vault / page).write_text(legacy, encoding="utf-8")
+
+    edited = call(
         "edit_note",
         {
             "path": page,
@@ -196,16 +226,55 @@ def test_an_edit_adding_a_generic_edge_is_refused_and_a_later_edit_of_the_kept_e
             },
         },
     )
-    assert later["state"] == "committed", later
+
+    assert edited["state"] == "committed", edited
+    assert f"- relates_to [[{anchor}]]" in _page(vault, page)
 
 
-def test_a_page_that_is_not_live_and_an_adoption_import_are_never_asked(
+def test_an_edit_that_leaves_a_legacy_generic_unit_relation_untouched_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    vault, call, _anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
+    """A unit-level generic relation from before the barrier must not lock the page."""
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    created = call(
+        "create_note",
+        {
+            "title": "Crane",
+            "note_type": "insight",
+            "content": (
+                "## Observations\n\n- [fact] Crane was settled.\n\n"
+                f"## Finding\n- relations: supports: [[{anchor}]]\n\nCrane lifts the load.\n"
+            ),
+            "sources": [_source(call, "Crane")],
+        },
+    )
+    page = created["path"]
+    legacy = _page(vault, page).replace(f"supports: [[{anchor}]]", f"relates_to: [[{anchor}]]")
+    (vault / page).write_text(legacy, encoding="utf-8")
+
+    edited = call(
+        "edit_note",
+        {
+            "path": page,
+            "why": "fix the wording",
+            "operation": {
+                "kind": "replace_string",
+                "old_string": "Crane lifts the load.",
+                "new_string": "Crane lifts the whole load.",
+            },
+        },
+    )
+
+    assert edited["state"] == "committed", edited
+    assert f"relates_to: [[{anchor}]]" in _page(vault, page)
+
+
+def test_a_page_that_is_not_live_and_an_adoption_import_are_never_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
     source = _source(call, "Crane")
-    row = f"relates_to [[{ben}]]"
+    row = f"relates_to [[{anchor}]]"
 
     draft = _create(call, "Draft crane", _source(call, "Draft crane"), row, status="draft")
     assert draft["state"] == "committed", draft
@@ -228,31 +297,23 @@ def test_a_page_that_is_not_live_and_an_adoption_import_are_never_asked(
     assert refused.value.code == CODE
 
 
-def test_a_successor_is_not_asked_about_the_edge_it_carries_but_about_one_it_adds(
+def test_a_successor_is_refused_for_a_generic_edge_it_adds_but_not_for_one_it_carries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    vault, call, _anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-    cy = _target(_entity(call, "person", "Cy Dock"))
+    vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    other = _target(_entity(call, "person", "Ben Quay"))
     source = _source(call, "Crane")
-    row = f"relates_to [[{ben}]]"
-    first = _create(call, "Crane", source, row)["error"]
-    old = _create(
-        call,
-        "Crane",
-        source,
-        row,
-        relation_disposition="generic",
-        relation_review_reason=REASON,
-        relation_review_hash=first["relation_review_hash"],
-        **{key: first[key] for key in ("draft_id", "draft_token", "draft_hash")},
-    )["path"]
+    old = _create(call, "Crane", source, f"supports [[{anchor}]]")["path"]
+    # A generic edge written before the barrier existed.
+    (vault / old).write_text(
+        _page(vault, old).replace(f"- supports [[{anchor}]]", f"- relates_to [[{anchor}]]"), encoding="utf-8"
+    )
 
-    def supersede(old_path: str, title: str, *rows: str) -> dict:
+    def supersede(title: str, *rows: str) -> dict:
         return call(
             "supersede_note",
             {
-                "old_path": old_path,
+                "old_path": old,
                 "title": title,
                 "note_type": "insight",
                 "content": _body(title, *rows),
@@ -260,92 +321,120 @@ def test_a_successor_is_not_asked_about_the_edge_it_carries_but_about_one_it_add
             },
         )
 
-    carried = supersede(old, "Crane revised", row)
-    assert carried["state"] == "committed", carried
-
-    other = _create(call, "Hoist", _source(call, "Hoist"), f"about_entity [[{ben}]]")["path"]
-    added = supersede(other, "Hoist revised", f"about_entity [[{ben}]]", f"relates_to [[{cy}]]")
+    added = supersede("Crane revised", f"relates_to [[{anchor}]]", f"relates_to [[{other}]]")
     assert added["error"]["code"] == CODE
 
+    carried = supersede("Crane revised", f"relates_to [[{anchor}]]")
+    assert carried["state"] == "committed", carried
 
-def test_a_withheld_target_gives_a_restricted_writer_the_result_an_absent_one_does(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def written_by_restricted(name: str, *, entity_exists: bool, withheld: bool):
-        vault, call, anchor = _anchored(tmp_path / name, monkeypatch)
-        if entity_exists:
-            _entity(call, "person", "Ben Quay")
-        if withheld:
-            write_scope(vault, paths="Entities/People/**", name="People")
-            write_rule(vault, ceiling=0)
-        source = _source(call, "Crane")
-        content = _body(
-            "Crane", f"supports [[{anchor}]]", "relates_to [[Knowledge Base/Entities/People/Ben Quay]]"
+
+def test_a_withheld_target_never_shapes_the_menu_a_restricted_writer_gets(tmp_path: Path) -> None:
+    """The writer sees a refusal either way; only a page it may see can rank the menu."""
+    from dataclasses import replace
+
+    def entity(path: str, title: str, kind: str, body: str = "") -> semantic_contract.SemanticPageState:
+        source = (
+            f"---\ntitle: {title}\ntype: entity\nentity_type: {kind}\nstatus: active\n---\n\n"
+            f"## Observations\n\n- [fact] {title} exists.\n{body}"
         )
-        with request_scope(_external()):
-            try:
-                result = commands.op_remember(
-                    vault, content=content, title="Crane", note_type="insight", sources=[source]
-                )
-            except ValueError as error:
-                result = {"refused": str(error)}
-        return _shown(result, vault)
+        return semantic_contract.build_page_state(
+            tmp_path,
+            path,
+            source,
+            relation_registry=relation_registry.core_registry(),
+            language_registry=semantic_language_registry.core_registry(),
+            review_fingerprint="review-v1",
+        )
 
-    visible = written_by_restricted("visible", entity_exists=True, withheld=False)
-    withheld = written_by_restricted("withheld", entity_exists=True, withheld=True)
-    absent = written_by_restricted("absent", entity_exists=False, withheld=True)
+    def corpus(*states):
+        return semantic_contract.SemanticCorpusContext.from_states(
+            tmp_path,
+            states,
+            registry=relation_registry.core_registry(),
+            identity_census=semantic_contract.StableIdentityCensus(
+                tuple(semantic_contract.StableIdentityEntry(state.path, None) for state in states)
+            ),
+        )
 
-    # The control: a restricted writer who may see the entity is asked.
-    assert CODE in visible
+    works = entity("Knowledge Base/Entities/Organizations/quay-works.md", "Quay Works", "organization")
+    cy = entity(
+        "Knowledge Base/Entities/People/cy-dock.md",
+        "Cy Dock",
+        "person",
+        "\n## Relations\n\n- relates_to [[Knowledge Base/Entities/Organizations/quay-works]]\n",
+    )
+
+    def menu(*, others, may_see_target: bool) -> list[str]:
+        after = replace(
+            corpus(cy, *others),
+            writer_visibility=lambda path: may_see_target or path != works.path,
+        )
+        refusal = relation_barrier.evaluate(
+            cy, after, prior=None, prior_corpus=corpus(*others), operation="create"
+        )
+        assert refusal is not None
+        return [option["key"] for option in refusal.options]
+
+    seen = menu(others=(works,), may_see_target=True)
+    withheld = menu(others=(works,), may_see_target=False)
+    absent = menu(others=(), may_see_target=False)
+
+    assert "member_of" in seen
     assert withheld == absent
-    assert CODE not in withheld
+    assert "member_of" not in withheld
 
 
-def test_create_entity_commits_a_generic_item_that_carries_a_reason_and_logs_it(
+def test_create_entity_refuses_a_generic_item_and_commits_a_specific_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
     works = _target(_entity(call, "organization", "Quay Works"))
-    item = {"kind": "relates_to", "target": works}
 
-    refused = _entity(call, "person", "Cy Dock", relations=[item])
+    refused = _entity(call, "person", "Cy Dock", relations=[{"kind": "relates_to", "target": works}])
     assert refused["error"]["code"] == CODE
+    assert "member_of" in [option["key"] for option in refused["error"]["options"]]
     assert not (vault / "Knowledge Base/Entities/People/Cy Dock.md").exists()
 
-    committed = _entity(call, "person", "Cy Dock", relations=[{**item, "reason": REASON}])
-
+    committed = _entity(call, "person", "Cy Dock", relations=[{"kind": "member_of", "target": works}])
     assert committed["state"] == "committed", committed
-    [edge] = _logged_edges(vault, committed["path"])
-    assert (edge["reason"], edge["reason_recorded"]) == (REASON, True)
 
 
-def test_identical_bullets_to_one_entity_count_as_one_refused_edge(
+def test_create_entity_no_longer_takes_a_reason_for_a_generic_item(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _vault, call, _anchor = _anchored(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-    cy = _target(_entity(call, "person", "Cy Dock"))
-    twice = f"relates_to [[{ben}]]"
+    vault, call = _served(tmp_path, monkeypatch)
+    works = _target(_entity(call, "organization", "Quay Works"))
+    item = {"kind": "relates_to", "target": works, "reason": "They crossed paths once."}
 
-    refused = _create(call, "Crane", _source(call, "Crane"), twice, twice, f"relates_to [[{cy}]]")
+    refused = _entity(call, "person", "Cy Dock", relations=[item])
+
+    assert refused["error"]["code"] == "INVALID_LINK"
+    assert not (vault / "Knowledge Base/Entities/People/Cy Dock.md").exists()
+
+
+def test_bare_connections_render_as_plain_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    ben = _target(_entity(call, "person", "Ben Quay"))
+
+    committed = _entity(call, "person", "Cy Dock", connections=[f"[[{ben}]]"])
+
+    assert committed["state"] == "committed", committed
+    page = _page(vault, committed["path"])
+    assert f"- links_to [[{ben}]]" in page
+    assert "relates_to" not in page
+
+
+def test_identical_bullets_to_one_page_count_as_one_refused_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vault, call, anchor = _anchored(tmp_path, monkeypatch)
+    ben = _target(_entity(call, "person", "Ben Quay"))
+    twice = f"relates_to [[{anchor}]]"
+
+    refused = _create(call, "Crane", _source(call, "Crane"), twice, twice, f"relates_to [[{ben}]]")
 
     assert refused["error"]["code"] == CODE
     assert refused["error"]["refused_edges"] == 2
-
-
-def test_a_reason_on_a_specific_item_does_not_answer_a_generic_item_to_the_same_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _vault, call = _served(tmp_path, monkeypatch)
-    works = _target(_entity(call, "organization", "Quay Works"))
-    specific = {"kind": "member_of", "target": works, "reason": REASON}
-    generic = {"kind": "relates_to", "target": works}
-
-    refused = _entity(call, "person", "Cy Dock", relations=[specific, generic])
-    committed = _entity(call, "person", "Cy Dock", relations=[specific, {**generic, "reason": REASON}])
-
-    assert refused["error"]["code"] == CODE
-    assert committed["state"] == "committed", committed
 
 
 def _offered(call, source_type: str, target: str) -> list[str]:
@@ -356,21 +445,20 @@ def _offered(call, source_type: str, target: str) -> list[str]:
     return [option["key"] for option in refused["error"]["options"]]
 
 
-def test_each_pair_of_pages_is_offered_only_the_relations_that_fit_it(
+def test_relations_whose_endpoints_name_both_pages_come_before_those_that_name_neither(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _vault, call = _served(tmp_path, monkeypatch)
     works = _target(_entity(call, "organization", "Quay Works"))
     ben = _target(_entity(call, "person", "Ben Quay"))
-    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
-    ruling = _target(_entity(call, "decision", "Quay Ruling"))
 
-    # Relations whose endpoints name both pages by type come first; `owns` needs `entity:*`.
-    assert _offered(call, "person", works) == ["member_of", "affiliated_with", "operates", "supplies"]
-    assert _offered(call, "person", ben) == ["kin_of", "supplies", "owns"]
-    assert _offered(call, "organization", ben) == ["supplies", "owns"]
-    assert _offered(call, "person", ledger) == ["owns"]
-    assert _offered(call, "person", ruling) == ["owns"]
+    person_to_organization = _offered(call, "person", works)
+    person_to_person = _offered(call, "person", ben)
+
+    assert person_to_organization[:4] == ["member_of", "affiliated_with", "operates", "supplies"]
+    assert person_to_person[:2] == ["kin_of", "supplies"]
+    assert "kin_of" not in person_to_organization
+    assert len(person_to_organization) <= 8
 
 
 def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_parent(
@@ -388,50 +476,14 @@ def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_pare
     assert offered.index("vault.employed_by") < offered.index("affiliated_with")
 
 
-def test_a_promoted_relation_that_only_inherits_its_parents_endpoints_is_never_offered(
+def test_a_promoted_relation_that_only_inherits_its_parents_endpoints_ranks_behind_the_relations_that_name_both_pages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _vault, call = _served(tmp_path, monkeypatch)
-    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
-    # `owns` and `supplies` reach any entity or a person or organization; neither extension
-    # says what it joins, so neither can claim a concept as its object.
-    for key, parent in (("vault.has_pet", "owns"), ("vault.supplies_parts", "supplies")):
-        saved = _save_extension(call, key, _extension(parent))
-        assert saved["state"] == "committed", saved
+    works = _target(_entity(call, "organization", "Quay Works"))
+    saved = _save_extension(call, "vault.works_with", _extension("affiliated_with"))
+    assert saved["state"] == "committed", saved
 
-    assert _offered(call, "person", ledger) == ["owns"]
+    offered = _offered(call, "person", works)
 
-
-def test_a_generic_edge_between_two_concepts_commits_without_a_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _vault, call = _served(tmp_path, monkeypatch)
-    ledger = _target(_entity(call, "concept", "Tidal Ledger"))
-
-    committed = _entity(
-        call, "concept", "Tide Table", relations=[{"kind": "relates_to", "target": ledger}]
-    )
-
-    assert committed["state"] == "committed", committed
-
-
-def test_a_plain_connection_between_two_people_is_refused_and_kin_of_is_offered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _vault, call = _served(tmp_path, monkeypatch)
-    ben = _target(_entity(call, "person", "Ben Quay"))
-
-    refused = _entity(call, "person", "Cy Dock", connections=[f"[[{ben}]]"])
-
-    assert refused["error"]["code"] == CODE
-    assert "kin_of" in [option["key"] for option in refused["error"]["options"]]
-
-
-def test_a_generic_edge_between_two_notes_is_never_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _vault, call, anchor = _anchored(tmp_path, monkeypatch)
-
-    committed = _create(call, "Crane", _source(call, "Crane"), f"relates_to [[{anchor}]]")
-
-    assert committed["state"] == "committed", committed
+    assert offered[:5] == ["member_of", "affiliated_with", "operates", "supplies", "vault.works_with"]

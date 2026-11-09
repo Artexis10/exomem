@@ -1,8 +1,9 @@
 """Backblaze B2 native API (v3) for the media edge, over httpx.
 
 Only the calls the edge needs. The edge key lacks `deleteFiles`, and no call here
-hides, lists or deletes a version. A rejected call did not take effect; an
-uncertain one may have. The write paths in `media_edge` depend on that split.
+lists or deletes a version. The one hide serves the collector's `condemn`. A
+rejected call did not take effect; an uncertain one may have. The write paths in
+`media_edge` depend on that split.
 """
 
 from __future__ import annotations
@@ -188,6 +189,10 @@ class B2:
     async def cancel_large(self, file_id: str) -> None:
         await self._post("b2_cancel_large_file", {"fileId": file_id})
 
+    async def hide_file(self, key: str) -> None:
+        """Make the name's newest version non-current. The version stays readable by ID until the bucket rule runs."""
+        await self._post("b2_hide_file", {"bucketId": (await self._authorized()).bucket_id, "fileName": key})
+
     async def file_info(self, file_id: str) -> FileInfo | None:
         try:
             payload = await self._post("b2_get_file_info", {"fileId": file_id})
@@ -208,7 +213,7 @@ class B2:
             raise ProviderUncertain("the provider HEAD failed") from error
 
     async def head_name(self, key: str) -> FileInfo | None:
-        """The newest version of a name, by the provider's download-by-name HEAD."""
+        """The newest version of a name, by the provider's download-by-name HEAD. None when it is hidden or absent."""
         response = await self._head(key)
         if response.status_code == 401:
             self._session = None  # the authorization expired; ask once more

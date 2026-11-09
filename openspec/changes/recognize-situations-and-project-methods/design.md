@@ -64,8 +64,8 @@ Excerpt-only and lower-release sources consistently stay outside this new corpus
 Extra unit omissions have no exact mapping to the canonical fixed L5 excerpt, so this change does not refill or approximate that window.
 Discovery reports partial coverage and preserves existing canonical read, find and map pulls.
 This limitation does not depend on whether the source contains withheld units.
-Restricted task graph expansion reports an omitted lane: existing graph caps and page edges precede origin-unit release.
-Unrestricted graph expansion stays unchanged. Restricted collection claims require the existing FULL metadata admission; text recall remains independent.
+Restricted task links report an omitted lane: existing graph caps and page edges precede origin-unit release.
+An unrestricted candidate lists up to five outbound links from the graph owner's neighbour read and adds no neighbour page as a candidate. Restricted collection claims require the existing FULL metadata admission; text recall remains independent.
 
 ### D2. Preserve candidate, current-state and intention distinctions
 
@@ -171,7 +171,7 @@ Add `task_context` beside `map` and `turn_slice`; do not redefine guarded anchor
 Its closed protocol state is `ready`, `empty`, `partial`, `unavailable` or `skipped`.
 It contains `candidates`, `methods` and the existing section-level `missing` reasons, without hidden names or counts.
 Candidates carry `ref`, `source_ref`, `source_version`, `carrier`, `origins`, `reason` and `read_ref`.
-Carrier values come from existing registries. Origins describe the retrieval input or graph edge, not a judgment about intent.
+Carrier values come from existing registries. Origins describe the retrieval input, not a judgment about intent. An unrestricted candidate may also carry `links` and `links_omitted`: outbound relation, canonical target ref and title.
 The reason uses existing categorical evidence or an honest read-required description, never an invented claim.
 Reuse current-state projections and linked evidence routes where available; omit unavailable state rather than inventing a new status taxonomy.
 

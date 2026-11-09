@@ -21,8 +21,9 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, call_spans, privacy_log, reserved_paths
+from . import access, call_spans, privacy_log, procedure_approval, reserved_paths
 from . import find as find_module
+from .governance import principal
 from .kbdir import kb_prefix
 from .vault import (
     VaultPathError,
@@ -133,28 +134,17 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
-    rel = path.strip().replace("\\", "/").lstrip("/")
-    if privacy_log.is_reserved_hosted_vault_path(rel):
+    if privacy_log.is_reserved_hosted_vault_path(path.strip().replace("\\", "/").lstrip("/")):
         raise GetError(code="INVALID_PATH", reason="path is reserved by hosted runtime")
-    # Only auto-append .md if the path has NO extension. Previously this
-    # appended unconditionally, which made e.g. `foo.meta.json` resolve to
-    # `foo.meta.json.md` and 404 — surfaced when trying to inspect trash
-    # sidecars via `get`.
-    rel = missing_path_for(rel)
-    missing_path = rel
+    named = spellings(path)
+    rel = missing_path = named[0]
 
     with call_spans.span("read.prepare.resolve_path"):
-        candidate = vault_root / rel
-
         # Back-compat shortcut: if the literal path doesn't exist but the same
         # path under Knowledge Base/ does, use that. Lets callers write
         # `Notes/Insights/foo` without the leading prefix.
-        if not candidate.exists() and not rel.startswith(kb_prefix()):
-            kb_rel = kb_prefix() + rel
-            kb_candidate = vault_root / kb_rel
-            if kb_candidate.exists():
-                candidate = kb_candidate
-                rel = kb_rel
+        if len(named) > 1 and not (vault_root / rel).exists() and (vault_root / named[1]).exists():
+            rel = named[1]
 
         try:
             resolution = resolve_under_vault(vault_root, rel, return_details=True)
@@ -248,6 +238,15 @@ def prepare_page_read(vault_root: Path, *, path: str) -> PreparedPageRead:
     )
 
 
+def spellings(path: str) -> tuple[str, ...]:
+    """The vault-relative paths a direct read of `path` names: as written, then under Knowledge Base/.
+
+    Only auto-append .md if the path has NO extension (`missing_path_for`).
+    """
+    rel = missing_path_for(path.strip().replace("\\", "/").lstrip("/"))
+    return (rel,) if rel.startswith(kb_prefix()) else (rel, kb_prefix() + rel)
+
+
 def missing_path_for(path: str) -> str:
     """The spelling a NOT_FOUND names for `path` — the caller's own input,
     normalized only by the suffix rule.
@@ -311,3 +310,38 @@ def get_page(
         content_hash=content_hash(content),
         mtime=prepared.mtime,
     )
+
+
+def approval_fields(vault_root: Path, result: GetResult, *, ref: str, full_release: bool) -> dict:
+    """The approval verdict of the page just read, for this caller, as result fields.
+
+    `approval` is the one verdict of `procedure_approval`, reported only when the ref's ledger holds an
+    entry of any class, or cannot be read. A page whose ref has none carries no field, so an ordinary note
+    gains nothing, and the absence reads `unapproved`. The owner's read also carries `diagnostics` with the
+    findings of the ref's ledger. Any other caller receives the field only as `approved`, so the field's
+    presence never separates a stale or revoked page from one nobody approved, and receives no finding.
+    A page whose approval cannot be checked reads `unapproved`: approval only ever adds an endorsement, and
+    the page content stays readable. `ref` is the reference index's ref for this path, which the index gives
+    only to the single valid owner of an id. So the page is its own holder, and the verdict needs no second index.
+    The owner check runs only for a ref whose ledger holds something, so an ordinary read never pays for it, and
+    a check that fails reads as not the owner.
+    """
+    owner = False
+    try:
+        ref_ledger = procedure_approval.ledger(vault_root, ref)
+        if not ref_ledger.held:
+            return {}
+        owner = procedure_approval.owner_view(vault_root, principal.effective_principal())
+        outcome = procedure_approval.served_verdict(
+            vault_root, result.path, ref_ledger, owner=owner, full_release=full_release,
+            read=lambda: result.content.encode("utf-8"), holders=lambda: (result.path,),
+        )
+    except Exception:  # noqa: BLE001 - an unchecked approval reads unapproved and never blocks the read
+        log.warning("approval verdict unavailable for %s", result.path, exc_info=True)
+        return {"approval": procedure_approval.UNAPPROVED} if owner else {}
+    if not owner and outcome.value != procedure_approval.APPROVED:
+        return {}
+    fields: dict = {"approval": outcome.value}
+    if outcome.findings:
+        fields["diagnostics"] = {"approval_findings": [finding.row() for finding in outcome.findings]}
+    return fields

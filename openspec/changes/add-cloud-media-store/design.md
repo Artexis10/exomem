@@ -132,7 +132,7 @@ An import larger than the volume needs room while it runs. The rules below chang
 
 The cell encrypts each original with `age` to its own X25519 recipient before upload. `age` streams 64 KiB authenticated chunks, and the cell image already ships it for imports.
 
-The object name is HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. A bucket listing then cannot match a stored object to a known file by name. Object sizes stay visible, because `age` ciphertext size follows plaintext size, so a file of distinctive length can be confirmed by size. An offload reuses a stored version only when a live sidecar already references that version. Otherwise it uploads a new version, so identical originals inside one cell usually share one version.
+The object name is HMAC-SHA-256 of the original's SHA-256 under a per-cell name key. `collect-released-media` D1 amends this: each new protection record gets a fresh random name, so a re-add never supersedes a referenced version. A bucket listing then cannot match a stored object to a known file by name. Object sizes stay visible, because `age` ciphertext size follows plaintext size, so a file of distinctive length can be confirmed by size. An offload reuses a stored version only when a live sidecar already references that version. Otherwise it uploads a new version, so identical originals inside one cell usually share one version.
 
 On the media-storage path, the media edge and the provider see only ciphertext. Playback and export are other paths, and D8 and the table below cover them.
 
@@ -165,21 +165,24 @@ This contract does not imply that tenant lock or its delivery channel is impleme
 
 The privacy copy states this custody truthfully (`cloud-operator-access`).
 
-### D6. A media edge holds the only bucket credential
+### D6. A media edge holds the only write credential for the bucket
 
 A new in-cluster service, the media edge, moves ciphertext between cells and the media bucket. It follows the artifact broker's shape: its own Deployment and Service on a literal ClusterIP, Recreate rollout, and a canary list plus a fleet switch.
 
-- **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. The export packing step (D8) reaches it on the same terms and has no other egress.
+- **Network.** A selected cell's runtime gains one egress edge, to the edge's ClusterIP and port, with no DNS. The export packing step (D8) reaches it on the same terms and has no public egress.
 - **Authentication.** cells carry no ServiceAccount token. cellctl signs a per-cell edge credential with its own signing key, binding audience, cell ID and version, and renders it into the cell's Secret. The edge holds only the public key. It maps the credential's cell ID to that cell's object prefix and accepts no prefix from the request.
 - **Revocation.** A valid signature is not enough. cellctl publishes the active set: each selected cell's ID and current credential version. The edge accepts a credential only while its cell and version are in that set. Rotation bumps the version, and the old credential stops working once the edge loads the new set. The edge reports a set generation only after it has loaded that set and drained every request accepted under an earlier one, so cellctl can observe when a revocation takes effect.
-- **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge cannot hide, list or delete. Its bucket key cannot delete file versions. Only cellctl's key-management authority destroys versions (D9).
-- **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing and alerts when a cell exceeds its allowance plus retained-version headroom. The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
+- **Operations.** Multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head. The edge sends no list or delete request. It sends a hide only for `condemn`, which `collect-released-media` D3 adds for a collector credential, and its HEAD then reports a `current` or `condemned` status. Its bucket key cannot delete file versions, but its `writeFiles` capability also permits a hide. cellctl holds a separate key that can only list the bucket, and no running service holds `deleteFiles` on the media bucket (D7). Version destruction belongs to a follow-on change (D9).
+- **Quota.** The cell admits uploads against its allowance (D10). cellctl meters each prefix's physical bytes from the bucket listing, with its list-only key (D7), and alerts when a cell exceeds its allowance plus retained-version headroom (D10). The alert detects abuse; it does not prevent it. Until the operator revokes it, an active cell credential can upload unreferenced objects below the per-object bound. Each such object costs storage, and the operator carries that exposure.
 
 Refinements from the build (2026-10-27):
 - **Prefix.** The provider name is `cells/<cell>/<name>`, with the cell ID taken from the credential and checked against the canonical cell ID shape. A prefix in a path, header or query is ignored. A version ID of another cell reads as absent, because the edge compares the provider's file name with the cell's own name.
 - **Admit preflight.** Before it sends any byte, the cell store posts the declared size and digest to an `admit` action. The edge answers 413 above the per-object bound, or 409 while an earlier write to the same name is unsettled, so a refusal costs no upload.
 - **Settled generation.** The reported generation is the lowest of the loaded set, every request still in flight and every write intent that is still unsettled. The edge records an intent durably before it sends a provider write. A lost reply, an absent HEAD or a restart therefore keeps the generation open until the provider shows the write or the file ID is gone.
 - **Large files.** A large upload is found again by its file ID: a finished file is the version, an unfinished one is finished or cancelled, and a missing one never became a version. A small upload is found again by a nonce that it carries in its file info.
+- **Multipart initiation needs no recovery state (decision 2026-11-06).** The edge calls the provider's finish operation only for a file ID that a persisted intent holds. A lost reply to the start call, or a crash between the start call and the intent, leaves an unfinished file that no intent names. Such a file can never become a version, so it needs no record and holds no generation open. The bucket's lifecycle rule and the operator's cleanup bound the unfinished files that remain (D9). The code at the start call says so.
+- **Exact-set evidence (decision 2026-11-06).** `/v1/generation` reports the settled generation, the loaded generation, the SHA-256 of the loaded set's validated bytes and the bucket name. cellctl treats a revocation as observed only when all of these hold: the loaded generation equals the generation it published, the digest equals the SHA-256 of the set it published, the bucket equals its configured bucket, and the settled generation is at least the published one. A higher generation with another set, or a matching set on another bucket, does not confirm. When the published ConfigMap is unreadable, cellctl seeds the next generation from the edge's loaded generation plus one, so a clock that went back cannot produce a set that the edge refuses while cellctl counts it as loaded.
+- **No retained edge-state continuity (decision 2026-11-06).** The state volume keeps its resource policy and the rollout is Recreate. The only consumer of drain evidence is cell deletion, and it waits for a 7-day operator grace (D9). A lost state volume therefore costs no unproven revocation, and the design records no further continuity requirement.
 
 Alternatives:
 - **Projected ServiceAccount tokens.** These would break the cell's no-token rule.
@@ -248,11 +251,17 @@ It proves positive recovery, not a finite negative fence; neither new padding no
 
 Media lives in its own B2 bucket. It is not under the backup prefixes, so the edge's bucket-wide key cannot reach restic packs.
 
-The bucket keeps versions, and nothing is hidden. A version is destroyed only when no retained backup snapshot and no live capture can still reference it (D9). No age or time cutoff decides this. Two facts rule out a cutoff:
+The bucket keeps versions. Only `collect-released-media` hides a name: a released one that no retained snapshot references. A version may be destroyed only when no retained backup snapshot and no live capture can still reference it. No age or time cutoff decides this. Version destruction is not part of this change (D9). Two facts rule out a cutoff:
 - restic keeps the latest snapshot of each of the last 4 weeks that *have* snapshots, so a stopped cell can keep a months-old snapshot.
 - A snapshot's restic timestamp follows its clone's capture time.
 
-Every restorable backup therefore still resolves its references. The only lifecycle rule cancels unfinished multipart uploads. No object lock is set, so cell deletion can complete.
+Every restorable backup therefore still resolves its references. The one lifecycle rule cancels unfinished multipart uploads. `collect-released-media` D2 adds `days_from_hiding_to_deleting` to it, so the provider deletes a hidden or superseded version after a grace period. No object lock is set, so cell deletion can complete.
+
+**Account and keys (decision 2026-11-06).** The bucket stays in the founder (durability) account, as `infra/terraform/durability/media.tf` creates it. In the cell-data account a compromised key custodian could mint a bucket-wide `deleteFiles` key. The media bucket has no lock, and an evicted original is the only copy (D1). The cost is that no per-cell media key exists. Two keys exist:
+- the edge key: `readFiles` and `writeFiles`, restricted to the bucket;
+- `cellctl_media_list`: `listBuckets` and `listFiles`, restricted to the bucket, copied in shape from the backup list key of `infra/terraform/cell-data/keys.tf`.
+
+No running service holds `deleteFiles` on the media bucket. The key watcher of `contain-cloud-controller-compromise` pins both key IDs and the bucket's settings (no object lock, one lifecycle rule, no CORS rules, server-side encryption) in the founder entry of its pinned set. That is data in the watcher's secret, with no watcher code change. Applying the keys and the pinned set are operator steps.
 
 The same provider holds backups and media. A second copy at another provider was considered and rejected on cost for now. The revisit trigger is any of:
 - the fleet's stored media passes 1 TB;
@@ -268,12 +277,8 @@ The same provider holds backups and media. A second copy at another provider was
 - **Playback and download.** The gateway serves a download route behind the owner's signed-in session. It forwards to the cell, which hydrates if needed and streams the original with range support. A tool result may carry this link, because it grants nothing without the owner's session. Local agents use `exomem cloud download` over OAuth, which verifies size and SHA-256 before it renames the file into place. No tool result carries a bearer link.
   - *Agent download.* The agent's route is `GET /download?path=<vault path>` on the gateway with the owner's OAuth access token, and it needs no ticket. The gateway validates the token, resolves the owner's cell, and signs a fresh gateway origin proof for each request, range requests included. The proof carries `purpose: "download"` and `target_sha256`, the SHA-256 of the requested path. The cell route checks the cell bearer, then the proof, and refuses with `DOWNLOAD_UNAVAILABLE` before it resolves anything. It then serves through the same artifact recovery as a local recovery, with its governance, custody page, size and SHA-256 checks. `transfer_artifact` download on Cloud returns the descriptor and a `next_step` command (`exomem cloud download '<path>'`), never a URL.
   - *Browser link.* The signed-in browser link stays open as task 5.1.
-- **Export.** Export runs in two steps, so the media key never shares a pod with public egress:
-  - A *packing* step mounts the media key. It reaches only the media edge and builds the archive on the export staging volume, writing evicted originals byte-identical. Each manifest SHA-256 must equal the sidecar's.
-  - A separate *upload* step without the media key transfers the archive as today's export does.
-
-  The archive's format and delivery stay those of the export contract. Export of more media than the staging volume can hold is an open question; until it is settled, no cell other than the canary may store more media than its export can stage (D11).
-- **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because no version that a retained snapshot references is destroyed (D9). A restored reference reads its pinned version, so a restore needs no reactivation step.
+- **Export.** Export runs in three steps, so the vault pauses only for a local copy and the media key never shares a pod with public egress. The amendment of 2026-11-08 below defines them.
+- **Restore from backup.** restic restores sidecars and any cached originals. Evicted originals stay in the store, because this change destroys no version, and `collect-released-media` removes none that a retained snapshot references. A restored reference reads its pinned version, so a restore needs no reactivation step.
 - **Restore from an export.** A vault restored from an export can carry references to versions destroyed since the export. So the cell confirms with a head request that a pinned version exists before it evicts an original or reuses the version. A reference to an absent version counts as no reference, and the original is offloaded again (D3).
 
 The existing upload service carries the selected lane. Source sessions use the canonical Source writer and its existing mutation replay protocol.
@@ -320,40 +325,62 @@ The operator confirmed the shape in D12 on 2026-10-30. It adds windows and filin
 - **After filing.** A filed original leaves the volume through write-through (D1) and eviction (D3). This shape adds no stage reference and no stage offload, and it keeps D2 unchanged.
 - **Processing.** Extraction of a filed original queues as today. M4 in D3 lets eviction take the original before a worker claims the job, and the worker hydrates it at the claim.
 
+**Amendment, 2026-11-08 (task 5.5): export in three steps.**
+
+Today's export holds the vault while it hashes, packs and uploads every byte, and it reads evicted originals from the volume. That breaks two promises: Home promises a pause of a few minutes, and an evicted original is not on the volume. Each step below is a Job of the cell image, `exomem cell-export --phase <step>`. All three mount the export's own staging claim, `export-staging-<export id>`.
+
+- **Pause.** The export hold stops the runtime, as today. The pause Job mounts the cell volume and the staging claim. It holds no media key and has no public egress (see **Network** below).
+  - It copies every archive member that is present on the volume into staging, below the export's own directory at the member's archive path. The archive classification decides what a member is: notes, sidecars, resident and cached originals, Trash, refusals and the offload backlog are all members. It copies in the kernel and hashes nothing; the pack hashes. Linux refuses `copy_file_range` between two filesystems that do not implement it (since 5.19), which is the case of the cell volume and the staging claim, so the copy falls back to `sendfile`.
+  - It refuses a plan above the bound with `EXPORT_TOO_LARGE` on the listed sizes, before it copies.
+  - It writes the plan into staging: the member list with sizes, and one entry for each evicted original, with its archive path, object name, version ID, plaintext size and SHA-256 from its companion. A companion under Trash counts like a live one.
+  - It mounts the media store configuration. When cellctl sets a media mode for the cell and no store binding resolves, it refuses, because it cannot tell an evicted original from a deleted one.
+  - An evicted original on a cell with no edge credential (a retained store) fails the plan with `EXPORT_MEDIA_UNREACHABLE`.
+  - A companion that it cannot read is still copied as a member, but it binds no original. The media ledger keeps a row for each evicted path, with its version, size and SHA-256. So for an original whose companion it cannot read and whose bytes are not on the volume, the pause plans the version that the ledger row holds. A row that holds no version of this store with its size fails the plan with `EXPORT_MEDIA_UNREACHABLE`. A Trash companion that it cannot read is not covered: its ledger row names the path before the deletion.
+  - It reports numbers only: member count and bytes, evicted count and bytes, and the planned archive bytes.
+- **The hold ends at the pause report.** cellctl releases the hold when the pause succeeds, and the runtime starts again. The remaining steps run without a hold, so backups, upgrades and restarts go on beside them.
+- **Pack.** The pack Job mounts only the staging claim, at `/data`. It reads members only from the plan; the vault path `/data/vault` names its store binding in the mounted configuration. It holds the media key bundle and the edge credential. It has no public egress and no DNS (see **Network** below).
+  - The plan is data on a claim that another pod mounts. The pack refuses a member path that is absolute, holds `..` or passes a symbolic link, with `UNSAFE_STAGED_MEMBER`, so a planted plan cannot put a file that the pack can read, such as its media key, into the archive.
+  - It hashes each staged member, checks the staged set against the plan, and fetches each evicted original by its version ID through the edge. It decrypts the stream and writes it into the archive. Its size and SHA-256 must equal the companion's.
+  - A transport failure during a read restarts the read from the first byte, after waits that cover an edge restart (about two minutes in all). The pack checks that the re-read prefix has the digest of the bytes already written, and continues after them. The edge answers a read of an absent version like an outage, so after a failed read the pack asks the edge for the version's head: an absent version fails the export at once. A mismatch or an edge that stays down fails it too.
+  - It writes the archive into a spool on staging, as numbered parts of at most 1 GiB. It holds at most two parts on staging, the one that it writes included. It ends with an end record that holds the archive size and SHA-256, or a failure record with its code.
+- **Upload.** The upload Job mounts only the spool directory of the staging claim, by its subPath, which the pause creates. It holds no media key, and keeps today's egress (TCP 443 and DNS). It cannot change the plan or the staged members that the pack reads. It sends each part in order to its presigned part URL, deletes it, and reports the parts as today. cellctl completes and verifies the upload as today.
+- **Staging.** The claim takes the storage class of the cell's own volume. Every configured cell class deletes its volumes on release. A cell whose volume has another class, such as the hosted class that retains volumes, is an identity conflict and runs no export. cellctl's admission refuses a staging claim on any class but the cell classes. Its size is the cell's last measured used bytes plus 10% plus 2 GiB for the spool, over 95% because ext4 keeps 5% of the claim for root and the Jobs do not run as root, in whole GiB. Hetzner's 10 GiB minimum volume covers most cells. cellctl deletes the claim, the Jobs and the multipart upload when the export ends, fails or is interrupted.
+- **The short pause.** The pause has its own deadline. Its pod must run within 2 minutes, and then copy at least a configured floor rate over the used bytes. On a miss cellctl stops the Job, releases the hold and fails the export with `EXPORT_FAILED` and a staging diagnostic. It does not retry and does not fall back to a long hold; the owner retries. The pause length is the claim's create and attach time plus the copy time. The rehearsal measures both on TopoLVM and on Hetzner (task 5.5.9).
+- **Limits from the plan.** The archive is bounded by the planned bytes, not by the cell size. cellctl sizes the parts, the part count (at most 1000, which bounds an archive near 1 TiB), the byte limit and the deadline from them. The deadline covers the pack, the upload and the verification. Above the bound the plan refuses with `EXPORT_TOO_LARGE`. The per-file limit becomes the planned bound too, so an evicted recording above 2 GiB exports.
+- **Image.** The pack and the upload run the image digest that the pause ran.
+- **Capacity.** Each node admits one concurrent export: one attach slot on Hetzner, the staging bytes of one export on TopoLVM. The number is a value in the one limits source. A second export on that node waits, and its row says that it waits.
+  - Deviation (2026-11-08): cellctl does not check a TopoLVM node's free pool before it creates a staging claim. cellctl reads the node pools only in a pass where an hourly backup reported its use, and with provider reservations their budgets decide instead, so the check needs new plumbing. Effect: a staging claim on a node whose pool is nearly full can take the room of the hourly backup's snapshot and clone. That backup then fails visibly, as a backup on a full pool does, for as long as the export runs.
+- **Quota.** The cell's quota admits the staging claim, the pack and upload pods and their requests. On local storage it admits four pods and one transition slot, and the requests of three Jobs beside the runtime: backup, pack and upload. Admission still admits the smaller counts that the previous cellctl writes, so a rollout does not refuse it.
+- **Placement on Hetzner.** The pack has a required affinity to the upload pod, so the one attachable staging volume serves both on one node. cellctl creates the upload Job first. Admission admits only that affinity: a required pod affinity on the node's hostname to the Job of the same export's upload.
+- **Network.** job-egress, the policy that gives cell Jobs TCP 443 and DNS, selects every Job but the pause and the pack, so neither has public egress. Like every pod of the cell, both reach only the in-cluster peers that runtime-ingress names: the edge, and the broker and the media slot where the cell has them. The runtime reaches the same peers and holds every media key, so the pack's reach exposes no key further. The edge's ingress admits the pack and no other export step. cellctl starts a pack only in a pass whose job-egress apply landed, so a refused apply never leaves a pack under an older job-egress that selects it; the transfer deadline ends a lasting refusal.
+- **Keys.** cellctl's admission gives each media key of the cell Secret only to the pod that needs it. The runtime gets the identity, the edge credential and the name key; a StatefulSet whose pod carries a Job label gets none. The pack gets the identity and the edge credential. A backup gets the collector credential. A pod lists each key by name, in a secret volume, a projected source or one environment reference. Admission refuses a mount and an environment import of the whole cell Secret.
+- **Purge.** The pack reads a version by its ID even after collection hid it (`condemned`), until the lifecycle rule deletes it N days later. So `collect-released-media` requires a grace period N longer than the longest export deadline. No protection row is written for an export. If the sandbox check of `collect-released-media` task 1.1 shows that a hidden version does not read by its ID through the edge, protection rows replace this rule.
+
+The alternatives were a long hold over the whole export (it breaks the short pause), staging whole trees (it copies evicted bytes that are not on the volume) and protection rows written into the live ledger (a second mechanism for what the grace period already covers).
+
 ### D9. Deletion
 
-Collection is new lifecycle logic. No existing sweep supplies it: the archive member pool's sweep removes only abandoned temporary files. Collection works by reachability, with no hide step:
+**Amendment, 2026-11-06: version destruction moves to a follow-on change.** Under the key custody of `contain-cloud-controller-compromise` D9, cellctl cannot read a manifest, because its backup key can only list. It cannot delete a manifest, because the backup bucket is locked in compliance mode. It holds no `deleteFiles` on the media bucket. So this change ships no reference manifest and no destruction of versions. The change `collect-released-media` carries both, and the operator has chosen to build it next. Never destroying a version is safe and costs storage only, which the physical meter (D10) watches. Its design (D1 to D5) replaces the manifest and destruction text that this decision held before the amendment.
 
-- **Reference manifests.** Each backup computes a reference manifest from the clone it backs up. The manifest lists every version that the captured sidecars reference, trash included, and every object name that a protection record in the captured media job ledger names. It is stored beside the snapshot in the cell's backup prefix, keyed by snapshot ID.
 - **Protection records.** A crash-consistent clone may omit the newest commits of a ledger that syncs lazily (WAL with `synchronous=NORMAL`). So the ordering is explicit:
   1. Before an offload uploads or reuses a version, it commits a protection record for the object name with a full sync. Any later capture therefore contains the record.
   2. The offload publishes the sidecar reference and syncs that write to disk.
   3. Only then does it retire the protection record.
 
   At every capture after step 1, the clone holds the record, the synced reference, or both. A reuse also checks that a live sidecar references the version at the moment its record commits.
-- **Destroy.** cellctl destroys versions only in the backup hold, after that hold's backup and prune succeed. Holds are exclusive per cell, so no restore and no other capture runs in between. It destroys a version only if all of these hold:
-  - the version appears in a listing of the cell's media prefix that cellctl completed before it took the newest retained snapshot's capture;
-  - no retained snapshot's manifest names that version or lists its object name under a protection record;
-  - every retained snapshot has a readable manifest. Otherwise nothing is destroyed for that cell.
-
-  cellctl then deletes the manifests of pruned snapshots.
-- **Why that is enough.** A reference that exists at capture is in the newest manifest. A reference written after capture names a version that a protection record covers. That record was synced before the upload or reuse began, so it is in every capture until the reference itself is synced. Only versions in a listing that cellctl completed before the newest capture are candidates, so no clocks are compared. A restic restore brings back sidecars whose versions some retained manifest names.
-- **Owner deletion.** An original the owner deletes leaves the store when the last retained backup that references it is pruned, as deleted vault files leave restic today.
-- **Cell deletion.** Media content-key retirement follows `cloud-cell-key-custody` and does not wait for edge or provider cleanup.
-  Live-copy absence and retention evidence still govern completion; removing the database bundle alone proves neither.
-  Cleanup keeps only the non-content credentials it needs. Its provider steps retain this order:
-  1. Remove the cell from the edge's active set.
-  2. Observe that the edge has loaded that set.
-  3. Abort every unfinished multipart upload under the cell's prefix.
-  4. Delete every version under the prefix.
-
-  It reports `deleted` only after it observes that the versions and the bundle are absent. A revoked credential cannot repopulate the prefix after the absence check.
+- **Destroy.** This change destroys no version. `collect-released-media` D5 defines when a released version may be removed, and its manifest carries the protection records above.
+- **Owner deletion.** Until `collect-released-media` ships, a version that the owner deleted stays in the store. Its storage counts in the physical meter, not against the owner's allowance. With it, the version is hidden at the first backup hold after the last retained backup that references it is pruned, and the provider deletes it after the grace period.
+- **Cell deletion (decision 2026-11-06).** cellctl revokes and proves the revocation. The operator's cleanup script deletes. cellctl holds no `deleteFiles` on the media bucket, so it deletes nothing there.
+  - *Content keys.* Media content-key retirement follows `cloud-cell-key-custody` and does not wait for edge or provider cleanup. cellctl runs it before any provider work.
+  - *Revocation.* A cell with a `media_store` record in its custody observation stays `deleting` until the edge's exact-set evidence (D6) shows a set that omits the cell. The database statement that retires the cell's media key bundle also writes `revoke_requested_at` into that record. That statement runs at the start of the pass, and the same pass then publishes a set without the cell, so the set no longer shows that the edge listed it. Writing the intent with the retirement keeps it when the rest of the pass fails or cellctl stops. A cell receives an edge credential only after its bundle is minted, so a held bundle marks every cell that the edge may admit. A turned-off store (D12) already has the record. The matching evidence adds `revoked_generation`, `set_sha256` and `observed_at`. The record needs no migration and survives a restart. A cell that never held a bundle waits for nothing. Then the row becomes `deleted` and the existing cleanup alert fires. This wait only controls when the alert fires. It authorizes no deletion.
+  - *Cleanup.* The operator's script has a media mode for the founder bucket. It follows the same 7-day grace from the operator's own first dry run as the cell-data mode, because the bucket has no lock and its objects are the only copy. After the grace, `--apply` cancels every unfinished large file under `cells/<cell>/` with the provider's cancel operation, and deletes every file version there. It does not rely on the delete operation for an unfinished file. It reports unfinished files apart from versions. A final dry run with `files_found=0` and no unfinished file is the absence proof.
+  - *Absence claim.* cellctl does not claim that the versions are absent. The content keys are gone first, so the remaining ciphertext is unreadable; the script's final dry run proves the removal. A revoked credential cannot repopulate the prefix, because the exact-set evidence preceded the alert.
 
 ### D10. Quota: an included media allowance
 
 Each cell has a media allowance, separate from its volume size. It is a configured value in the one limits source; its first value is 100 GB. Paid blocks follow the existing paid-storage observation.
 
-- **Metering.** The cell meters original plaintext bytes from the versions its live and trash sidecars reference, each version counted once. Trash counts until it is emptied. A version kept only for retained backups does not count against the owner. cellctl separately meters physical ciphertext bytes per prefix from the bucket listing, for the operator.
+- **Metering.** The cell meters original plaintext bytes from the versions its live and trash sidecars reference, each version counted once. Trash counts until it is emptied. A version kept only for retained backups does not count against the owner. cellctl separately meters physical ciphertext bytes per prefix from the bucket listing, for the operator (the physical meter below).
 - **Admission.** An upload or import whose declared media bytes exceed the remaining allowance is refused before any byte arrives, with a code that names the limit.
 - **Overflow.** An original that the allowance cannot cover stays local and is reported in status.
 - **Two meters.** Status and the Home display report two figures, each named for what it counts:
@@ -361,6 +388,17 @@ Each cell has a media allowance, separate from its volume size. It is a configur
   - *Media storage:* each stored original counted once, against the allowance.
 
   Vault storage is provisioned per cell and costs more per gigabyte; media storage is billed by the bytes stored. A meter that cannot be read shows as unknown, never as zero.
+
+#### The physical meter (decision 2026-11-06)
+
+Once per backup hold, cellctl lists each cell's prefix with its list-only key (D7). It sums `contentLength` over the upload versions while it pages, so it holds one page in memory and not the prefix. It also counts unfinished large files. A failed listing makes the figure unknown, never 0, and does not change the owner's figure. cellctl raises an alert in three cases:
+- any hide entry appears. The edge sends no hide request, but its key's `writeFiles` capability permits one. So a hide means that the edge key or another key hid a name, and the operator checks both: the edge and the key watcher. Only a listing that shows no hide entry resolves this alert, so it stays when the cell is deleted. `collect-released-media` (D4) withdraws this alert, because its collection hides released names;
+- a prefix's bytes exceed the cell's allowance times the configured headroom factor;
+- the figure stays unknown for three listings in a row, five minutes apart. One failure alerts nothing, because a provider blip is normal. A revoked or wrong list key fails every listing, and without this alert it would switch off the other two with no notice.
+
+cellctl starts without the list key, because the meter is a report and not a gate. It then logs once that every physical figure is unknown and meters nothing, and each try counts as a failed listing toward the unknown-figure alert. The runbook's upgrade step creates the key's Secret.
+
+Publication of the physical figure to Home needs Substrate columns and stays out of this change. The headroom factor is configuration, not a constant in code.
 
 #### Complete reference accounting
 
@@ -429,7 +467,9 @@ Under filing by rename (D12), each window is an ordinary import within the limit
 1. Ship core behind the store being disabled. Tasks 3.x prove the states and eviction against a filesystem-backed store.
 2. Ship the bucket, edge, keys and policies with the edge off.
 3. Enable one canary cell. Back-fill: upload and verify every bound original, then evict to target.
-4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5). Until then, only the canary may store more media than its export can stage. Imports larger than the volume also stay on the canary until then (D12, choice 4).
+4. Enable the fleet switch only after export can deliver every selected cell's media (task 5.5) and the change `collect-released-media` has shipped. Until then, only the canary may store more media than its export can stage. Imports larger than the volume also stay on the canary until then (D12, choice 4).
+
+**Operator decision, 2026-11-06: "Build it next; test cell now".** The change `collect-released-media` is built next. Only the canary cell uses the media store before it ships. The fleet switch (task 6.3) waits for it as well as for task 5.5.
 
 Phases 1–6 of `move-cloud-cells-to-local-storage` do not depend on this change. Phase 7 does for any media-heavy cell. Either this change's rollout finishes first, or a media-light cell migrates first.
 
@@ -626,7 +666,7 @@ Delivery slices:
 - **Cold playback.** A large evicted original hydrates in full before ranged playback starts, which takes seconds to tens of seconds; the spike measures it.
 - **Key loss.** Media recovery follows the cell root's custody and recovery rules in `cloud-cell-key-custody`. This change adds no separate escrow or bypass.
 - **Sidecar edits.** An edit could drop or alter the reference. Mitigations: the descriptor key is governed, and a version stays in the store while any retained snapshot references it.
-- **Compromised edge.** It holds a bucket-wide credential, so it can bypass its own active-set check. It sees every cell's ciphertext and object names, can write new versions under any prefix (a revoked cell's included), and can deny service or run up storage. It cannot decrypt, destroy versions or change a version that a reference pins. A captured *cell* credential is narrower: the edge refuses it once revoked. Mitigations: the edge holds no media key, version destruction stays with cellctl, and cellctl's metering alerts on unexpected bytes.
+- **Compromised edge.** It holds a bucket-wide credential, so it can bypass its own active-set check. It sees every cell's ciphertext and object names, can write new versions under any prefix (a revoked cell's included), and can deny service or run up storage. It cannot decrypt or change a version that a reference pins. Since `collect-released-media`, it can hide any name, and the provider deletes a hidden version after the grace period; that change's hide budget and grace bound this (its D4). A captured *cell* credential is narrower: the edge refuses it once revoked. Mitigations: the edge holds no media key, no running service holds `deleteFiles` on the media bucket, and cellctl's metering alerts on unexpected bytes.
 - **Hydration storms.** An export or a CLIP model change can hydrate many originals. Concurrency and temporary space are bounded (D3).
 - **Holds per window (D12).** Each window takes three holds, or two with deferred discards, and each hold restarts the cell. A large import therefore costs the owner several short outages. The rehearsal measures the downtime of all three holds, and R is the follow-up.
 - **The source is the second copy (D12).** Until filing ends, the person's source folder is the only other copy of an unfiled member. After a discard, it is the only copy. The CLI reports done when the last window lands, not when filing ends. Tool text and the CLI say to keep the source while a landed window has an unfiled member or a residual record lists a member. Status reports both.
@@ -642,7 +682,7 @@ Each question below names what settles it.
 
 - **Eviction target, margin and minimum idle age.** Settled by two to four weeks of hydration records on the canary cell.
 - **Edge integration:** the custom service is selected above. Task 2.1 still measures 1 GB hydration; sandbox provider checks verify exact-version recovery after lost replies.
-- **Export of more media than the export staging volume can hold.** This covers staging, part limits and deadlines; Cloud export today sizes its total from the cell. It is settled with the owners of `add-cloud-owner-export` and gates the fleet switch (D11).
+- **Export of more media than the export staging volume can hold.** Settled by the amendment of 2026-11-08 to D8: staging holds the volume's members and a two-part spool, and evicted originals stream from the edge into the archive. The rehearsal (task 5.5.9) still measures the pause on TopoLVM and Hetzner.
 - **Direct presigned upload to the store for files above the 2 GiB upload-session limit.** Settled by the first such file.
 - **Unbound binaries.** A file that was neither preserved nor matched by the extraction registry has no sidecar and stays on the volume. Whether discovery should give large unbound files a sidecar is settled by their byte share in canary vaults.
 - **The archive member pool.** It stores content-addressed members in the vault. Whether it is in scope is settled by its byte share.

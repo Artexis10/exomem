@@ -24,6 +24,7 @@ from . import (
 )
 from . import find as find_module
 from .audit import AuditFinding
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import content_hash, find_body_wikilinks, kb_root
 
 ACTIVATION_CATEGORIES: tuple[str, ...] = (
@@ -33,18 +34,7 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
     "relation_debt",
 )
 
-_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
-_SKIP_TAGS = frozenset({"hub", "snapshot"})
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
-_PROVENANCE_RELATIONS = frozenset({"derived_from", "evidenced_by", "cites"})
-_FRONTMATTER_TYPED_FIELDS: dict[str, str] = {
-    "sources": "derived_from",
-    "evidence": "evidenced_by",
-    "evidences": "evidenced_by",
-    "evidence_paths": "evidenced_by",
-    "supersedes": "supersedes",
-    "superseded_by": "supersedes",
-}
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]+)?\]\]")
 
 
@@ -307,12 +297,12 @@ def structurally_placed(
     if access.access_tier(vault_root, page.rel_path) not in tiers:
         return False
     stem = page.path.stem.lower()
-    if any(stem.endswith(suffix) for suffix in _SKIP_SLUG_SUFFIXES):
+    if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
         return False
     normalized_tags = {
         str(tag).strip().casefold().lstrip("#") for tag in page.tags
     }
-    if _SKIP_TAGS & normalized_tags:
+    if BREADTH_TAGS & normalized_tags:
         return False
     return True
 
@@ -343,9 +333,12 @@ def _measure_page(
 
 
 def frontmatter_link_counts(frontmatter: dict[str, Any]) -> dict[str, int]:
-    """Keep each fixed field separate so summaries preserve provenance counts."""
+    """Keep each bound field separate so summaries preserve provenance counts.
+
+    The fields are core-only registry data, so the shipped registry names them for every page.
+    """
     return {field: len(_frontmatter_links(frontmatter.get(field)))
-            for field in (*_FRONTMATTER_TYPED_FIELDS, "related")}
+            for field in relation_registry.core_registry().frontmatter_fields()}
 
 
 def measure_document(
@@ -392,17 +385,16 @@ def measure_document(
                 registered.append(resolution.canonical)
 
     frontmatter_links = 0
-    for field, relation_kind in _FRONTMATTER_TYPED_FIELDS.items():
+    for field, binding in registry.frontmatter_fields().items():
         count = frontmatter_counts.get(field, 0)
         frontmatter_links += count
-        registered.extend([relation_kind] * count)
-    related_count = frontmatter_counts.get("related", 0)
-    frontmatter_links += related_count
+        if not registry.has(binding.relation, "plain_link"):
+            registered.extend([binding.relation] * count)
 
     assertion_blocks = sum(
         1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )
-    provenance_relations = sum(1 for kind in registered if kind in _PROVENANCE_RELATIONS)
+    provenance_relations = sum(1 for kind in registered if registry.has(kind, "sources"))
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered
     }

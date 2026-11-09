@@ -136,9 +136,11 @@ from . import provenance as provenance_module
 from . import review_state as review_state_module
 from . import vault as vault_module
 from .collection_store import ownership
+from .collection_store.aliases import link_target as retired_link_target
 from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import (
     _mask_code_spans,
     content_hash,
@@ -2649,6 +2651,8 @@ def _check_wikilinks(
                 continue
             if target_for_resolve.lstrip("/") in full_paths:
                 continue
+            if "/" in target_for_resolve and retired_link_target(vault_root, target_for_resolve):
+                continue
             # Bare-name lookup: Obsidian resolves [[name]] by filename anywhere
             # in the vault. Only attempt if no path separator.
             ambiguous_stem = False
@@ -3897,9 +3901,9 @@ def relation_debt_eligible(
     if access.access_tier(vault_root, path.as_posix()) != access.TIER_READ_WRITE:
         return False
     stem = path.stem.lower()
-    if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+    if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
         return False
-    return not bool(_STALE_SKIP_TAGS & set(tags))
+    return not bool(BREADTH_TAGS & set(tags))
 
 
 @call_spans.timed("audit.relation_debt")
@@ -3999,9 +4003,9 @@ def _check_missing_sources(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
         if page.frontmatter.get("sources"):
             continue
@@ -4331,9 +4335,9 @@ def _check_derivation_double_counting(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
         key = _relevance_canon(page.rel_path)
         directs = direct_sources.get(key, [])
@@ -4567,10 +4571,21 @@ def _check_unfinished_experiments(
 
 # ---------------- check: prediction_window ----------------
 
-# Authoring one of these on the unit is the signal that SOMEBODY ENGAGED with the
-# prediction. Deliberately not a judgment of which way it went — concluding is
+# Authoring a relation with the `bears_on` behaviour on the unit is the signal that SOMEBODY
+# ENGAGED with the prediction. Deliberately not a judgment of which way it went — concluding is
 # `verdict`'s job; this queue only measures whether anyone looked.
-_PREDICTION_RESOLVING_RELATIONS = frozenset({"supports", "contradicts", "resolves", "evidenced_by"})
+def _bears_on_unit(
+    relations: relation_registry.RelationRegistry, unit: semantic_units.SemanticUnit
+) -> bool:
+    """True when the unit itself authors a relation that bears on it, whatever its extension."""
+    return any(
+        relations.has(
+            relations.resolve(relation.kind, origin="semantic_relation").canonical or "", "bears_on"
+        )
+        for relation in unit.relations
+    )
+
+
 # The prefilter that decides whether a page is worth parsing. It MUST NOT be
 # narrower than `semantic_blocks.normalize_label`, which lowercases a metadata
 # key and collapses `[\s-]+` to `_` — so `- Check By:`, `- check by:` and
@@ -4603,8 +4618,8 @@ def _check_prediction_window(
     without the author having to remember to go looking for it.
 
     "Nothing recorded" is deliberately UNIT-LOCAL: no `verdict` on the unit, and
-    no outbound relation authored ON THE UNIT ITSELF resolving to one of
-    `_PREDICTION_RESOLVING_RELATIONS`. A relation elsewhere on the parent page
+    no outbound relation authored ON THE UNIT ITSELF with the `bears_on` behaviour
+    (`_bears_on_unit`). A relation elsewhere on the parent page
     does not clear it, and neither does an inbound edge from another note.
 
     That is forced, not lazy. `epistemic_graph` still strips the `#fragment` off a
@@ -4665,11 +4680,7 @@ def _check_prediction_window(
                 continue
             if unit.verdict:
                 continue
-            if any(
-                relations.resolve(relation.kind, origin="semantic_relation").canonical
-                in _PREDICTION_RESOLVING_RELATIONS
-                for relation in unit.relations
-            ):
+            if _bears_on_unit(relations, unit):
                 continue
 
             overdue_days = (today - due).days
@@ -6014,12 +6025,11 @@ QUESTION_AGING_DAYS = 30
 #: the check alias-proof.
 _QUESTION_CATEGORY = "question"
 
-#: Authoring one of these on the unit is the signal that SOMEBODY ANSWERED the
-#: question. Deliberately the same set `_check_prediction_window` clears on, so
-#: one resolution rule governs every unit-scoped due-state category instead of
-#: two that drift apart. A question and a prediction are the same shape of open
-#: loop; only the threshold that opens them differs.
-_QUESTION_ANSWERING_RELATIONS = _PREDICTION_RESOLVING_RELATIONS
+# Authoring a `bears_on` relation on the unit is the signal that SOMEBODY ANSWERED the question.
+# Deliberately the rule `_check_prediction_window` clears on (`_bears_on_unit`), so one
+# resolution rule governs every unit-scoped due-state category instead of two that drift apart.
+# A question and a prediction are the same shape of open loop; only the threshold that opens
+# them differs.
 
 #: Cheap prefilter, deliberately looser than the exact heading — a page that has
 #: never authored a question cannot match, so a vault that does not use the
@@ -6102,11 +6112,7 @@ def _check_question_aging(
                 continue
             if unit.verdict:
                 continue
-            if any(
-                relations.resolve(relation.kind, origin="semantic_relation").canonical
-                in _QUESTION_ANSWERING_RELATIONS
-                for relation in unit.relations
-            ):
+            if _bears_on_unit(relations, unit):
                 continue
 
             fingerprint = unit.fingerprint or ""
@@ -6364,6 +6370,7 @@ def _check_supersession_integrity(
                     continue
                 older, newer = (
                     (page.rel_path, target)
+                    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
                     if pointer == "superseded_by"
                     else (target, page.rel_path)
                 )
@@ -6468,9 +6475,8 @@ def _multi_headed_chain_findings(
 # (The scaffold's "unfinished production lifecycles" entry is still an unbacked
 # claim; closing it is filed as a named follow-up in
 # `openspec/changes/close-experiment-lifecycle/design.md`.)
-# Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag.
-_STALE_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
-_STALE_SKIP_TAGS = frozenset({"hub", "snapshot"})
+# Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag
+# (`structure_promotion.BREADTH_TAGS` and `BREADTH_SLUG_SUFFIXES`).
 
 
 def _stale_thresholds() -> tuple[int, int, int]:
@@ -6678,9 +6684,9 @@ def _check_stale_review(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
 
         updated = _parse_fm_date(page.frontmatter.get("updated") or page.frontmatter.get("created"))
@@ -7051,6 +7057,7 @@ def _asserted_contradictions(
                     + _page_signal_version(eligible[b])
                 )[:16],
                 "provenance": "asserted",
+                # Debt (K18): a label on the finding; the pairs come from `opposes`, an extension is labelled by its parent.
                 "relation_type": "contradicts",
             },
             )

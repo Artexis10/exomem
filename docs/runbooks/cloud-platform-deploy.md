@@ -227,6 +227,11 @@ cell's apply once and retries it after its backoff, and the cell keeps
 serving. With local storage enabled, every local cell whose hourly backup runs
 during the upgrade parks once. Expect it; it needs no action.
 
+The cellctl release that splits an export into a pause, a pack and an upload
+runs the pause with the cell's own image. Until the rollout reaches a cell,
+each export of that cell fails with `EXPORT_FAILED`. The owner retries it
+after the rollout.
+
 ## Verify
 
 ```bash

@@ -150,6 +150,21 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+#: The learning instruction: the user's own request to recall before a task and to
+#: save what the task establishes. Agents read the server's policy text as
+#: background; the same request changed what they did only when it arrived as the
+#: user's instruction. So it lives in the user's instruction file, never in a server,
+#: bootstrap or hook channel. `exomem setup` offers it for Claude Code and Codex
+#: (`client_config.place_learning_instruction`), the hosted-client guides show it as
+#: paste-in text, and `tests/test_prominence.py` fails when a guide's copy differs.
+LEARNING_INSTRUCTION = (
+    "Use Exomem as the memory for my work. Before you start a task, recall what Exomem "
+    "holds about the systems, projects or topics it touches. As you work, save each "
+    "reusable fact you establish (how something is structured, a pitfall, a method that "
+    "worked) as one concise observation, and update an existing note when one covers it, "
+    "so a later session does not have to find it again."
+)
+
 #: The activation carrier, at `balanced` and `maximal` only.
 #:
 #: Where the host exposes a prompt lifecycle, the retrieve hook injects the
@@ -211,16 +226,17 @@ _BASELINE_CAPTURE = (
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
     "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Before an affiliation facet, check the relation queue: a confirmed match goes "
-    "to link_acceptance instead. Fleeting preferences, one-offs, incidental associations, "
-    "trivia, and tentative claims stay quiet."
+    "measurement. Before an affiliation facet, check the relation queue: a match the user "
+    "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
+    "incidental associations, trivia, and tentative claims stay quiet."
 )
 
-#: What a selected or sent draft is worth as a save, positive rule first. The activation block
-#: carries it with the baseline doctrine; the prohibition and the rest stay in bootstrap.
+#: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
+#: trigger: waiting for the agent to notice a selection lost files the user went on to use. The
+#: activation block carries it with the baseline doctrine; the rest stays in bootstrap.
 _ADOPTION_TRIGGER = (
-    "Generated drafts stay ephemeral. Keep the exact bytes of the one the user selects or "
-    "sends, once, under proactive_capture: Source/Evidence by role, never MIME."
+    "Keep the exact bytes of every generated file you hand the user under proactive_capture: "
+    "Source/Evidence by role, never MIME. Drafts not handed over stay ephemeral."
 )
 
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
@@ -234,7 +250,7 @@ _DELIVERY_CAPTURE = (
 _ARTIFACT_ADOPTION_CAPTURE = (
     " "
     + _ADOPTION_TRIGGER
-    + " Selection is not write consent. No handle: non-committing handoff. "
+    + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
     + " Missing collection: structural_suggestions."
 )

@@ -41,10 +41,10 @@ def test_resolver_returns_complete_core_and_honest_outcomes() -> None:
     vocabulary = {item["key"]: item for item in result["core_vocabulary"]}
     assert len(vocabulary) == len(relation_registry.core_registry().core)
     assert vocabulary["part_of"]["inverse"] == "contains"
-    assert result["honest_outcomes"] == {
-        "relates_to": "available when a meaningful generic connection is justified",
-        "no_edge": "available when no durable relationship is established",
-    }
+    # The generic relation is not an honest outcome for new authoring: a plain link is.
+    assert set(result["honest_outcomes"]) == {"plain_link", "no_edge"}
+    assert relation_registry.link_relation_key() in result["honest_outcomes"]["plain_link"]
+    assert result["honest_outcomes"]["no_edge"] == "available when no durable relationship is established"
     assert result["selected_relation"] is None
     assert result["proposed_relation"] is None
 

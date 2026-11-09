@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,12 +85,34 @@ def parse_relation_review_ref(value: str) -> str:
     return raw_id
 
 
-def _candidate_identity(candidate: dict[str, Any]) -> str:
+def candidate_identity(candidate: dict[str, Any]) -> str:
+    """The review id of a candidate. One function names it, so queue, accept and suggestions agree."""
     payload = "|".join(
         str(candidate.get(key) or "")
         for key in ("from", "to", "relation_type", "method")
     )
     return review_state_module.item_id(f"relation:{payload}")
+
+
+def generic_choice(
+    registry: relation_registry.RelationRegistry,
+    candidate: dict[str, Any],
+    options: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The fields a generated candidate shows in place of the generic relation; None for any other.
+
+    Such a candidate names no relation and no bullet: it shows the ranked specific options and
+    the plain link, and accepting it takes one of them. The generic relation stays on the
+    internal candidate so its review id does not move.
+    """
+    if not registry.is_generic(str(candidate.get("relation_type") or "")):
+        return None
+    return {
+        "relation_type": None,
+        "bullet": None,
+        "options": options,
+        "plain_link": registry.link_key,
+    }
 
 
 def _bullet(candidate: dict[str, Any]) -> str:
@@ -170,15 +192,18 @@ class RelationFit:
     """The specific relations that fit a generated candidate's two pages.
 
     A generator proposes the generic relation when its evidence shows two pages are related
-    and nothing more (shared sources, a shared question). When the registry names a specific
-    relation that joins those pages, the candidate carries it as an option and the agent
-    chooses; `relation_options.fitting_options` is the one producer. Page lookups are held for
-    one read, so a page that many candidates name is read once.
+    and nothing more (shared sources, a shared question). The candidate then names no relation
+    to write: it carries the ranked specific relations that join those pages, and the agent
+    chooses one (`relation_options.ranked_options` is the one producer). Page lookups are held
+    for one read, so a page that many candidates name is read once. The same holds for a page's
+    registry and parsed relation bullets, which a run of candidates from one page asks for each.
     """
 
     def __init__(self, vault_root: Path, *, basis: note_types.Basis | None = None) -> None:
         self._root = Path(vault_root)
         self._pages: dict[str, Any | None] = {}
+        self._registries: dict[str, relation_registry.RelationRegistry] = {}
+        self._bullets: dict[str, tuple[Any, ...]] = {}
         self._basis = basis or note_types.Basis(self._root)
         self._entity_types: Any = None
 
@@ -194,6 +219,21 @@ class RelationFit:
             allowed = bool(rel) and recall_policy.is_recall_candidate(self._root, self._root / rel)
             self._pages[rel] = _page_for(self._root, rel) if allowed else None
         return self._pages[rel]
+
+    def registry(self, page: Any) -> relation_registry.RelationRegistry:
+        """The registry that the page's instance defines, loaded once per page."""
+        if page.rel_path not in self._registries:
+            self._registries[page.rel_path] = relation_registry.load_for_page(
+                self._root, page.rel_path, page.frontmatter
+            )
+        return self._registries[page.rel_path]
+
+    def note_relations(self, page: Any) -> tuple[Any, ...]:
+        """The canonical `## Relations` bullets of the page's current Markdown, parsed once."""
+        if page.rel_path not in self._bullets:
+            document = _relation_document(page, self._root, registry=self.registry(page))
+            self._bullets[page.rel_path] = tuple(document.canonical_note_relations)
+        return self._bullets[page.rel_path]
 
     def _kind(self, page: Any) -> relation_endpoints.PageKind | None:
         # Mirrors `semantic_contract.endpoint_page_kind` for a parsed page rather than a write state.
@@ -214,7 +254,7 @@ class RelationFit:
         source_page: Any | None = None,
         relation: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Up to four fitting relations when the relation is the generic one, else none.
+        """The ranked specific relations when the relation is the generic one, else none.
 
         `relation` is the one under judgement: the candidate's own, unless an agent asked for another.
         """
@@ -223,7 +263,7 @@ class RelationFit:
             page = page or self._page(str(candidate.get("from") or ""))
             if page is None:
                 return []
-            registry = relation_registry.load_for_page(self._root, page.rel_path, page.frontmatter)
+            registry = self.registry(page)
         # Generic is a registry attribute (`generic`); no relation key is compared here.
         if not registry.is_generic(str(relation or candidate.get("relation_type") or "")):
             return []
@@ -231,26 +271,35 @@ class RelationFit:
         target = self._page(str(candidate.get("to") or ""))
         if page is None or target is None:
             return []
-        subject = self._kind(page)
-        other = self._kind(target)
-        if subject is None or other is None:
-            return []
-        return relation_options.fitting_options(
+        return relation_options.ranked_options(
             registry,
-            subject,
-            other,
+            self._kind(page),
+            self._kind(target),
             self._types(),
             accepts=lambda key: _usable_relation(registry, key, page, target) is not None,
         )
 
 
-#: What the agent does when the queue will not write the generic relation for a pair a specific one
-#: fits. Naming a relation here takes a recorded vocabulary choice, so the steps run in this order.
+#: What the agent does when the queue will not write the generic relation for a pair.
 RELATION_CHOICE_REMEDIATION = (
-    "Choose one of the offered relations. Ask a vocabulary question for this candidate, "
-    "record a reuse decision that names the relation, then accept the candidate with requested_relation, "
-    "vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate. "
-    "A generic edge with a reason can be authored on the page."
+    "Accept again with requested_relation set to one of the offered relations. When none "
+    "fits, set it to the plain_link relation, or dismiss the candidate."
+)
+
+#: What the agent does when a candidate offers no relation to choose and one is requested anyway.
+RELATION_NONE_OFFERED_REMEDIATION = (
+    "This candidate offers no relation to choose. Accept again without requested_relation to "
+    "write its own relation, or dismiss the candidate. To use another relation, ask a "
+    "vocabulary question for this candidate, record a reuse decision that names the relation, "
+    "then accept the candidate with requested_relation, vocabulary_ref and vocabulary_fingerprint."
+)
+
+#: What the agent does when it names a relation the candidate does not offer. Such a relation
+#: takes a recorded vocabulary choice, so the steps run in this order.
+RELATION_NOT_OFFERED_REMEDIATION = (
+    "Choose one of the offered relations. To use another, ask a vocabulary question for this "
+    "candidate, record a reuse decision that names the relation, then accept the candidate "
+    "with requested_relation, vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate."
 )
 
 
@@ -262,7 +311,7 @@ def require_relation_choice(
     page: Any | None = None,
     fit: RelationFit | None = None,
 ) -> None:
-    """Refuse to accept the generic relation where a specific one fits; the agent chooses.
+    """Refuse to accept the generic relation: the agent names a specific relation or the plain link.
 
     Naming no relation takes the candidate's own, so a generic candidate is refused. Naming
     the generic relation is refused too. Any other registered relation passes.
@@ -272,17 +321,20 @@ def require_relation_choice(
         return
     registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
     fit = fit or RelationFit(vault_root)
-    relation = None
+    relation = str(candidate.get("relation_type") or "")
     if requested_relation is not None:
         chosen = selected_relation(vault_root, candidate, requested_relation, source_page=page)
         relation = str(chosen.get("relation_type") or "")
-    options = fit.options(candidate, registry=registry, source_page=page, relation=relation)
-    if options:
+    if registry.is_generic(relation):
         raise OpError(
             "RELATION_CHOICE_REQUIRED",
-            "a specific relation fits these two pages, so the generic relation is not chosen for you",
+            "the generic relation is not written; name a specific relation or the plain link",
             RELATION_CHOICE_REMEDIATION,
-            details={"options": options, "mutated": False},
+            details={
+                "options": fit.options(candidate, registry=registry, source_page=page),
+                "plain_link": registry.link_key,
+                "mutated": False,
+            },
         )
 
 
@@ -334,15 +386,20 @@ def _candidate_fingerprint(
     )
 
 
-def _relation_document(page: Any, vault_root: Path) -> Any:
+def _relation_document(
+    page: Any,
+    vault_root: Path,
+    *,
+    registry: relation_registry.RelationRegistry | None = None,
+) -> Any:
     """Parse one already-read source with the current semantic registries."""
+    if registry is None:
+        registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
     return semantic_units.parse_semantic_units(
         page.body,
         validate=False,
         language_registry=semantic_language_registry.load_registry(vault_root),
-        relation_registry=relation_registry.load_for_page(
-            vault_root, page.rel_path, page.frontmatter
-        ),
+        relation_registry=registry,
         page_type=page.page_type,
     )
 
@@ -386,17 +443,20 @@ def _authors_toward(
     target: str,
     *,
     accepts: Callable[[str], bool],
+    fit: RelationFit | None = None,
 ) -> bool | None:
     """Whether current Markdown has `page` author an accepted relation to `target`.
 
     Targets resolve through the exact cached resolver authority. None means that
-    authority is unavailable or moved while it was read.
+    authority is unavailable or moved while it was read. `fit` holds the page's parsed
+    bullets for a run of candidates, so each one does not parse the page again.
     """
-    matching_relations = tuple(
-        relation
-        for relation in _relation_document(page, vault_root).canonical_note_relations
-        if accepts(relation.kind)
+    bullets = (
+        fit.note_relations(page)
+        if fit is not None
+        else _relation_document(page, vault_root).canonical_note_relations
     )
+    matching_relations = tuple(relation for relation in bullets if accepts(relation.kind))
     if not matching_relations:
         return False
     snapshot = semantic_contract_module.current_reference_identity_snapshot(vault_root)
@@ -423,6 +483,8 @@ def _current_candidate_is_authored(
     vault_root: Path,
     page: Any,
     candidate: dict[str, Any],
+    *,
+    fit: RelationFit | None = None,
 ) -> bool | None:
     """Check current Markdown using exact cached resolver authority."""
     relation_type = str(candidate.get("relation_type") or "")
@@ -430,7 +492,7 @@ def _current_candidate_is_authored(
     if not relation_type or not target:
         return False
     return _authors_toward(
-        vault_root, page, target, accepts=lambda kind: kind == relation_type
+        vault_root, page, target, accepts=lambda kind: kind == relation_type, fit=fit
     )
 
 
@@ -438,25 +500,35 @@ def _current_pair_is_settled(
     vault_root: Path,
     page: Any,
     candidate: dict[str, Any],
+    *,
+    fit: RelationFit | None = None,
 ) -> bool | None:
     """Whether a generic candidate's two pages already have a specific authored relation.
 
     Either page may author it, toward the other. This is the Markdown twin of the
     graph read's `_specific_pairs`, so accept and the queue agree on what is settled.
     """
-    registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
+    registry = (
+        fit.registry(page)
+        if fit is not None
+        else relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
+    )
     if not registry.is_generic(str(candidate.get("relation_type") or "")):
         return False
     target = epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
-    forward = _authors_toward(vault_root, page, target, accepts=registry.is_specific)
+    forward = _authors_toward(vault_root, page, target, accepts=registry.is_specific, fit=fit)
     if forward:
         return True
     other = _page_for(vault_root, target)
     if other is None:
         return forward
-    other_registry = relation_registry.load_for_page(vault_root, other.rel_path, other.frontmatter)
+    other_registry = (
+        fit.registry(other)
+        if fit is not None
+        else relation_registry.load_for_page(vault_root, other.rel_path, other.frontmatter)
+    )
     backward = _authors_toward(
-        vault_root, other, page.rel_path, accepts=other_registry.is_specific
+        vault_root, other, page.rel_path, accepts=other_registry.is_specific, fit=fit
     )
     if backward:
         return True
@@ -604,7 +676,7 @@ def _body_wikilink_candidates(
             {
                 "from": page.rel_path,
                 "to": str(observation["target_path"]),
-                "relation_type": "links_to",
+                "relation_type": relation_registry.link_relation_key(),
                 "method": "wikilink",
                 "evidence": evidence,
             }
@@ -625,22 +697,34 @@ def _shared_source_candidates(
     if connection is None:
         return []
     try:
+        # Debt (drifted shared-source copy): reads only the frontmatter field's stored edges, while the
+        # graph's copy also reads page-level extensions; folding the two changes suggestions and needs
+        # its own evidence. The field and relation come from the binding, not from literals.
+        field, relation = epistemic_graph_module.declared_sources_binding()
         rows = connection.execute(
             "SELECT e2.source_path, e1.dst_key "
             "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
             "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
             "WHERE e1.source_path = ? "
-            "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
-            "AND e1.relation_type = 'derived_from' "
-            "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
-            "AND e2.relation_type = 'derived_from' "
+            "AND e1.origin = 'frontmatter' AND e1.source_anchor = ? "
+            "AND e1.relation_type = ? "
+            "AND e2.origin = 'frontmatter' AND e2.source_anchor = ? "
+            "AND e2.relation_type = ? "
             "AND e2.source_path <> e1.source_path "
             "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
             "WHERE p.src_key = ('file:' || e1.source_path) "
             "AND p.dst_page_key = ('file:' || e2.source_path) "
             "AND p.relation_type = ?) "
             "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
-            (rel_path, relation_registry.generic_relation_key(), max(0, int(limit))),
+            (
+                rel_path,
+                field,
+                relation,
+                field,
+                relation,
+                relation_registry.generic_relation_key(),
+                max(0, int(limit)),
+            ),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -808,15 +892,14 @@ def _enrich(
         to_ref = refs.get(to_path, to_path)
     else:
         from_ref, to_ref = exact_refs
-    review_id = _candidate_identity(candidate)
+    review_id = candidate_identity(candidate)
     fingerprint = _candidate_fingerprint(
         candidate,
         from_ref=from_ref,
         to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
-    # Where a specific relation fits, the item offers it and no bullet: the agent picks the relation.
-    options = (fit or RelationFit(vault_root)).options(candidate, source_page=page)
+    fit = fit or RelationFit(vault_root)
     item = {
         "review_id": review_id,
         "ref": relation_review_ref(review_id),
@@ -826,12 +909,12 @@ def _enrich(
         "relation_type": candidate.get("relation_type"),
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
-        "bullet": None if options else _bullet(candidate),
         "target_ref": from_ref,
         "state": "open",
     }
-    if options:
-        item["options"] = options
+    # A candidate the generator could only call generic names no relation and no bullet.
+    generic = generic_choice(fit.registry(page), candidate, fit.options(candidate, source_page=page))
+    item.update(generic if generic is not None else {"bullet": _bullet(candidate)})
     return item
 
 
@@ -877,6 +960,117 @@ def _classify_candidate(
     if effective != "open":
         return "decided", enriched
     return None, enriched
+
+
+def _classify_current(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+    *,
+    store: review_state_module.ReviewStateStore,
+    state_payload: dict[str, Any],
+    exact_refs: tuple[str, str] | None,
+    fit: RelationFit | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """`_classify_candidate` against the page's current Markdown, as accept judges a candidate.
+
+    The reason is "unverifiable" when the reference authority moved while the Markdown was read.
+    """
+    authored_now = _current_candidate_is_authored(vault_root, page, candidate, fit=fit)
+    # A settled generic pair classifies like an authored edge: nothing is left to accept.
+    settled_now = _current_pair_is_settled(vault_root, page, candidate, fit=fit)
+    if authored_now is None or settled_now is None:
+        return "unverifiable", None
+    return _classify_candidate(
+        vault_root,
+        page,
+        candidate,
+        store=store,
+        state_payload=state_payload,
+        exact_refs=exact_refs,
+        fit=fit,
+        authored=(
+            {
+                (
+                    str(candidate.get("relation_type") or ""),
+                    epistemic_graph_module._page_rel(str(candidate.get("to") or "")),
+                )
+            }
+            if authored_now or settled_now
+            else set()
+        ),
+    )
+
+
+def open_reviews(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    identities: Collection[str],
+) -> tuple[dict[str, dict[str, str]], set[str]]:
+    """The accept fields of the named candidates that the queue holds open for one page.
+
+    Each candidate is resolved and judged as `accept` judges it, by the same functions, so a
+    field served here is one `accept` takes. `identities` bounds the work to the candidates that
+    a caller shows.
+    Returns the fields by review id, and the ids the queue could not settle: an id in neither
+    is a candidate the queue does not hold (decided, already authored, no target page, or a
+    method the queue does not derive). A graph that cannot answer at all raises.
+    """
+    _refuse_other_audiences(vault_root)
+    vault_root = Path(vault_root)
+    rel_path = epistemic_graph_module._page_rel(rel_path)
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    snapshot = index._open_read_snapshot() if index.available() else None
+    if snapshot is None:
+        raise ValueError(
+            "REVIEW_REFRESH_REQUIRED: the relation graph is not current, "
+            "so the queue cannot confirm candidates"
+        )
+    try:
+        page = _page_for(vault_root, rel_path)
+        if page is None or not activation_module._eligible(vault_root, page):
+            return {}, set()
+        store = review_state_module.ReviewStateStore(vault_root)
+        state_payload = store.load()
+        fit = RelationFit(vault_root)
+        source_content_hash = _page_content_hash(page)
+        open_fields: dict[str, dict[str, str]] = {}
+        unsettled: set[str] = set()
+        # One graph snapshot serves the generators and every candidate's reference lookup.
+        for candidate in _page_candidates(
+            vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD, snapshot=snapshot
+        ):
+            identity = candidate_identity(candidate)
+            source = str(candidate.get("from") or page.rel_path)
+            if identity not in identities or source != rel_path:
+                continue
+            if _is_placeholder_target(vault_root, str(candidate.get("to") or "")):
+                continue
+            exact_refs = _hinted_candidate_refs(vault_root, candidate, snapshot=snapshot)
+            if exact_refs is None:
+                unsettled.add(identity)
+                continue
+            reason, enriched = _classify_current(
+                vault_root,
+                page,
+                candidate,
+                store=store,
+                state_payload=state_payload,
+                exact_refs=exact_refs,
+                fit=fit,
+            )
+            if reason == "unverifiable":
+                unsettled.add(identity)
+            elif reason is None and enriched is not None:
+                open_fields[identity] = {
+                    "ref": enriched["ref"],
+                    "fingerprint": enriched["fingerprint"],
+                    "source_content_hash": source_content_hash,
+                }
+        return open_fields, unsettled
+    finally:
+        snapshot.close()
 
 
 def build_queue(
@@ -1003,6 +1197,10 @@ def resolve_candidate(
             for item in group.get("items") or []:
                 if str(item.get("review_id") or "") != wanted:
                     continue
+                if item.get("plain_link"):
+                    # A generic candidate shows no relation, so its own candidate is generated again
+                    # from its page; the queue item cannot rebuild the generic relation it hides.
+                    return resolve_candidate(vault_root, ref, source_path=str(item.get("from") or ""))
                 candidate = {
                     key: item.get(key)
                     for key in (
@@ -1033,7 +1231,7 @@ def resolve_candidate(
     ):
         if str(candidate.get("from") or page.rel_path) != rel_path:
             continue
-        if _candidate_identity(candidate) != wanted:
+        if candidate_identity(candidate) != wanted:
             continue
         identity_refs = _hinted_candidate_refs(vault_root, candidate)
         if identity_refs is None:
@@ -1088,6 +1286,32 @@ def triage(
     return result
 
 
+def _require_offered(
+    vault_root: Path,
+    candidate: dict[str, Any],
+    selected: dict[str, Any],
+    page: Any,
+    fit: RelationFit,
+) -> None:
+    """Refuse an unbound request for a relation that the candidate does not offer.
+
+    The options are computed now, so a registry that changed since the read is honoured. A relation
+    outside them takes a recorded vocabulary decision and its exact binding. A candidate that
+    offers none takes no requested relation: it writes its own.
+    """
+    offered = fit.options(candidate, source_page=page)
+    chosen = str(selected.get("relation_type") or "")
+    # The plain link is the last resort the candidate always allows.
+    if chosen == fit.registry(page).link_key or chosen in {option["key"] for option in offered}:
+        return
+    raise OpError(
+        "VOCABULARY_APPLICATION_INVALID",
+        "a relation the candidate does not offer needs a recorded vocabulary choice",
+        RELATION_NOT_OFFERED_REMEDIATION if offered else RELATION_NONE_OFFERED_REMEDIATION,
+        details={"options": offered, "mutated": False},
+    )
+
+
 def accept(
     vault_root: Path,
     *,
@@ -1097,6 +1321,7 @@ def accept(
     expected_fingerprint: str | None = None,
     source_path: str | None = None,
     requested_relation: str | None = None,
+    bound: bool = False,
     edit_memory: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     """Governed server-side accept: validate signal + hash, then author the bullet.
@@ -1108,6 +1333,10 @@ def accept(
     spec requires accept to validate the candidate's fingerprint against the
     live signal, and an optional-by-omission check is skippable by any caller
     that simply doesn't send it.
+
+    ``bound`` says the caller carries a recorded vocabulary decision for ``requested_relation``,
+    which the writer validates. Without one, the request may name only a relation that the
+    candidate itself offers, computed here at accept time.
     """
     _refuse_other_audiences(vault_root)
     if not why or not str(why).strip():
@@ -1120,7 +1349,8 @@ def accept(
         )
     if not expected_fingerprint:
         raise ValueError(
-            "INVALID_ACCEPT: accept-relation requires `expected_fingerprint` from the queue read"
+            "INVALID_ACCEPT: accept-relation requires `expected_fingerprint` from the queue read "
+            "or from the candidate's `review` in suggest-relations"
         )
     vault_root = Path(vault_root)
     resolved = resolve_candidate(vault_root, ref, source_path=source_path)
@@ -1138,44 +1368,33 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
-    authored_now = _current_candidate_is_authored(vault_root, page, candidate)
-    # A settled generic pair classifies like an authored edge: nothing is left to accept.
-    settled_now = _current_pair_is_settled(vault_root, page, candidate)
-    if authored_now is None or settled_now is None:
-        raise _refresh_required(ref)
     store = review_state_module.ReviewStateStore(vault_root)
-    reason, _enriched = _classify_candidate(
+    fit = RelationFit(vault_root)
+    reason, _enriched = _classify_current(
         vault_root,
         page,
         candidate,
         store=store,
         state_payload=store.load(),
         exact_refs=resolved.identity_refs,
-        authored=(
-            {
-                (
-                    str(candidate.get("relation_type") or ""),
-                    epistemic_graph_module._page_rel(
-                        str(candidate.get("to") or "")
-                    ),
-                )
-            }
-            if authored_now or settled_now
-            else set()
-        ),
+        fit=fit,
     )
+    if reason == "unverifiable":
+        raise _refresh_required(ref)
     if reason is not None:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the relation candidate is no longer eligible "
             f"({reason}); refresh the queue and inspect {ref} again"
         )
-    require_relation_choice(vault_root, candidate, requested_relation, page=page)
+    require_relation_choice(vault_root, candidate, requested_relation, page=page, fit=fit)
     selected = selected_relation(
         vault_root,
         candidate,
         requested_relation,
         source_page=page,
     )
+    if requested_relation is not None and not bound:
+        _require_offered(vault_root, candidate, selected, page, fit)
     bullet = _bullet(selected)
     edit_result = edit_memory(
         vault_root,

@@ -189,12 +189,13 @@ The continuation hook reads local structural state and uses a restricted environ
 
 The Cloud-shipped scripts no longer contain the self-hosted credential transport.
 `exomem_local_credentials.py` owns every read of a local credential and every authenticated REST request.
-The producer excludes that module from the archive.
+It also opens the connection: a hook calls `Lane.post` and imports no network module.
+The producer excludes that module from the archive. The Cloud hook scripts therefore read no credential, import no network module and open no connection themselves.
 The retrieve and capture hooks load it through the continuation script's optional sibling loader.
 Where the module is absent, those hooks behave as when no credential is configured.
 Do not prune Python functions during packaging or create a second Cloud hook implementation to change a scanner result.
 The split lives in the canonical source, so self-hosted installs run the same code.
-The registered-hook regression check scans the shipped scripts for our closed set of credential identifiers.
+The registered-hook regression check scans the shipped scripts for our closed set of credential identifiers and for imports of a standard-library network module.
 It then executes all five events with conflicting transport settings and synthetic credentials.
 It records attempted credential-file reads, network connections and unexpected child processes even when a hook soft-fails.
 

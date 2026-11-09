@@ -40,7 +40,7 @@ from test_collection_store_s1_gate import (
     coordinator,
     run_host,
 )
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_typed_history_generations import previous_release
 
@@ -80,7 +80,7 @@ SOURCE = "Knowledge Base/Evidence/service/export/rows.ndjson"
 MAPPING = {"fields": {"title": "title", "count": "count"}}
 ON = frozenset({capability.RECORDS_SUMMARY_V1})
 OPERATOR = "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN"
-DAILY_TEXT = summary_text(manifest_text().replace(CID, DAILY).replace("title: Work", "title: Daily"))
+DAILY_TEXT = sqlite_text(manifest_text().replace(CID, DAILY).replace("title: Work", "title: Daily"))
 
 
 def call(root, tool, **arguments):
@@ -150,7 +150,7 @@ def test_public_progress_review_compares_file_intent_with_canonical_outcomes(ser
     from test_plan_progress_review import _committed
 
     root = service.root
-    front, body, _ = vault.parse_frontmatter(summary_text(), strict=True)
+    front, body, _ = vault.parse_frontmatter(sqlite_text(), strict=True)
     front["views"] = {"observed": {"query": {"filters": []}}}
     guards = call(root, "record_memory", action="inspect", collection=CID)["lifecycle_guards"]
     call(root, "record_memory", action="revise", collection=CID,
@@ -231,7 +231,7 @@ def _served_vault(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
     }.items():
         monkeypatch.setenv(name, value)
-    (tmp_path / "c.md").write_text(summary_text())
+    (tmp_path / "c.md").write_text(sqlite_text())
     # Only a release that enables the slice enrols a vault and serves its summary collection C.
     monkeypatch.setattr(capability, "RELEASED", ON)
     return root
@@ -304,7 +304,7 @@ def test_first_offline_collection_creation_preserves_trashed_declarations(tmp_pa
     state_migration.require_vault_state_ready(root)
     trashed = root / "Knowledge Base/_trash/2026-01-01/removed/_collection.md"
     trashed.parent.mkdir(parents=True)
-    original = summary_text().encode()
+    original = sqlite_text().encode()
     trashed.write_bytes(original)
     source = tmp_path / "manifest.md"
     source.write_bytes(original)
@@ -332,7 +332,7 @@ def test_an_offline_create_after_a_retire_enrols_the_next_fence_generation(tmp_p
     (root / "Knowledge Base/_Schema/SKILL.md").write_text("# Schema\n")
     state_migration.require_vault_state_ready(root)
     source = tmp_path / "manifest.md"
-    source.write_text(summary_text())
+    source.write_text(sqlite_text())
     for name, value in {
         "EXOMEM_VAULT_PATH": str(root), "EXOMEM_WRITER_LEASE_URL": "http://localhost",
         "EXOMEM_WRITER_LEASE_VAULT_ID": "gate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
@@ -532,7 +532,7 @@ def test_records_summary_v1_gates_summary_create_import_and_query_until_released
     (plain / "Knowledge Base/_Schema").mkdir(parents=True)
     refused(lambda: create_daily(plain), "COLLECTION_STORE_ENROLLMENT_REQUIRED")
     assert offline_create(root, tmp_path / "items.md", DAILY_PATH, why="items mode") == 1
-    assert "COLLECTION_STORE_SUMMARY_REQUIRED" in capsys.readouterr().err
+    assert "SQLITE_STORAGE_REQUIRED" in capsys.readouterr().err
     (tmp_path / "daily.md").write_text(DAILY_TEXT)
     assert offline_create(root, tmp_path / "daily.md", DAILY_PATH, why="beside the service") == 1
     assert "COLLECTION_STORE_SERVICE_ACTIVE" in capsys.readouterr().err
@@ -565,7 +565,7 @@ def test_global_inspection_rechecks_canonical_support_and_permissions_without_a_
     root = service.root
     observed = "77777777-7777-4777-8777-777777777777"
     observed_path = manifest_path().replace("Work", "Observed")
-    observed_text = summary_text(manifest_text().replace(CID, observed).replace("title: Work", "title: Observed")
+    observed_text = sqlite_text(manifest_text().replace(CID, observed).replace("title: Work", "title: Observed")
                                  .replace("    count: {type: integer}\n",
                                           "    count: {type: integer}\n    category: {type: string}\n"))
     call(root, "record_memory", action="create", manifest_path=observed_path,
@@ -642,10 +642,12 @@ def test_expired_due_refresh_keeps_the_request_principal_and_canonical_ownership
     from exomem.governance.principal import current_principal
 
     root = service.root
-    daily_text = DAILY_TEXT.replace("view_mode: summary\n", "").replace("lifecycle: active\n",
+    # The routing collection is one that stays in files: a create now makes a store collection.
+    claimed = manifest_text().replace(CID, KEY).replace("lifecycle: active\n",
         "lifecycle: active\nclaims:\n  terms: [account, subscriptions]\n")
-    call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
-         manifest_text=daily_text, why="declared routing")
+    guards = call(root, "record_memory", action="inspect", collection=KEY)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=KEY, manifest_text=claimed, why="declared routing",
+         **guards)
     observation, _ref = _write_observation(root)
     now = dt.datetime(2026, 9, 3, 12, tzinfo=dt.UTC)
     with request_scope(OWNER):
@@ -692,7 +694,7 @@ def test_the_service_builds_a_revised_rollup_and_publishes_the_summary_page(serv
     monkeypatch.setattr(capability, "RELEASED", ON)
     activity = "77777777-7777-4777-8777-777777777777"
     path = manifest_path().replace("Work", "Activity")
-    text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Activity")
+    text = sqlite_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Activity")
                         .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
     call(root, "record_memory", action="create", manifest_path=path, manifest_text=text, why="activity")
     for title, day, count in (("a", "2026-10-01", 3), ("b", "2026-10-01", 4), ("c", "2026-10-02", 5)):
@@ -722,7 +724,7 @@ def test_the_release_lever_stops_the_service_building_derived_state(service, mon
     monkeypatch.setattr(capability, "RELEASED", ON)
     monkeypatch.setattr(runtime, "BACKFILL_BATCH_ROWS", 1)
     activity = "99999999-9999-4999-8999-999999999999"
-    text = summary_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
+    text = sqlite_text(manifest_text().replace(CID, activity).replace("title: Work", "title: Lever")
                         .replace("    count: {type: integer}\n", "    count: {type: integer}\n    day: {type: date}\n"))
     call(root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Lever"),
          manifest_text=text, why="lever")
@@ -1240,12 +1242,12 @@ def test_a_failed_move_restores_its_bytes_after_the_fallback_marker_is_withdrawn
 
 
 def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one(service):
-    """Defect: once its summary page publishes, an empty summary collection revised without
-    view_mode becomes an items-mode store collection outside the release gate."""
+    """Defect: once its summary page publishes, an empty summary collection revised back to
+    Markdown items without view_mode becomes an items-mode store collection outside the release gate."""
     root = service.root
     empty = "88888888-8888-4888-8888-888888888888"
     path = manifest_path().replace("Work", "Empty")
-    text = summary_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty"))
+    text = sqlite_text(manifest_text().replace(CID, empty).replace("title: Work", "title: Empty"))
     call(root, "record_memory", action="create", manifest_path=path, manifest_text=text, why="empty")
 
     def published():
@@ -1255,8 +1257,10 @@ def test_a_revise_cannot_turn_an_empty_summary_collection_into_an_items_mode_one
 
     _until(published)  # no pending publication masks a mode change any more
     guards = call(root, "record_memory", action="inspect", collection=empty)["lifecycle_guards"]
+    # A sqlite collection's view mode is summary by default, so only the strategy edit can reach items mode.
     refused(lambda: call(root, "record_memory", action="revise", collection=empty, why="items mode",
-                         manifest_text=text.replace("view_mode: summary\n", ""), **guards),
+                         manifest_text=text.replace("view_mode: summary\n", "")
+                         .replace("strategy: sqlite\n", "strategy: markdown-items\n"), **guards),
             "COLLECTION_STORE_SUMMARY_REQUIRED")
 
 
@@ -1455,7 +1459,7 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     from exomem import vault
 
     root = service.root
-    front, body, _ = vault.parse_frontmatter(summary_text(), strict=True)
+    front, body, _ = vault.parse_frontmatter(sqlite_text(), strict=True)
     front["item_schema"]["fields"].update({
         "place": {"type": "object", "classification": "location", "properties": {"label": {"type": "string"}}},
         "label": {"type": "string", "depends_on": ["place"]},
@@ -2116,54 +2120,86 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
 
 
 
+@pytest.mark.parametrize("starved", [True, False], ids=["starved-tick-beside-the-holder", "tick-beside-any-reader"])
 def test_a_boundary_holder_s_store_reads_are_not_queued_behind_maintenance_waiting_on_its_boundary(
-        service, monkeypatch):
-    """A starved maintenance tick waits while another thread holds the vault boundary.
+        service, monkeypatch, starved):
+    """Maintenance on the store thread stops waiting for the vault boundary once a store read waits on it.
 
-    Maintenance proves collection ownership under that boundary. Started during a command's hold,
-    it waited there while the command's own store reads queued behind it, so each read sat out a
-    full boundary wait and was refused: a two-second hold became a 45-second one on the live
-    service. Once the hold ends, the deferred tick runs.
+    A views tick takes the boundary for each write. A tick already running when a command took the
+    boundary waited there, while the command's own store reads queued behind the tick: each waited
+    on the other until the boundary timeout refused the read. A two-second hold became a 45-second
+    one on the live service, and the tick a write wakes ran into it on loaded CI runners. A starved
+    tick stops waiting only beside the holder's own read; a tick that has not starved, beside any
+    read. Either way the tick publishes once the hold ends.
     """
+    from exomem import request_budget
+
     server = runtime._SERVERS[service.root]
-    ticked, finished, real_tick = [], [], server._views_tick
-
-    def maintenance():
-        ticked.append(time.monotonic())
-        # The ownership proof every views pass takes; like `authority.admitted_collections`,
-        # a refused proof admits nothing and the tick stays due.
-        try:
-            with service.manager.consistency_guard(service.root, operation="test ownership proof",
-                                                   holder_kind="collection-read"):
-                pass
-        except OpError:
-            pass
-        try:
-            return real_tick()
-        finally:
-            finished.append(time.monotonic())
-
-    monkeypatch.setattr(server, "_views_tick", maintenance)
     boundary_wait = service.manager._mutation_timeout_seconds
+    if not starved:
+        # Neither starvation bound is reached during the test.
+        monkeypatch.setattr(runtime, "MAINTENANCE_DEFER_SECONDS", 60.0)
+        monkeypatch.setattr(runtime, "VIEWS_POLL_DEFER_SECONDS", 60.0)
     _until(lambda: not service.manager._store_handoff)
-    # The fixture's append woke a views pass. The store thread runs one tick at a time, so once
-    # this patched tick has run to its end, no tick that started before the hold is in flight.
-    server._ticks["views"] = time.monotonic() - 60
-    _until(lambda: finished)
-    refusals = []
-    with service.manager.consistency_guard(service.root, operation="test command hold"):
-        server._ticks["views"] = time.monotonic() - 60  # long starved
-        started = time.monotonic()
+    before = int(store_meta(service.root)[schema.META_COMMIT_SEQ])
+    at_write, holding, release = threading.Event(), threading.Event(), threading.Event()
+    real_write = server._write
+
+    def write(method, *args, **kwargs):
+        # The first views write after the append below stops here, just before its boundary wait,
+        # until the boundary is held: the tick is in flight when the hold begins.
+        if not at_write.is_set() and int(store_meta(service.root)[schema.META_COMMIT_SEQ]) > before:
+            at_write.set()
+            holding.wait(10)
+        return real_write(method, *args, **kwargs)
+
+    def reads():
+        refusals = []
         for _ in range(4):
+            token = request_budget.set_current(request_budget.RequestBudget(
+                seconds=request_budget.DELIVERY_RESERVE_SECONDS + 2.0, entry=time.monotonic()))
             try:
                 server.call(lambda: None, read_only=True)
             except OpError as error:
                 refusals.append(error.code)
-        elapsed = time.monotonic() - started
-        released = time.monotonic()
+            finally:
+                request_budget.reset_current(token)
+        return refusals
+
+    def other_holder():
+        with service.manager.consistency_guard(service.root, operation="test other holder"):
+            holding.set()
+            release.wait(10)
+
+    monkeypatch.setattr(server, "_write", write)
+    if starved:
+        server._ticks["views"] = time.monotonic() - 60
+    call(service.root, "record_memory", action="append", collection=CID, item={"title": "During hold"},
+         item_key=LATER, why="wakes the views tick")
+    try:
+        assert at_write.wait(10), "the views tick never reached its write"
+        if starved:
+            with service.manager.consistency_guard(service.root, operation="test command hold"):
+                holding.set()
+                started = time.monotonic()
+                refusals = reads()
+                elapsed = time.monotonic() - started
+        else:
+            holder = threading.Thread(target=other_holder)
+            holder.start()
+            assert holding.wait(5)
+            started = time.monotonic()
+            refusals = reads()
+            elapsed = time.monotonic() - started
+            release.set()
+            holder.join(10)
+    finally:
+        holding.set()
+        release.set()
     assert refusals == []
-    assert elapsed < boundary_wait  # unfixed, the second read alone waited out one boundary wait
-    _until(lambda: any(at >= released for at in ticked))
+    assert elapsed < boundary_wait  # unfixed, the first read waited out its whole budget behind the tick
+    page = service.root / manifest_path().replace("_collection.md", "Items/_summary.md")
+    _until(lambda: "2 committed rows" in page.read_text())
 
 
 @contextmanager

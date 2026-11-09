@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from hook_requests import answer_requests
 
 import exomem
 
@@ -86,7 +87,7 @@ def _record_requests(monkeypatch: pytest.MonkeyPatch, answer) -> list[tuple[str,
         seen.append((request.full_url, authorization))
         return answer(request)
 
-    monkeypatch.setattr(hook, "_open_no_redirect", fake_open)
+    answer_requests(monkeypatch, fake_open)
     return seen
 
 

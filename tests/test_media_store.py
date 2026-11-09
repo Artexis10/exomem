@@ -91,8 +91,21 @@ def test_real_age_offload_and_verified_hydration_preserve_the_sidecar(vault: Pat
     assert not media_jobs.MediaJobStore(vault).has_binary(path)
 
 
-def test_offload_reuses_only_a_live_reference(vault: Path, selected_store):
+def _versions(selected_store, name: str) -> list[str]:
+    folder = Path(selected_store[0]["root"]) / name
+    return sorted(entry.name for entry in folder.iterdir()) if folder.exists() else []
 
+
+def _releases(vault: Path) -> list[str]:
+    from exomem import media_jobs
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as captured:
+        return [row[0] for row in captured.execute("SELECT object FROM media_releases ORDER BY id")]
+
+
+def test_offload_reuses_only_a_live_reference_and_a_re_add_gets_a_new_name(vault: Path, selected_store):
+    """collect-released-media D1: a keyed name gave the re-added bytes a second version under the first name, so
+    the bucket rule would destroy the first version while a retained backup still pins it."""
     first = _preserved(vault, category="first")
     initial = _offload(vault, first)
     duplicate = _preserved(vault, category="second")
@@ -104,8 +117,78 @@ def test_offload_reuses_only_a_live_reference(vault: Path, selected_store):
     duplicate.with_name(duplicate.name + ".md").unlink()
     returned = _preserved(vault, category="third")
     latest = _offload(vault, returned)
-    assert latest.object == initial.object
-    assert latest.version != initial.version
+    assert latest.object != initial.object
+    assert _versions(selected_store, initial.object) == [initial.version]
+
+
+def test_a_retry_after_a_lost_upload_reply_reuses_the_records_name(vault: Path, selected_store, monkeypatch):
+    """A fresh name per attempt would leave the landed first attempt under a name that nothing releases."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    upload = media_store.FilesystemStore.upload
+    attempts: list[str] = []
+
+    def reply_lost(self, name, stream, *, size, sha256):
+        attempts.append(name)
+        upload(self, name, stream, size=size, sha256=sha256)
+        raise OSError("the reply was lost")
+
+    with monkeypatch.context() as lost:
+        lost.setattr(media_store.FilesystemStore, "upload", reply_lost)
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+            media_store.offload(vault, path)
+    reference = media_store.offload(vault, path)
+    assert reference.object == attempts[0]
+    assert len(_versions(selected_store, reference.object)) == 2  # the lost attempt is a superseded duplicate
+
+
+def test_a_name_a_sidecar_carried_never_takes_another_upload(vault: Path, selected_store, monkeypatch):
+    """A crash after publication leaves the protection record. Reusing its name for the next upload of the same
+    path would supersede the published version, which a retained backup still pins."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    finish = media_store._finish_reference
+
+    def crashed(*args, **kwargs):
+        raise RuntimeError("stopped after publication")
+
+    with monkeypatch.context() as crash:
+        crash.setattr(media_store, "_finish_reference", crashed)
+        with pytest.raises(RuntimeError, match="stopped after publication"):
+            media_store.offload(vault, path)
+    published = originals.original_state(vault, path).reference
+    assert published is not None
+    media_store.forget_original(vault, path)
+    assert media_store._finish_reference is finish
+    again = media_store.offload(vault, path)
+    assert again.object != published.object
+    assert _versions(selected_store, published.object) == [published.version]
+
+
+def test_a_release_is_durable_before_the_reference_retires(vault: Path, selected_store, monkeypatch):
+    """A crash between the release and the unreference keeps the reference, so no hold can condemn a live name."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    publish = media_store._publish_reference
+
+    def stopped(vault_root, snapshot, value):
+        if value is None:
+            raise RuntimeError("stopped before the unreference")
+        return publish(vault_root, snapshot, value)
+
+    with monkeypatch.context() as crash:
+        crash.setattr(media_store, "_publish_reference", stopped)
+        with pytest.raises(RuntimeError, match="stopped before the unreference"):
+            media_store.forget_original(vault, path)
+    assert originals.original_state(vault, path).reference == reference
+    assert _releases(vault) == [reference.object]
+    media_store.forget_original(vault, path)
+    assert originals.original_state(vault, path).reference is None
+    assert _releases(vault) == [reference.object, reference.object]
 
 
 def test_corrupt_ciphertext_never_places_an_original(vault: Path, selected_store):
@@ -521,7 +604,7 @@ def test_legacy_refusal_migration_preserves_measured_sizes_and_protections(vault
                            "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
         connection.execute("INSERT INTO media_offload_refusals VALUES (?, ?, ?, ?, ?)",
                            ("Knowledge Base/Evidence/sample.bin", "a" * 64, "MEDIA_OBJECT_TOO_LARGE", 2048, 1.0))
-        connection.execute("INSERT INTO media_protections VALUES (?, ?, ?, ?)",
+        connection.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) VALUES (?, ?, ?, ?)",
                            ("protected", "Knowledge Base/Evidence/sample.bin", "b" * 64, 1.0))
     media_jobs.MediaJobStore(vault)
     with sqlite3.connect(ledger.path) as connection:
@@ -3212,7 +3295,7 @@ def test_the_retained_status_names_the_original_whose_companion_blocks_the_censu
 
 def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path, selected_store, monkeypatch):
     """Catches a status and a ledger that grow with every damaged companion of a large vault."""
-    from exomem import commands, media_store
+    from exomem import commands, media_allowance, media_store
 
     paths = [_stored(vault, f"evicted-{number}", 100) for number in range(3)]
     for path in paths:
@@ -3220,7 +3303,7 @@ def test_the_status_names_no_more_than_the_first_blocking_originals(vault: Path,
     _retained(selected_store, vault)
     for path in paths:
         _companion(path).write_bytes(b"")
-    monkeypatch.setattr(media_store, "CENSUS_BLOCKERS_SHOWN", 2)
+    monkeypatch.setattr(media_allowance, "BLOCKERS_SHOWN", 2)
 
     with pytest.raises(media_store.MediaStoreError):
         media_store.drain_census(vault)
@@ -3531,3 +3614,154 @@ def test_the_retained_status_reports_the_census_the_latch_and_the_originals_too_
     assert (after["census"]["evicted"], after["census"]["bytes"]) == (2, 700)
     assert after["drained"] is False
     assert after["above_hydration_capacity"] == {"count": 1}
+
+
+def _malformed_notes(vault: Path, count: int) -> list[str]:
+    """`count` notes whose header cannot be read, and their vault-relative paths in path order."""
+    from exomem.kbdir import kb_dirname
+
+    folder = vault / kb_dirname() / "Damaged"
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for number in range(count):
+        (folder / f"note-{number}.md").write_bytes(b"---\nvalue: [\n---\n")
+        paths.append(f"{kb_dirname()}/Damaged/note-{number}.md")
+    return paths
+
+
+def test_an_unknown_allowance_names_the_unreadable_notes_in_the_status_and_in_the_refusal(
+        vault: Path, selected_store, monkeypatch):
+    """Catches an unknown media usage that tells the owner nothing to repair: no note, no reason, no count."""
+    from exomem import media_jobs, media_store
+
+    _recorded_by_a_batch(vault)
+    damaged = _malformed_notes(vault, 7)
+    member = _filed(vault, 2, category="next")[1]
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, member, batch=media_store.OffloadBatch(vault))
+    allowance = _window_status(vault)["media_allowance"]
+    [refusal] = media_jobs.tool_status(vault)["offload_refusals"]
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_UNKNOWN" and refusal["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    for named in (allowance, refusal):
+        assert [item["path"] for item in named["blocked_by"]] == damaged[:5]  # Bounded, in path order.
+        assert all(item["reason"] for item in named["blocked_by"])
+    assert "used_bytes" not in allowance
+
+
+def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, selected_store, monkeypatch):
+    """Catches a partial list of notes presented as the whole reason, when the walk stopped for another cause."""
+    from exomem import media_allowance, media_store
+
+    _malformed_notes(vault, 1)
+    monkeypatch.setattr(media_allowance, "_binding", lambda *args: (_ for _ in ()).throw(OSError("disk")))
+    census = media_store.take_census(vault)
+
+    assert census.used_bytes is None and census.blockers == ()
+
+
+def test_a_restricted_caller_learns_no_path_of_a_restricted_note_that_stops_the_census(vault: Path, selected_store):
+    """Catches a refusal or a status text that names a note the caller may not see, beside a refusal it can see."""
+    import os
+
+    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+
+    from exomem import commands, media_worker, writer_lease
+    from exomem.governance.principal import request_scope
+
+    visible = _preserved(vault, category="visible").relative_to(vault).as_posix()
+    damaged = vault / "Knowledge Base/Evidence/Test/restricted/damaged.md"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_bytes(b"---\nvalue: [\n---\n")
+    hidden = damaged.relative_to(vault).as_posix()
+    write_scope(vault, paths="Evidence/Test/restricted/**")
+    write_rule(vault, ceiling=0)
+    _reset_governance_caches()
+    # The worker's offload takes the census, which the damaged note makes unknown, and records the refused job.
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05) == 0
+
+    def statuses() -> str:
+        replies = [writer_lease.invoke_command(next(command for command in commands.PRODUCT_COMMANDS if command.name == name),
+                                               vault, **arguments)
+                   for name, arguments in (("process_media", {"operation": "status"}), ("adoption_studio", {"action": "status"}))]
+        return json.dumps(replies, default=str)
+
+    with library_scope():
+        owner = statuses()
+    with request_scope(_external()):
+        restricted = statuses()
+
+    assert hidden in owner  # The owner is told which note to repair.
+    assert visible in restricted  # The refusal that the restricted caller may see is still there.
+    assert "restricted/damaged" not in restricted
+
+
+def test_the_status_reports_the_two_meters_without_counting_a_cached_original_twice(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a vault figure that charges the volume for cached copies, or a media figure that leaves them out."""
+    from types import SimpleNamespace
+
+    _window_policy(selected_store, monkeypatch)
+    cached = _stored(vault, "cached", 300)
+    evicted = _stored(vault, "evicted", 500)
+    from exomem import media_store
+
+    assert media_store.evict(vault, evicted)
+    allocated = cached.stat().st_blocks * 512  # The volume's figure counts allocated blocks, not file lengths.
+    used = 10_000 + allocated
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=_WINDOW_VOLUME, used=used, free=_WINDOW_VOLUME - used))
+    both = _stored_census(vault)
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert status["vault_storage"] == {"bytes": 10_000, "cached_bytes": allocated, "volume_bytes": _WINDOW_VOLUME}
+    assert status["media_storage"] == {"used_bytes": both, "allowance_bytes": 10_000_000}  # Each stored original once.
+    assert both > cached.stat().st_size
+
+
+def test_an_original_rewritten_since_its_cache_record_counts_as_vault_storage(vault: Path, selected_store):
+    """Catches a vault figure that leaves out an original the owner rewrote, because its old row still says cached."""
+    from exomem import media_store
+
+    kept = _stored(vault, "kept", 300)
+    rewritten = _stored(vault, "rewritten", 300)
+    rewritten.write_bytes(b"x" * 300 + b" and the owner's new bytes")
+
+    assert media_store.cached_bytes(vault) == kept.stat().st_blocks * 512
+
+
+def test_a_volume_reading_below_its_cached_copies_makes_vault_storage_unknown(vault: Path, selected_store, monkeypatch):
+    """Catches a negative vault figure shown as a number when the volume reads less than the cached copies on it."""
+    _window_policy(selected_store, monkeypatch)
+    _stored(vault, "cached", 300)
+    monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, 0))
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert "bytes" not in status["vault_storage"] and status["vault_storage"]["unknown"]
+
+
+def _stored_census(vault: Path) -> int:
+    """The bytes that a fresh census counts, from the references alone."""
+    from exomem import media_allowance
+
+    used = media_allowance.reference_usage(vault).used_bytes
+    assert used is not None
+    return used
+
+
+def test_the_meters_say_unknown_with_a_reason_when_their_readings_fail(vault: Path, selected_store, monkeypatch):
+    """Catches a failed census or ledger read that shows as 0 bytes used or 0 bytes cached."""
+    from exomem import media_store
+
+    _window_policy(selected_store, monkeypatch)
+    _stored(vault, "cached", 300)
+    _malformed_notes(vault, 1)
+    monkeypatch.setattr(media_store, "cached_bytes", lambda _vault: (_ for _ in ()).throw(
+        media_store.MediaStoreError("MEDIA_LEDGER_UNREADABLE", "the media ledger cannot be read: locked")))
+
+    status = _window_status(vault, series_id="series-a", next_window_bytes=1)
+
+    assert "bytes" not in status["vault_storage"] and "locked" in status["vault_storage"]["unknown"]
+    assert "used_bytes" not in status["media_storage"] and status["media_storage"]["unknown"]

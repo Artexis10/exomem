@@ -594,29 +594,27 @@ cannot be undone.
 
 ### Generated artifact adoption
 
-A generated draft is not durable merely because it exists. Keep drafts,
-rejected variants, and revised-away siblings ephemeral. Once the user selects,
-approves, sends, or publishes one offered output, the exact selected handle is
-eligible for preservation under the existing `proactive_capture` authority; an
-explicit request to save is a requested action. Selection is adoption evidence,
-not write confirmation.
+When to adopt is the rule in [engagement](engagement.md): every generated file
+you hand the user, not a file you write in the user's own workspace. This
+section is the envelope.
 
 Choose the lane by role before transport. Material retained for later reasoning
-is a Source; an approved deliverable or proof-bearing output is Evidence. MIME
-never chooses. With a direct handle, pass the closed envelope on the normal
-command:
+is a Source; a deliverable or proof-bearing output is Evidence. MIME never
+chooses. With a direct handle, pass the closed envelope on the normal command:
 
 ```text
 capture_source(..., files=[...],
-  adoption={"key": "...", "trigger": "selected", "selected_file_id": "..."})
+  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
 preserve_artifacts(..., files=[...],
-  adoption={"key": "...", "trigger": "approved", "selected_file_id": "..."})
+  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
 ```
 
-Only `selected_file_id` may become canonical; unselected siblings must report
-`unselected` and create no artifact. Without a usable direct handle, use the
-ordinary upload handoff and report `handoff_required` or `handoff_prepared` as
-non-committing. A token, description, or reconstructed text is not a saved
+`key` is one per hand-over, such as the file name plus a version.
+`selected_file_id` names the handle you hand over; any other supplied handle
+reports `unselected` and creates no artifact. Identical bytes already stored
+report `already_stored` and write nothing. Without a usable direct handle, use
+the ordinary upload handoff and report `handoff_required` or `handoff_prepared`
+as non-committing. A token, description, or reconstructed text is not a saved
 artifact.
 
 Delivery is ordered after local Evidence adoption. If one existing compatible
@@ -666,12 +664,13 @@ need confirmed `restructure_execution`. An independently authored edge follows t
 ## download
 
 **Goal:** Recover the exact stored original after its external source disappears.
-Notes and exports use their separate read and export paths.
+Notes and exports use their separate read and export paths. To look at a stored
+image, use `read_media` kind `image`; it needs no download.
 
 ### Procedure
 1. Call `transfer_artifact(operation="download", artifact="<stored artifact or custody page>")` to receive the available delivery paths.
-2. If the client supports MCP blobs, read `deliveries.native_resource.uri` to receive the bounded original.
-3. Otherwise, open `deliveries.https.url` in a browser to download the original without a hidden header.
+2. Give the person `deliveries.https.url`; it is a short link that downloads the original in any browser.
+3. If the client supports MCP blobs, `deliveries.native_resource.uri` returns the bounded original to the agent instead.
 4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
 5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
 
@@ -785,10 +784,10 @@ profiles through one proposal-first surface.
    reality or another named contract.
 6. Before authoring a typed edge, call
    `read_connections(operation={'kind': 'resolve-relation'})`; reuse a specific truthful
-   registered meaning. Use `relates_to` only for a real generic connection; a new
-   generic edge that joins an entity is refused until you name a fitting relation or
-   give a reason (see [mutation-results](mutation-results.md)). Prefer no edge to an
-   invented label.
+   registered meaning. A write that adds the generic relation is refused
+   with a ranked list of specific relations; when none fits, propose a new relation type,
+   or write a plain link as the last resort (see [mutation-results](mutation-results.md)).
+   Prefer no edge to an invented label.
 7. For a durable recurring distinction, call
    `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})` with a
    reviewed parent, description, and direction. Review its full duplicate
@@ -852,7 +851,12 @@ are review-only and never write to the vault.
 3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
    response-only, and soft-fail with warnings when optional extras are absent.
 4. Persist accepted relations through the normal Markdown write path (`note` or
-   `edit`); do not treat suggestions as an automatic write.
+   `edit`); do not treat suggestions as an automatic write. A candidate that the
+   relation queue holds open carries `review` (`ref`, `fingerprint`,
+   `source_content_hash`): pass those to
+   `change_connections(operation={'kind': 'accept-relation'})` as `ref`,
+   `expected_fingerprint` and `expected_hash`, with a `why`. When the candidate has
+   `options`, set `requested_relation` to one option's `key`.
 
 ### Writes performed
 None.

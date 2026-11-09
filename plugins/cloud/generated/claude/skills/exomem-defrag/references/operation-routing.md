@@ -173,9 +173,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   **`transfer_artifact(operation="download", artifact="<stored artifact or custody page>")`**.
   Supply `expected_sha256` when a particular version is required. The response names
   the original's SHA-256, size, filename, MIME source and available delivery paths.
-  Use `deliveries.native_resource.uri` with MCP `resources/read` only when the client
-  can consume a blob. Otherwise open `deliveries.https.url` in a normal browser;
-  it needs no hidden header. Large originals use HTTPS before base64 encoding.
+  Give the person `deliveries.https.url` as a link: it is short, opens in a normal
+  browser and needs no hidden header. Use `deliveries.native_resource.uri` with MCP
+  `resources/read` only when the client can consume a blob. To look at an image
+  yourself, use `read_media` kind `image` instead of downloading it. Large originals use HTTPS before base64 encoding.
   A prepared handoff proves no consumption: verify the recovered bytes before
   claiming success. Native attachment rendering in other clients remains unverified.
   Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
@@ -189,6 +190,20 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.
+- **Look at a stored image — `read_media`.** To *see* a photo, scan or screenshot,
+  call `read_media(operation={"kind": "image", "path": ...})` with the image or its
+  Source page, or `"paths": [...]` to compare several. Each comes back INLINE as an
+  upright JPEG image block with its file name and EXIF capture time; the stored
+  original is unchanged. `max_side` sets the long side in pixels, or `"original"`
+  for full resolution; the default is the server's setting. Your model may shrink a
+  large image again, so to inspect detail pass `"region": [x, y, width, height]`
+  (fractions of the upright image) and the server crops at full resolution first.
+  A view too large for the inline limit comes back smaller, with an `original_link`
+  when one can be made;
+  images past a call's size or time limit are listed in `not_shown` for another call. A camera
+  raw file such as DNG, or an image too large to decode, cannot be shown: recover it
+  with `transfer_artifact` download instead. Personal servers show images; Exomem
+  Cloud does not yet.
 - **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
   `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns

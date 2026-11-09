@@ -20,6 +20,7 @@ from exomem import (
     vocabulary_review,
     writer_lease,
 )
+from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
 from exomem.vault import content_hash
 from exomem.vocabulary_state import VocabularyState
@@ -562,7 +563,9 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
     assert historical["exact_matches"][0]["parent"] == "relates_to"
 
 
-def test_selected_relation_refuses_without_a_vocabulary_binding(tmp_path: Path) -> None:
+def test_a_registered_relation_the_candidate_does_not_offer_refuses_without_a_vocabulary_binding(
+    tmp_path: Path,
+) -> None:
     source = "Knowledge Base/Notes/venue.md"
     target = "Knowledge Base/Notes/event.md"
     _write(
@@ -599,9 +602,8 @@ def test_selected_relation_refuses_without_a_vocabulary_binding(tmp_path: Path) 
         if item["from"] == source and item["to"] == target
     )
 
-    with library_scope(), pytest.raises(
-        ValueError, match="VOCABULARY_APPLICATION_INVALID"
-    ):
+    # The registered relation declares no endpoints, so the candidate does not offer it.
+    with library_scope(), pytest.raises(OpError, match="VOCABULARY_APPLICATION_INVALID"):
         commands.op_connect_memory(
             tmp_path,
             operation="accept-relation",

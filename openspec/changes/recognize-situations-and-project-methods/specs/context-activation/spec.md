@@ -13,6 +13,7 @@ Maps packets SHALL carry a bounded `task_context` section beside the map and tur
 
 - **WHEN** final egress releases task candidates or methods in a maps response
 - **THEN** the existing private served-context record retains their state, source identity, version and read route without source or prompt text
+- **AND** it keeps each candidate's offered links as relation and target ref, with the count of omitted links and no title, so a later read can be credited to a link that was offered
 - **AND** earlier records without task metadata remain readable with an explicit unrecorded task state
 
 ### Requirement: Method continuation cannot certify stale behavior
@@ -54,6 +55,48 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **WHEN** a relevant comparison method is stored outside the current subject's anchor neighborhood
 - **THEN** method discovery can supply it with applicability evidence and its source reference
 
+#### Scenario: Different wording still finds the stored page
+
+- **WHEN** an unrestricted caller's turn paraphrases or misspells a stored page and shares no material term with it
+- **THEN** discovery ranks admitted pages by the dense reading of the resident recall matrix as well as by keyword, and supplies the page
+- **AND** a page enters through the dense reading only when one of its chunks clears the corpus-relative chance band over the admitted rows, so an unrelated turn gains no dense candidate
+- **AND** the dense reading never loads a model or a matrix on the request; while a service cannot run it (warming, or a matrix evicted after an idle gap, whose background reload the request starts), the keyword result stands and task context reports `partial`
+- **AND** while the keyword index lags behind the corpus, the dense reading still runs and its pages stand, and task context reports `partial`
+
+#### Scenario: A late deadline keeps what was found
+
+- **WHEN** the request budget runs out after some discovery lanes ran
+- **THEN** each later lane checks the budget before it starts and is skipped with a `budget` missing reason, the costliest lane last
+- **AND** when leads are already found, the method search stops early enough to leave time for their ordering, links and projection, sized to the request's own budget, so a slow method search does not drop them
+- **AND** task context returns the candidates already found with state `partial`, not an empty result
+
+#### Scenario: A candidate lists what it links to
+
+- **WHEN** an unrestricted caller's task discovery finds a page that authors typed relations and plain links to other pages
+- **THEN** the candidate lists up to five of its outbound links, each with the relation, the target's canonical ref and the target's title, and no body
+- **AND** links with a typed relation, as the relation registry's declared family marks it, come before plain links, and the graph owner's order stands within each group
+- **AND** a candidate with more links than it lists carries the count of those it omits, and a link to a page the caller may not see is never listed
+- **AND** no linked page becomes a candidate by that link, so the agent decides which link to follow
+- **AND** a page the turn slice already carries returns as a candidate only to list its links, when at least one fits
+
+#### Scenario: Links cost the allowance last
+
+- **WHEN** the packet allowance cannot hold every listed link
+- **THEN** every lead and method that fits without links is served, and links fill only the room that remains, in lead order
+- **AND** the candidate counts the links it could not list
+
+#### Scenario: The hook shows each lead's links
+
+- **WHEN** the retrieve hook renders a lead that lists links
+- **THEN** it renders one line under the lead with each link's relation, quoted and escaped title, and ref, and the count of omitted links when there is one
+- **AND** the hook charges link lines after every lead and method line, so a tight cap drops link lines before any lead or method line
+- **AND** a lead that the turn slice already lists renders no second lead line, only its link line named by the slice's ref
+
+#### Scenario: An unavailable graph keeps the leads
+
+- **WHEN** the graph cannot answer, or the request budget cannot afford the link read
+- **THEN** the candidates stay and carry no links, and task context reports `partial` with a `lane_failed` or `budget` missing reason
+
 #### Scenario: A large structured collection is relevant
 - **WHEN** a collection description identifies a source of exact facts
 - **THEN** activation supplies its bounded query route without indexing or enumerating all collection rows
@@ -78,7 +121,7 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 #### Scenario: Restricted routes report their limits
 
 - **WHEN** a restricted caller activates task context
-- **THEN** task graph expansion reports an omitted lane until origin-unit release can precede its caps
+- **THEN** task links report an omitted lane until origin-unit release can precede the graph caps
 - **AND** collection claims routing requires existing FULL metadata admission, while independent released text remains eligible
 
 #### Scenario: Released-corpus discovery is off by default

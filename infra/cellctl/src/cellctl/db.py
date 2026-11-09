@@ -73,6 +73,9 @@ OBSERVED_COLUMNS = (
 # migration can still read and retire every cell: each call that reads or writes them says so.
 MEDIA_KEY_COLUMNS = ("media_key_wrapped", "media_key_version")
 MEDIA_KEY_MIGRATION = "0081_exomem_cloud_media_keys"
+# add-cloud-media-store D9, D12: the custody observation's key for a cell's media store record. Substrate
+# has no column for it, and a new one needs a Substrate migration; the observation is cellctl's to write.
+MEDIA_STORE_RECORD = "media_store"
 
 ROLLOUT_COLUMNS = ("paused", "error_code", "held_cell_id", "last_good_image")
 
@@ -175,15 +178,28 @@ async def lock_cell(connection: asyncpg.Connection, cell_id: str, *, media_keys:
 
 async def retire_content_keys(connection: asyncpg.Connection, now: datetime, *, media_keys: bool = False) -> None:
     """Retire decryption material before any provider cleanup can block. With `media_keys`,
-    the media key bundle too; a schema without its columns holds no bundle to retire."""
-    media_set = "media_key_wrapped=NULL, media_key_version=NULL, " if media_keys else ""
+    the media key bundle too; a schema without its columns holds no bundle to retire.
+
+    The statement that retires a bundle also records `revoke_requested_at` in the cell's media store
+    record (add-cloud-media-store D9). A cell gets an edge credential only after its bundle is minted,
+    so a held bundle is the sign that the edge may admit it. The pass publishes a set without the cell
+    after this statement, and a failure after that publication must not lose the sign."""
+    # A held bundle's record gains the intent; keys already in the record win, and a record that is not
+    # an object is replaced, as `reconcile._media_revocation` reads one as absent.
+    media_set = """media_key_wrapped=NULL, media_key_version=NULL,
+        custody_observation = CASE WHEN media_key_wrapped IS NULL THEN custody_observation
+          ELSE (CASE WHEN jsonb_typeof(custody_observation) = 'object' THEN custody_observation ELSE '{}'::jsonb END)
+            || jsonb_build_object($2::text, jsonb_build_object('revoke_requested_at', $3::text)
+              || (CASE WHEN jsonb_typeof(custody_observation -> ($2::text)) = 'object'
+                  THEN custody_observation -> ($2::text) ELSE '{}'::jsonb END)) END, """ if media_keys else ""
     media_held = " OR media_key_wrapped IS NOT NULL" if media_keys else ""
+    arguments = (MEDIA_STORE_RECORD, now.isoformat()) if media_keys else ()
     await connection.execute(
         "UPDATE exomem_cloud_cells SET cell_root_key_wrapped=NULL, cell_root_key_version=NULL, "
         f"backup_key_wrapped=NULL, backup_key_version=NULL, {media_set}"
         "content_keys_retired_at=COALESCE(content_keys_retired_at,$1) "
         "WHERE desired_state='deleted' AND (content_keys_retired_at IS NULL "
-        f"OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL{media_held})", now)
+        f"OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL{media_held})", now, *arguments)
 
 
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
@@ -461,6 +477,13 @@ async def read_exports(connection: asyncpg.Connection, cell_id: str):
         fields["export_id"] = str(fields["export_id"])
         rows.append(ExportRow(**fields))
     return rows
+
+
+async def read_packing_export_cells(connection: asyncpg.Connection) -> set[str]:
+    """The cells with an export in packing, each of which holds its node's export slot (D8)."""
+
+    records = await connection.fetch("SELECT DISTINCT cell_id FROM exomem_cloud_exports WHERE observed_state='packing'")
+    return {str(record["cell_id"]) for record in records}
 
 
 # C6 column grants fix this controller-owned subset.

@@ -94,6 +94,12 @@ def build_reconcile_config() -> ReconcileConfig:
     concurrency_raw = os.environ.get("CELLCTL_BACKUP_CONCURRENCY")
     if concurrency_raw is not None:
         kwargs["backup_concurrency"] = int(concurrency_raw)
+    for field, variable in (("export_pause_copy_floor_mib", "CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB"),
+                            ("export_concurrency_per_node", "CELLCTL_EXPORT_CONCURRENCY_PER_NODE")):
+        if variable in os.environ:
+            kwargs[field] = int(os.environ[variable])
+            if kwargs[field] <= 0:
+                raise ValueError(f"{variable} must be positive")
     for field, variable, unit in (
         ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES", "minutes"),
         ("import_growth_deadline", "CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "minutes"),
@@ -202,10 +208,33 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
         url=url,
         max_object_bytes=int(os.environ["CELLCTL_MEDIA_EDGE_MAX_OBJECT_BYTES"]),
         signing_key=signing_key,
+        bucket=os.environ["CELLCTL_MEDIA_EDGE_BUCKET"],
         cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_CELL_IDS", "[]", list, "media edge cell IDs")),
         all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
+        collect_cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS", "[]", list, "media edge collect list")),
         credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
         store_policy=_json_env("CELLCTL_MEDIA_EDGE_STORE_POLICY", "{}", dict, "media store policy"),
+        physical_headroom=float(os.environ["CELLCTL_MEDIA_PHYSICAL_HEADROOM"]),
+    )
+
+
+def build_media_listing() -> B2ObjectStorage | None:
+    """add-cloud-media-store D7, D10: the list-only key for the media bucket, which cellctl uses for the
+    physical meter and for nothing else. None while the media edge is off, and None with one log line
+    while the key is missing: the meter is a report, not a gate, so a release that reaches the cluster
+    before its list-key Secret must still start."""
+
+    if not os.environ.get("CELLCTL_MEDIA_EDGE_URL"):
+        return None
+    key_id, application_key = (os.environ.get("CELLCTL_MEDIA_LIST_KEY_ID"),
+                               os.environ.get("CELLCTL_MEDIA_LIST_APPLICATION_KEY"))
+    if not key_id or not application_key:
+        logging.getLogger("cellctl").warning(
+            "cellctl: the media list key is missing, so every cell's physical media figure is unknown and "
+            "its hide and over-allowance alerts are off until the key's Secret exists and cellctl restarts")
+        return None
+    return B2ObjectStorage(
+        B2Config(key_id=key_id, application_key=application_key, bucket_id=os.environ["CELLCTL_MEDIA_BUCKET_ID"])
     )
 
 
@@ -321,6 +350,7 @@ def run() -> None:
             bucket_id=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_ID"],
         )
     )
+    media_listing = build_media_listing()
     volume_provider = HetznerVolumeProvider(read_only_token=os.environ["CELLCTL_HETZNER_READ_TOKEN"])
 
     async def serve():
@@ -359,6 +389,7 @@ def run() -> None:
                 config=build_reconcile_config(),
                 heartbeat_path=os.environ.get("CELLCTL_HEARTBEAT_PATH", "/tmp/cellctl-heartbeat"),
                 backup_listing=backup_listing,
+                media_listing=media_listing,
             )
         finally:
             stop.set()

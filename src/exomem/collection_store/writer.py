@@ -42,14 +42,18 @@ from ..governance.principal import effective_principal
 from ..planning_values import PlanningValues
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
+    aliases,
+    authority,
     chain,
     connection,
+    conversion,
     derived_rows,
     edit_back,
     filenames,
     governance,
     index_migrations,
     log_view,
+    references,
     rollups,
     schema,
     summary,
@@ -376,6 +380,20 @@ class CollectionWriter:
             )
         )
         return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
+
+    def row_body(self, cid: str, key: str) -> dict[str, str]:
+        """``body``: the Markdown body of row ``key`` of ``cid``; or ``body_withheld`` with its reason.
+
+        Only a reader of the whole row gets the body, as only such a reader got the item file. Call
+        it inside ``read_collection``, after the row itself was released.
+        """
+        subject = next(iter(governance.iter_subjects(
+            self.connection, cid, self._operation.logical_vault_id, row_key=key)), None)
+        row = self.connection.execute(
+            "SELECT body FROM items WHERE collection_id = ? AND item_key = ?", (cid, key)).fetchone()
+        if row is None or not self._operation.reads_whole_row(cid, subject):
+            return {"body_withheld": "the body goes only to a reader of every field of this collection"}
+        return {"body": row[0]}
 
     def _container(self, row: Mapping[str, Any]) -> str:
         return tokens.container_hash(row["collection_id"], row["generation"], row["audit_head"])
@@ -1350,11 +1368,20 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             row, manifest, _ = self._collection(cid)
             outside = facts.get("old_path") is not None
-            if (row["generation"] != observed[0] or not _renders_rows(manifest)
+            retired = not outside and aliases.retired(self.connection, path) is not None
+            if (row["generation"] != observed[0] or not (_renders_rows(manifest) or retired)
                     or (not outside and not path.startswith(manifest.storage.source + "/"))):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "view sweep basis changed")
             if not self._publication.eligible({"collection_id": cid, "path": manifest.path}):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "collection route is closed")
+            if retired:
+                # A retired item path of a converted collection is no view: a file there is held, never applied.
+                self._require_detached_path(manifest, path)
+                _fresh, guard = vault.read_bounded_guarded_bytes(self.root, path, limit=record_formats._MAX_ITEM_BYTES,
+                                                                expected_hash=facts["digest"])
+                self._recheck_guard(guard)
+                self._hold_detached(manifest, path, raw, edit_back.UNBOUND)
+                return result
             item = self._item(cid, facts["item_key"]) if facts["item_key"] is not None else None
             self._require_detached_path(manifest, path, item)
             projection = (None if item is None else self._publication.previous(item["view_path"]))
@@ -2179,7 +2206,7 @@ class CollectionWriter:
                     "type_version": declared.version,
                     "manifest_path": manifest.path,
                     "source_path": manifest.storage.source,
-                    "layout": manifest.storage.strategy,
+                    "layout": authority.store_layout(manifest.storage.strategy),
                     "audit_head": txn["event_hash"],
                     "txn_id": txn["txn_id"],
                     "view_mode": manifest.view_mode,
@@ -2220,6 +2247,9 @@ class CollectionWriter:
                 outcome="committed",
                 audit_correlation=txn["transition_id"],
             )
+            # Stored with the receipt, so a replay and the served create report it too.
+            receipt = records._with_warnings(receipt, [
+                f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
             self._precommit(manifest)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()
@@ -2258,8 +2288,14 @@ class CollectionWriter:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values)
         if declared.validators and validate_graph:
-            plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
-            plans[key] = values
+            validators = [types.named_validator(name) for name in declared.validators]
+            plans = None
+            if all(validator.references() for validator in validators):
+                followed = [reference for validator in validators for reference in validator.references()]
+                plans = references.neighbourhood(self.connection, manifest.collection_id, followed, key, values)
+            if plans is None:
+                plans = dict(typed_storage.collection_values(self.connection, manifest.collection_id))
+                plans[key] = values
             write = planning.HierarchyWrite(self.root, key, before)
             for name in declared.validators:
                 types.named_validator(name).validate(manifest, plans, write=write)
@@ -2512,9 +2548,24 @@ class CollectionWriter:
         )
 
     def _pending_summary(self, manifest, generation):
-        """The summary pages' pending basis (``_pending_basis``)."""
-        for path in summary.page_paths(manifest):
+        """The summary pages' pending basis (``_pending_basis``).
+
+        A summary page that the manifest no longer declares, such as a renamed or removed saved
+        view's, turns pending with no basis, so that reconcile retires it.
+        """
+        declared = summary.page_paths(manifest)
+        for path in declared:
             self._pending_basis(path, manifest.collection_id, "summary", generation)
+        # Every summary page lies in the storage source folder: a key range on the path reads only that folder.
+        folder = manifest.storage.source + "/"
+        for (path,) in self.connection.execute(
+                "SELECT path FROM projection_state WHERE path>=? AND path<? AND collection_id=? AND kind='summary'",
+                (folder, folder[:-1] + chr(ord("/") + 1), manifest.collection_id)).fetchall():
+            if path not in declared:
+                self._publication.pending = True
+                self._confirm_installed(path)
+                self._execute("UPDATE projection_state SET pending_row_version=NULL,pending_sha256=NULL,"
+                              "state='pending' WHERE path=?", (path,))
 
     def _pending_log(self, manifest, generation):
         """The log view's pending basis (``_pending_basis``); the projector renders the whole log."""
@@ -3282,7 +3333,7 @@ class CollectionWriter:
                 self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, path=before["view_path"] or manifest.path,
+        return self._item_carriers(result, manifest, path=row_source(manifest, before),
                                    key=key, values=final, previous=old_values)
 
     def rebaseline_collection(self, collection, *, expected_manifest_hash, expected_container_hash,
@@ -3398,10 +3449,12 @@ class CollectionWriter:
         with self.read_snapshot(mutation=True):
             row, current, declared = self._collection(collection)
             proposed, _mode, _plans, _metadata, _rows = self._prepare_revision(current, declared, manifest_text)
-            return {"valid": True,
-                    "lifecycle_guards": {"expected_manifest_hash": current.manifest_version.hash,
-                                         "expected_container_hash": self._container(row)},
-                    "normalized_contract": records._normalized_manifest_contract(proposed)}
+            return records._with_warnings(
+                {"valid": True,
+                 "lifecycle_guards": {"expected_manifest_hash": current.manifest_version.hash,
+                                      "expected_container_hash": self._container(row)},
+                 "normalized_contract": records._normalized_manifest_contract(proposed)},
+                records.ignored_recipe_warnings(proposed))
 
     def revise_collection(
         self,
@@ -3505,6 +3558,92 @@ class CollectionWriter:
                 checkpoint_snapshot_hash=None,
                 affected_paths=(current.path,),
             )
+            self._precommit(proposed)
+            self._insert_txn(txn, receipt)
+        writer_lease.mark_active_mutation_committed()
+        records._refresh_manifest_due_state(self.root, proposed)
+        return receipt
+
+    def conversion_state(self, collection):
+        """The collection id, storage strategy, view mode and pending conversion record (``conversion``)."""
+        with self.read_snapshot(mutation=True):
+            row, manifest, _declared = self._collection(collection)
+            return (row["collection_id"], manifest.storage.strategy, row["view_mode"],
+                    conversion.record(self.connection, row["collection_id"]))
+
+    def advance_conversion(self, cid, value):
+        """Record the phase a conversion reached, or clear its record once the vault holds no item file."""
+        with self._mutation():
+            self._collection(cid)
+            conversion.put(self._execute, cid, value)
+
+    def _conversion_files(self, current):
+        """The published item files a conversion archives, refused while any view work is unsettled.
+
+        The preflight is revise's: the manifest view, every item view and every held view, so an
+        edit made outside the store stops the conversion as it stops a revise.
+        """
+        cid = current.collection_id
+        paths = sorted(path for (path,) in self.connection.execute(
+            "SELECT path FROM projection_state WHERE collection_id=? AND kind='item'", (cid,)))
+        self._preflight_views([current.path, *paths, *(path for (path,) in self.connection.execute(
+            "SELECT view_path FROM held_candidates WHERE collection_id=? AND view_path IS NOT NULL", (cid,)))])
+        if self._publication.pending or conversion.unsettled(self.connection, cid):
+            raise conversion.outstanding("a view of the collection is unpublished or a view correction is held")
+        # After the preflight, which may narrow a view's published digest to the bytes it found.
+        published = conversion.published_views(self.connection, cid, ("item",))
+        if (edited := conversion.first_edited(self.root, published)) is not None:
+            raise conversion.outstanding(f"{edited} differs from the view the store published")
+        return published
+
+    def convert_to_summary(self, collection, *, why, before_commit):
+        """Convert a populated markdown-items collection to SQLite-only storage in one transaction (design §17).
+
+        The new manifest version names ``storage.strategy: sqlite`` and ``view_mode: summary``. Rows
+        keep their keys, values, payload hashes, versions and audit, and the item projection state
+        retires. Each row's former view path stays in ``items.view_path`` as its retired alias, so an
+        old path still finds its row (C2.4) without a schema change: every reader of that column
+        renders, publishes, watches and governs a summary row by the collection, never by the alias.
+        The conversion record that the archive and the removal resume from commits here too. A
+        collection already in summary mode has no item views, so only its storage strategy changes.
+        """
+        records._validate_why(why)
+        with self._mutation():
+            identity, digest, replay = self._identity(
+                "revise", collection, {"view_mode": summary.SUMMARY, "why": why}, None)
+            if replay is not None:
+                return replay
+            row, current, declared = self._collection(collection)
+            cid = current.collection_id
+            if not conversion.convertible(current):
+                raise conversion.unsupported(current.storage.strategy, current.view_mode)
+            files = self._conversion_files(current)
+            stored = self.connection.execute(
+                "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (cid, row["manifest_version"])).fetchone()[0]
+            manifest_text, proposed = conversion.summary_form(self.root, self._operation, current, declared, stored)
+            txn = self._txn(row, proposed, "revise", why, identity, digest)
+            self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+            self._execute("UPDATE collections SET view_mode=?, manifest_version=?, audit_reader_version=2 "
+                          "WHERE collection_id=?", (summary.SUMMARY, txn["manifest_version_after"], cid))
+            self._execute("DELETE FROM projection_state WHERE collection_id=? AND kind='item'", (cid,))
+            self._pending_summary(proposed, txn["generation_after"])
+            conversion.put(self._execute, cid, {"phase": conversion.COMMITTED, "txn_id": txn["txn_id"],
+                                                "files": files})
+            after_container = self._advance(txn)
+            payload = records.lifecycle_request_hash(
+                action="revise", collection_id=cid, before_manifest_hash=current.manifest_version.hash,
+                before_container_hash=self._container(row), proposed_manifest_hash=proposed.manifest_version.hash,
+                acknowledged_gap_codes=(), rationale=why,
+            )
+            receipt = records._lifecycle_result(
+                operation="revise", manifest=current, before_manifest_hash=current.manifest_version.hash,
+                after_manifest_hash=proposed.manifest_version.hash, before_container_hash=self._container(row),
+                after_container_hash=after_container, payload_hash=payload, audit_correlation=txn["transition_id"],
+                continuity=True, acknowledged_gap_codes=(), gap_fingerprint=None, checkpoint_snapshot_hash=None,
+                affected_paths=(current.path,),
+            )
+            before_commit()
             self._precommit(proposed)
             self._insert_txn(txn, receipt)
         writer_lease.mark_active_mutation_committed()

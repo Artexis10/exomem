@@ -4,12 +4,14 @@ restore Jobs count as the current hold's."""
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
 import pytest
 from kubernetes.client.rest import ApiException
 
+from cellctl.export_layout import PACK, PAUSE, job_name, legacy_job_name
 from cellctl.k8s_client import CELL_LABEL, ClusterClient
 from cellctl.manifests import (
     HOLD_ANNOTATION,
@@ -61,19 +63,23 @@ def _matches(labels: dict[str, str], selector: str | None) -> bool:
     return True
 
 
-def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False):
-    return NS(status=NS(succeeded=1 if succeeded else None, failed=1 if failed else None,
+def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False, created: datetime | None = None):
+    return NS(metadata=NS(creation_timestamp=created),
+              status=NS(succeeded=1 if succeeded else None, failed=1 if failed else None,
                         active=1 if active else None, start_time=None))
 
 
-def _job_pod(job_name: str, *, snapshot_id: str):
-    terminated = NS(exit_code=0, message=snapshot_id)
+def _job_pod(job_name: str, *, snapshot_id: str, running_since: datetime | None = None):
+    terminated = NS(exit_code=0, message=snapshot_id, started_at=None)
+    state = NS(running=None, terminated=terminated, waiting=None)
+    if running_since is not None:
+        state = NS(running=NS(started_at=running_since), terminated=None, waiting=None)
     return NS(
         metadata=NS(labels={JOB_KIND_LABEL: "backup", "batch.kubernetes.io/job-name": job_name},
                     namespace=NAMESPACE, deletion_timestamp=None),
         spec=NS(node_name="node-1"),
-        status=NS(phase="Succeeded", conditions=[], init_container_statuses=None,
-                  container_statuses=[NS(state=NS(terminated=terminated))]),
+        status=NS(phase="Running" if running_since else "Succeeded", conditions=[], init_container_statuses=None,
+                  container_statuses=[NS(state=state)]),
     )
 
 
@@ -145,7 +151,7 @@ def _client(*, hold_started_at: str | None, jobs: dict, pods: list) -> ClusterCl
 def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(caplog):
     """Defect: deleting a failed export Job loses its cause, or its log exposes private report fields."""
     export_id = "00000000-0000-4000-8000-000000000001"
-    name = "export-00000000000040008000000000000001"
+    name = job_name(export_id, PACK)
     report = {"error": "EXPORT_FAILED", "diagnostic": {"type": "PortabilityError", "function": "_fail",
               "code": "RESOURCE_LIMIT_EXCEEDED", "limit": "max_file_bytes", "cause": "OSError", "errno": 28,
               "message": "private-record", "path": "/private-record", "url": "https://private-record"}}
@@ -154,7 +160,7 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
     pod.status.container_statuses[0].state.terminated.exit_code = 1
     client = _client(hold_started_at=None, jobs={name: _job(failed=True)}, pods=[pod])
 
-    observed = client.observe_export_job(NAMESPACE, export_id)
+    observed = client.observe_export_job(NAMESPACE, export_id, step=PACK)
 
     assert observed.failed
     assert "RESOURCE_LIMIT_EXCEEDED" in caplog.text and "max_file_bytes" in caplog.text
@@ -163,14 +169,29 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
 
 
 @pytest.mark.parametrize("remaining", ["job", "pod"])
-def test_export_verification_still_observes_its_packing_predecessor(remaining):
-    """Verification cannot release the cell's hold while a packing Job or Pod can still own its volume."""
+def test_the_pause_still_observes_a_single_job_export_started_before_the_split(remaining):
+    """Defect: after the upgrade, the hold ends while the earlier release's export Job or pod still uses the volume."""
     export_id = "00000000-0000-4000-8000-000000000001"
-    name = "export-00000000000040008000000000000001"
+    name = legacy_job_name(export_id)
     client = _client(hold_started_at=None, jobs={name: _job()} if remaining == "job" else {},
                      pods=[_job_pod(name, snapshot_id="{}")] if remaining == "pod" else [])
-    observed = client.observe_export_job(NAMESPACE, export_id, verify=True)
+    observed = client.observe_export_job(NAMESPACE, export_id, step=PAUSE)
     assert observed.present and not observed.succeeded
+
+
+def test_the_pause_reports_when_its_job_was_created_and_when_its_pod_first_ran():
+    """Defect: the pause deadline never sees its pod run, so every export fails at the start
+    allowance, or a staging volume that never attaches is never noticed."""
+    export_id = "00000000-0000-4000-8000-000000000001"
+    name = job_name(export_id, PAUSE)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    ran = created + timedelta(seconds=40)
+    running = _client(hold_started_at=None, jobs={name: _job(active=True, created=created)},
+                      pods=[_job_pod(name, snapshot_id="{}", running_since=ran)])
+    observed = running.observe_export_job(NAMESPACE, export_id, step=PAUSE)
+    assert (observed.created_at, observed.running_at) == (created, ran)
+    pending = _client(hold_started_at=None, jobs={name: _job(active=True, created=created)}, pods=[])
+    assert pending.observe_export_job(NAMESPACE, export_id, step=PAUSE).running_at is None
 
 
 def test_claim_observation_reads_status_capacity_and_filesystem_resize_condition() -> None:

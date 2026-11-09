@@ -18,7 +18,7 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from .. import capabilities, held_fs, state_migration, state_paths, vault, writer_lease
+from .. import held_fs, state_migration, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
@@ -166,6 +166,7 @@ class _ProducerSession:
 
     @contextmanager
     def writer(self, token):
+        from .preview import producing
         from .writer import CollectionWriter
 
         self.require(token)
@@ -179,19 +180,21 @@ class _ProducerSession:
         try:
             with connection.open_writer(self.path, lease_check=lambda: self.require(token),
                                         schema_guard=record_schema) as handle:
-                yield CollectionWriter(self.root, handle)
+                writer = CollectionWriter(self.root, handle)
+                with producing(self.root, writer):
+                    yield writer
         finally:
             writer_lease._ACTIVE_WRITE_FENCE.reset(fence_context)
             writer_lease._ACTIVE_LEASE_MANAGER.reset(manager_context)
 
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
-               fence_client, scaffold=True):
+               fence_client, scaffold=True, facade_profile=None):
     if session.production:
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
         capability.require_records_summary(session.root)
-        require_summary_manifest(session.root, manifest_path, manifest_text)
+        require_new_store_manifest(session.root, manifest_path, manifest_text)
     session.verify_custody()
     _ProducerSession.bind(session, manager)
     _bind_fence_client(session, fence_client)
@@ -243,7 +246,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                         else:
                             prepared = _prepare_new(writer, manifest_path, manifest_text, why=why,
                                                     request_id=request_id, scaffold=scaffold,
-                                                    fence_client=fence_client)
+                                                    fence_client=fence_client, facade_profile=facade_profile)
                     finally:
                         # A rejected prepare cannot revoke admission; a durable intent must gate reports.
                         runtime = manager._collection_store
@@ -254,7 +257,8 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
         return _resume_locked(session, fence_client, preparation_token=token)
 
 
-def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client):
+def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client,
+                 facade_profile=None):
     from . import ownership
 
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -274,7 +278,8 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     authority.require_new_file_ownership(writer.root, old, target["collections"][-1])
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
-                           target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode())
+                           target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode(),
+                           facade_profile=facade_profile)
 
 
 def target_marker(root, old, sid, entries, *, fence, supersede=False):
@@ -773,7 +778,7 @@ def create_route(vault_root, manifest_path, manifest_text, *, why, request_id):
     """
     require_owner(vault_root, "create")
     capability.require_records_summary(vault_root)  # before any lease, fence or operator credential
-    require_summary_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
+    require_new_store_manifest(Path(vault_root).resolve(), manifest_path, manifest_text)
     return _offline_owner(Path(vault_root).resolve(), "create", lambda session, manager, fence_client: create_new(
         session, manager, manifest_path, manifest_text, why=why, request_id=request_id,
         fence_client=fence_client))
@@ -818,6 +823,35 @@ def migrate_route(vault_root, *, step, deadline=None):
     raise ValueError("migrate step must be dry-run, prepare, apply or handoff")
 
 
+def store_mode_route(vault_root, operation, step):
+    """The offline owner's route behind ``exomem store-mode migrate`` and ``rollback`` (OpenSpec make-vault-store-canonical).
+
+    It runs ``step(session, token, writer)`` as the owner's offline step: with the service stopped, in its own
+    producer session under the configured lease and the operator credential, inside the mutation boundary, with
+    the admitted store's one writer. A store that cannot be admitted refuses with its own reason. The lease
+    renews while the step runs, because a proof over a whole vault outlasts one lease.
+    """
+    require_owner(vault_root, operation)
+    root = Path(vault_root).resolve()
+
+    def apply(session, manager, fence_client):
+        manager.start_renewer()
+        opened = open_store(session, manager, fence_client=fence_client)
+        runtime = session.runtime(retire=False)
+        if opened["status"] != "admitted":
+            raise runtime._refusal()
+        with manager.writer_authority_guard(vault_root=root):
+            token = manager._fencing_token
+            with manager.consistency_guard(root, operation=f"vault_store_{operation}"):
+                state_migration._require_collection_store_recovery(session, token)
+                if not runtime.retire_idle_handle():
+                    raise connection.busy("the live store is still borrowed")
+                with session.writer(token) as writer:
+                    return step(session, token, writer)
+
+    return _offline_owner(root, operation, apply, committed=True)
+
+
 def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, abandon=False):
     """The owner's route behind `exomem collections export` and its maintain_memory mode (P1b.4).
 
@@ -854,11 +888,27 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
         session, manager, fence_client, plan_id=plan_id, why=why), drain_views=not abandon)
 
 
-def require_summary_manifest(root, manifest_path, manifest_text):
-    """Refuse a production store create whose manifest is not a summary collection (S1).
+def require_new_store_manifest(root, manifest_path, manifest_text):
+    """Refuse a production store create unless its manifest is a sqlite summary collection.
 
-    Items mode stays in files under this slice. A manifest that does not parse passes
-    on, so the create's own validation names what is wrong with it.
+    A manifest that does not parse passes on, so the create's own validation names what is
+    wrong with it.
+    """
+    from .. import records
+
+    try:
+        manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode())
+    except ValueError:  # CollectionError included
+        return
+    records.require_store_storage(manifest)
+    require_summary_manifest(root, manifest_path, manifest_text)
+
+
+def require_summary_manifest(root, manifest_path, manifest_text):
+    """Refuse a production store create or revise whose manifest is not a summary collection (S1).
+
+    A manifest that does not parse passes on, so the create's own validation names what is
+    wrong with it.
     """
     from .summary import SUMMARY
 
@@ -869,10 +919,8 @@ def require_summary_manifest(root, manifest_path, manifest_text):
     if manifest.view_mode != SUMMARY:
         raise CollectionStoreError(
             "COLLECTION_STORE_SUMMARY_REQUIRED",
-            "the collection store creates only summary collections: add \"view_mode: summary\" to the "
-            "manifest, or create an items-mode collection with "
-            f"{capabilities.active_call_text('record_memory', {'action': 'create'})}, "
-            "which keeps it in files")
+            "the collection store keeps only summary collections: keep \"view_mode: summary\" in the "
+            "manifest, or declare \"storage.strategy: sqlite\", whose view mode is summary")
 
 
 ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest-file FILE --why REASON, "
@@ -977,12 +1025,14 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
-def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
+def _offline_owner(root, operation, work, *, operator=True, drain_views=True, committed=False):
     """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
     lease, which it hands back with the flushed head. ``operator=False`` is for a step
     that only reads the fence: its client carries the writer credential, not the operator's.
+    ``committed`` is for a step whose result is already durable when it returns: a failed hand-back
+    is reported on that result, never raised over it.
     """
     config = writer_lease.LeaseConfig.from_env()
     fence_client = (writer_lease.configured_schema_fence_operator_client() if operator
@@ -1009,7 +1059,9 @@ def _offline_owner(root, operation, work, *, operator=True, drain_views=True):
             try:
                 manager.close(**close_options)
             except OpError as error:
-                if operation == "migrate" and result.get("status") != "marker_admitted":
+                if committed:
+                    result = {**result, "lease": "expires", "lease_reason": error.code}
+                elif operation == "migrate" and result.get("status") != "marker_admitted":
                     # A migrate that admitted nothing has no head to hand off; the report must not hide.
                     result = {**result, "lease": "expires", "lease_reason": error.code}
                 elif operation != "rollback" or result["status"] != "disabled":
@@ -1170,6 +1222,11 @@ def _takeover_facts(session, runtime, token, raw, marker, fence):
 
 def _settle(session, runtime, token, facts, staged, action, reason, check, *, unchanged=None):
     """Under the boundary: revalidate cheaply what the decision read, then apply it."""
+    if action == "adopt":
+        from ..vault_store import availability
+
+        # The replica is a copy without pages, so adopting it over a store-mode store would drop them.
+        availability.refuse_page_loss(session.root, "adopting the vault replica as the live store")
     manager = session.manager
     state_migration._require_collection_store_recovery(session, token)
     # An adoption replaces the live store with the staged replica, which staging migrated.
@@ -1280,6 +1337,10 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
         state_migration.record_collection_store_compatibility(
             session.root, authority_check=lambda: session.require(token),
         )
+        if _creates_sqlite(writer, intent):
+            # Before the marker routes the collection, so no release that lacks the floor serves it.
+            state_migration.record_collections_sqlite_only(
+                session.root, authority_check=lambda: session.require(token))
         try:
             _require_create_file_ownership(writer, intent)
         except CollectionStoreError as error:
@@ -1318,6 +1379,18 @@ def _resume_locked(session, fence_client, *, preparation_token=None):
             with manager._report_lock:
                 runtime._admitted_token = None
             raise
+
+
+def _creates_sqlite(writer, intent):
+    """Whether a pending create's committed manifest declares the sqlite strategy."""
+    if intent["kind"] != authority.CREATE:
+        return False
+    path, text = writer.connection.execute(
+        "SELECT c.manifest_path,m.manifest_text FROM collections c JOIN collection_manifests m "
+        "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
+        (intent["collection_id"],)).fetchone()
+    manifest = collections.parse_manifest_bytes(writer.root, path, text.encode())
+    return manifest.storage.strategy == collections.SQLITE_STORAGE
 
 
 def _publication_authority(session, token):
@@ -1577,8 +1650,10 @@ class _CreateAdmission:
 
 
 def _prepare_create(writer, manifest_path, manifest_text, *, why, request_id,
-                    expected_marker, target_marker, scaffold=True):
+                    expected_marker, target_marker, scaffold=True, facade_profile=None):
     admission = _CreateAdmission(writer, expected_marker, target_marker)
+    # The calling tool's profile: the create requires it and applies that profile's scaffold.
+    writer._facade_profile = facade_profile
     receipt = writer._create_collection(manifest_path, manifest_text, why=why, request_id=request_id,
                                         scaffold=scaffold, admission=admission)
     try:

@@ -238,3 +238,121 @@ Creating a Records or Planning collection SHALL be an action of the `restructure
 #### Scenario: A file disposition is the agent's append
 - **WHEN** a `records_routing` advisory carries `disposition: file` at prominence `maximal`
 - **THEN** no record exists until the agent performs the returned payload, which is governed like any other append
+
+### Requirement: Curation proposals and execution occupy different authority classes
+
+Agent-initiated curation context and proposal surfacing SHALL be governed by the
+existing `structural_suggestions` disposition. Forward-plan apply, resume, and
+compensation execution SHALL be governed by the existing
+`restructure_execution` class and SHALL remain confirm-required regardless of
+prominence, family disposition, repeated prior approvals, or stored plan state.
+The served bootstrap and curation workflow contract SHALL teach this split and
+require explicit in-conversation user confirmation before the first apply of
+each immutable forward or compensation plan.
+
+These requirements and confirmation scenarios define the unchanged v1 mode.
+`activate-agent-led-vocabulary-evolution` SHALL be the sole dependency that may
+authorize supported additive steps in an explicitly activated v2 vault. A plan,
+candidate, disposition, or prior confirmation SHALL NOT activate that mode or
+replace its exact effect, current authority, and receipt checks. Compensation
+and other non-additive steps retain their existing confirmation boundary.
+
+#### Scenario: Structural suggestions are off
+
+- **WHEN** `structural_suggestions` is off and the user has not explicitly
+  requested a curation review
+- **THEN** the agent does not proactively surface or propose curation work, while
+  an explicit user request remains available
+
+#### Scenario: Plan was proposed at maximal prominence
+
+- **WHEN** a valid curation plan exists while prominence is maximal
+- **THEN** the agent still obtains explicit confirmation before apply and no
+  setting turns the plan into silent execution
+
+#### Scenario: Compensation follows a previously approved plan
+
+- **WHEN** the user already approved the forward plan and a compensation plan is
+  later derived
+- **THEN** the compensation plan requires its own explicit confirmation because
+  it is a new immutable `restructure_execution` action
+
+### Requirement: Entity lifecycle actions follow the delegation-envelope classes
+Agent-initiated entity-candidate surfacing and curation-plan proposals SHALL be `structural_suggestions` and SHALL only surface when that class disposition permits. Entity merge, supersession or deletion, and curation apply, resume, or compensation SHALL be `restructure_execution` and SHALL remain exactly confirm-required. On a personal vault, an owner's entity-type registry save, including an unknown kind, SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states (owner decision O2, 2026-10-10, in `promote-referents-without-nudges`). On a personal vault, additive Entity creation through the entity writer's resolve-before-create path SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states; a promotion or hydration curation plan remains a confirmed apply. Acceptance of a relation that the server's relation queue suggested SHALL be `link_acceptance` and SHALL remain confirm-required, while a typed edge that the owner's agent authors SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states; when relation acceptance is a step inside curation apply, the stricter enclosing `restructure_execution` confirmation SHALL govern the whole apply. Candidate detection and work-item reads grant no write authority and this change SHALL add no standing-delegation cell.
+
+These authority classes and confirmation scenarios define the v1 mode. `activate-agent-led-vocabulary-evolution` SHALL be the sole v2 authority dependency. Only its explicit activation, supported canonical effects, fresh authority checks, and receipt binding may authorize additive steps; lifecycle detection, stored proposals, prominence, and prior confirmations SHALL NOT grant that authority. Non-additive steps retain their existing confirmation requirements.
+
+#### Scenario: Candidate surfacing is advisory only
+- **WHEN** a recurring identity qualifies without an explicit user request
+- **THEN** the active agent may surface it only under the `structural_suggestions` disposition
+- **AND** detection does not create a registry type, Entity, relation, or curation plan
+
+#### Scenario: Unknown kind registration follows proactive capture for the owner
+- **WHEN** the owner's active agent judges that no registered type fits and saves a vault type with rationale
+- **THEN** the registry save follows `proactive_capture` with every existing guarded-save check and no in-conversation confirmation
+- **AND** a resolved non-owner's save of the same type stays a pending item for the owner
+
+#### Scenario: Promotion and hydration apply remain confirmed
+- **WHEN** a promotion or hydration curation plan is ready to apply, resume, or compensate
+- **THEN** the action is `restructure_execution` and remains confirm-required
+- **AND** no prominence or family disposition lifts that ceiling
+
+#### Scenario: Relation acceptance keeps its own confirmation boundary
+- **WHEN** the agent accepts a relation that the relation queue suggested, outside curation
+- **THEN** it uses `link_acceptance` with confirmation
+- **AND** the same step inside curation is covered by the stricter confirmed `restructure_execution` apply
+
+### Requirement: Handing over an artifact does not bypass write authority
+Handing a generated file to the user, or a definite report that an offered artifact was sent or published, SHALL be the adoption trigger but SHALL NOT count as explicit confirmation to write Exomem. Agent-initiated exact-byte Source or Evidence adoption and any later compatible delivery Record SHALL be `proactive_capture` and SHALL obey its active off, advisory, or silent disposition. A user's explicit request to save or preserve the artifact SHALL remain an ordinary requested action and SHALL not create standing authority for later artifacts.
+
+When no compatible Records collection exists, a proposed collection or schema change SHALL be `structural_suggestions`; any later creation or schema mutation SHALL be separate confirmed `restructure_execution`. Adoption success SHALL never depend on that structural work.
+
+#### Scenario: Hand-over under silent capture preserves exact bytes
+- **WHEN** the agent hands the user one generated file and `proactive_capture` is `silent`
+- **THEN** the active agent adopts exactly that file through the semantically correct Source or Evidence lane
+- **AND** the hand-over grants no standing authority for files the agent never hands over or for future files
+
+#### Scenario: Advisory capture surfaces before writing
+- **WHEN** the agent hands the user one generated file and `proactive_capture` is `advisory`
+- **THEN** the agent surfaces the proposed exact-byte adoption before invoking the write
+- **AND** it does not describe the hand-over alone as write confirmation
+
+#### Scenario: Off capture leaves a handed-over file unwritten
+- **WHEN** the agent hands the user one generated file but `proactive_capture` is `off` and the user has not explicitly requested preservation
+- **THEN** the agent performs no Source, Evidence, adoption-receipt, or delivery-Record write
+
+#### Scenario: Explicit save remains requested action
+- **WHEN** the user explicitly asks to save a generated file in Exomem
+- **THEN** the agent may invoke the correct existing preservation lane as a requested action
+- **AND** that request creates no standing delegation for another file
+
+#### Scenario: Delivery observation obeys the same capture posture
+- **WHEN** a local adoption receipt exists and a definite delivery event is eligible for an existing compatible Records collection
+- **THEN** the agent-initiated Record follows `proactive_capture`
+- **AND** absence of a compatible collection permits only a structural suggestion, not implicit schema creation
+
+### Requirement: Durable-baseline routing preserves action authority
+An agent-initiated concise compiled observation or compatible existing-collection Records capture SHALL be `proactive_capture` and SHALL obey its active disposition. A small additive guarded edit that adds one durable facet to a uniquely resolved Entity MAY use `proactive_capture` only when it does not create an Entity, accept a relation, restructure content, supersede, merge, move, or delete. A durable affiliation that requires accepting a relation that the server's relation queue suggested SHALL use `link_acceptance` and remain confirm-required; an affiliation edge that the owner's agent authors SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states. Additive Entity creation SHALL follow `proactive_capture` as the `delegation-envelope` ceiling requirement states, but baseline eligibility alone SHALL NOT decide it. Substantial Entity curation — merge, supersession, deletion — or any restructuring execution SHALL use `restructure_execution` and remain confirm-required. Off or advisory dispositions SHALL be honored and no baseline eligibility judgment grants standing delegation.
+
+#### Scenario: Compiled baseline obeys proactive-capture posture
+- **WHEN** an eligible baseline routes to one concise compiled observation and `proactive_capture` is silent, advisory, or off
+- **THEN** the agent respectively may capture silently, must surface advice before capture, or performs no agent-initiated write
+
+#### Scenario: Small Entity facet remains narrowly additive
+- **WHEN** an eligible baseline is one additive facet of exactly one resolved Entity and changes no structure or relation
+- **THEN** it may follow `proactive_capture`
+- **AND** any merge, supersede, move, delete, or substantial rewrite instead follows `restructure_execution`
+
+#### Scenario: Queue-suggested affiliation is confirmed
+- **WHEN** a durable membership is represented by accepting a relation that the relation queue suggested
+- **THEN** the action follows `link_acceptance` and requires exact confirmation
+
+#### Scenario: Owner-authored affiliation follows proactive capture
+- **WHEN** the owner's agent authors a membership edge between two resolved entities
+- **THEN** the action follows `proactive_capture` and needs no confirmation question
+
+#### Scenario: Entity creation is never implied by baseline capture
+- **WHEN** no Entity uniquely resolves or the proposed change is structural
+- **THEN** baseline eligibility does not authorize Entity creation or curation
+- **AND** a new Entity, when the identity itself warrants one, follows `proactive_capture` through resolve-before-create
+- **AND** any merge, supersession, deletion or other restructuring follows confirmed `restructure_execution`

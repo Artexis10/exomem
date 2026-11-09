@@ -21,13 +21,13 @@ env:
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
   # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.py).
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.146.1"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "ff3f131ea45c4108a419405f3675c1b1d80d24e1be9d7b310cea21960f19fc8a"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.165.0"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "61cab7c3284e0e85c426e331a1e086605097863e3cc58e6b81dda54515cbac09"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.151.1"
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: "1688692e3d2c73bda8ac8f5f8f5c9b57cc81273fa222f4ca0142948e11c7842d"
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: ""
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: ""
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
@@ -98,6 +98,9 @@ jobs:
           # Pytest workers own CPU parallelism; avoid a native math pool per interpreter.
           OPENBLAS_NUM_THREADS: &native-math-threads "1"
           EXOMEM_DURATIONS_PATH: *duration-snapshot-path
+          # Core shards read bytecode from scripts/ci-prepare-bytecode.sh's cache, outside the checkout.
+          # This five-module job does not prepare one; without a cache, Python compiles in memory.
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
@@ -180,13 +183,24 @@ jobs:
         # covers its update retries, backoffs, and kill grace with margin.
         timeout-minutes: 9
         run: |
-          # age: the protected-import suite skips without the real age and age-keygen.
-          scripts/ci-apt-install.sh bubblewrap age
+          scripts/ci-apt-install.sh bubblewrap
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --unshare-all --new-session --die-with-parent \
             --ro-bind / / -- /usr/bin/true
+      - name: Restore the age release archive
+        # GitHub release downloads failed in most core shards on 2026-11-08.
+        # Keyed on the script, which pins the version and checksum.
+        uses: actions/cache@v4
+        with: &age-archive-cache
+          path: ${{ runner.temp }}/age-archive
+          key: age-archive-${{ hashFiles('scripts/ci-install-age.sh') }}
+      - name: Install age encryption tools
+        # The protected-import suite skips without the real age and age-keygen.
+        # The script bounds its download retries at three minutes.
+        timeout-minutes: 5
+        run: scripts/ci-install-age.sh
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -201,6 +215,11 @@ jobs:
           uv run --no-project --python 3.13 scripts/ci_install_release.py "$EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION" \
             "$RUNNER_TEMP/previous-schema" "$EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256" EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON
       - *prepare-duration-snapshot
+      - name: Prepare shared bytecode
+        # About a minute on a healthy runner; the cache never decides which tests run.
+        timeout-minutes: 5
+        env: *core-test-env
+        run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
@@ -559,11 +578,15 @@ jobs:
       - name: Governed lifecycle, restart persistence, transport shutdown, S1 summary journey
         if: steps.scope.outputs.docs_only != 'true'
         run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 330 --request-timeout 20
-      - name: Install retained-original encryption tools
-        # Cover the helper's update retries, download, installation and kill grace.
-        timeout-minutes: 9
+      - name: Restore the age release archive
         if: steps.scope.outputs.docs_only != 'true'
-        run: scripts/ci-apt-install.sh age
+        uses: actions/cache@v4
+        with: *age-archive-cache
+      - name: Install retained-original encryption tools
+        # The script bounds its download retries at three minutes.
+        timeout-minutes: 5
+        if: steps.scope.outputs.docs_only != 'true'
+        run: scripts/ci-install-age.sh
       - name: Cloud frame reads with native codecs
         if: steps.scope.outputs.docs_only != 'true'
         env:
@@ -576,7 +599,7 @@ jobs:
         # Keep mandatory decoder proof in this serial job, outside lean worker environments.
         run: >-
           uv run --frozen --extra frame-codecs python -m pytest -q
-          tests/test_cloud_video_frames.py -m frame_codecs -o timeout=120
+          tests/test_cloud_video_frames.py tests/test_image_view.py -m frame_codecs -o timeout=120
           --junitxml=test-results/e2e-logs/cloud-frame-junit.xml
       # The harness prints the tail inline; this keeps the whole log for the
       # failures whose cause is older than the tail.

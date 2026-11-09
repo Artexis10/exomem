@@ -238,7 +238,7 @@ Use one applicable authored writer to record a verdict or resolving relation und
 For example, `change_observations(operation={'kind': 'update'})` uses the real unit fingerprint and current parent hash.
 The due fingerprint binds a review finding and is not the unit fingerprint.
 The existing projection update clears a resolved finding; do not add a second dismissal.
-If presentation dismissal is the decision, use one `triage_memory(ref, action="dismiss", expected_fingerprint, why)` mutation.
+If presentation dismissal is the decision, use one `triage_memory(operation={'kind': 'decision', 'ref': ..., 'action': 'dismiss', 'expected_fingerprint': ..., 'why': ...})` mutation.
 That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
 
 ## Passing the conversation to activation
@@ -323,18 +323,29 @@ reasons, and `restore` takes a `version`, a `why` and the current
 
 ## Generated artifact adoption
 
-Generated drafts stay ephemeral. Generation, preview, filename, MIME type,
-apparent quality, and abandoned or revised-away variants do not make durable
-work. When the user selects, approves, sends, or publishes one offered output,
-that exact offered artifact becomes adoption-eligible; the event is evidence of
-adoption, not write consent. Agent-initiated adoption therefore follows
-`proactive_capture`, while an explicit request to save is an ordinary requested
-action. Preserve only the selected handle's exact bytes and write no siblings.
+Keep every generated file you hand the user. When you give the user a file to
+download or use (a ZIP, PDF, preset, image, spreadsheet or any other output),
+preserve that file's exact bytes as you hand it over, once, under
+`proactive_capture`; do not wait for the user to say they chose it. Drafts,
+previews and variants you never hand over stay ephemeral. An explicit request to
+save is an ordinary requested action.
+
+This covers files you generate and give the user: downloads, attachments and
+outputs in a sandbox. It does not cover files you write or edit in the user's
+own workspace or repository; those already persist there.
+
+Give each hand-over its own `adoption.key`, such as the file name plus a version.
+A revision you hand over later takes a new key and is kept beside the first under
+the next free name. The same bytes again under a new key or name return
+`already_stored`, name the earlier copy and write nothing; a retry with the same
+key replays the first answer. The same key with other bytes is refused as
+`ADOPTION_KEY_REUSED`.
 
 Choose the semantic lane before transport: reasoning material is a Source;
-an approved deliverable or proof-bearing output is Evidence. MIME never chooses.
+a deliverable or proof-bearing output is Evidence. MIME never chooses.
 Use `capture_source(..., adoption={key, trigger, selected_file_id})` or
-`preserve_artifacts(..., adoption={...})` when a direct handle exists. With no handle,
+`preserve_artifacts(..., adoption={...})` when a direct handle exists, with
+`selected_file_id` naming the handle you hand over. With no handle,
 report a non-committing `handoff_required` or
 `handoff_prepared`; a token or description is not a saved artifact.
 

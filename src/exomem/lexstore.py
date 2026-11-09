@@ -78,7 +78,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Generic, Literal, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeVar
 
 from . import (
     __version__,
@@ -89,10 +89,13 @@ from . import (
     reserved_paths,
     state_paths,
 )
-from .find_types import RankingPage
+from .find_types import ParsedPage, RankingPage
 from .kbdir import kb_dirname
 from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
+
+if TYPE_CHECKING:
+    from .semantic_index import SemanticParentIndexState
 
 log = logging.getLogger(__name__)
 
@@ -827,7 +830,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: `pages.structure_json` their summary; readers interpret both per operation.
 #: 14: `pages.ranking_json` holds ranking and link inputs from the page snapshot.
 #: 15: parent structure includes separately versioned prose-carrier positions.
-SCHEMA_VERSION = 15
+#: 16: `unit_revisions` names each parent's unit rows and summary by a revision
+#: that every write to them changes, so ranking statistics re-read only parents
+#: that moved.
+SCHEMA_VERSION = 16
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1394,31 +1400,44 @@ class _SelectedUnits:
                 if unit is not None and unit.unit_ref is not None:
                     yield row, unit
 
-    def corpus(
-        self, column: str, parents: set[str], representatives: dict[int, str],
-        occurrences: dict[str, list[tuple[int, str, str]]],
-    ) -> dict[str, list[str]]:
-        """Stemmed tokens of every referable unit of `parents`, keyed by public ref.
+    def contributions(
+        self, column: str, parents: Sequence[str],
+    ) -> tuple[dict[str, tuple[_UnitContribution, ...]], set[str]]:
+        """Each of `parents`' referable units, as ranking statistics count it, by parent, and the parents read.
 
-        Ranking statistics come from this selected corpus, so a candidate no
+        A unit holds its stemmed tokens and its public ref; a candidate no
         interpretation emits, or an overlapping occurrence, never weighs in.
+        A parent's units come in rowid order, which fixes which occurrence of a
+        shared ref stands for it. A parent with no unit has no entry. The set
+        names every parent that had a stored row and so was interpreted, even
+        when its interpretation emitted no unit.
         """
+        if not parents:
+            return {}, set()
         rows = self.conn.execute(
             "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed, u.rowid FROM semantic_units u "
             "JOIN unit_fts ON unit_fts.rowid = u.rowid "
-            f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?))",
+            f"WHERE u.{column} = 1 AND u.parent_path IN (SELECT value FROM json_each(?)) "
+            "ORDER BY u.parent_path, u.rowid",
             (json.dumps(sorted(parents), ensure_ascii=False),),
         )
-        corpus: dict[str, list[str]] = {}
-        for row, unit in self.served(rows):
-            ref = str(unit.unit_ref)
-            if ref not in corpus:
-                corpus[ref] = str(row[2]).split()
-                representatives[int(row[3])] = ref
-            # Retain identities without text; ambiguous hit precedence still
-            # belongs to the original candidate SQL traversal.
-            occurrences.setdefault(ref, []).append((int(row[3]), str(row[1]), str(row[0])))
-        return corpus
+        interpreted: set[str] = set()
+
+        def counted() -> Iterator[tuple]:
+            for row in rows:
+                if row[1] not in interpreted:
+                    interpreted.add(row[1])
+                    call_spans.measure(call_spans.UNIT_PARENTS_INTERPRETED)
+                yield row
+
+        grouped: dict[str, list[_UnitContribution]] = {}
+        for row, unit in self.served(counted()):
+            grouped.setdefault(str(row[1]), []).append(_UnitContribution(
+                int(row[3]), str(row[0]), str(unit.unit_ref),
+                # Interned: the units of a base share each distinct token.
+                tuple(map(sys.intern, str(row[2]).split())),
+            ))
+        return {path: tuple(units) for path, units in grouped.items()}, interpreted
 
 
 @dataclass(frozen=True, slots=True)
@@ -2599,6 +2618,12 @@ def _schedule_repair(
     a full pass is already active are one level-triggered observation and are
     coalesced into that pass instead of creating an unbounded rebuild chain.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # The serving worker is the one repair owner, and a standby's read can find the catalogue
+        # one publication ahead of its unwatched registry. A rebuild here would be a publication.
+        return False
     # Pending-only callers already hold the resolved key; idle recovery must
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
@@ -3130,6 +3155,12 @@ class _AdmittedStatisticsEntry:
 #: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
 #: no base, and its next build counts every page.
 _ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
+#: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
+#: each other's pages: each build subtracted the other set's terms and re-read its own texts, about 2.5 s of CPU a
+#: recall on a 13,000-page vault (measured 2026-11-08). A base built from another shares that base's page entries
+#: and its frequency mapping is its statistics entry's own, so an extra base costs about a dictionary slot a page.
+_ADMITTED_BASES_MAX = 4
 
 
 class _PageTerms(NamedTuple):
@@ -3152,6 +3183,47 @@ class _AdmittedBase:
 
     pages: Mapping[str, _PageTerms]
     frequency: Mapping[str, int]
+
+
+#: Bytes that one scope's unit base may keep, by the estimate below: a unit costs about 370 bytes (its tuples,
+#: rowid and two ids; measured at 505 for a unit of 12 tokens) and 8 for each token it holds, as the tokens
+#: are interned. 64 MiB holds about 130,000 units of 12 tokens, twice a live vault's 62,000 units. A corpus
+#: past it keeps no base, and its next build interprets every parent.
+_UNIT_BASE_BYTES_MAX = 64 << 20
+_UNIT_BYTES = 370
+_TOKEN_BYTES = 8
+
+
+class _UnitContribution(NamedTuple):
+    """One referable unit's share of a unit corpus."""
+
+    rowid: int
+    #: The stored occurrence's key within its parent, which a reader's interpretation maps to a unit.
+    key: str
+    #: The unit's public ref in the interpretation that emitted it.
+    ref: str
+    tokens: tuple[str, ...]
+
+
+class _ParentUnits(NamedTuple):
+    """One parent's units as one revision of the parent held them."""
+
+    revision: str
+    units: tuple[_UnitContribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _UnitBase:
+    """The parents an admitted unit corpus was built from, so the next build interprets only those that moved.
+
+    `key` names the catalogue and the public instance's definitions, the only inputs of a parent's units beyond
+    its revision. A parent enters `parents` only when its page selects the public instance: an owner-only
+    instance's interpretation is the owner's, so every request interprets such a parent again and never keeps it.
+    A parent with no stored unit row enters as an empty entry, which holds no interpretation.
+    """
+
+    key: tuple
+    parents: Mapping[str, _ParentUnits]
 
 
 def _text_digest(text: str) -> bytes:
@@ -4852,6 +4924,216 @@ class _CatchUpPlan:
     deleted: frozenset[str]
 
 
+#: Each full-text table holds one row per row of its parent table, under the parent's rowid. The catalogue DDL
+#: fixes these three tables, so a comparison that cannot join on rowid across databases reads them from here.
+# nosemgrep: ep-word-set -- Table names that the catalogue DDL fixes.
+FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "unit_fts": "semantic_units"}
+
+#: ``meta`` holds the sidecar's own history (freshness triples, checkpoints, revisions) and no fact derived
+#: from the files, so a comparison with a fresh derivation leaves it out.
+# nosemgrep: ep-word-set -- The one table that the catalogue DDL fixes as build stamps.
+BUILD_STAMP_TABLES = ("meta",)
+
+#: Triggers mint a new random revision for a page on every write, so only the presence of its row is derived.
+# nosemgrep: ep-word-set -- The one table that the catalogue DDL fixes as random revisions.
+KEY_ONLY_TABLES = ("unit_revisions",)
+
+
+def create_catalogue_schema(conn: sqlite3.Connection) -> None:
+    """Create the catalogue's tables, indexes, triggers and full-text tables on ``conn``.
+
+    This is the catalogue's own DDL for a database that is not its sidecar: store mode copies the
+    catalogue into the collection store through it (OpenSpec make-vault-store-canonical), so the
+    store's tables are the ones this module declares. It owns no transaction and stamps no schema version.
+    """
+    LexicalStore._create_catalog_tables(conn)
+    LexicalStore._create_catalog_indexes(conn)
+    LexicalStore._ensure_fts_schema(conn)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticUnitRow:
+    """One `semantic_units` row keyed by column, and the text `unit_fts` indexes for it."""
+
+    columns: Mapping[str, Any]
+    stemmed: str
+
+
+@dataclass(frozen=True, slots=True)
+class PageRows:
+    """Every catalogue row one page derives, as plain data; `write_page_rows` writes them.
+
+    `columns` is the `pages` row keyed by column. `stemmed`, `title_lower` and `body_lower` are the
+    text that `fts` and `tri` index under that row's id. `structure_json` is the page's structural
+    summary, None when the page has no semantic state and so no unit rows.
+    """
+
+    columns: Mapping[str, Any]
+    stemmed: str
+    title_lower: str
+    body_lower: str
+    structure_json: str | None
+    units: tuple[SemanticUnitRow, ...]
+
+
+def page_rows(
+    vault_root: Path,
+    rel: str,
+    raw: bytes,
+    *,
+    page: ParsedPage | None,
+    state: SemanticParentIndexState | None,
+    mtime_ns: int,
+    in_kb: bool,
+    in_vault: bool,
+) -> PageRows | None:
+    """The catalogue rows of one page, derived from ``raw`` and nothing on disk.
+
+    ``rel`` is the page's vault-relative path and ``raw`` its exact bytes. ``page`` is
+    ``find_corpus.parse_page(..., content=raw, resolved_relative=rel)`` of those bytes. It is None
+    when they are not a parseable page, which still gets an empty-text row. ``state`` is
+    ``semantic_index.current_parent_index_state(vault_root, rel, source=<raw decoded>)``. It is None
+    when it could not be derived, which leaves the page without unit rows. Returns None when recall
+    policy does not admit ``raw`` at ``rel``: such a page has no rows. The caller proves the
+    destination file itself.
+    """
+    from . import bm25 as bm25_module
+    from . import recall_policy, semantic_language_registry, semantic_units
+    from .semantic_index import structural_metadata
+
+    if not recall_policy.admits_markdown_content(vault_root, rel, raw):
+        return None
+    if page is not None:
+        title = page.title
+        title_lower = page.title_norm if title else ""
+        body_lower = page.body_norm
+        stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
+        updated = page.updated or "0000-00-00"
+        # Scene-frame children carry the parent video they collapse into;
+        # unparseable rows (page is None) stay NULL like ordinary pages.
+        emitted_parent_path = page.emitted_parent
+        eligibility = _eligibility_columns(page)
+        eligibility_view = _eligibility_view_json(page)
+        content_hash = getattr(page, "snapshot_hash", None)
+        ranking = _ranking_metadata_json(page)
+    else:
+        title = None
+        title_lower = body_lower = stemmed = ""
+        updated = "0000-00-00"
+        emitted_parent_path = None
+        # An unparseable page has no frontmatter to filter on. Every axis is
+        # NULL, which is exactly "matches no positive constraint" — the same
+        # answer the scan oracle gives, since it cannot parse it either.
+        eligibility = _EMPTY_ELIGIBILITY
+        eligibility_view = None
+        content_hash = None
+        ranking = None
+    columns = {
+        "path": rel,
+        "title": title,
+        "mtime_ns": mtime_ns,
+        "updated": updated,
+        "in_kb": int(in_kb),
+        "in_vault": int(in_vault),
+        "is_nav": int(rel.rsplit("/", 1)[-1].lower() in _NAV_BASENAMES),
+        "emitted_parent_path": emitted_parent_path,
+        **dict(zip(_ELIGIBILITY_COLUMNS, eligibility, strict=True)),
+        "eligibility_view_json": eligibility_view,
+        "content_hash": content_hash,
+        "ranking_json": ranking,
+    }
+    structure_json = None
+    units: list[SemanticUnitRow] = []
+    if page is not None and state is not None and state.candidates is not None:
+        structure_json = json.dumps(structural_metadata(state), sort_keys=True)
+        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
+            verdict, check_by_day, check_by_json, tags_canonical_json = (
+                _unit_eligibility_columns(unit)
+            )
+            units.append(
+                SemanticUnitRow(
+                    {
+                        "record_type": "structural_occurrence",
+                        "unit_ref": semantic_units.occurrence_key(
+                            unit.form, unit.span, unit.source_hash
+                        ),
+                        "parent_path": state.path,
+                        "parent_ref": state.parent_ref,
+                        "parent_generation": state.parent_generation,
+                        "parent_source_hash": state.parent_source_hash,
+                        "parser_version": state.parser_version,
+                        "form": unit.form,
+                        "category_raw": unit.category_raw,
+                        "category_key": unit.category_key,
+                        "category": semantic_language_registry.normalize_label(unit.category_raw),
+                        "kind": unit.kind_key,
+                        "content": unit.content,
+                        "tags_json": json.dumps(
+                            list(unit.tags), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        "context": unit.context,
+                        "unit_source_hash": unit.source_hash,
+                        "anchor": unit.anchor,
+                        "line": unit.line,
+                        "end_line": unit.end_line,
+                        "fingerprint": None,
+                        "source_order": source_order,
+                        "updated": updated,
+                        "in_kb": int(in_kb),
+                        "in_vault": int(in_vault),
+                        "verdict": verdict,
+                        "check_by_day": check_by_day,
+                        "check_by_json": check_by_json,
+                        "tags_canonical_json": tags_canonical_json,
+                    },
+                    " ".join(bm25_module.tokenize(unit.content)),
+                )
+            )
+    return PageRows(columns, stemmed, title_lower, body_lower, structure_json, tuple(units))
+
+
+def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
+    """Insert one row of ``table`` from its column values and return the new row id."""
+    cur = conn.execute(
+        f"INSERT INTO {table}({', '.join(columns)}) VALUES({', '.join('?' * len(columns))})",
+        tuple(columns.values()),
+    )
+    return cur.lastrowid
+
+
+def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
+    """Insert one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    rowid = _insert_row(conn, "pages", rows.columns)
+    if fts5_available():
+        conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.stemmed))
+        conn.execute(
+            "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
+            (rowid, rows.title_lower, rows.body_lower),
+        )
+    if rows.structure_json is not None:
+        conn.execute(
+            "UPDATE pages SET structure_json = ? WHERE path = ?",
+            (rows.structure_json, rows.columns["path"]),
+        )
+    for unit in rows.units:
+        unit_rowid = _insert_row(conn, "semantic_units", unit.columns)
+        if fts5_available():
+            conn.execute(
+                "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
+            )
+
+
+def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
+    """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
+
+    ``conn`` already holds the schema that ``create_catalogue_schema`` made. Store mode compares what this
+    derives with the rows it copied in. It owns no transaction and stamps no meta row.
+    """
+    store = LexicalStore(vault_root)
+    members, signatures = store._walk_entries()
+    store._insert_members(conn, members, signatures)
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the
@@ -4921,9 +5203,12 @@ class LexicalStore:
         # unchanged. Each entry holds one vocabulary-sized mapping and the page
         # terms it was counted from.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
-        # scope -> the pages the latest admitted corpus of that scope was built from;
-        # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
-        self._admitted_bases: dict[str, _AdmittedBase] = {}
+        # (scope, admitted-set digest) -> the pages that admitted corpus was last built from, most recent
+        # last; see `_admitted_corpus` and `_ADMITTED_BASES_MAX`. Guarded by `_term_frequency_cache_lock`.
+        self._admitted_bases: OrderedDict[tuple[str, str], _AdmittedBase] = OrderedDict()
+        # scope -> the public-instance parents the latest admitted unit corpus of that scope was built
+        # from; see `_UnitBase`. Guarded by `_term_frequency_cache_lock`.
+        self._unit_bases: dict[str, _UnitBase] = {}
         # (scope, catalogue snapshot generation) -> that snapshot's admitted
         # recall rows, and the lock a miss holds while one request fills it.
         # See `_admitted_recall_rows`.
@@ -5847,7 +6132,8 @@ class LexicalStore:
             return False
         return self._pages_has_current_columns(conn, raise_errors=raise_errors)
 
-    def _create_catalog_tables(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _create_catalog_tables(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pages("
             " path TEXT PRIMARY KEY,"
@@ -5903,7 +6189,7 @@ class LexicalStore:
             "INSERT OR IGNORE INTO meta(key, value) "
             "VALUES('frequency_revision', hex(randomblob(16)))"
         )
-        self._create_frequency_revision_triggers(conn, "pages")
+        LexicalStore._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
             " record_type TEXT NOT NULL CHECK(record_type = 'structural_occurrence'),"
@@ -5944,11 +6230,47 @@ class LexicalStore:
             " tags_canonical_json TEXT,"
             " UNIQUE(parent_path, unit_ref))"
         )
-        self._create_frequency_revision_triggers(conn, "semantic_units")
+        LexicalStore._create_frequency_revision_triggers(conn, "semantic_units")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS unit_revisions("
+            " parent_path TEXT PRIMARY KEY, revision TEXT NOT NULL)"
+        )
+        LexicalStore._create_unit_revision_triggers(
+            conn, "semantic_units", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
+            lambda row: f"{row}.parent_path",
+        )
+        # A summary written beside its page row changes how the parent's units read, so it counts as a unit write.
+        LexicalStore._create_unit_revision_triggers(
+            conn, "pages",
+            (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
+            lambda row: f"{row}.path",
+        )
 
-    def _create_frequency_revision_triggers(
-        self, conn: sqlite3.Connection, table: str
+    @staticmethod
+    def _create_unit_revision_triggers(
+        conn: sqlite3.Connection, table: str, events: tuple[tuple[str, str], ...],
+        parent: Callable[[str], str],
     ) -> None:
+        """Give a parent a fresh revision whenever a write changes what its units rank as.
+
+        `events` pairs each trigger event with the changed row it reads, and `parent`
+        names the parent path of that row in SQL (NULL when the row has none).
+        A reader keeps a parent's interpreted units while its revision is the
+        one it kept them under. The revision is random, so a catalogue replaced
+        beside the live one never repeats one. A unit row never changes parent:
+        the writers delete a parent's rows and insert them again.
+        """
+        for event, row in events:
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS unit_revision_{table}_{event.split()[0]} "
+                f"AFTER {event} ON {table} BEGIN "
+                "INSERT OR REPLACE INTO unit_revisions(parent_path, revision) "
+                f"SELECT path, hex(randomblob(16)) FROM (SELECT {parent(row)} AS path) "
+                "WHERE path IS NOT NULL; END"
+            )
+
+    @staticmethod
+    def _create_frequency_revision_triggers(conn: sqlite3.Connection, table: str) -> None:
         """Attest mutations from every connection in the writer's transaction.
 
         Random revisions separate independently built/replaced catalogues too.
@@ -5964,7 +6286,8 @@ class LexicalStore:
                 "WHERE key = 'frequency_revision'; END"
             )
 
-    def _create_catalog_indexes(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _create_catalog_indexes(conn: sqlite3.Connection) -> None:
         # Covering indexes so the per-corpus-change count/max reconcile stays
         # index-ranged instead of scanning 100k rows.
         conn.execute("CREATE INDEX IF NOT EXISTS pages_kb ON pages(in_kb, mtime_ns)")
@@ -6007,7 +6330,7 @@ class LexicalStore:
         """Drop the disposable normal + FTS tables (never `meta`), so a legacy
         shape can be replaced by the current one without a new-column index or
         INSERT ever running against the old table."""
-        for table in ("semantic_units", "pages", "fts", "tri", "unit_fts"):
+        for table in ("semantic_units", "pages", "unit_revisions", "fts", "tri", "unit_fts"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> bool:
@@ -6024,15 +6347,14 @@ class LexicalStore:
         self._create_catalog_tables(conn)
         if not self._pages_has_current_columns(conn):
             self._drop_catalog_tables(conn)
-            self._create_catalog_tables(conn)
-        self._create_catalog_indexes(conn)
-        # Optional content-ranking virtual tables — soft, isolated from the
-        # normal-table catalog whose readiness is decided below.
-        self._ensure_fts_schema(conn)
+        # The tables, indexes and (soft, isolated from the catalog whose readiness is decided
+        # below) content-ranking virtual tables: the one DDL that store mode shares.
+        create_catalogue_schema(conn)
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return bool(row and row[0] == str(SCHEMA_VERSION))
 
-    def _ensure_fts_schema(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         """Create the optional FTS5/trigram virtual tables when available.
 
         These back the BM25 (`fts`, `unit_fts`) and substring (`tri`) lanes
@@ -6046,7 +6368,7 @@ class LexicalStore:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
-            self._create_frequency_revision_triggers(conn, "fts_content")
+            LexicalStore._create_frequency_revision_triggers(conn, "fts_content")
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -6055,7 +6377,14 @@ class LexicalStore:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts "
                 f"USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
-            self._create_frequency_revision_triggers(conn, "unit_fts_content")
+            LexicalStore._create_frequency_revision_triggers(conn, "unit_fts_content")
+            # The shadow row's id is the unit's rowid, whose parent the `semantic_units` row names. FTS5
+            # writes an update as a delete and an insert; the UPDATE trigger, like the frequency one above,
+            # covers a direct write to the shadow row.
+            LexicalStore._create_unit_revision_triggers(
+                conn, "unit_fts_content", (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")),
+                lambda row: f"(SELECT parent_path FROM semantic_units WHERE rowid = {row}.id)",
+            )
         except sqlite3.Error as e:
             log.debug(
                 "lexical FTS/trigram virtual tables unavailable (%s); "
@@ -6529,8 +6858,9 @@ class LexicalStore:
                 conn.execute("DELETE FROM fts")
                 conn.execute("DELETE FROM tri")
                 conn.execute("DELETE FROM unit_fts")
-            for path, (in_kb, in_vault) in members.items():
-                self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+            # The deletes above left a revision for every parent they removed; the inserts below give each page its own.
+            conn.execute("DELETE FROM unit_revisions")
+            self._insert_members(conn, members, signatures)
             self._stamp_whole_build(conn)
         self._witnessed.clear()
         self._term_frequency_cache = None
@@ -6546,6 +6876,11 @@ class LexicalStore:
             return
         for scope, target in targets.items():
             self._bless(conn, scope, target)
+
+    def _insert_members(self, conn: sqlite3.Connection, members, signatures) -> None:
+        """Insert a page row, with its full-text and unit rows, for each walked file (caller owns the txn)."""
+        for path, (in_kb, in_vault) in members.items():
+            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness
@@ -6634,161 +6969,54 @@ class LexicalStore:
     ) -> None:
         """Insert one page row + its fts/tri rows (caller owns the txn).
 
-        Unparseable pages get an empty-text row: they keep the count check
-        honest but can never match — mirroring the python rungs, which skip
-        pages the parse cache rejects.
+        This is the file-mode driver of `page_rows` and `write_page_rows`: it
+        admits the path on disk, reads the page's bytes once and hands them to
+        the pure derivation. Unparseable pages get an empty-text row: they keep
+        the count check honest but can never match, mirroring the python rungs,
+        which skip pages the parse cache rejects.
         """
-        from . import bm25 as bm25_module
-        from . import find as find_module
-        from . import recall_policy
+        from . import find_corpus, recall_policy, semantic_index
 
         # Every insertion is independently guarded.  Rebuild, replay and a
         # second lookup must not be able to resurrect a raw Record after an
-        # earlier delete-only suppression.
+        # earlier delete-only suppression. The gate runs before the page is
+        # opened: a Records descendant's body is never read.
         if not recall_policy.is_recall_candidate(self.vault_root, path):
             return
-
-        page = find_module._CACHE.get(path, self.vault_root)
-        if page is not None:
-            rel = page.rel_path
-            title = page.title
-            title_lower = page.title_norm if title else ""
-            body_lower = page.body_norm
-            stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
-            updated = page.updated or "0000-00-00"
-            # Scene-frame children carry the parent video they collapse into;
-            # unparseable rows (page is None) stay NULL like ordinary pages.
-            emitted_parent_path = page.emitted_parent
-            eligibility = _eligibility_columns(page)
-            eligibility_view = _eligibility_view_json(page)
-            content_hash = getattr(page, "snapshot_hash", None)
-            ranking = _ranking_metadata_json(page)
-        else:
-            try:
-                rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
-            except ValueError:
-                return
-            title = None
-            title_lower = body_lower = stemmed = ""
-            updated = "0000-00-00"
-            emitted_parent_path = None
-            # An unparseable page has no frontmatter to filter on. Every axis is
-            # NULL, which is exactly "matches no positive constraint" — the same
-            # answer the scan oracle gives, since it cannot parse it either.
-            eligibility = _EMPTY_ELIGIBILITY
-            eligibility_view = None
-            content_hash = None
-            ranking = None
-        is_nav = path.name.lower() in _NAV_BASENAMES
-        cur = conn.execute(
-            "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path, "
-            + ", ".join(_ELIGIBILITY_COLUMNS)
-            + ", eligibility_view_json, content_hash, ranking_json) "
-            "VALUES(" + ", ".join("?" * (11 + len(_ELIGIBILITY_COLUMNS))) + ")",
-            (
-                rel,
-                title,
-                mtime_ns,
-                updated,
-                int(in_kb),
-                int(in_vault),
-                int(is_nav),
-                emitted_parent_path,
-                *eligibility,
-                eligibility_view,
-                content_hash,
-                ranking,
-            ),
+        rel = self._rel(path)
+        if rel is None:
+            return
+        raw = find_corpus.read_page_bytes(path, self.vault_root)
+        page = (
+            None
+            if raw is None
+            else find_corpus.parse_page(
+                path, mtime_ns / 1e9, self.vault_root, content=raw, resolved_relative=rel
+            )
         )
-        rowid = cur.lastrowid
-        if fts5_available():
-            conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, stemmed))
-            conn.execute(
-                "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
-                (rowid, title_lower, body_lower),
-            )
+        state = None
         if page is not None:
-            self._insert_semantic_units(
-                conn,
-                path,
-                updated=updated,
-                in_kb=in_kb,
-                in_vault=in_vault,
-            )
-
-    def _insert_semantic_units(
-        self,
-        conn: sqlite3.Connection,
-        path: Path,
-        *,
-        updated: str,
-        in_kb: bool,
-        in_vault: bool,
-    ) -> None:
-        """Store every structural occurrence some selected interpretation could emit.
-
-        Rows are shared by every caller, so they hold only selection-free facts:
-        raw category and heading labels in the registry normalization domain,
-        and the governed metadata the occurrence authors. Whether a row is a
-        unit, its category, kind and public reference belong to the reader's
-        selected interpretation of the page's stored summary.
-        """
-        from . import bm25 as bm25_module
-        from . import semantic_language_registry, semantic_units
-        from .semantic_index import current_parent_index_state, structural_metadata
-
-        try:
-            state = current_parent_index_state(self.vault_root, path)
-        except (OSError, UnicodeError, ValueError):
-            return
-        if state.candidates is None:
-            return
-        conn.execute("UPDATE pages SET structure_json = ? WHERE path = ?",
-                     (json.dumps(structural_metadata(state), sort_keys=True), state.path))
-        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
-            cur = conn.execute(
-                "INSERT INTO semantic_units("
-                "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
-                "parent_source_hash, parser_version, form, category_raw, category_key, "
-                "category, kind, content, tags_json, context, unit_source_hash, anchor, "
-                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
-                "verdict, check_by_day, check_by_json, tags_canonical_json) "
-                "VALUES('structural_occurrence', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash),
-                    state.path,
-                    state.parent_ref,
-                    state.parent_generation,
-                    state.parent_source_hash,
-                    state.parser_version,
-                    unit.form,
-                    unit.category_raw,
-                    unit.category_key,
-                    semantic_language_registry.normalize_label(unit.category_raw),
-                    unit.kind_key,
-                    unit.content,
-                    json.dumps(list(unit.tags), ensure_ascii=False, separators=(",", ":")),
-                    unit.context,
-                    unit.source_hash,
-                    unit.anchor,
-                    unit.line,
-                    unit.end_line,
-                    None,
-                    source_order,
-                    updated,
-                    int(in_kb),
-                    int(in_vault),
-                    *_unit_eligibility_columns(unit),
-                ),
-            )
-            if fts5_available():
-                stemmed = " ".join(bm25_module.tokenize(unit.content))
-                conn.execute(
-                    "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)",
-                    (cur.lastrowid, stemmed),
+            try:
+                state = semantic_index.current_parent_index_state(
+                    self.vault_root, rel, source=raw.decode("utf-8")
                 )
+            except (OSError, UnicodeError, ValueError):
+                state = None
+        # An unreadable page has no bytes to admit. An ordinary page still gets its empty-text row.
+        # A Records manifest is admitted by its content, so it gets no row until a later pass reads
+        # it: the gate fails closed.
+        rows = page_rows(
+            self.vault_root,
+            rel,
+            b"" if raw is None else raw,
+            page=page,
+            state=state,
+            mtime_ns=mtime_ns,
+            in_kb=in_kb,
+            in_vault=in_vault,
+        )
+        if rows is not None:
+            write_page_rows(conn, rows)
 
     def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
         if fts5_available():
@@ -10129,7 +10357,11 @@ class LexicalStore:
             else:
                 call_spans.measure(call_spans.STATS_REBUILT)
                 with self._term_frequency_cache_lock:
-                    base = self._admitted_bases.get(scope)
+                    # This admitted set's own base; a set seen first starts from the scope's latest base.
+                    base = self._admitted_bases.get((scope, digest)) or next(
+                        (kept for (kept_scope, _), kept in reversed(self._admitted_bases.items()) if kept_scope == scope),
+                        None,
+                    )
                 held = base.pages if base is not None else {}
                 # Only a page the base lacks, or holds under another identity, has its text read.
                 rows.update(self._stemmed_texts(conn, col, [
@@ -10138,10 +10370,11 @@ class LexicalStore:
                 ]))
                 statistics, postings, base = _admitted_corpus(rows, digests, base)
                 with self._term_frequency_cache_lock:
-                    if base is None:
-                        self._admitted_bases.pop(scope, None)
-                    else:
-                        self._admitted_bases[scope] = base
+                    self._admitted_bases.pop((scope, digest), None)
+                    if base is not None:
+                        self._admitted_bases[(scope, digest)] = base
+                        while len(self._admitted_bases) > _ADMITTED_BASES_MAX:
+                            self._admitted_bases.popitem(last=False)
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.
@@ -10258,32 +10491,118 @@ class LexicalStore:
     def _admitted_unit_statistics(
         self, conn: sqlite3.Connection, scope: str, parents: set[str], view: _SelectedUnits,
     ) -> _AdmittedStatisticsEntry:
-        """Selected-unit figures and first-occurrence row identities for this snapshot."""
+        """Selected-unit figures and first-occurrence row identities for this snapshot.
+
+        Reused for the same snapshot, or whenever every admitted parent's revision and the
+        interpretation's inputs are unchanged. Otherwise a parent is interpreted again only
+        if it moved or the public-instance base lacks it, and every parent's units are then
+        merged in `(parent path, rowid)` order, which gives the figures of a build from nothing.
+        """
         from . import bm25 as bm25_module
+        from .vocabulary.registry import PUBLIC_INSTANCE
 
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
             "\0".join(sorted(admitted)).encode("utf-8", "surrogatepass"), digest_size=16,
         ).hexdigest()
+        generation = self._snapshot_generation(conn)
+        dependency = view.interpretations.dependency()
         # This technical tag separates unit statistics from page statistics.
-        key = ("semantic-units", scope, *self._snapshot_generation(conn), digest,
-               view.interpretations.dependency())
+        key = ("semantic-units", scope, *generation, digest, dependency)
         with self._term_frequency_cache_lock:
             cached = self._admitted_statistics.get(key)
         if cached is not None:
             return cached
-        representatives: dict[int, str] = {}
-        occurrences: dict[str, list[tuple[int, str, str]]] = {}
-        corpus = view.corpus(
-            "in_vault" if scope == "vault" else "in_kb", admitted, representatives, occurrences,
-        )
-        view.require_complete()
-        call_spans.measure(call_spans.STATS_REBUILT)
-        entry = _AdmittedStatisticsEntry(
-            b"", bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
-            MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
-        )
+        # A parent with no row here has no unit row either: every write that gives it one gives it a revision.
+        revisions = dict(sorted(conn.execute(
+            "SELECT parent_path, revision FROM unit_revisions "
+            "WHERE parent_path IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(admitted), ensure_ascii=False),),
+        )))
+        identity = dict(generation[1:]).get("catalog_identity")
+        fingerprint = hashlib.sha256(repr(identity).encode())
+        for path, revision in revisions.items():
+            encoded = path.encode("utf-8", "surrogatepass")
+            # Length framing keeps field and row boundaries unambiguous; a revision has a fixed size.
+            fingerprint.update(len(encoded).to_bytes(8, "big"))
+            fingerprint.update(encoded)
+            fingerprint.update(revision.encode())
+        current_fingerprint = fingerprint.digest()
+
+        def same_inputs(retained_key: tuple, entry: _AdmittedStatisticsEntry) -> bool:
+            return (
+                retained_key[0] == "semantic-units" and retained_key[1] == scope
+                and retained_key[-2:] == (digest, dependency) and entry.fingerprint == current_fingerprint
+            )
+
         with self._term_frequency_cache_lock:
+            retained = next((
+                entry for retained_key, entry in self._admitted_statistics.items()
+                if same_inputs(retained_key, entry)
+            ), None)
+        if retained is not None:
+            entry = retained
+        else:
+            call_spans.measure(call_spans.STATS_REBUILT)
+            base_key = (identity, view.interpretations.public_dependency())
+            with self._term_frequency_cache_lock:
+                base = self._unit_bases.get(scope)
+            held = base.parents if base is not None and base.key == base_key else {}
+            fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
+                path for path, revision in revisions.items()
+                if (kept := held.get(path)) is None or kept.revision != revision
+            ])
+            view.require_complete()
+            corpus: dict[str, tuple[str, ...]] = {}
+            representatives: dict[int, str] = {}
+            occurrences: dict[str, list[tuple[int, str, str]]] = {}
+            kept_parents: dict[str, _ParentUnits] = {}
+            kept_bytes = 0
+            for path, revision in revisions.items():
+                parent = held.get(path)
+                if parent is None or parent.revision != revision:
+                    units = fresh.get(path, ())
+                    # A parent of an owner-only instance is interpreted by its caller alone, on every request,
+                    # even when its interpretation emitted no unit: another caller may be refused that instance.
+                    # Only a parent with no stored row holds no interpretation at all.
+                    parent = (
+                        _ParentUnits(revision, units)
+                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
+                    )
+                else:
+                    units = parent.units
+                for unit in units:
+                    if unit.ref not in corpus:
+                        corpus[unit.ref] = unit.tokens
+                        representatives[unit.rowid] = unit.ref
+                    # Retain identities without text; ambiguous hit precedence still
+                    # belongs to the original candidate SQL traversal.
+                    occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+                    if parent is not None:
+                        kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
+                if parent is not None:
+                    kept_parents[path] = parent
+            # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
+            # parents this build did not read. Each is used again only at its own revision; a deleted or
+            # renamed page's entry stays until the byte bound drops the base.
+            for path, parent in held.items():
+                if path not in revisions:
+                    kept_parents[path] = parent
+                    kept_bytes += sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in parent.units)
+            entry = _AdmittedStatisticsEntry(
+                current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
+                MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
+            )
+            with self._term_frequency_cache_lock:
+                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
+                    self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
+                else:
+                    self._unit_bases.pop(scope, None)
+        with self._term_frequency_cache_lock:
+            # Equivalent snapshot aliases must not evict another admitted corpus.
+            for retained_key, other in tuple(self._admitted_statistics.items()):
+                if same_inputs(retained_key, other):
+                    del self._admitted_statistics[retained_key]
             if len(self._admitted_statistics) >= _ADMITTED_STATISTICS_MAX:
                 self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
             self._admitted_statistics[key] = entry

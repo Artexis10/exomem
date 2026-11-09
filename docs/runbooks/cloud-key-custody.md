@@ -3,12 +3,17 @@
 # Exomem Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
-that key. `cellctl` holds no credential that creates or deletes keys, and no bucket-wide credential in the founder account.
+that key. `cellctl` holds no credential that creates or deletes keys. In the founder account it holds no credential that
+reads, writes or deletes files; its one key there can only list the media bucket.
 It still holds the stored per-cell key of each cell created before the switch, limited to that cell's prefix, until the cell migrates.
 
 ## Credentials
 
-Terraform creates the first three credentials. Their source is `infra/terraform/cell-data/keys.tf`.
+Terraform creates the credentials above except the per-cell keys and the operator key. The cell-data keys come from
+`infra/terraform/cell-data/keys.tf`. The three media keys come from `infra/terraform/durability/media.tf`.
+No media key can delete a file version. A captured edge key can still hide a name, and the media bucket's
+lifecycle rule deletes a hidden version when the grace period ends. The key watcher's hide budget and the
+grace period bound that exposure: see "Triage a burst of hides" in `cloud-media-edge.md`.
 Each credential has one holder.
 
 | Credential | Account | Restricted to | Capabilities | Held by |
@@ -16,12 +21,56 @@ Each credential has one holder.
 | `exomem-cell-data-key-custodian` | cell-data | None. B2 allows key creation only on an account-level key. | `listKeys`, `writeKeys`, `deleteKeys` | The key custodian, in Secret `exomem-key-custodian-b2` |
 | `exomem-cell-data-cellctl-staging` | cell-data | The staging bucket | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | `cellctl`, for exports, imports and the staging sweep of a deletion |
 | `exomem-cell-data-cellctl-backup-list` | cell-data | The locked backup bucket | `listBuckets`, `listFiles` | `cellctl`, to count backup versions for the log |
+| `<prefix>-media-edge` | founder | The media bucket | `readFiles`, `writeFiles` | The media edge, in Secret `exomem-media-edge-b2` |
+| `<prefix>-cellctl-media-list` | founder | The media bucket | `listBuckets`, `listFiles` | `cellctl`, to meter each cell's stored bytes. Source: `infra/terraform/durability/media.tf` |
+| `<prefix>-key-watcher-media-list` | founder | The media bucket | `listFiles` | The key watcher, to count hide markers, in secrets `B2_WATCHER_MEDIA_KEY_ID` and `B2_WATCHER_MEDIA_KEY` of environment `key-watcher` |
 | One key per cell | cell-data | The locked backup bucket and the prefix `cells/<cell_id>/` | `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles` | The cell's backup and restore Jobs, in Secret `cell-object-store-key` |
 | Operator key | One account per key | None. B2 allows key deletion only on an account-level key. | `listKeys`, `deleteKeys`; for cell-data also `listFiles`, `writeFiles`; for founder also `listBuckets`, `listFiles`, `deleteFiles` | The operator, for the clean-up script only |
 
 The key custodian creates each per-cell key. `cellctl` cannot create that Secret.
 Until D3 is in force, `cellctl` can render a Job that reads the Secret, so it can reach a cell's key by that route.
 No other credential can create or delete a key.
+
+## Pin the media keys
+
+The key watcher reports a key or a bucket setting that its pinned set does not list. The set is the GitHub
+Actions secret `KEY_WATCHER_PINNED_SET` in environment `key-watcher`. GitHub never returns a secret's value,
+so the current document is the copy that you keep from the last time you wrote it. The set is live state.
+Never replace it from a template; read the current value, change it and write it back.
+
+1. Apply the durability root with the operator's approval. Expect one new key, `cellctl_media_list`, and
+   the outputs `cloud_media_list_application_key_id` and `cloud_media_edge_application_key_id`.
+2. Open your copy of the current pinned set. In the `founder` account, add both key IDs to `pinned_key_ids`.
+   Skip an ID that the list already holds.
+3. In that account's `buckets`, add the media bucket under its ID from `cloud_media_bucket_id`, if it is
+   missing. Copy each setting from the provider's `b2_list_buckets` response for that bucket.
+   The fields are `bucketType`, `fileLockEnabled`, `defaultRetention`, `lifecycleRules`,
+   `defaultServerSideEncryption`, `replicationConfiguration` and `corsRules`.
+4. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+5. Run the watcher once: `gh workflow run b2-key-watcher.yml`. Expect the run to end with `0 active` for both accounts.
+
+Until step 4, the watcher reports the new key as unpinned. The alert is expected for that window.
+A bucket setting that differs from the copy shows as a reason token that names the field and no value.
+
+## Pin the media watch
+
+Do this after the durability apply of "Turn on collection" in `cloud-media-edge.md`. That apply adds the
+watcher's media key and the grace period to the media bucket's lifecycle rule. Agree the change with the
+owner of `contain-cloud-controller-compromise` first, because that change owns the pinned set.
+
+1. Open your copy of the current pinned set.
+2. In the `founder` account, add the ID from `key_watcher_media_list_application_key_id` to `pinned_key_ids`.
+3. In that account's `buckets`, replace the media bucket's `lifecycleRules` with the provider's current value
+   from `b2_list_buckets`. Expect `daysFromHidingToDeleting` equal to the grace period.
+4. Add the media watch to the `founder` account, with the budget and window that you chose:
+   `"media": {"bucket_id": "<media bucket id>", "key_id_env": "B2_WATCHER_MEDIA_KEY_ID", "key_env": "B2_WATCHER_MEDIA_KEY", "hide_budget": <budget>, "window_hours": <hours>}`
+5. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+6. Run the watcher once: `gh workflow run b2-key-watcher.yml`.
+   Expect `0 active` for both accounts and a line `account founder: <n> media hides in the window`.
+
+`window_hours` is the period that `hide_budget` covers. Keep it at 2 or more, because a scheduled run can
+start late. Until step 5, the watcher reports the new key as unpinned and the lifecycle rule as drift.
+A pinned set without `media` still parses, and its watcher counts no hides.
 
 ## Clean up after a cell deletion
 
@@ -58,6 +107,7 @@ the key, so run the script for both accounts.
    Expect `hide=due` and `files_hidden` equal to `files_found`.
 10. Run the dry run again for both accounts. The clean-up is complete when `founder` and `cell-data` each show
     `keys_found=0` and `files_found=0`. The alert does not show completion.
+11. If the cell used the media store, clean up the media bucket as well. See the next section.
 
 The grace starts from a date that you pass, not from a state file. The date is one value that you
 already keep with the deletion record. A file would need a path, a place that survives between sessions,
@@ -67,9 +117,38 @@ The script deletes only keys that the provider lists with the exact prefix `cell
 For `cell-data` it hides the cell's current backup files and never deletes a file version: the bucket's
 compliance lock keeps every version until its retention ends. For `founder` it deletes only versions that the
 provider lists under that prefix. Every step is safe to repeat.
-For unfinished large files, the provider's [delete-file-version API](https://www.backblaze.com/apidocs/b2-delete-file-version)
-cancels the upload, so the same command also removes their uploaded parts.
+For `founder`, the listing includes unfinished large files, and the script sends the same
+[delete-file-version call](https://www.backblaze.com/apidocs/b2-delete-file-version) for each of them.
+This runbook does not rely on that call to cancel an unfinished upload, because that provider behaviour
+is unverified here. The final dry run counts unfinished files in `files_found`, so it shows any that remain.
 If `keys_found` is more than 1 for one account, stop and ask why the provider holds two keys for one cell.
+
+## Media bucket of a deleted cell
+
+The media bucket stays in the founder account. Its only writer is the media edge, and no service holds
+`deleteFiles` on it. `cellctl` removes the cell from the edge's active set and reports `deleted` only after the
+edge shows that exact set (`add-cloud-media-store` D6, D9). So the alert for a cell that used the media store
+means the edge no longer admits that cell. The alert is still an input that a compromised `cellctl` controls:
+do the database check in steps 1 and 2 first. The bucket has no lock and its objects are the only copy,
+so the same 7-day grace applies, counted from your own first dry run.
+
+1. Export an operator key for the founder account that is limited to the media bucket, with `listFiles`, `deleteFiles`
+   and `writeFiles` (cancelling an upload is a write). It needs no key capability.
+   `export CELL_CLEANUP_B2_KEY_ID=<key id> CELL_CLEANUP_B2_APPLICATION_KEY=<application key>`
+2. Run the dry run. Take the media bucket's ID from the `cloud_media_bucket_id` output of `infra/terraform/durability`; check `cloud_media_bucket_name` for the intended bucket.
+   `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id>`
+3. Write down the date that the dry run prints as `first_dry_run=<date>`. This date starts the 7-day grace.
+4. Rerun the command with `--first-dry-run <date>` on every later run. Add `--apply` on or after the date in `grace_ends`.
+   Expect `delete=waiting` before that date, and no change.
+   `infra/scripts/cell_storage_cleanup.py <cell_id> --account media --bucket-id <media bucket id> --first-dry-run <date> --apply`
+5. Expect `delete=due`, `files_deleted` equal to `files_found` and `unfinished_cancelled` equal to `unfinished_found`.
+   The script deletes every file version under `cells/<cell_id>/`, hidden versions included. It cancels each unfinished
+   large file with the provider's cancel call. It does not rely on the delete call for an upload that never finished.
+6. Run the dry run again. The clean-up is complete when it shows `files_found=0` and `unfinished_found=0`.
+
+Every step is safe to repeat. An upload that the edge started for this cell before its revocation stays unfinished until
+you cancel it here or the bucket's lifecycle rule removes it. If a rerun after the grace still shows a file, stop and
+ask why: the edge should admit no upload for this cell.
 
 ## Staging objects of a deleted cell
 

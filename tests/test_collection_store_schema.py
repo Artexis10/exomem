@@ -57,6 +57,14 @@ EXPECTED_TABLES = {
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
+    "store_mode",
+    "store_mode_objects",
+    "store_pages",
+    "store_binaries",
+    "store_manifest",
+    "store_projection_queue",
+    "store_held",
+    "store_audit",
 }
 APPEND_ONLY = (
     "txns",
@@ -66,6 +74,7 @@ APPEND_ONLY = (
     "collection_manifests",
     "collection_type_versions",
     "import_members",
+    "store_audit",
 )
 
 
@@ -206,6 +215,12 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
             " importer_version, zone_rules) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (COLLECTION_ID, 1, 1, "0" * 32, 0, H, H, H, 1, 0, H, 1, "0.0.0", None),
         )
+        if schema.schema_version(conn) >= 15:  # an older store has no store audit
+            conn.execute(
+                "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
+                " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, '2026-11-08T00:00:00Z')",
+                (H,),
+            )
     return {"row_id": row_id}
 
 
@@ -382,7 +397,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 14
+    assert schema.SCHEMA_VERSION == 16
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -486,7 +501,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["14", "9"])
+@pytest.mark.parametrize("revision", ["16", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -501,12 +516,91 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 14
+        assert schema.schema_version(store.connection) == 16
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 14
+            assert schema.schema_version(reader) == 16
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("14",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("16",)]
+
+
+def test_a_schema_14_store_gains_the_empty_store_mode_tables_and_keeps_its_rows(tmp_path, monkeypatch):
+    """Defect: the schema 15 revision works on a new store only, so every existing store fails to open or loses rows."""
+    path = tmp_path / "collections.sqlite"
+    with monkeypatch.context() as earlier:
+        earlier.setattr(schema, "SCHEMA_VERSION", 14)
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            _populated(writer)
+            assert schema.schema_version(writer.connection) == 14
+            rows = writer.connection.execute("SELECT * FROM items").fetchall()
+            assert not writer.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'store_pages'").fetchone()
+
+    with connection.open_writer(path, lease_check=_allow) as writer:
+        conn = writer.connection
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
+        assert conn.execute("SELECT * FROM items").fetchall() == rows
+        strict = dict(conn.execute("SELECT name, strict FROM pragma_table_list WHERE schema='main'").fetchall())
+        for name in schema.VAULT_STORE_TABLES:
+            assert strict[name] == 1
+            assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == 0  # noqa: S608 - fixed names
+
+
+def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_rows(tmp_path, monkeypatch):
+    """Defect: the schema 16 revision drops a page's modification time or loses the pages a store-mode vault holds."""
+    path = tmp_path / "collections.sqlite"
+    pages = (("Knowledge Base/Notes/a.md", 1_700_000_000_000_000_001), ("Knowledge Base/Notes/b.md", 7))
+    with monkeypatch.context() as earlier:
+        earlier.setattr(schema, "SCHEMA_VERSION", 15)
+        with connection.open_writer(path, lease_check=_allow) as writer:
+            assert schema.schema_version(writer.connection) == 15
+            with writer.transaction() as conn:
+                for rel, mtime_ns in pages:
+                    conn.execute(
+                        "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision)"
+                        " VALUES (?, ?, ?, ?, NULL, 1)", (rel, b"body", H, 4))
+                    conn.execute(
+                        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, 4, ?, 1)",
+                        (rel, H, mtime_ns))
+                # A page with no manifest row cannot happen in a migrated vault; it takes the zero default.
+                conn.execute(
+                    "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision)"
+                    " VALUES ('Knowledge Base/Notes/c.md', x'00', ?, 1, NULL, 1)", (H,))
+                conn.execute(
+                    "INSERT INTO store_projection_queue(path, revision, operation, queued_at)"
+                    " VALUES (?, 1, 'write', 't1')", (pages[0][0],))
+                conn.execute(
+                    "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
+                    " VALUES (1, ?, 'write', 'agent', ?, 't1')", (pages[0][0], H))
+
+    with connection.open_writer(path, lease_check=_allow) as writer:
+        conn = writer.connection
+        assert schema.schema_version(conn) == 16
+        assert conn.execute("SELECT * FROM store_projection_queue").fetchall() == [
+            (pages[0][0], 1, "write", None, "t1")]
+        with writer.transaction() as tx:
+            tx.execute("INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at)"
+                       " VALUES ('Knowledge Base/Notes/d.md', 2, 'move', ?, 't2')", (pages[1][0],))
+            for operation, from_path in (("move", None), ("write", pages[1][0])):
+                with pytest.raises(sqlite3.IntegrityError):
+                    tx.execute("INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at)"
+                               " VALUES ('Knowledge Base/Notes/e.md', 2, ?, ?, 't2')", (operation, from_path))
+        assert conn.execute("SELECT path, mtime_ns, body FROM store_pages ORDER BY path").fetchall() == [
+            (pages[0][0], pages[0][1], b"body"), (pages[1][0], pages[1][1], b"body"),
+            ("Knowledge Base/Notes/c.md", 0, b"\x00")]
+        # The audit trail keeps its row, gains the move column, and stays append-only.
+        assert conn.execute("SELECT path, from_path FROM store_audit").fetchall() == [(pages[0][0], None)]
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"), writer.transaction() as tx:
+            tx.execute("UPDATE store_audit SET from_path = 'x'")
+        indexes = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name IN "
+            "('store_pages_meta', 'store_audit_by_path', 'store_binaries_by_sha')")}
+        assert indexes == {"store_pages_meta", "store_audit_by_path", "store_binaries_by_sha"}
+        plan = conn.execute("EXPLAIN QUERY PLAN SELECT path FROM store_binaries WHERE sha256 = ?", (H,)).fetchall()
+        assert any("store_binaries_by_sha" in row[3] for row in plan)
+        plan = conn.execute("EXPLAIN QUERY PLAN SELECT path, revision, sha256, size, mtime_ns, frontmatter_json "
+                            "FROM store_pages ORDER BY path").fetchall()
+        assert any("COVERING INDEX store_pages_meta" in row[3] for row in plan)
 
 
 def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
@@ -520,7 +614,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("14",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("16",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 

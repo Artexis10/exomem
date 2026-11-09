@@ -14,7 +14,15 @@ from typing import Any
 import pytest
 import yaml
 
-from cellctl.manifests import MEDIA_EDGE_ACCESS_LABEL, render_cell_manifests
+from cellctl.capacity import GIB
+from cellctl.exports import PACK, PAUSE, UPLOAD, VERIFY, ExportRow, export_size
+from cellctl.manifests import (
+    MEDIA_EDGE_ACCESS_LABEL,
+    render_backup_job,
+    render_cell_manifests,
+    render_export_job,
+    render_restore_job,
+)
 
 from .test_media_edge import _spec
 from .test_platform_chart_headers import (
@@ -37,6 +45,7 @@ EDGE = (
     "--set", "mediaEdge.enabled=true",
     "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
     "--set-string", "mediaEdge.bucket=media-bucket",
+    "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
     "--set-json", f'mediaEdge.cellIds=["{CANARY}"]',
 )
 NAMESPACE = "exomem-cloud"
@@ -129,7 +138,7 @@ def test_the_edge_render_holds_neither_the_media_keys_nor_the_signing_key() -> N
     assert any(v.get("secret", {}).get("secretName") == "exomem-media-edge-signing-key" for v in cellctl["volumes"])
 
 
-def test_the_edge_admits_cellctl_and_the_runtimes_cellctl_labels_and_reaches_public_443_and_dns() -> None:
+def test_the_edge_admits_cellctl_the_runtimes_cellctl_labels_and_backups_and_reaches_public_443_and_dns() -> None:
     documents = _helm_template(*EDGE)
     policy = _find(documents, "NetworkPolicy", "exomem-media-edge")["spec"]
     peers = _ingress_peers(documents)
@@ -140,6 +149,11 @@ def test_the_edge_admits_cellctl_and_the_runtimes_cellctl_labels_and_reaches_pub
                                "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
          "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell"},
                          "matchExpressions": [{"key": "exomem.io/cell-job", "operator": "DoesNotExist"}]}},
+        {"namespaceSelector": {"matchLabels": {MEDIA_EDGE_ACCESS_LABEL: "true"},
+                               "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell-job": "export-pack"}}},
+        {"namespaceSelector": {"matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell-job": "backup"}}},
     ]
     assert policy["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8769}]
     assert [rule["to"][0].get("ipBlock", {}).get("cidr") for rule in policy["egress"]] == ["0.0.0.0/0", None]
@@ -177,6 +191,47 @@ def test_a_turned_off_canary_reaches_the_edge_while_its_namespace_is_labelled_an
     assert _edge_peer_guarded_by_the_label(expression)
 
 
+def test_the_edge_admits_a_retained_cells_backup_job_and_none_of_its_other_pods() -> None:
+    # collect-released-media D3: a retained store's backups keep condemning what the cell released, and only the
+    # backup Job holds the collector credential, so no other Job and no unlabelled runtime may reach the edge.
+    documents = _helm_template(*EDGE, "--set-json", "mediaEdge.cellIds=[]")
+    spec = _spec(media_edge_url="", media_edge_credential="", media_age_identity="", media_recipient="",
+                 media_name_key=b"", media_key_version=0, media_max_object_bytes=0, media_store_retained=True,
+                 media_collector_url="http://10.43.0.30:8769", media_collector_credential="collector",
+                 hold_kind="backup", hold_started_at="2026-01-01T00:00:00+00:00")
+    namespace = next(m for m in render_cell_manifests(spec) if m["kind"] == "Namespace")["metadata"]["labels"]
+    store = dict(bucket_name="b", endpoint="https://s3.example")
+    pods = {
+        "backup": render_backup_job(spec, **store)["spec"]["template"]["metadata"]["labels"],
+        "restore": render_restore_job(spec, **store, snapshot_id="c" * 64)["spec"]["template"]["metadata"]["labels"],
+        "runtime": next(m for m in render_cell_manifests(spec)
+                        if m["kind"] == "StatefulSet")["spec"]["template"]["metadata"]["labels"],
+    }
+
+    admitted = {name for name, pod in pods.items() if any(
+        _selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
+        for peer in _ingress_peers(documents) if "namespaceSelector" in peer)}
+    assert admitted == {"backup"}
+
+
+def test_the_edge_admits_a_served_cells_export_pack_and_none_of_its_other_export_steps() -> None:
+    # add-cloud-media-store D8: only the pack reads evicted originals. The upload, which has public
+    # egress, and the pause beside the stopped vault never reach the edge.
+    documents = _helm_template(*EDGE)
+    spec = _spec(hold_kind="export", hold_started_at="2026-01-01T00:00:00+00:00")
+    namespace = next(m for m in render_cell_manifests(spec) if m["kind"] == "Namespace")["metadata"]["labels"]
+    item = ExportRow("00000000-0000-4000-8000-000000000001", spec.cell_id, "requested", None,
+                     archive_bytes=1, archive_sha256="0" * 64, archive_version_id="v")
+    pods = {step: render_export_job(spec, item, step, deadline_seconds=60, size=export_size(GIB),
+                                    part_urls=["https://storage.example/part"])["spec"]["template"]["metadata"]["labels"]
+            for step in (PAUSE, PACK, UPLOAD, VERIFY)}
+
+    admitted = {step for step, pod in pods.items() if any(
+        _selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
+        for peer in _ingress_peers(documents) if "namespaceSelector" in peer)}
+    assert admitted == {PACK}
+
+
 def test_the_fleet_switch_selects_every_cell_beside_the_canary_list_and_leaves_the_network_wall() -> None:
     canary = _helm_template(*EDGE)
     documents = _helm_template(*EDGE, "--set", "mediaEdge.allCells=true")
@@ -194,6 +249,7 @@ def test_the_fleet_switch_selects_every_cell_beside_the_canary_list_and_leaves_t
 def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> None:
     documents = _helm_template(
         *EDGE, "--set-json", f'mediaEdge.credentialEpochs={{"{CANARY}":2}}',
+        "--set-json", f'mediaEdge.collectCells=["{CANARY}"]',
         "--set-json", 'mediaEdge.storePolicy={"evict_after_days":30,"max_temporary_bytes":5637144576,"max_hydrations":1}')
     cellctl = _find(documents, "Deployment", "cellctl")["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in cellctl["env"]}
@@ -201,9 +257,22 @@ def test_cellctl_receives_its_edge_settings_and_may_write_one_config_map() -> No
 
     assert env["CELLCTL_MEDIA_EDGE_URL"] == "http://10.43.0.30:8769"
     assert json.loads(env["CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS"]) == {CANARY: 2}
+    assert json.loads(env["CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS"]) == [CANARY]
+    # cellctl confirms a revocation only for the bucket the edge writes to, so one value feeds both.
+    edge = _find(documents, "Deployment", "exomem-media-edge")["spec"]["template"]["spec"]["containers"][0]
+    assert env["CELLCTL_MEDIA_EDGE_BUCKET"] == {e["name"]: e.get("value") for e in edge["env"]}["EXOMEM_MEDIA_EDGE_BUCKET"]
     default_policy = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text())["mediaEdge"]["storePolicy"]
     assert json.loads(env["CELLCTL_MEDIA_EDGE_STORE_POLICY"]) == {
         **default_policy, "evict_after_days": 30, "max_temporary_bytes": 5637144576, "max_hydrations": 1}
+    # The physical meter lists with its own list-only key, never the edge's: the Secret is the list key's.
+    # It is optional, so a release that reaches the cluster before that Secret still starts cellctl.
+    secret_refs = {e["name"]: e["valueFrom"]["secretKeyRef"] for e in cellctl["env"] if "valueFrom" in e}
+    assert env["CELLCTL_MEDIA_BUCKET_ID"] == "4a48fe8875c6214145260818"
+    assert env["CELLCTL_MEDIA_PHYSICAL_HEADROOM"] == "2"
+    assert secret_refs["CELLCTL_MEDIA_LIST_KEY_ID"] == {
+        "name": "exomem-cloud-media-list", "key": "keyId", "optional": True}
+    assert secret_refs["CELLCTL_MEDIA_LIST_APPLICATION_KEY"] == {
+        "name": "exomem-cloud-media-list", "key": "applicationKey", "optional": True}
     assert role["metadata"]["namespace"] == NAMESPACE
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["exomem-media-edge-active-set"],
@@ -234,6 +303,8 @@ def test_the_default_object_bound_admits_a_5_gib_file_at_the_edge_and_in_cellctl
         ("--set-string", "mediaEdge.endpoint=http://10.43.0.30:8768"),
         ("--set-string", "mediaEdge.endpoint=http://203.0.113.9:8769"),
         ("--set-string", "mediaEdge.bucket="),
+        ("--set-string", "mediaEdge.bucketId="),
+        ("--set-json", "mediaEdge.physicalHeadroom=0.5"),
         ("--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem:latest"),
         ("--set-json", 'cells.jobEgressExcept=["10.0.0.0/8"]'),
         ("--set-json", 'mediaEdge.cellIds=["short"]'),
@@ -326,6 +397,20 @@ def test_turning_the_edge_off_is_refused_while_the_live_active_set_cannot_be_rea
 
     assert result.returncode != 0
     assert "cannot be read" in result.stderr
+
+
+@pytest.mark.parametrize(("collectors", "says"), [
+    pytest.param(f'{{"{CANARY}":8}}', CANARY, id="a retained cell still collects"),
+    pytest.param("[]", "cannot be read", id="the collectors cannot be read"),
+])
+def test_turning_the_edge_off_is_refused_while_the_live_active_set_lists_a_collector(
+    collectors: str, says: str, tmp_path: Path
+) -> None:
+    # collect-released-media D3: with the edge off a retained cell's backups would stop condemning without a word.
+    result = _upgrade_with_the_edge_off(f'{{"generation":9,"cells":{{}},"collectors":{collectors}}}', tmp_path)
+
+    assert result.returncode != 0
+    assert says in result.stderr
 
 
 @pytest.mark.parametrize(

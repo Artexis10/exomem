@@ -266,5 +266,6 @@ def shared_rendering_tool(contributors):
     read_only = all(rendering.read_only for rendering, _ in contributors)
     tool.annotations = ToolAnnotations(title=first.title, readOnlyHint=read_only,
                                       destructiveHint=any(r.destructive for r, _ in contributors),
-                                      idempotentHint=read_only, openWorldHint=False)
+                                      idempotentHint=all(r.idempotent for r, _ in contributors),
+                                      openWorldHint=False)
     return tool

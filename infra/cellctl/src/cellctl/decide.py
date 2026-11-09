@@ -59,11 +59,19 @@ class ReconcileConfig:
     import_cleanup_retry: timedelta = timedelta(hours=1)
     # The cell stops for each attempt, and a person settles the cause of an owner refusal, so retry daily.
     import_cleanup_owner_retry: timedelta = timedelta(hours=24)
-    # C6: an export hold not finished this long per started 10 GiB of its cap
-    # (exports.export_deadline) fails, and the cell starts again. A ready export
-    # is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each download link
-    # lasts export_link_ttl.
+    # C6: an export's pack, upload and verification not finished this long per
+    # started 10 GiB of its planned archive (exports.export_deadline) fail. A
+    # ready export is kept for export_ttl (EXOMEM_EXPORT_TTL_HOURS), and each
+    # download link lasts export_link_ttl.
     export_deadline: timedelta = timedelta(minutes=30)
+    # add-cloud-media-store D8: the short pause. The runtime stops and the pause
+    # pod runs each within export_pause_start; the pause then copies the used
+    # bytes at no less than the floor (CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB, MiB
+    # per second; task 5.5.9 sets it from the rehearsal). Each node runs at most
+    # export_concurrency_per_node exports at once (CELLCTL_EXPORT_CONCURRENCY_PER_NODE).
+    export_pause_start: timedelta = timedelta(minutes=2)
+    export_pause_copy_floor_mib: int = 25
+    export_concurrency_per_node: int = 1
     export_ttl: timedelta = timedelta(hours=24)
     export_link_ttl: timedelta = timedelta(seconds=300)
     backup_deadline: timedelta = timedelta(minutes=15)
@@ -247,12 +255,13 @@ def decide(
         # C5 and C6 reconciliation own these holds, and this branch runs only
         # when neither decides, as when no row owns the hold. Routine
         # convergence never restarts their volume. An unowned hold still ends:
-        # every Job of its kind starts before the kind's deadline and runs at
-        # most that long, so after twice the deadline none can use the volume.
-        from .exports import export_deadline  # exports.py imports this module
+        # every Job of its kind that uses the volume starts before the kind's
+        # deadline and runs at most that long, so after twice the deadline none
+        # can use the volume. An export's only such Job is its pause.
+        from .exports import pause_window  # exports.py imports this module
 
         started = observation.statefulset_hold_started_at or row.hold_started_at or now
-        deadline = config.import_deadline if active_hold == "import" else export_deadline(row, config)
+        deadline = config.import_deadline if active_hold == "import" else pause_window(row, config)
         if now - started < 2 * deadline:
             decision = Decision(apply_manifests=True, replicas=0, image=current_image(row, observation),
                                 hold_kind=active_hold, hold_started_at=row.hold_started_at,
@@ -1381,6 +1390,10 @@ def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:
     # staging key empties. Deleting a cell removes all of its data, so this comes first (D9).
     if not observation.staging_objects_absent_confirmed:
         return Decision(delete_staging_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
+    # The edge must first be shown to serve a set without the cell, so no upload lands after the operator
+    # starts the media clean-up. This only orders the alert; the clean-up's own grace authorizes the delete.
+    if observation.media_revocation_pending:
+        return Decision(row_updates={**hold_clear, "observed_state": "deleting"})
     # No backup object is deleted here, and no key: a new cell's bucket is locked, and the operator's
     # clean-up empties an old cell's prefix in the old bucket and deletes its key (D9).
     return Decision(

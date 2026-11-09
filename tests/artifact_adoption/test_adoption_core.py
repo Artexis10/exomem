@@ -1539,3 +1539,210 @@ def test_durable_receipt_page_is_not_read_through_path_read_text(
     replay = client_artifacts.preserve_artifacts(vault, **kwargs)
 
     assert replay["files"][0]["outcome"] == "replayed"
+
+
+_PRESET_V1 = b"PK\x03\x04preset-v1\x00"
+_PRESET_V2 = b"PK\x03\x04preset-v2-revised\x00"
+
+
+def _evidence_listing(vault: Path, category: str = "outputs") -> list[str]:
+    folder = vault / "Knowledge Base" / "Evidence" / "case" / category
+    return sorted(entry.name for entry in folder.iterdir())
+
+
+def test_handing_over_a_revision_then_the_first_file_again_keeps_each_version_once(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    payloads = {"offer": ("preset.zip", "application/zip", _PRESET_V1)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+
+    def hand_over(key: str) -> dict:
+        result = client_artifacts.preserve_artifacts(
+            vault,
+            scope="case",
+            category="outputs",
+            files=[_handle("offer", "preset.zip", "application/zip")],
+            adoption=_adoption(key, selected="offer", trigger="handed_over"),
+        )
+        return result["files"][0]
+
+    first = hand_over("preset.zip:v1")
+    payloads["offer"] = ("preset.zip", "application/zip", _PRESET_V2)
+    revision = hand_over("preset.zip:v2")
+    payloads["offer"] = ("preset.zip", "application/zip", _PRESET_V1)
+    again = hand_over("preset.zip:v1-resent")
+
+    assert first["outcome"] == "stored"
+    assert first["stored_path"].endswith("/outputs/preset.zip")
+    assert revision["outcome"] == "stored"
+    assert revision["stored_path"].endswith("/outputs/preset-2.zip")
+    assert again["state"] == "already_stored"
+    assert again["duplicate_of"]["path"] == first["stored_path"]
+    assert _evidence_listing(vault) == [
+        "preset-2.zip",
+        "preset-2.zip.md",
+        "preset.zip",
+        "preset.zip.md",
+    ]
+    assert (vault / first["stored_path"]).read_bytes() == _PRESET_V1
+    assert (vault / revision["stored_path"]).read_bytes() == _PRESET_V2
+
+
+def test_identical_bytes_under_another_file_name_and_key_are_already_stored(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing, preserve
+
+    payloads = {
+        "offer-a": ("preset.zip", "application/zip", _PRESET_V1),
+        "offer-b": ("preset (1).zip", "application/zip", _PRESET_V1),
+    }
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    first = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("offer-a", "preset.zip", "application/zip")],
+        adoption=_adoption("preset-a", selected="offer-a", trigger="handed_over"),
+    )
+    listing = _evidence_listing(vault)
+    writes: list[str] = []
+    original = preserve.batch_atomic_write
+    monkeypatch.setattr(
+        preserve, "batch_atomic_write", lambda *args, **kwargs: writes.append("write") or original(*args, **kwargs)
+    )
+
+    second = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("offer-b", "preset (1).zip", "application/zip")],
+        adoption=_adoption("preset-b", selected="offer-b", trigger="handed_over"),
+    )
+
+    row = second["files"][0]
+    assert row["state"] == "already_stored"
+    assert row["duplicate_of"]["path"] == first["files"][0]["stored_path"]
+    assert second["summary"] == {
+        "stored": 0,
+        "already_stored": 1,
+        "replayed": 0,
+        "failed": 0,
+        "unselected": 0,
+    }
+    assert writes == []
+    assert _evidence_listing(vault) == listing
+
+
+def test_bytes_preserved_without_adoption_are_already_stored_when_handed_over(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    payloads = {"offer": ("preset.zip", "application/zip", _PRESET_V1)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    saved = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("offer", "preset.zip", "application/zip")],
+    )
+
+    handed_over = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("offer", "preset.zip", "application/zip")],
+        adoption=_adoption("preset-handed-over", selected="offer", trigger="handed_over"),
+    )
+
+    row = handed_over["files"][0]
+    assert row["state"] == "already_stored"
+    assert row["duplicate_of"]["path"] == saved["files"][0]["stored_path"]
+    assert _evidence_listing(vault) == ["preset.zip", "preset.zip.md"]
+
+
+def test_a_source_hand_over_of_identical_bytes_under_a_new_key_is_already_stored(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import add, client_artifacts, media_processing
+
+    payloads = {"offer": ("brief.bin", "application/octet-stream", _PRESET_V1)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    capture = {
+        "source_schema": source_schema,
+        "title": "Reasoning input",
+        "source_type": "research-report",
+        "files": [_handle("offer", "brief.bin", "application/octet-stream")],
+    }
+    first = client_artifacts.capture_source_artifacts(
+        vault, adoption=_adoption("brief:v1", selected="offer", trigger="handed_over"), **capture
+    )
+    folder = vault / "Knowledge Base" / "Sources" / "Reports"
+    listing = sorted(entry.name for entry in folder.iterdir())
+    commits: list[str] = []
+    original = add.add
+    monkeypatch.setattr(
+        add, "add", lambda *args, **kwargs: commits.append("add") or original(*args, **kwargs)
+    )
+
+    again = client_artifacts.capture_source_artifacts(
+        vault, adoption=_adoption("brief:v1-resent", selected="offer", trigger="handed_over"), **capture
+    )
+
+    row = again["files"][0]
+    assert row["state"] == "already_stored"
+    assert row["duplicate_of"]["path"] == first["files"][0]["stored_path"]
+    # capture_source builds its compile guidance from `page`, so the earlier copy's page must be named.
+    assert row["page"] == first["files"][0]["page"]
+    assert again["summary"]["already_stored"] == 1
+    assert again["summary"]["stored"] == 0
+    assert commits == []
+    assert sorted(entry.name for entry in folder.iterdir()) == listing
+
+
+def test_a_source_hand_over_of_a_revision_is_stored_beside_the_first(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    payloads = {"offer": ("brief.bin", "application/octet-stream", _PRESET_V1)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    capture = {
+        "source_schema": source_schema,
+        "title": "Reasoning input",
+        "source_type": "research-report",
+        "files": [_handle("offer", "brief.bin", "application/octet-stream")],
+    }
+    first = client_artifacts.capture_source_artifacts(
+        vault, adoption=_adoption("brief:v1", selected="offer", trigger="handed_over"), **capture
+    )
+    payloads["offer"] = ("brief.bin", "application/octet-stream", _PRESET_V2)
+
+    revision = client_artifacts.capture_source_artifacts(
+        vault, adoption=_adoption("brief:v2", selected="offer", trigger="handed_over"), **capture
+    )
+
+    assert revision["files"][0]["outcome"] == "stored"
+    assert revision["files"][0]["stored_path"] != first["files"][0]["stored_path"]
+    assert (vault / first["files"][0]["stored_path"]).read_bytes() == _PRESET_V1
+    assert (vault / revision["files"][0]["stored_path"]).read_bytes() == _PRESET_V2

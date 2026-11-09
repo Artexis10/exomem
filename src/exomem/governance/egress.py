@@ -6299,6 +6299,9 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "replace_memory",
         "edit_memory",
         "manage_memory_file",
+        # Owner-only mutation of one ref the caller supplied; a result shows the
+        # change to that page only at FULL release.
+        "approve_procedure",
         "process_media",
         "transfer_artifact",
         "adopt_vault",
@@ -6419,10 +6422,16 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
                 "provenance", "evolution", "compilation", "stale", "contradiction",
                 "unprocessed-sources", "relation-debt", "relation-queue", "adoption",
                 "upkeep", "plan-progress", "write-advisory-result",
+                "procedure_approvals",
             ),
             "structure",
         ),
         "vocabulary": "question-conditional",
+    },
+    ("approve_procedure", "action"): {
+        "approve": "mutation",
+        "revoke": "mutation",
+        "quarantine": "mutation",
     },
     ("configure_memory", "action"): {
         "inspect": "structure",
@@ -6484,6 +6493,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "collections-store": "structure",
         "collections-store-adopt-local": "apply-conditional",
         "collections-store-export": "apply-conditional",
+        "collections-cutover": "structure",
     },
     ("manage_memory_file", "operation"): {
         "list": "structure",

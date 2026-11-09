@@ -139,7 +139,7 @@ def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
 ):
     root, writer = store
     target = replica.replica_path(root)
-    original = snapshot.staged_snapshot
+    original = snapshot.staged_collection_snapshot
     workspace = None
 
     @contextmanager
@@ -150,7 +150,7 @@ def test_matching_installed_copy_retires_the_still_owned_redundant_stage(
             target.write_bytes(artifact.path.read_bytes())
             yield artifact
 
-    monkeypatch.setattr(snapshot, "staged_snapshot", matching_copy_arrives)
+    monkeypatch.setattr(snapshot, "staged_collection_snapshot", matching_copy_arrives)
     if concurrent:
         @contextmanager
         def step(_patience, _cancelled):
@@ -702,7 +702,7 @@ def test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_
 ):
     # Defensive guard for out-of-model private mutation, not shared sync input.
     root, writer = store
-    original = snapshot.staged_snapshot
+    original = snapshot.staged_collection_snapshot
     changed = None
 
     @contextmanager
@@ -713,7 +713,7 @@ def test_failed_foreign_stage_relocation_cannot_delete_changed_bytes_on_context_
             changed.write_bytes(b"foreign content in the original stage inode")
             yield artifact
 
-    monkeypatch.setattr(snapshot, "staged_snapshot", mutate_after_validation)
+    monkeypatch.setattr(snapshot, "staged_collection_snapshot", mutate_after_validation)
     result = replica.publish_replica(
         root,
         writer,
@@ -892,7 +892,7 @@ def parent(fs, relative, **kwargs):
         os._exit(73)
     return result
 filesystem_type.parent = parent
-original_snapshot = snapshot.staged_snapshot
+original_snapshot = snapshot.staged_collection_snapshot
 @contextmanager
 def staged(*args, **kwargs):
     note('snapshot-enter')
@@ -903,7 +903,7 @@ def staged(*args, **kwargs):
         note('snapshot-ready')
         os._exit(73)
         yield artifact
-snapshot.staged_snapshot = staged
+snapshot.staged_collection_snapshot = staged
 note('writer-enter')
 with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as writer:
     note('writer-returned')

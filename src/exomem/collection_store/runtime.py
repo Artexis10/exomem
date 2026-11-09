@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-from .. import call_spans, foreground_priority, request_budget, state_paths
+from .. import call_spans, foreground_priority, mutation_lock, request_budget, state_paths
 from . import connection, legacy_originals, replica, schema
 
 logger = logging.getLogger(__name__)
@@ -428,11 +428,10 @@ class CollectionStoreRuntime:
         """Operator view of admission; an unresolved takeover or divergence reports attention."""
         token = self.manager._fencing_token
         if token is not None and self.reporting_ready(token):
-            divergence, view = self._meta(schema.META_REPLICA_DIVERGENCE, schema.META_VIEW_DIVERGED)
-            if divergence is not None or view is not None:
-                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True,
-                        "reason": json.loads(divergence)["reason"] if divergence is not None
-                        else "a view carries another store instance's stamp"}
+            with connection.store_reader(self.path, self.reader_pool()) as reader:
+                reason = schema.divergence_reason(reader)
+            if reason is not None:
+                return {"status": "diverged", "code": "COLLECTION_STORE_DIVERGED", "attention": True, "reason": reason}
             return {"status": "admitted"}
         return self._takeover.status() if self._takeover is not None else {"status": "unadmitted"}
 
@@ -852,8 +851,7 @@ def route_with_proof(command, vault_root, arguments):
     refuses (C never falls back to its views), a summary create on a vault with no store
     refuses as the owner's enrolment step, and the inventory names C as unreadable.
     """
-    from ..cli_ops import OpError
-    from .preview import UNSERVED, bound_writer
+    from .preview import bound_writer
 
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
@@ -868,7 +866,7 @@ def route_with_proof(command, vault_root, arguments):
 
     selector = arguments.get("collection", arguments.get("manifest_path"))
     proof = ownership.current(root)
-    summary = command == "record_memory" and arguments.get("action") == "create" and summary_create(root, arguments)
+    summary = arguments.get("action") == "create" and summary_create(root, arguments)
     if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
@@ -876,10 +874,7 @@ def route_with_proof(command, vault_root, arguments):
         connection.load_store_libraries()
     if summary:
         if proof.marker is None:
-            from . import admission, capability
-
-            capability.require_records_summary(root)
-            raise admission.enrollment_required()
+            refuse_unserved_create(root, None)
     elif progress_review or selector is None and (
         arguments.get("action") == "inspect"
         or (command == "record_memory" and arguments.get("action") == "describe")
@@ -893,10 +888,26 @@ def route_with_proof(command, vault_root, arguments):
     if server is None and not summary:
         return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
     if server is None:
-        raise OpError(
-            "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
-        )
+        refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
+
+
+def refuse_unserved_create(root, marker):
+    """Refuse a NEW summary collection's create that no serving store thread runs.
+
+    A vault without a store needs the owner's offline enrolment; a vault with one needs
+    the service that serves it.
+    """
+    from ..cli_ops import OpError
+    from . import admission, capability
+    from .preview import UNSERVED
+
+    if marker is None:
+        capability.require_records_summary(root)
+        raise admission.enrollment_required()
+    raise OpError(
+        "COLLECTION_STORE_UNAVAILABLE", UNSERVED, "Send the request to the service that serves this vault.",
+    )
 
 
 def _curation_route(command, root, arguments):
@@ -1003,12 +1014,13 @@ def summary_create(root, arguments):
         return False
 
 
-def served_create(vault_root, arguments):
+def served_create(vault_root, arguments, facade_profile=None):
     """Create a NEW summary collection on the serving session, or None for any other manifest.
 
     It runs on the store thread under the request principal, through the producer's own
     create (``admission.create_new``), which a vault already enrolled in this store
     completes with writer authority. Enrolling a vault is the owner's offline step.
+    ``facade_profile`` is the calling tool's profile, which the create requires and scaffolds.
     """
     from .. import structured_collections as collections
     from .. import writer_lease
@@ -1031,7 +1043,11 @@ def served_create(vault_root, arguments):
         result = admission.create_new(
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
-            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True))
+            fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
+            facade_profile=facade_profile)
+        if (receipt := result.get("receipt")) and receipt.get("warnings"):
+            # The create's own warnings lead, where the tool result shows them.
+            result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}
         if result.get("status") == "pending":
             # Committed, but its replica publication did not finish: the store stays the
             # create's until this thread's create tick resumes it, so this request ends
@@ -1135,6 +1151,7 @@ class _Call:
         self.read_only = read_only
         self.checkpoint = request_budget.current_checkpoint() if read_only else None
         self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
+        self.thread = threading.get_ident()  # the caller, which keeps any boundary it holds while it waits here
         self.taken = False
         self.done = threading.Event()
         self.result = self.error = None
@@ -1377,13 +1394,38 @@ class StoreServer:
                     if self._starved("views", served) and not self._boundary_held_elsewhere(served):
                         # Saved views get one bounded turn per starvation bound even when requests never stop.
                         self._held_elsewhere_since = None  # a started tick ends any wait; a later hold starts anew
-                        self._ticks["views"] = time.monotonic() + self._views_tick()
+                        with self._maintaining("views"):
+                            self._ticks["views"] = time.monotonic() + self._views_tick()
                 elif self._tick_may_start(name, time.monotonic()):
                     # One tick per turn, so a waiting request is taken between any two.
                     self._held_elsewhere_since = None
-                    self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
+                    with self._maintaining(name):
+                        self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
+
+    @contextmanager
+    def _maintaining(self, name):
+        """Run one tick whose boundary waits end once a queued store request needs this thread.
+
+        A tick waits for the vault boundary before it writes. A command that holds the boundary and
+        then sends a store request waits for this thread, while this thread waits for the command's
+        boundary, and only the boundary timeout would end either wait. In this scope, a tick that
+        has not starved stops waiting when any request is queued. A starved tick, whose turn is due
+        even beside requests, stops only for a request from the boundary's holder. The tick then
+        ends with its due time unchanged, so it runs again after the request.
+        """
+        starved = self._starved(name, time.monotonic())
+
+        def waited_on(holder):
+            with self._condition:
+                return any(not starved or request.thread == holder for request in self._requests)
+
+        try:
+            with mutation_lock.ending_waits(waited_on):
+                yield
+        except mutation_lock.WaitEnded:
+            pass  # the caller's `_ticks` assignment did not run, so the tick keeps its age
 
     def _starves_at(self, name, now):
         """When a tick starves: ``MAINTENANCE_DEFER_SECONDS`` after it fell due, or, for a views tick
@@ -1426,11 +1468,11 @@ class StoreServer:
         """Whether a starved tick waits while another thread holds the vault boundary.
 
         Maintenance proves collection ownership under that boundary. Started during
-        another thread's hold, it waits there while the holder's own store reads queue
-        behind it, so a short hold becomes a long one. Waiting here serves those reads
-        first. The wait ends one mutation timeout after it began, as long as the tick's
-        own blocked wait would take, so back-to-back holders cannot starve maintenance.
-        A tick that starts ends the wait (``_run``), so the next hold gets a full one.
+        another thread's hold, it would only reach its boundary wait and stop there for the
+        holder's next store read (``_maintaining``). Waiting here spares those reads the
+        tick's work up to that wait. The wait ends one mutation timeout after it began, so
+        back-to-back holders cannot starve maintenance. A tick that starts ends the wait
+        (``_run``), so the next hold gets a full one.
         """
         if self._boundary is None:
             self._boundary = self.manager._mutation_coordinator_for(self.root)
@@ -1530,8 +1572,14 @@ class StoreServer:
             return
         self._stack, self.session, self.runtime = stack, session, self.manager._collection_store
 
-    def _serve(self, request):
+    def unserved(self):
+        """The refusal for a request that arrives while this vault's store is not open."""
         from ..cli_ops import OpError
+
+        code, message = self.refusal
+        return OpError(code, message, "Retry once the service serves the collection store.")
+
+    def _serve(self, request):
         from ..governance import policy
         from . import ownership
         from .preview import preview_store
@@ -1571,8 +1619,7 @@ class StoreServer:
 
         try:
             if self.runtime is None:
-                code, message = self.refusal
-                raise OpError(code, message, "Retry once the service serves the collection store.")
+                raise self.unserved()
             request.result = request.context.run(bound)
         except BaseException as error:  # noqa: BLE001 - raised again on the caller's thread
             if isinstance(error, connection.CollectionStoreError) and error.code == "COLLECTION_STORE_BUSY":
@@ -1827,8 +1874,12 @@ class StoreServer:
         """
         from ..governance import policy
 
-        with state_paths.resolution_scope(), policy.request_policy_snapshot():
-            return self._views_work()
+        try:
+            with state_paths.resolution_scope(), policy.request_policy_snapshot():
+                return self._views_work()
+        except mutation_lock.WaitEnded:
+            self._views_owed = True  # the pass that stopped for a request stays views work (`_maintaining`)
+            raise
 
     def _views_work(self):
         from ..governance import principal
@@ -1895,16 +1946,22 @@ class StoreServer:
                            and time.monotonic() - started < VIEW_SLICE_SECONDS):
                         wait = self._edit_back.run(writer, now=time.monotonic(), mutate=mutate,
                                                    limit=VIEW_BATCH_PATHS)
-            except Exception:  # noqa: BLE001 - an edit that cannot be classified now is read again later
-                logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+            # An edit that cannot be classified now is read again later. A wait that ended for a
+            # request (`_maintaining`) is no failure: the hints go back with no retry delay.
+            except (Exception, mutation_lock.WaitEnded) as error:  # noqa: BLE001
+                stopped = isinstance(error, mutation_lock.WaitEnded)
+                if not stopped:
+                    logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                    wait = IMPORT_RETRY_SECONDS
+                    self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
                 self._sweep_pending, self._sweep_seen = {}, {}  # the next sweep finds the edits again
-                wait = IMPORT_RETRY_SECONDS
-                self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
                 with self._condition:
                     self._view_census_needed |= dirty
                     for change in changes:
                         if change in self._view_changes:
                             self._view_changes[change] = False
+                if stopped:
+                    raise
         with self._condition:
             if views and self._view_retry_at <= time.monotonic() \
                     and any(not checked for checked in self._view_changes.values()):

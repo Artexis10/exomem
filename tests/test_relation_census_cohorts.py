@@ -123,14 +123,11 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
         summary="A synthetic accounting concept.",
     ).path
     draft_arguments = {
-        "content": f"## Claim\n\nA retained conclusion.\n\n## Relations\n\n- relates_to [[{target.removesuffix('.md')}]]\n",
+        "content": f"## Claim\n\nA retained conclusion.\n\n## Relations\n\n- extends [[{target.removesuffix('.md')}]]\n",
         "note_type": "insight",
         "title": "Authored additions",
         "status": "active",
         "today": dt.date(2020, 1, 1),
-        # A generic edge to an entity is kept on a stated reason, not refused.
-        "relation_disposition": "generic",
-        "relation_review_reason": "The note names no narrower relation to the concept.",
     }
     draft = note.note(vault, validate_only=True, **draft_arguments)
     created = note.note(
@@ -140,7 +137,7 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     path = created.path
     _, body, _ = vault_module.parse_frontmatter((vault / path).read_text())
     extra = "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization"
-    changed_body = body + f"\n- supports [[{extra}]]\n"
+    changed_body = body + f"\n- links_to [[{extra}]]\n"
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=vault.parent / "receipts")
     )
@@ -182,30 +179,18 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     before = relation_census.census(vault)
     cohort = before["new_edges"]
     assert cohort["authored_edges"]["numerator"] == 2
-    assert cohort["endpoint_classes"]["note_to_entity"]["raw_generic_share"]["numerator"] == 1
+    # No real write adds a generic edge, so the log classes both edges and none is generic.
+    assert cohort["endpoint_classes"]["note_to_entity"]["raw_generic_share"]["numerator"] == 0
     assert cohort["endpoint_classes"]["note_to_note"]["raw_generic_share"]["denominator"] == 1
-    # The one generic edge kept the reason its writer gave, so no logged reason is blank.
-    assert cohort["unreasoned_generic_edges"]["numerator"] == 0
-    assert cohort["unreasoned_generic_edges"]["denominator"] == 1
-    assert cohort["unreasoned_generic_edges"]["coverage"]["status"] == "partial"
+    assert (cohort["raw_generic_share"]["numerator"], cohort["raw_generic_share"]["denominator"]) == (0, 2)
+    # One edge names a specific relation and the other is a plain link.
+    assert (cohort["specific_share"]["numerator"], cohort["specific_share"]["denominator"]) == (1, 2)
+    assert (cohort["plain_link_share"]["numerator"], cohort["plain_link_share"]["denominator"]) == (1, 2)
     assert cohort["referents"]["acted"]["numerator"] is None
     assert cohort["placement_by_basis"]["numerator"] == 1
     assert cohort["coverage"]["status"] == "partial"
     assert cohort["review"]["gate"] is False
-    assert cohort["review"]["needed"] is True
-    reviewed = commands.op_review_memory(
-        vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
-    )
-    assert len(reviewed["findings"]) == 1
-    assert reviewed["findings"][0]["severity"] == "info"
-    assert reviewed["findings"][0]["meta"]["measurement"]["numerator"] == 1
-    config = vault.parent / "review-target.json"
-    config.write_text(json.dumps({"relation_census": {"entity_generic_review_share": 1}}))
-    with monkeypatch.context() as changed_target:
-        changed_target.setenv("EXOMEM_CONFIG_PATH", str(config))
-        assert commands.op_review_memory(
-            vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
-        )["findings"] == []
+    assert cohort["review"]["needed"] is False
 
     monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1")
     monkeypatch.setattr(vault_module, "LOG_ROTATE_KEEP_ENTRIES", 1)
@@ -215,6 +200,121 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     assert after["metrics"] == before["metrics"]
     assert after["new_edges"]["authored_edges"]["numerator"] == 2
     assert after["new_edges"]["placement_by_basis"]["numerator"] == 1
+
+
+_NOTE = "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization.md"
+_OTHER = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+
+
+def _log_added_edges(vault: Path, edges: list[dict]) -> None:
+    """Append one governed edit to the operation log, as an earlier release recorded it."""
+    event = {
+        "server_at": dt.datetime.now(dt.UTC).isoformat(),
+        "path": _NOTE,
+        "before_hash": content_hash((vault / _NOTE).read_text()),
+        "after_hash": content_hash((vault / _NOTE).read_text()),
+        "mutation_kind": "edit",
+        "placement": None,
+        "added_edges": [
+            {
+                "identity": str(index),
+                "source": _NOTE,
+                "target": _OTHER,
+                "source_path": _NOTE,
+                "target_path": _OTHER,
+                "endpoint_class": "note_to_note",
+                "reason": None,
+                "reason_recorded": False,
+                **edge,
+            }
+            for index, edge in enumerate(edges)
+        ],
+    }
+    plan = vault_module.plan_log_writes(
+        vault,
+        date_iso="2020-01-01",
+        op="edit",
+        rel_path_no_ext=_NOTE.removesuffix(".md"),
+        body="A recorded edit.",
+        operation_token="logged-edges",
+        provenance=event,
+    )
+    vault_module.batch_atomic_write(plan.writes, vault_root=vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+
+def test_specific_and_plain_link_shares_count_authored_relations_only(vault: Path) -> None:
+    _log_added_edges(
+        vault,
+        [
+            {"generic": False, "origin": "markdown_relation", "relation": "supports"},
+            {"generic": False, "origin": "markdown_relation", "relation": "refines"},
+            {"generic": False, "origin": "markdown_relation", "relation": "links_to"},
+            # A body wikilink is not an authored relation.
+            {"generic": False, "origin": "wikilink", "relation": "links_to"},
+        ],
+    )
+
+    cohort = relation_census.census(vault)["new_edges"]
+
+    assert (cohort["specific_share"]["numerator"], cohort["specific_share"]["denominator"]) == (2, 3)
+    assert (cohort["plain_link_share"]["numerator"], cohort["plain_link_share"]["denominator"]) == (1, 3)
+
+
+def test_an_extension_of_the_plain_link_counts_as_a_plain_link(vault: Path) -> None:
+    overlay = vault / "Knowledge Base/_Schema/relation-registry.yaml"
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nextensions:\n"
+        "  x.see_also: {parent: links_to, description: Points to related reading}\n"
+    )
+    _log_added_edges(
+        vault,
+        [
+            {"generic": False, "origin": "markdown_relation", "relation": "x.see_also"},
+            {"generic": False, "origin": "markdown_relation", "relation": "supports"},
+        ],
+    )
+
+    cohort = relation_census.census(vault)["new_edges"]
+
+    assert (cohort["specific_share"]["numerator"], cohort["specific_share"]["denominator"]) == (1, 2)
+    assert (cohort["plain_link_share"]["numerator"], cohort["plain_link_share"]["denominator"]) == (1, 2)
+
+
+def test_specific_and_plain_link_shares_are_unavailable_when_the_log_names_no_relation(
+    vault: Path,
+) -> None:
+    _log_added_edges(vault, [{"generic": False, "origin": "markdown_relation"}])
+
+    cohort = relation_census.census(vault)["new_edges"]
+
+    assert cohort["raw_generic_share"]["numerator"] == 0
+    assert cohort["specific_share"]["numerator"] is None
+    assert cohort["plain_link_share"]["numerator"] is None
+
+
+def test_the_generic_share_review_follows_the_configured_target(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An earlier release could keep a generic edge to an entity; the log still carries them.
+    _log_added_edges(
+        vault,
+        [{"generic": True, "origin": "markdown_relation", "relation": "relates_to", "endpoint_class": "note_to_entity"}],
+    )
+
+    reviewed = commands.op_review_memory(
+        vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
+    )
+    assert len(reviewed["findings"]) == 1
+    assert reviewed["findings"][0]["severity"] == "info"
+    assert reviewed["findings"][0]["meta"]["measurement"]["numerator"] == 1
+    config = vault.parent / "review-target.json"
+    config.write_text(json.dumps({"relation_census": {"entity_generic_review_share": 1}}))
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(config))
+    assert commands.op_review_memory(
+        vault, mode="audit", categories=[audit.RELATION_GENERIC_SHARE_CATEGORY], detail="full"
+    )["findings"] == []
 
 
 def test_missing_and_legacy_logs_never_measure_zero_new_edges(
@@ -248,13 +348,13 @@ def test_successor_keeps_inherited_edges_out_of_the_new_authored_cohort(vault: P
         vault,
         note_type="insight",
         title="Initial accounting conclusion",
-        content=f"## Claim\n\nA retained conclusion.\n\n## Relations\n\n- relates_to [[{carried}]]\n",
+        content=f"## Claim\n\nA retained conclusion.\n\n## Relations\n\n- refines [[{carried}]]\n",
     )
     arguments = {
         "old_path": old.path,
         "note_type": "insight",
         "title": "Revised accounting conclusion",
-        "content": f"## Claim\n\nAn updated conclusion.\n\n## Relations\n\n- relates_to [[{carried}]]\n- supports [[{extra}]]\n",
+        "content": f"## Claim\n\nAn updated conclusion.\n\n## Relations\n\n- refines [[{carried}]]\n- supports [[{extra}]]\n",
     }
     draft = replace.replace(vault, validate_only=True, **arguments)
     replace.replace(
@@ -268,8 +368,8 @@ def test_successor_keeps_inherited_edges_out_of_the_new_authored_cohort(vault: P
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     cohort = relation_census.census(vault)["new_edges"]
     assert cohort["authored_edges"]["numerator"] == 2
-    assert cohort["raw_generic_share"]["numerator"] == 1
-    assert cohort["raw_generic_share"]["denominator"] == 2
+    assert (cohort["specific_share"]["numerator"], cohort["specific_share"]["denominator"]) == (2, 2)
+    assert cohort["plain_link_share"]["numerator"] == 0
 
 
 def test_only_explicit_edge_reason_records_supply_reason_metrics(
@@ -408,7 +508,7 @@ def test_unit_identity_coverage_requires_a_stable_authored_anchor(
         note_type="insight",
         title="A unit identity boundary",
         status="active",
-        content=f"## Claim\n{identity}- relations: relates_to: [[{target}]]\n\nA retained conclusion.\n",
+        content=f"## Claim\n{identity}- relations: supports: [[{target}]]\n\nA retained conclusion.\n",
     )
     graph_sync.await_active_rebuild(vault, timeout=30)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()

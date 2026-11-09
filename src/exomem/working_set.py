@@ -28,7 +28,9 @@ import json
 import logging
 import os
 import posixpath
+import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -94,6 +96,8 @@ UNIT_LANE_LIMIT = 200
 GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
 GRAPH_TRAVERSAL_PROFILE = "epistemic"
+#: Outbound links one task candidate lists. A packet-shape bound like `MAX_ITEMS_PER_ROLE`: the rest are counted.
+TASK_LINKS_PER_CANDIDATE = 5
 
 #: Entries the working-continuity block may carry, and the characters they may
 #: spend. Both are hard: the block leads every packet, including an abstained
@@ -473,6 +477,7 @@ def _without_lede_repeats(
             and not any(item.provenance.get(key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS)
             and not item.provenance.get("corrects")
             and not item.provenance.get("supersedes_targets")
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             and not item.provenance.get("superseded_by")
             and (item.ref, str(item.provenance.get("source_hash") or "")) not in qualified_sources
         ):
@@ -1156,6 +1161,7 @@ def _provenance(item: LaneItem) -> dict[str, Any]:
 
 
 def _superseded_targets(item: LaneItem) -> tuple[str, ...]:
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     raw = item.provenance.get("superseded_by")
     if isinstance(raw, str):
         return (raw,)
@@ -1338,67 +1344,188 @@ def _with_standing_units(result: LaneResult, standing_pages: frozenset[str]) -> 
     return result._replace(items=tuple(items))
 
 
+def _compiled_first(vault_root: Path, paths: list[str], *, visible: Callable[[str], bool] | None) -> list[str]:
+    """Move each live note that compiled a candidate Source ahead of that Source.
+
+    Text ranking can put a short, term-dense recap above the note compiled from it, which
+    sends the agent to an older, partial account first. Coverage is the citation rule that
+    the audit uses (`source_coverage`): the Source names the note in `ingested_into` and the
+    live note cites it back in `sources:`. Only candidates are looked up, so no page outside
+    them moves; a note pulled ahead can push the last candidate past the limit. Without a
+    resident resolver the text order stands, and where the context pack would, the miss
+    schedules the background rebuild that restores it. A restricted caller keeps text order:
+    the broad resolver also sees withheld pages, and a withheld namesake could flip the order.
+    """
+    from . import find, lifecycle_statuses, note_types, source_coverage, vault
+
+    if len(paths) < 2:
+        return paths
+    snapshot = find.borrow_query_resolver(
+        vault_root, visible=visible, schedule_rebuild=vault.inbound_recovery_available(vault_root),
+    )
+    if snapshot is None:
+        return paths
+    candidates = set(paths)
+
+    def lookup(path: str):
+        return find._CACHE.get(vault_root / path, vault_root) if path in candidates else None  # noqa: SLF001
+
+    status_basis, type_basis = lifecycle_statuses.Basis(vault_root), note_types.Basis(vault_root)
+    ordered: list[str] = []
+    for path in paths:
+        page = lookup(path)
+        if page is not None and page.frontmatter.get("ingested_into"):
+            coverage = source_coverage.evaluate(
+                vault_root, page, lookup=lookup, resolver=lambda: snapshot,
+                status_basis=status_basis, type_basis=type_basis,
+            )
+            ordered.extend(
+                item.path for item in coverage.derivatives
+                if item.reason is None and item.path and item.path not in ordered
+            )
+        if path not in ordered:
+            ordered.append(path)
+    return ordered
+
+
+def method_unit_categories(vault_root: Path) -> tuple[str, ...]:
+    """The categories the effective role registry projects as methods, never a list kept in code."""
+    registry = context_roles.load_roles(vault_root)
+    return tuple(sorted(context_roles.projection_categories(registry, "method")))
+
+
+def search_method_units(
+    vault_root: Path, query_units: list, k: int, *,
+    categories: tuple[str, ...], allowed: AbstractSet[str], fresh: tuple, checkpoint: Any,
+):
+    """The method-unit lexical search of a full-source-access task context over its `allowed` catalogue paths.
+
+    One call for the request and for `warm_owner_method_units`, so a warm builds the statistics that this
+    search reads and a change to either cannot leave the other behind.
+
+    The caller proves full source access first: `allowed` is passed as the released set too, so the search
+    applies no release filter of its own. A request passes its released catalogue paths, a warm the
+    catalogue's own recall set after `warm_owner_method_units` proved the owner reads without a filter.
+    """
+    from . import lexstore, working_set_runtime
+
+    return lexstore.get_store(vault_root).search_semantic_units_result(
+        [], k, categories, (), "kb", fresh,
+        allowed_parent_paths=allowed,
+        admitted_parent_paths=allowed,
+        # Full source access was proved and `allowed` is already this request's released catalogue paths.
+        released_parent_paths=allowed,
+        query_units=query_units,
+        term_budget=working_set_runtime.material_term_budget(),
+        recall_checkpoint=checkpoint, allow_delta=False,
+    )
+
+
+def warm_owner_method_units(vault_root: Path) -> str:
+    """Build in this process the method-unit statistics an owner's first task context builds; say what happened.
+
+    For a standby, which has no request to read from and must publish nothing. It reads the lexical
+    catalogue as published: its own recall checkpoint and its own recall rows, so a vault write that the
+    standby's unwatched registry has not seen cannot make the catalogue look stale, and no repair is
+    asked for. A query with no units builds the statistics and ranks nothing.
+
+    The warmed set is every page the catalogue holds for the knowledge base, a superset of the catalogue
+    entries an owner's request admits. Interpreting a parent is the cost, and the unit base keeps each
+    parent by its own revision whatever set asked for it, so the owner's first request finds every parent
+    interpreted and only merges the figures, or reuses them whole when the sets agree.
+    """
+    from . import context_task, context_views, lexstore
+    from .governance import principal
+
+    # The standby's own read stands in for the owner's request, so it takes the owner-local scope that
+    # `effective_principal` leaves to a caller that declares it.
+    with principal.library_scope():
+        if not context_task.full_source_access(vault_root, context_views.CallerView.current(vault_root)):
+            return "skipped: the owner reads through a release filter"
+        categories = method_unit_categories(vault_root)
+        if not categories:
+            return "skipped: no category is projected as a method"
+        store = lexstore.get_store(vault_root)
+        published = store.published_recall_checkpoint("kb")
+        allowed = None if published is None else store.recall_admitted_paths("kb", published)
+        if published is None or allowed is None:
+            return "skipped: the catalogue publishes no recall projection"
+        result = search_method_units(
+            vault_root, [], 1, categories=categories, allowed=set(allowed),
+            fresh=published.triple, checkpoint=published,
+        )
+    if not result.readiness.complete:
+        return f"not built: the catalogue answered {result.readiness.status}"
+    return f"built over {len(allowed)} pages"
+
+
 @governance_policy.request_policy_snapshot()
 def task_candidates(
     vault_root: Path, *, catalogue: Any, caller: Any, turn: str, focus: str,
     snapshot: Any, limit: int,
     index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
+    timings: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Independent bounded recall over catalogue carriers, never anchor evidence."""
+    """Independent bounded recall over catalogue carriers, never anchor evidence.
+
+    Each lane records a child span of `working_set.task_context`, so a slow recall names its stage.
+    """
     from . import (
         bm25,
         collection_claims,
         context_task,
         context_views,
-        epistemic_graph,
+        find_types,
         lexstore,
         record_governance,
     )
     from .governance import egress
 
-    page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-    entries = [entry for entry in catalogue.task_entries() if entry.path
-               and context_views._admits(entry, caller.visible)
-               and (page_visible is None or page_visible(entry.path))]
+    with find_types.timing_span(timings, "working_set.task_context_entries"):
+        page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+        entries = [entry for entry in catalogue.task_entries() if entry.path
+                   and context_views._admits(entry, caller.visible)
+                   and (page_visible is None or page_visible(entry.path))]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
     allowed = set(by_path)
-    fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
-    registry = context_roles.load_roles(vault_root)
-    categories = tuple(sorted(context_roles.projection_categories(registry, "method")))
     found: dict[str, dict[str, Any]] = {}
     missing: list[dict[str, str]] = []
-    restricted = not context_task.full_source_access(vault_root, caller)
     token_corpus = None
     statistics = None
-    metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
+    with find_types.timing_span(timings, "working_set.task_context_policy"):
+        fresh, checkpoint = snapshot.for_scope("kb"), snapshot.lexical_checkpoint("kb")
+        categories = method_unit_categories(vault_root)
+        restricted = not context_task.full_source_access(vault_root, caller)
+        metadata_full = record_governance.full_release_filter(vault_root) if restricted else None
     if restricted:
-        projections = projections if projections is not None else {}
-        token_corpus = {}
-        corpus_bytes = 0
-        for path in sorted(allowed):
+        with find_types.timing_span(timings, "working_set.task_context_released_corpus"):
+            projections = projections if projections is not None else {}
+            token_corpus = {}
+            corpus_bytes = 0
+            for path in sorted(allowed):
+                context_task._deadline_check()
+                source = context_task.project_source(vault_root, path, caller, cache=projections)
+                if source is None:
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                    continue
+                text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
+                # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
+                charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
+                if charge > TASK_CORPUS_MAX_BYTES:
+                    raise RuntimeError("released task corpus preparation allowance exceeded")
+                tokens = bm25.tokenize(text)
+                charge += 64 * len(tokens)
+                if charge > TASK_CORPUS_MAX_BYTES:
+                    raise RuntimeError("released task corpus preparation allowance exceeded")
+                corpus_bytes = charge
+                token_corpus[path] = tokens
+            # The complete released corpus owns N/DF, term selection and result slots.
             context_task._deadline_check()
-            source = context_task.project_source(vault_root, path, caller, cache=projections)
-            if source is None:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-                continue
-            text = json.dumps(source.public, sort_keys=True, ensure_ascii=False)
-            # Conservative engineering charge for released data, token slots and per-source containers; not measured RSS.
-            charge = corpus_bytes + 32 * len(text.encode("utf-8")) + 256
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            tokens = bm25.tokenize(text)
-            charge += 64 * len(tokens)
-            if charge > TASK_CORPUS_MAX_BYTES:
-                raise RuntimeError("released task corpus preparation allowance exceeded")
-            corpus_bytes = charge
-            token_corpus[path] = tokens
-        # The complete released corpus owns N/DF, term selection and result slots.
-        context_task._deadline_check()
-        statistics = bm25.CorpusStatistics.of(token_corpus)
-        context_task._deadline_check()
-        allowed = set(token_corpus)
+            statistics = bm25.CorpusStatistics.of(token_corpus)
+            context_task._deadline_check()
+            allowed = set(token_corpus)
 
     def add(path: str, origin: str) -> None:
         if path not in by_path or path not in allowed:
@@ -1409,17 +1536,19 @@ def task_candidates(
         if origin not in found[path]["origins"]:
             found[path]["origins"].append(origin)
 
+    method_queries: list[tuple[str, str]] = []
     # Origin values name the two request input segments, not inferred intent.
     for origin, query in (("turn", turn), ("focus", focus)):
         if not query.strip():
             continue
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
-            targets = _routing_targets(
-                vault_root, index_token[1], index_token=index_token,
-                visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
-            )
-            route = collection_claims.route(working_set_index.terms_of(query), targets)
+            with find_types.timing_span(timings, "working_set.task_context_routing"):
+                targets = _routing_targets(
+                    vault_root, index_token[1], index_token=index_token,
+                    visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
+                )
+                route = collection_claims.route(working_set_index.terms_of(query), targets)
             if route is not None:
                 add(str(route["collection"]), origin)
         if restricted:
@@ -1436,63 +1565,140 @@ def task_candidates(
             for path, _score in hits[:limit]:
                 add(path, origin)
             continue
-        result = lexstore.search_bm25_result(
-            vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
-            allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
-            exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
-        )
+        with find_types.timing_span(timings, "working_set.task_context_text"):
+            result = lexstore.search_bm25_result(
+                vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
+                allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
+                exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
+            )
         if not result.readiness.complete:
+            # A lexical index still catching up after a cutover or a write must not also silence the dense reading.
             missing.append({"role": "task_context", "reason": "lane_failed"})
-            continue
-        hits = result.value or []
-        if len(hits) > limit:
-            missing.append({"role": "task_context", "reason": "lane_truncated"})
-        for path, _score in hits[:limit]:
+        else:
+            hits = result.value or []
+            if len(hits) > limit:
+                missing.append({"role": "task_context", "reason": "lane_truncated"})
+            for path, _score in hits[:limit]:
+                add(path, origin)
+        if budget_exhausted("working_set.task_context_vector"):
+            missing.append({"role": "task_context", "reason": "budget"})
+            break
+        # The dense reading search_memory fuses, so a paraphrase or a typo reaches the page that shares no
+        # material term with the turn. It reads only the resident recall matrix and an encoder already in
+        # memory: it never loads a model or a matrix on this thread.
+        with find_types.timing_span(timings, "working_set.task_context_vector"):
+            vector_paths, vector_state = _resident_vector_paths(vault_root, query, allowed, limit)
+        if vector_state == "lane_failed":
+            missing.append({"role": "task_context", "reason": "lane_failed"})
+        for path in vector_paths:
             add(path, origin)
         if categories:
-            methods = lexstore.get_store(vault_root).search_semantic_units_result(
-                [], limit + 1, categories, (), "kb", fresh,
-                allowed_parent_paths=allowed,
-                admitted_parent_paths=allowed,
-                # This branch proved FULL source access and filtered this request's catalogue paths.
-                released_parent_paths=allowed,
-                query_units=bm25.token_units(query_text, query=True),
-                term_budget=working_set_runtime.material_term_budget(),
-                recall_checkpoint=checkpoint, allow_delta=False,
-            )
-            if not methods.readiness.complete:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-            else:
-                for hit in (methods.value or [])[:limit]:
-                    add(hit.parent_path, origin)
+            method_queries.append((origin, query_text))
     if restricted:
         # Existing graph caps precede origin-unit release; restricted tasks retain text recall and name the omitted lane.
         missing.append({"role": "task_context", "reason": "lane_failed"})
-    if found and not restricted:
-        nodes_left, edges_left = GRAPH_MAX_NODES, GRAPH_MAX_EDGES
-        try:
-            for path in list(found)[:MAX_ITEMS_PER_ROLE]:
-                graph = epistemic_graph.graph_context(
-                    vault_root, path=path, depth=1, max_nodes=nodes_left, max_edges=edges_left,
-                    traversal_profile=GRAPH_TRAVERSAL_PROFILE, keep=caller.visible, include_lag=False,
-                )
-                if not graph.get("available", True):
-                    missing.append({"role": "task_context", "reason": "lane_failed"})
-                    break
-                for node in graph.get("nodes", ()):
-                    add(str(node.get("path") or ""), "graph")
-                nodes_left -= len(graph.get("nodes", ()))
-                edges_left -= len(graph.get("edges", ()))
-                if graph.get("truncation"):
-                    missing.append({"role": "task_context", "reason": "lane_truncated"})
-                if nodes_left <= 0 or edges_left <= 0:
-                    break
-        except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
-            log.debug("task-context graph unavailable", exc_info=True)
+    # The method-unit search is the costliest lane, so it runs last and only while the request can afford it.
+    method_seconds: float | None = None
+    for origin, query_text in method_queries:
+        # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
+        # The leads already found must still be projected, so the search may spend only what that leaves.
+        kept = request_budget.task_projection_reserve(len(found))
+        reserve = kept + (
+            method_seconds if method_seconds is not None else request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        )
+        if budget_exhausted("working_set.task_context_methods", reserve=reserve):
+            missing.append({"role": "task_context", "reason": "budget"})
+            break
+        started = time.monotonic()
+        with (
+            find_types.timing_span(timings, "working_set.task_context_methods"),
+            request_budget.leaving(kept),
+            lexstore.stopping_at_budget(),
+        ):
+            methods = search_method_units(
+                vault_root, bm25.token_units(query_text, query=True), limit + 1,
+                categories=categories, allowed=allowed, fresh=fresh, checkpoint=checkpoint,
+            )
+        method_seconds = time.monotonic() - started
+        if methods.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            budget = request_budget.current()
+            if budget is not None:
+                budget.note_truncated("working_set.task_context_methods")
+            break
+        if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
+        else:
+            for hit in (methods.value or [])[:limit]:
+                add(hit.parent_path, origin)
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
-    return list(found.values())[:limit], [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    with find_types.timing_span(timings, "working_set.task_context_order"):
+        ordered = list(found.values()) if restricted else [
+            found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
+        ]
+    ordered = ordered[:limit]
+    if ordered and not restricted:
+        # Links are read for the candidates that will be served, so the agent sees what each lead points at
+        # and chooses what to follow; no neighbour page becomes a candidate by itself.
+        if budget_exhausted("working_set.task_context_links"):
+            missing.append({"role": "task_context", "reason": "budget"})
+        else:
+            try:
+                with find_types.timing_span(timings, "working_set.task_context_links"):
+                    links = _task_links(vault_root, ordered, by_path=by_path, visible=caller.visible)
+            except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+                log.debug("task-context links unavailable", exc_info=True)
+                links = None
+            if links is None:
+                missing.append({"role": "task_context", "reason": "lane_failed"})
+            else:
+                for candidate in ordered:
+                    listed, omitted = links.get(candidate["source_ref"], ((), 0))
+                    if listed:
+                        candidate["links"] = list(listed)
+                    if omitted:
+                        candidate["links_omitted"] = omitted
+    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+
+
+def _task_links(
+    vault_root: Path, candidates: Sequence[Mapping[str, Any]], *, by_path: Mapping[str, Any],
+    visible: Callable[[str], bool] | None,
+) -> dict[str, tuple[list[dict[str, str]], int]] | None:
+    """Each candidate page's outbound links, typed relations first: `{page: (listed links, omitted count)}`.
+
+    One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
+    relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
+    pages this caller may see, so a target outside it is never named; `visible` is also passed to the
+    owner API, which re-resolves each link in the caller's view. Typed relations rank above plain links
+    by the registry's `plain_link` behaviour (the rule `find_candidates` uses for graph hits), never by
+    relation name; within a rank the owner API's order stands. Returns None while the graph cannot answer.
+    """
+    from . import epistemic_graph
+
+    # A request never stacks the O(corpus) cold proof of an inherited sidecar (#1454), as in the find graph lane.
+    index = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT)
+    if not index.available():
+        return None
+    ranked: dict[str, dict[str, tuple[int, int, str]]] = {}
+    for position, neighbor in enumerate(index.neighbors_for([c["source_ref"] for c in candidates], keep=visible)):
+        if neighbor.direction != "outbound" or neighbor.other_rel not in by_path:
+            continue
+        tier = 0 if neighbor.typed else 1
+        relation = neighbor.relation_type or neighbor.relation_label or ""
+        # One line per target: when a typed relation and a plain link reach the same page, the typed one names it.
+        best = ranked.setdefault(neighbor.seed_rel, {})
+        if neighbor.other_rel not in best or (tier, position) < best[neighbor.other_rel][:2]:
+            best[neighbor.other_rel] = (tier, position, relation)
+    result: dict[str, tuple[list[dict[str, str]], int]] = {}
+    for seed, targets in ranked.items():
+        ordered = sorted(targets.items(), key=lambda pair: pair[1][:2])
+        result[seed] = ([
+            {"relation": relation, "target_ref": by_path[target].ref or target, "title": by_path[target].title}
+            for target, (_tier, _position, relation) in ordered[:TASK_LINKS_PER_CANDIDATE]
+        ], max(0, len(ordered) - TASK_LINKS_PER_CANDIDATE))
+    return result
 
 
 def _conclusion_pages(
@@ -2396,7 +2602,8 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     START a stage but never enough to finish one.
 
     `reserve` overrides that flat second for a stage whose cost this request
-    has already MEASURED. Nothing interrupts a stage once it has started, so
+    has already MEASURED. Nothing interrupts a started stage unless its queries run inside
+    `lexstore.stopping_at_budget`, so
     a flat reserve is only honest for stages that cost about the same every
     time; the carry's query is the same shape as the first lexical pass and
     costs about as much, so on a request where that pass took three seconds
@@ -2405,10 +2612,9 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
 
     Records the skip on the budget itself (`note_skipped`), so it is safe to
     call at every boundary without special-casing: `RequestBudget.note_skipped`
-    dedupes by name, and every caller of this helper either returns or raises
-    immediately on `True`, so control flow never reaches a second boundary
-    once the budget is gone — the FIRST stage that could not be afforded is
-    the only one ever recorded.
+    dedupes by name. Most callers return or raise on `True`; task discovery's
+    later lanes each skip and continue, so one request can record up to one
+    skip per lane name.
     """
     budget = request_budget.current()
     needed = (
@@ -2544,6 +2750,7 @@ def _is_current_page(
         return False
     if page is None:
         return False
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
@@ -3128,6 +3335,87 @@ def _indexed_title(index: working_set_index.WorkingSetIndex | None, path: str) -
     return titles.get(path, "")
 
 
+def _resident_vector_paths(
+    vault_root: Path, text: str, allowed: AbstractSet[str], limit: int,
+) -> tuple[list[str], str]:
+    """`(paths, state)`: the `allowed` pages whose recall chunks clear the chance band for `text`, best first.
+
+    A page is listed only when one of its chunks clears the corpus-relative band (`chance_band.semantic_band`,
+    the rule `related_pages` uses) computed over the admitted rows alone: an unrelated turn lists nothing, and a
+    page the caller may not see neither appears nor moves the band. Reads the resident matrix and an encoder
+    already in memory. In a managed service a cold matrix starts the one background load and the lane reports
+    it did not run; it never loads on the request thread. `state` is `ready`; `off` when this install runs
+    without embeddings, has no resident matrix in this profile, or is a one-shot process with a cold matrix or
+    encoder; or `lane_failed` when the dense reading should run and cannot (cold or warming in a service, or a
+    matrix from another encoder).
+    """
+    import numpy as np
+
+    from . import embeddings, ranking_config, readiness, recall_space
+
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return [], "off"
+    managed = readiness.runtime_managed()
+    # A one-shot process never loads the encoder or the matrix, so cold is expected there; a service warms them.
+    cold = "lane_failed" if managed else "off"
+    if readiness.should_defer("embeddings"):
+        # The boot warm-up holds the index lock while it loads; asking for the matrix now would wait on it.
+        return [], "lane_failed"
+    try:
+        embedding_index = embeddings.peek_embedding_index(vault_root)
+        if embedding_index is None:
+            return [], cold
+        try:
+            resident = embedding_index.require_resident_matrix() if managed else embedding_index.resident_matrix()
+        except recall_space.CorpusMatrixCold:
+            return [], "lane_failed"
+        if resident is None:
+            # No sidecar yet, or the disk-scoring profile, which keeps no resident matrix to read.
+            return [], "off"
+        fingerprint = embeddings.activation_fingerprint()
+        if fingerprint is None:
+            return [], cold
+        identity = embedding_index.identity
+        if identity is None or identity.fingerprint != fingerprint:
+            return [], "lane_failed"
+        vector = embeddings.embed_activation_query_if_loaded(text)
+        if vector is None:
+            return [], cold
+        query = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if resident.matrix.ndim != 2 or query.shape[0] != resident.matrix.shape[1] or not np.all(np.isfinite(query)):
+            return [], "lane_failed"
+        norm = float(np.linalg.norm(query))
+        if norm == 0.0:
+            return [], "lane_failed"
+        stale = resident.stale_paths or ()
+        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
+        rows = np.fromiter(
+            (index for index, (path, _chunk) in enumerate(resident.metadata) if path in allowed and path not in stale),
+            dtype=np.int64,
+        )
+        if rows.size == 0:
+            return [], "ready"
+        # Score the whole matrix, then mask: indexing first copies most of the matrix on every query (#951).
+        similarities = (resident.matrix @ (query / norm))[rows]
+        config = ranking_config.DEFAULT_RANKING
+        cleared = chance_band.semantic_band(
+            similarities,
+            alpha=float(config.working_set_semantic_alpha),
+            min_population=int(config.working_set_semantic_min_population),
+        )
+        if not cleared:
+            # No chunk clears the band, or too few admitted rows to calibrate one: the lane lists nothing.
+            return [], "ready"
+        best: dict[str, float] = {}
+        for position in cleared:
+            path = resident.metadata[int(rows[position])][0]
+            best[path] = max(float(similarities[position]), best.get(path, float("-inf")))
+        return sorted(best, key=lambda page: (-best[page], page))[:limit], "ready"
+    except Exception:  # noqa: BLE001 - a failed dense reading leaves the keyword lanes standing
+        log.debug("task-context dense reading unavailable", exc_info=True)
+        return [], "lane_failed"
+
+
 def related_pages(
     vault_root: Path,
     *,
@@ -3522,7 +3810,7 @@ def _carry_admission(
     A rich unit proves subject-associated context, never ownership of every
     sentence. Uncovered prose has no such association and cannot be a bypass.
     """
-    from . import find, semantic_language_registry, vault
+    from . import find, relation_registry, semantic_language_registry, vault
 
     scopes = working_set_resolve.possessive_scopes(analysis)
     if not scopes:
@@ -3551,6 +3839,7 @@ def _carry_admission(
         ) if len(matches) == 1 else frozenset()
     restricted = {}
     registries = {}
+    relation_registries = {}
     language = semantic_language_registry.load_registry(vault_root)
     for path, page in pages.items():
         if page is None:
@@ -3573,6 +3862,8 @@ def _carry_admission(
         restricted[path] = tuple(local)
         registries[path] = semantic_language_registry.for_attached_projects(
             language, tuple(find._all_projects(page.frontmatter)))
+        relation_registries[path] = relation_registry.load_for_page(
+            vault_root, path, page.frontmatter)
 
     def admit(path, hit):
         if path not in restricted:
@@ -3583,9 +3874,11 @@ def _carry_admission(
             return False
         # Subject relations must identify the canonical page. A short alias
         # alone cannot prove identity, even when the turn used a unique name.
+        names_subject = relation_registries[path]
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
-            for relation in hit.relations if relation.get("kind") == "about_entity"}
+            for relation in hit.relations
+            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False

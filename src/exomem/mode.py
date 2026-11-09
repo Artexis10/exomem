@@ -170,6 +170,16 @@ def read_config() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def int_setting(name: str, default: int) -> int:
+    """A positive integer setting: `EXOMEM_<NAME>`, else this machine's config key, else `default`."""
+    raw = os.environ.get(f"EXOMEM_{name.upper()}") or read_config().get(name)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 def resolve_mode() -> str:
     """The effective mode: env → config file → legacy quiet alias → default."""
     env = normalize(os.environ.get(_MODE_ENV))
@@ -207,6 +217,30 @@ def preload_cpu_caches() -> bool:
 def retain_cpu_caches() -> bool:
     """Whether large CPU caches may stay resident after use."""
     return not service_profile_enabled() and resolve_mode() == "performance"
+
+
+def release_idle_cpu_caches_only_under_pressure() -> bool:
+    """Whether an idle CPU cache waits for memory pressure before it is released.
+
+    Normal mode keeps what recall has built until the host or the unit is short of memory:
+    a release on idle alone hands the next recall a cold rebuild. Quiet mode releases on
+    idle, and performance mode retains.
+    """
+    return not service_profile_enabled() and resolve_mode() == "normal"
+
+
+def idle_cpu_cache_release() -> str:
+    """When the reaper releases an idle CPU cache: `never`, `under_memory_pressure` or `after_idle`.
+
+    Both releases also wait out the idle threshold, and an unreadable memory reading
+    releases under `under_memory_pressure` too. Kept out of `resolved()`: bootstrap serves
+    that whole dict, and no agent acts on this value.
+    """
+    if not release_when_idle() or retain_cpu_caches():
+        return "never"
+    if release_idle_cpu_caches_only_under_pressure():
+        return "under_memory_pressure"
+    return "after_idle"
 
 
 def defer_expensive_indexes() -> bool:

@@ -48,7 +48,13 @@ sidecar of an evicted original.
 
 ### Requirement: Export writes evicted originals byte-identical
 
-A Cloud export SHALL include every original that the media store has evicted, at its vault-relative path, with the exact stored bytes. A packing step SHALL fetch each evicted original through the media edge, decrypt it, and verify its SHA-256 against the sidecar before it writes the manifest entry. The packing step SHALL have no egress except the media edge. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch or an unreadable object SHALL fail the export without publishing it as complete.
+A Cloud export SHALL run in three steps: a pause, a pack and an upload. The pause SHALL run under the export hold, copy every archive member that is present on the volume into the export's staging claim, and write a plan that lists those members and each evicted original with its object name, version ID, plaintext size and SHA-256. The hold SHALL end when the pause reports, so the vault pauses only for the local copy. The pause SHALL hold no media key and have no public egress.
+
+The pack SHALL fetch each evicted original by its version ID through the media edge, decrypt it, and verify its size and SHA-256 against the plan before the archive completes. The pack SHALL have no public egress. It SHALL reach only the in-cluster peers that the cell's runtime reaches, the media edge among them, and the media edge SHALL admit no other export step. A separate upload step that mounts no media key SHALL transfer the archive. A mismatch, an absent version or an unreadable object SHALL fail the export without publishing it as complete.
+
+An export SHALL NOT omit a file without saying so. Originals under Trash SHALL be members like live ones. A companion that the pause cannot read SHALL be copied as a member. For an original behind such a companion whose bytes are not on the volume, the pause SHALL plan the version that the media ledger's evicted row holds, and a row that holds no readable version SHALL fail the export with a named code. An evicted original that the cell cannot reach SHALL fail the export with a named code. Two cases are accepted gaps: an unreadable companion under Trash over an evicted original, whose ledger row names the path before the deletion, and an original whose ledger row a restore did not bring back.
+
+The pause SHALL have its own deadline: its pod runs within 2 minutes, and then copies at least a configured floor rate. On a miss the export SHALL fail and release the hold, without retrying. The archive's limits, parts and deadline SHALL follow the planned archive bytes, not the cell size.
 
 #### Scenario: A vault with evicted recordings is exported
 
@@ -63,4 +69,34 @@ A Cloud export SHALL include every original that the media store has evicted, at
 #### Scenario: The media key stays out of the egress pod
 
 - **WHEN** an export of a vault with evicted originals runs
-- **THEN** the pod that decrypts originals reaches only the media edge, and the pod that uploads the archive holds no media key
+- **THEN** the pod that decrypts originals has no public egress, the pod that uploads the archive holds no media key, and the pod that copies under the hold holds no key and has no public egress
+
+#### Scenario: The vault serves again after the local copy
+
+- **WHEN** the pause has copied the present members and written its plan
+- **THEN** the hold ends and the runtime starts while the pack and the upload run
+
+#### Scenario: An evicted original in Trash is exported
+
+- **WHEN** an owner exports a vault whose Trash holds an evicted original
+- **THEN** the archive contains it at its Trash path, byte-identical
+
+#### Scenario: A companion cannot be read
+
+- **WHEN** the pause meets a companion that it cannot parse, and the companion's original is evicted
+- **THEN** the companion is in the archive, and the archive holds the original byte-identical from the version that the media ledger's row holds
+
+#### Scenario: A retained store holds an evicted original
+
+- **WHEN** a cell without an edge credential exports a vault with an evicted original
+- **THEN** the export fails with `EXPORT_MEDIA_UNREACHABLE`, and no archive omits the original
+
+#### Scenario: The staging claim does not start in time
+
+- **WHEN** the pause pod does not run within 2 minutes
+- **THEN** the export fails with a staging diagnostic, the hold ends, and the runtime starts again
+
+#### Scenario: Collection runs during an export
+
+- **WHEN** a hold condemns a version that a running export's plan lists
+- **THEN** the pack still reads that version by its ID, because the grace period exceeds the longest export deadline

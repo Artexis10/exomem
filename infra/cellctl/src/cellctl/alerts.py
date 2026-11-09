@@ -67,6 +67,12 @@ RECALL_LAG_ALERT = "cell-recall-lagging"
 # id because the receiver's transition has no other field for it; the alert never resolves
 # itself, since cellctl cannot see the provider's key listing.
 CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"
+# add-cloud-media-store D10: a media prefix holds more bytes than the cell's allowance times the configured
+# headroom, or a physical figure that several tries in a row could not read. The names carry the cell id as
+# above. collect-released-media D4 withdrew the hide alert: every owner deletion now ends in a hide, and the
+# out-of-cluster key watcher alerts on a burst instead.
+MEDIA_OVER_ALLOWANCE_ALERT = "media-over-allowance"
+MEDIA_METER_UNKNOWN_ALERT = "media-meter-unknown"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -76,6 +82,11 @@ SERVING_STATES = ("running", "read_only")
 
 def cleanup_pending_alert(cell_id: str) -> str:
     return f"{CLEANUP_PENDING_ALERT}-{cell_id}"
+
+
+def media_alerts(cell_id: str) -> tuple[str, str]:
+    """The over-allowance and unknown-figure alert names of one cell's media prefix."""
+    return f"{MEDIA_OVER_ALLOWANCE_ALERT}-{cell_id}", f"{MEDIA_METER_UNKNOWN_ALERT}-{cell_id}"
 
 
 @dataclass(frozen=True)

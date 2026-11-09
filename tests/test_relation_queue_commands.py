@@ -91,18 +91,18 @@ def test_edit_creates_missing_section_only_when_opted_in(tmp_path: Path) -> None
     with pytest.raises(edit_module.EditError) as ei:
         edit_module.edit(
             tmp_path, path=rel, why="x", heading="Relations",
-            section_position="append", new_string="- relates_to [[Foo]]",
+            section_position="append", new_string="- supports [[Foo]]",
         )
     assert ei.value.code == "HEADING_NOT_FOUND"
 
     edit_module.edit(
         tmp_path, path=rel, why="x", heading="Relations",
-        section_position="append", new_string="- relates_to [[Foo]]",
+        section_position="append", new_string="- supports [[Foo]]",
         create_missing_section=True,
     )
     text = p.read_text(encoding="utf-8")
     assert "## Relations" in text
-    assert "relates_to" in text
+    assert "supports" in text
     assert text.count("## Relations") == 1  # exactly one section created
 
 
@@ -213,6 +213,9 @@ def test_accepting_an_alias_writes_the_bare_label_and_the_edge_resolves_to_its_k
         why="Accepted reviewed relation",
         expected_fingerprint=item["fingerprint"],
         requested_relation="has_pet",
+        # The candidate does not offer `has_pet`, so a command call would carry a binding.
+        # This test calls the queue directly and covers the alias spelling, not the binding.
+        bound=True,
         edit_memory=commands.op_edit_memory,
     )
 

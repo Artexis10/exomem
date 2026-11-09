@@ -34,6 +34,14 @@ SEQUENCE_FIVE_FAMILIES = ("f30", "f31")
 SEQUENCE_SEVEN_FAMILIES = ("f33",)
 #: Sequence 8 (organisation autonomy), withheld until its receipt is acknowledged.
 SEQUENCE_EIGHT_FAMILIES = ("f34",)
+#: Sequence 9 (outcome evaluation), acknowledged 2026-11-08 and released.
+SEQUENCE_NINE_FAMILIES = ("f35", "f36", "f37")
+#: The squash commit on ``main`` that introduced the sequence-9 receipt (#2519),
+#: pinned by the founder at acknowledgment.
+SEQUENCE_NINE_ACKNOWLEDGED_REVISION = "69599c346c631a0722c56b1634eb862329a9f09b"
+#: The squash commit on ``main`` that introduced the sequence-10 receipt (#2527),
+#: pinned by the founder at acknowledgment.
+SEQUENCE_TEN_ACKNOWLEDGED_REVISION = "b9b00ab39ec7f562e74d174f8b82972e3a840170"
 SEQUENCE_SIX_ACKNOWLEDGED_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
 # The commit that recorded the founder acknowledgment of sequence 6 (#1232).
 SEQUENCE_SIX_RELEASE_REVISION = "3677c2e7cd6bf863f0a0149b21bc339adb35ad50"
@@ -638,7 +646,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 8
+    assert len(identity.amendments) == 10
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -692,7 +700,18 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert pending_eight.acknowledgment_status == "pending"
     assert pending_eight.introduced_family_ids == SEQUENCE_EIGHT_FAMILIES
     assert pending_eight.contract.repository_revision == pending_eight.receipt.introduction_revision
-    assert identity.effective.sha256 == pending_eight.contract.sha256
+    acknowledged_nine = identity.amendments[8]
+    assert acknowledged_nine.sequence == 9
+    assert acknowledged_nine.acknowledgment_status == "acknowledged"
+    assert acknowledged_nine.introduced_family_ids == SEQUENCE_NINE_FAMILIES
+    assert acknowledged_nine.contract.repository_revision == SEQUENCE_NINE_ACKNOWLEDGED_REVISION
+    # Sequence 10 changes the arms, scale and judge of f35 to f37 and adds no family.
+    acknowledged_ten = identity.amendments[9]
+    assert acknowledged_ten.sequence == 10
+    assert acknowledged_ten.acknowledgment_status == "acknowledged"
+    assert acknowledged_ten.introduced_family_ids == ()
+    assert acknowledged_ten.contract.repository_revision == SEQUENCE_TEN_ACKNOWLEDGED_REVISION
+    assert identity.effective.sha256 == acknowledged_ten.contract.sha256
     assert identity.pending_amendments == (
         pending_two,
         pending_four,
@@ -811,7 +830,8 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # which families backed this run and which were withheld from it without
     # reading any other artifact, which is the whole reason the field exists.
     # Sequence 3 left the withheld set when its acknowledgment landed 2026-08-30;
-    # Sequences 4, 5, 7 and 8 are pending alongside sequence 2.
+    # Sequences 4, 5, 7 and 8 are pending alongside sequence 2; sequence 9 left the
+    # withheld set when its acknowledgment landed 2026-11-08.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
         (
             *SEQUENCE_TWO_FAMILIES,
@@ -987,7 +1007,7 @@ def test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two() ->
         + SEQUENCE_SEVEN_FAMILIES
         + SEQUENCE_EIGHT_FAMILIES
     )
-    for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES:
+    for family_id in AMENDED_FAMILIES + SEQUENCE_THREE_FAMILIES + SEQUENCE_NINE_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
     for family_id in SEQUENCE_TWO_FAMILIES:
         with pytest.raises(

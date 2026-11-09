@@ -49,19 +49,30 @@ function relationName(entry, fallback) {
 // The server supplies the generic relation; where it names none, the row says so rather than naming one.
 const UNNAMED_RELATION = "unnamed relation";
 
-// What a candidate can be written as. Fitting relations (`options`) replace the generic one;
-// without them the candidate's own relation is the key, and a candidate naming none is not writable.
+// The server's last resort when no specific relation fits: link the pages without naming how.
+const PLAIN_LINK_TEXT = "plain link (no specific relation)";
+
+// What a candidate can be written as. Fitting relations (`options`) replace the generic one, and
+// the server's plain link (`plain_link`) comes last. Without either, the candidate's own relation
+// is the key, and a candidate naming none is not writable.
 function relationChoices(candidates) {
   return candidates.flatMap((candidate) => {
     const options = Array.isArray(candidate.options) ? candidate.options : [];
-    if (options.length) {
-      return options.map((option) => ({
+    const choices = options.map((option) => ({
+      candidate,
+      key: option.key,
+      text: option.label || option.key,
+      description: option.description || "",
+    }));
+    if (candidate.plain_link) {
+      choices.push({
         candidate,
-        key: option.key,
-        text: option.label || option.key,
-        description: option.description || "",
-      }));
+        key: candidate.plain_link,
+        text: PLAIN_LINK_TEXT,
+        description: "Links the two pages without naming how they relate. Use it only when no relation above fits.",
+      });
     }
+    if (choices.length) return choices;
     return [{candidate, key: candidate.relation_type || "", text: relationName(candidate, UNNAMED_RELATION), description: ""}];
   });
 }
@@ -777,8 +788,8 @@ function renderRelationCandidate(item, group) {
   if (fitting.length) summary.append(element("span", `a specific relation fits: ${fitting.join(", ")}`, "fine-print"));
   li.append(summary);
   const actions = element("div", "", "actions");
-  // The queue refuses the generic relation where a specific one fits, so the owner chooses one instead.
-  const choosing = fitting.length > 0;
+  // The queue refuses the generic relation, so the owner chooses a specific one or the plain link.
+  const choosing = fitting.length > 0 || Boolean(item.plain_link);
   const accept = element("button", choosing ? "Choose relation" : "Accept");
   accept.type = "button";
   accept.dataset.relationRef = item.ref;
@@ -867,7 +878,7 @@ function openRelationTriage(item, action) {
 
 // A row whose item carries `options` offers a choice, not Accept. A refusal still arrives when the
 // item had none at read time. The owner then reads the relations that fit with the server's own
-// remediation; naming one through accept is a vocabulary decision that Studio does not make.
+// remediation. Studio writes a chosen relation as its own audited edit, not through accept.
 function choiceRefusal(error, item) {
   if (!(error instanceof ApiError) || error.code !== "RELATION_CHOICE_REQUIRED") return error;
   const fitting = fittingRelations(item);

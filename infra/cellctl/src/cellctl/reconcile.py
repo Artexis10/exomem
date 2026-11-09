@@ -24,6 +24,7 @@ import asyncpg
 from kubernetes.client.rest import ApiException
 
 from . import alerts, cell_readiness, db
+from .backup_source import MEDIA_COLLECTION_COMPLETE
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -50,25 +51,39 @@ from .decide import (
     storage_receipt,
 )
 from .errors import describe_error as _describe_error
-from .exports import (
-    EXPORT_UPLOAD_FAILED,
-    ExportRow,
-    ExportStorage,
-    accepted_report,
-    decide_export,
-    export_deadline,
-    export_size,
-    settle_step,
+from .export_layout import (
+    PACK,
+    PAUSE,
+    UPLOAD,
+    VERIFY,
+    legacy_job_name,
+    staging_gib,
     verification_secret_name,
 )
+from .export_layout import job_name as export_job_name
+from .exports import (
+    EXPORT_UPLOAD_FAILED,
+    TRANSFER,
+    ExportRow,
+    ExportSlots,
+    ExportStorage,
+    TransferStep,
+    decide_export,
+    export_size,
+    export_state,
+    pause_window,
+    settle_step,
+    transfer_deadline,
+    transfer_step,
+)
 from .exports import HOLD as EXPORT_HOLD
-from .exports import job_name as export_job_name
 from .imports import StagedObjects
 from .manifests import (
     BACKUP_JOB_NAME,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     HOURLY_RETENTION_ARGS,
+    JOB_EGRESS_POLICY,
     RENDER_VERSION,
     RETENTION_ARGS,
     SNAPSHOT_NAME,
@@ -88,6 +103,7 @@ from .manifests import (
     render_cell_namespace,
     render_clone_claim,
     render_export_job,
+    render_export_staging_claim,
     render_export_verification_secret,
     render_import_job,
     render_restore_job,
@@ -95,7 +111,9 @@ from .manifests import (
     snapshot_backup_name,
 )
 from .media_edge import (
+    COLLECTOR_AUDIENCE,
     ActiveSet,
+    EdgeEvidence,
     MediaEdgeConfig,
     mint_bundle,
     open_bundle,
@@ -106,6 +124,7 @@ from .media_edge import (
     unwrap_bundle,
     wrap_bundle,
 )
+from .media_meter import UNKNOWN, PhysicalFigure, meter_prefix, over_allowance
 from .rollout import (
     current_image,
     initial_image,
@@ -281,9 +300,19 @@ class LoopMemory:
     # A volume confirmed absent stays absent: its id is never reused.
     volumes_absent: set[str] = field(default_factory=set)
     refusals: dict[str, RefusalPark] = field(default_factory=dict)
-    # add-cloud-media-store D6: the newest active set generation the edge reported as loaded and
-    # drained. A restart forgets it and asks the edge again; it is never assumed.
-    media_edge_confirmed_generation: int = 0
+    # add-cloud-media-store D6: the generation and digest of the active set the edge reported as
+    # loaded and drained, exactly. A restart forgets it and asks the edge again; it is never assumed.
+    media_edge_confirmed: tuple[int, str] | None = None
+    # The generation of a set the edge loaded that cellctl did not publish. The edge refuses a
+    # generation at or below its own, so the next plan rises past it.
+    media_edge_foreign: int = 0
+    # D10: each metered cell's physical figure from its latest listing (UNKNOWN when it failed), the
+    # `last_backup_at` it was listed for (once per backup hold), when a failed listing may be retried, and
+    # how many listings in a row failed. A restart forgets all four and lists each cell once more.
+    media_physical: dict[str, PhysicalFigure] = field(default_factory=dict)
+    media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
+    media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
+    media_meter_failures: dict[str, int] = field(default_factory=dict)
     # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
     # process fills it from every deleted row, so a restart never loses the alert; the receiver
     # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
@@ -613,7 +642,8 @@ class ClusterGateway:
     def delete_family_secret(self, local: LocalStorage, *, cell_id: str, request: FamilyRequest) -> bool: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
-    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False): ...  # pragma: no cover
+    def observe_export_job(self, namespace: str, export_id: str, *, step: str): ...  # pragma: no cover
+    def delete_export_staging(self, namespace: str, export_id: str) -> None: ...  # pragma: no cover
     def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None: ...  # pragma: no cover
     def retain_volume(self, name: str) -> None: ...  # pragma: no cover
     def delete_claim(self, namespace: str) -> None: ...  # pragma: no cover
@@ -638,7 +668,7 @@ class ClusterGateway:
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
-    def media_edge_generation(self, url: str) -> int: ...  # pragma: no cover
+    def media_edge_evidence(self, url: str) -> EdgeEvidence: ...  # pragma: no cover
 
 
 def _active_hold(row: CellRow, observation: ClusterObservation) -> str | None:
@@ -1192,9 +1222,9 @@ def _log_orphan_namespaces(cluster: ClusterGateway, rows: list[CellRow], now: da
 # egress and active-set entry, with offload off, until it drains. Retained: its store identity alone.
 MEDIA_SERVED, MEDIA_DRAINING, MEDIA_RETAINED = "served", "draining", "retained"
 MEDIA_KEYED = (MEDIA_SERVED, MEDIA_DRAINING)
-# D12: the custody observation's key for a turned-off store's record. Substrate has no column for it,
-# and a new one needs a Substrate migration; the observation is cellctl's to write (simplest choice).
-MEDIA_STORE_RECORD = "media_store"
+# D9, D12: a turned-off store's record and a deleted cell's revocation share one custody key, which
+# db.retire_content_keys also writes.
+MEDIA_STORE_RECORD = db.MEDIA_STORE_RECORD
 
 
 def _media_store_of(row: CellRow) -> object:
@@ -1252,6 +1282,29 @@ def _media_store_record(cluster_config: ClusterConfig, row: CellRow, census: Med
             "captured_at": census.captured_at.isoformat()}
 
 
+def _media_revocation(
+    cluster_config: ClusterConfig, row: CellRow, active: ActiveSet | None, memory: LoopMemory, now: datetime,
+) -> tuple[bool, dict | None]:
+    """D9: whether a deleted cell still waits for the edge to show a set without it, and the `media_store`
+    record to write. cellctl deletes nothing in the media bucket; the operator's clean-up does, after its grace.
+
+    A cell waits while its `media_store` record holds no `revoked_generation`. The record exists for every
+    cell the edge may admit: a turned-off store writes it, and the statement that retires a deleted cell's
+    media bundle adds `revoke_requested_at` before the pass publishes a set without the cell
+    (db.retire_content_keys). The wait ends when the edge is confirmed to serve the exact published set and
+    that set omits the cell's runtime and collector credentials; the record keeps what was observed."""
+    if cluster_config.media_edge is None:
+        return False, None
+    record = _media_store_of(row)
+    if not isinstance(record, dict) or not record or "revoked_generation" in record:
+        return False, None
+    if (active is not None and row.cell_id not in active.cells and row.cell_id not in active.collectors
+            and memory.media_edge_confirmed == (active.generation, active.sha256())):
+        return False, {**record, "revoked_generation": active.generation, "set_sha256": active.sha256(),
+                       "observed_at": now.isoformat()}
+    return True, None
+
+
 def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
     """The credential version the edge admits for this cell; None when the cell holds no credential."""
     if active is None or _media_mode(cluster_config, row) not in MEDIA_KEYED:
@@ -1259,21 +1312,48 @@ def _media_credential_version(cluster_config: ClusterConfig, active: ActiveSet |
     return active.cells.get(row.cell_id)
 
 
-def _publish_media_edge_set(cluster: ClusterGateway, cells: Mapping[str, int], now: datetime) -> ActiveSet | None:
+def _media_collects(cluster_config: ClusterConfig, row: CellRow) -> bool:
+    """collect-released-media D3: a cell on the edge's collect list collects while it holds a store, a retained
+    one too, so its backups keep condemning the names that it released. A deleted cell has no store, and a cell
+    taken off the list loses its collector entry, so both stop; an empty list lets the edge turn off."""
+    edge = cluster_config.media_edge
+    return edge is not None and edge.collects(row.cell_id) and _media_mode(cluster_config, row) is not None
+
+
+def _media_collector_version(cluster_config: ClusterConfig, active: ActiveSet | None, row: CellRow) -> int | None:
+    """The collector credential version the edge admits for this cell's backup Job; None when it collects nothing."""
+    if active is None or not _media_collects(cluster_config, row):
+        return None
+    return active.collectors.get(row.cell_id)
+
+
+def _publish_media_edge_set(
+    cluster: ClusterGateway, edge: MediaEdgeConfig, cells: Mapping[str, int], now: datetime, memory: LoopMemory,
+    collectors: Mapping[str, int] | None = None,
+) -> ActiveSet | None:
     """D6: publish the active set before any Secret that carries a credential for it.
 
-    `cells` maps each served or draining cell to its credential epoch. Returns the set the edge is
-    to load, or None when the cluster would not say, in which case no keyed cell renders this pass.
-    An unchanged set writes nothing."""
+    `cells` maps each served or draining cell to its credential epoch, and `collectors` each cell whose
+    backup Job collects (collect-released-media D3). Returns the set the edge is to
+    load, or None when the cluster would not say, in which case no keyed cell renders this pass. An
+    unchanged set writes nothing."""
     try:
         current = cluster.read_media_edge_active_set()
         published = read_active_set(current)
-        planned = plan_active_set(published, cells, int(now.timestamp() * 1000))
+        if published.generation == 0:
+            # No readable published set: whatever the edge loaded is not ours, and a clock that went
+            # back would plan a generation the edge refuses. An unreadable edge leaves the clock to plan.
+            try:
+                memory.media_edge_foreign = max(memory.media_edge_foreign, cluster.media_edge_evidence(edge.url).loaded)
+            except Exception as error:  # noqa: BLE001 - the edge may be away; the settled check learns it later
+                logger.warning("cellctl could not seed the media edge generation: %s", _describe_error(error))
+        planned = plan_active_set(published, cells, int(now.timestamp() * 1000), above=memory.media_edge_foreign,
+                                  collectors=collectors)
         manifest = render_active_set(planned, GATEWAY_NAMESPACE)
         if current != manifest["data"]:
             cluster.apply_media_edge_active_set(manifest)
-            logger.info("cellctl: media edge active set published at generation %d for %d cell(s)",
-                        planned.generation, len(planned.cells))
+            logger.info("cellctl: media edge active set published at generation %d for %d cell(s) and %d collector(s)",
+                        planned.generation, len(planned.cells), len(planned.collectors))
         return planned
     except Exception as error:  # noqa: BLE001 - the set stays as it was; selected cells wait for the next pass
         logger.error("cellctl could not publish the media edge active set: %s", _describe_error(error))
@@ -1303,23 +1383,27 @@ def _label_media_edge_namespaces(
 def _media_edge_settled(
     cluster: ClusterGateway, edge: MediaEdgeConfig, active: ActiveSet | None, memory: LoopMemory
 ) -> bool:
-    """Whether the edge has loaded the published set and drained every request of the one before.
+    """Whether the edge serves exactly the published set and has drained every request of the one before.
 
-    A revocation is done only when the edge says so. An edge that is down, behind or unreadable is
-    unsettled, and no failure counts as confirmation."""
+    A revocation is done only when the edge says so, and only about this set: a higher generation, another
+    digest or another bucket confirms nothing. An edge that is down, behind or unreadable is unsettled,
+    and no failure counts as confirmation."""
     if active is None:
         return False
-    if active.generation <= memory.media_edge_confirmed_generation:
+    if memory.media_edge_confirmed == (active.generation, active.sha256()):
         return True
     try:
-        reported = cluster.media_edge_generation(edge.url)
+        evidence = cluster.media_edge_evidence(edge.url)
     except Exception as error:  # noqa: BLE001 - unreadable is unsettled, not confirmed
         logger.error("cellctl could not read the media edge generation: %s", _describe_error(error))
         return False
-    if reported < active.generation:
-        return False
-    memory.media_edge_confirmed_generation = active.generation
-    return True
+    if evidence.matches(active, edge.bucket):
+        memory.media_edge_confirmed = (active.generation, active.sha256())
+        return True
+    if evidence.loaded >= active.generation and (evidence.loaded, evidence.set_sha256) != (active.generation, active.sha256()):
+        # The edge holds a set cellctl did not publish and will not take ours at this generation.
+        memory.media_edge_foreign = max(memory.media_edge_foreign, evidence.loaded)
+    return False
 
 
 async def reconcile_once(
@@ -1333,8 +1417,10 @@ async def reconcile_once(
     now: datetime | None = None,
     memory: LoopMemory | None = None,
     backup_listing=None,
+    media_listing=None,
 ) -> bool:
-    """One pass. `backup_listing` only lists a new cell's locked backups. Returns whether the next one
+    """One pass. `backup_listing` only lists a new cell's locked backups, and `media_listing` only the media
+    bucket's prefixes for the physical meter. Returns whether the next one
     is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
@@ -1390,9 +1476,11 @@ async def reconcile_once(
     media_unsettled = False
     if cluster_config.media_edge is not None:
         # D12: a draining cell keeps its entry although the edge no longer selects it.
-        media_active = _publish_media_edge_set(cluster, {
+        media_active = _publish_media_edge_set(cluster, cluster_config.media_edge, {
             row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
-            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now)
+            if _media_mode(cluster_config, row) in MEDIA_KEYED}, now, memory, collectors={
+            row.cell_id: cluster_config.media_edge.epoch(row.cell_id) for row in rows
+            if _media_collects(cluster_config, row)})
         media_unsettled = not _media_edge_settled(cluster, cluster_config.media_edge, media_active, memory)
 
     # H4: one row's observe() must not take every other row down with it.
@@ -1511,6 +1599,11 @@ async def reconcile_once(
         or render_digest_candidate is not None
         or any(_in_transition(row, observations[row.cell_id], row.cell_id in parked) for row in rows)
     )
+    # add-cloud-media-store D8: each node runs a bounded number of exports at
+    # once, counted from the exports that hold a slot (packing) at the pass start.
+    packing_cells = await db.read_packing_export_cells(connection)
+    export_slots = ExportSlots(config.export_concurrency_per_node, [
+        _export_node(row, observations[row.cell_id]) for row in rows if row.cell_id in packing_cells])
     for row in rows:
         try:
             fast |= await _reconcile_row(
@@ -1536,6 +1629,7 @@ async def reconcile_once(
                 media_active=media_active,
                 local_capacity=local_capacity,
                 backup_listing=backup_listing,
+                export_slots=export_slots,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -1544,6 +1638,7 @@ async def reconcile_once(
             fast = True
 
     await _cleanup_alerts(cluster, cluster_config, memory, now)
+    await _media_physical_meter(cluster, cluster_config, rows, memory, media_listing, now)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1670,6 +1765,92 @@ async def _cleanup_alerts(
         # Without a delivery Secret the log line is the only notice, as for the other alerts.
         if memory.alert_delivered.get(alert) or cluster_config.alert_delivery_secret is None:
             memory.cleanup_pending.discard(cell_id)
+
+
+# A failed listing is tried again after this long: the meter is a report, and a provider outage
+# must not turn it into a listing on every pass.
+MEDIA_METER_RETRY = timedelta(minutes=5)
+# Failed listings in a row before the unknown-figure alert fires. Three, five minutes apart, outlast a
+# provider blip, while a revoked or wrong list key fails every one; without the alert such a key would
+# switch off the over-allowance alert with no notice.
+MEDIA_METER_UNKNOWN_AFTER = 3
+# Hidden names the meter's line shows beside their count. Every owner deletion adds one, and a rescue lists
+# the markers from the bucket itself, so the line needs only a sample to show what is being hidden.
+MEDIA_HIDDEN_NAMES_LOGGED = 5
+
+
+def _hidden_sample(hidden: tuple[str, ...]) -> str:
+    """The first MEDIA_HIDDEN_NAMES_LOGGED hidden names in name order, and how many the line leaves out."""
+    if not hidden:
+        return ""
+    shown = ", ".join(hidden[:MEDIA_HIDDEN_NAMES_LOGGED])
+    left = len(hidden) - MEDIA_HIDDEN_NAMES_LOGGED
+    return f": {shown}" + (f" and {left} more" if left > 0 else "")
+
+
+async def _media_physical_meter(
+    cluster: ClusterGateway, cluster_config: ClusterConfig, rows: list[CellRow], memory: LoopMemory,
+    listing, now: datetime,
+) -> None:
+    """D10: once per backup hold, list each media cell's prefix with the list-only key and alert on what it
+    shows. A prefix above the cell's allowance times the configured headroom alerts. An unknown figure
+    changes no alert, since it is not within the allowance, and a figure that stays unknown for
+    MEDIA_METER_UNKNOWN_AFTER listings raises its own alert. collect-released-media D4: a hide raises no
+    alert, since every owner deletion ends in one; the log counts the hidden names, and the out-of-cluster
+    watcher alerts on a burst. Without the list key each try counts
+    as a failed listing, since a missing key switches off the over-allowance alert as a revoked one does. The figure
+    is the operator's; the owner's meter and the cell's record stay as they are."""
+    edge = cluster_config.media_edge
+    if edge is None:
+        return
+    metered = {row.cell_id for row in rows if _media_mode(cluster_config, row) is not None}
+    for row in rows:
+        if row.cell_id not in metered:
+            continue
+        retry_at = memory.media_meter_retry_at.get(row.cell_id)
+        listed_for_this_backup = (row.cell_id in memory.media_metered_for
+                                  and memory.media_metered_for[row.cell_id] == row.last_backup_at)
+        if listed_for_this_backup or (retry_at is not None and now < retry_at):
+            continue
+        # main.py logged the missing key once at startup, so this try adds no log line of its own.
+        figure = UNKNOWN if listing is None else await asyncio.to_thread(meter_prefix, listing, row.cell_id)
+        memory.media_physical[row.cell_id] = figure
+        if figure is UNKNOWN:
+            memory.media_meter_failures[row.cell_id] = memory.media_meter_failures.get(row.cell_id, 0) + 1
+            memory.media_meter_retry_at[row.cell_id] = now + MEDIA_METER_RETRY
+            # One failed listing ends the pass's metering: a provider that is down would otherwise cost
+            # one timeout per cell before this pass reconciles anything else.
+            break
+        memory.media_meter_retry_at.pop(row.cell_id, None)
+        memory.media_meter_failures.pop(row.cell_id, None)
+        memory.media_metered_for[row.cell_id] = row.last_backup_at
+        # A repeated name loses its older version once the lifecycle rule applies, so a count that is not
+        # zero, or not known, logs as a warning: the operator re-offloads those originals first.
+        logger.log(logging.INFO if figure.repeated == 0 else logging.WARNING,
+                   "cellctl: cell %s holds %s media byte(s), %d unfinished upload(s), %s name(s) with more than one "
+                   "upload version and %d hidden name(s) in the bucket%s",
+                   row.cell_id, "an unknown number of" if figure.bytes is None else figure.bytes, figure.unfinished,
+                   "an unknown number of" if figure.repeated is None else figure.repeated, len(figure.hidden or ()),
+                   _hidden_sample(figure.hidden or ()))
+    allowance = edge.store_policy.get("allowance_bytes")
+    for cell_id, figure in list(memory.media_physical.items()):
+        over_alert, unknown_alert = alerts.media_alerts(cell_id)
+        if cell_id not in metered:
+            # A cell that left the store (deleted) forgets its figure, and its alerts resolve.
+            for alert in (over_alert, unknown_alert):
+                if memory.alert_delivered.get(alert):
+                    await _deliver_alert(cluster, cluster_config, memory, alert, False, now)
+            del memory.media_physical[cell_id]
+            memory.media_metered_for.pop(cell_id, None)
+            memory.media_meter_retry_at.pop(cell_id, None)
+            memory.media_meter_failures.pop(cell_id, None)
+            continue
+        exceeds = over_allowance(figure, allowance if type(allowance) is int else None, edge.physical_headroom)
+        stays_unknown = memory.media_meter_failures.get(cell_id, 0) >= MEDIA_METER_UNKNOWN_AFTER
+        for alert, firing in ((over_alert, exceeds), (unknown_alert, stays_unknown)):
+            # None is unknown: send nothing. A cell that never alerted needs no resolution either.
+            if firing or (firing is False and memory.alert_delivered.get(alert)):
+                await _deliver_alert(cluster, cluster_config, memory, alert, firing, now)
 
 
 async def _growth_alert(
@@ -2116,6 +2297,7 @@ async def _reconcile_row(
     media_active: ActiveSet | None = None,
     local_capacity: LocalCapacityObservation | None = None,
     backup_listing=None,
+    export_slots: ExportSlots | None = None,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2217,6 +2399,12 @@ async def _reconcile_row(
     if export_item is None and exports and EXPORT_HOLD in (row.hold_kind, _active_hold(row, observation)):
         export_item = exports[-1]
     export_job = export_decision = None
+    transfer_run: str | None = None
+    # D8: the staging claim takes the cell's own class, so a local pause finds both
+    # volumes on one node. Every configured cell class deletes its volumes on release
+    # (the platform chart's StorageClasses), and the identity check below already
+    # refuses a cell whose volume has any other class.
+    staging_class = cluster_config.storage.claim_class(observation.pvc_storage_class or observation.pv_storage_class)
     # An import holding or claiming the volume goes first; the export waits.
     # A cell that has had a volume and lost its claim is decide()'s to report:
     # any apply from the export path would create an empty claim in its place.
@@ -2224,19 +2412,35 @@ async def _reconcile_row(
     if export_item is not None and import_decision is None and not _identity_conflict(
             row, observation, cluster_config.storage) and not (
             claim_missing(observation) and row.volume_id is not None and row.desired_state != "deleted"):
-        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id,
-                                                verify=export_item.archive_version_id is not None)
+        export_job = cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id, step=PAUSE)
         volume_unavailable = (
             relocation_volume(row, observation, cluster_config.storage) is not None
             or planned_move_volume(row, observation, cluster_config.storage) is not None
         )
+        node = _export_node(row, observation)
+        slot_free = export_slots is None or export_slots.free(node)
         export_decision = decide_export(row, export_item, observation, export_job, now=now, config=config,
-                                        volume_unavailable=volume_unavailable)
+                                        volume_unavailable=volume_unavailable, slot_free=slot_free)
+        if export_decision is not None and export_decision.export_transport == "create" and export_slots is not None:
+            export_slots.take(node)
+        if export_decision is None and export_item.observed_state is None and not slot_free:
+            await _note_export_waiting(connection, row, export_item)
+    if (export_decision is None and export_item is not None and export_item.observed_state == "packing"
+            and export_state(export_item).get("step") == TRANSFER and row.desired_state != "deleted"):
+        # D8: after the pause, the upload and the pack run beside the serving
+        # runtime, so routine reconciliation decides the cell meanwhile.
+        jobs = {step: cluster.observe_export_job(namespace_name(row.cell_id), export_item.export_id, step=step)
+                for step in (UPLOAD, PACK, VERIFY)}
+        transfer = transfer_step(row, export_item, jobs, now=now, config=config)
+        if transfer is not None:
+            transfer_run = await _apply_transfer(connection, cluster, row, export_item, transfer, secrets_config,
+                                                 cluster_config)
     already_served = row.observed_state in ("running", "read_only")
     backup_due = already_served and start_backup
     nothing_to_start = (
         import_decision is None
         and export_decision is None
+        and transfer_run is None
         and _active_hold(row, observation) is None
         and not backup_due
         and not start_upgrade
@@ -2291,6 +2495,15 @@ async def _reconcile_row(
             observation, row, cluster, volume_provider, now, memory, storage=cluster_config.storage,
             backup_listing=backup_listing, staging=lambda: _staged_objects(cluster_config, secrets_config),
         )
+        revocation_pending, revocation = _media_revocation(cluster_config, row, media_active, memory, now)
+        if revocation is not None and revocation != _media_store_of(row):
+            custody = json.loads(row.custody_observation or "{}")
+            custody = custody if isinstance(custody, dict) else {}
+            custody[MEDIA_STORE_RECORD] = revocation
+            recorded = {"custody_observation": json.dumps(custody, sort_keys=True)}
+            await db.write_observed(connection, row.cell_id, recorded)
+            row = dataclass_replace(row, **recorded)
+        observation = dataclass_replace(observation, media_revocation_pending=revocation_pending)
         # Namespace, volume and staging absence bound every live content copy before expiry starts. A
         # cell's backup files are ciphertext that cellctl does not prove absent: a new cell's sit under a lock
         # nothing deletes, and the operator's clean-up empties an old cell's prefix. The object-version window
@@ -2404,16 +2617,22 @@ async def _reconcile_row(
             await db.write_observed(connection, row.cell_id,
                                     {"hold_kind": "import", "hold_started_at": decision.hold_started_at})
 
-    export_storage = None
     if export_decision is not None:
-        export_storage = await _export_transport(
-            connection, cluster, row, export_item, export_job, decision, secrets_config, cluster_config)
+        await _export_transport(connection, cluster, row, export_item, decision, secrets_config, cluster_config)
 
     if decision.storage_growth is not None:
         _note_growth(memory, row, observation, decision)
     if decision.row_updates.get("last_error_code") == BACKUP_FAILED and observation.backup_job_failure_code:
         # D5: the failed Job's own code, value-free; the Job goes a pass later.
         logger.warning("cellctl: cell %s's backup failed: %s", row.cell_id, observation.backup_job_failure_code)
+    collection = observation.backup_job_media_collection
+    if collection is not None and "last_backup_at" in decision.row_updates:
+        # collect-released-media D5: the pass that ends the hold reads the Job last, before its pod's TTL deletes it.
+        counts = ["an unknown number of" if count is None else count
+                  for count in (collection.hidden, collection.candidates, collection.skipped)]
+        logger.log(logging.INFO if collection.outcome == MEDIA_COLLECTION_COMPLETE else logging.WARNING,
+                   "cellctl: cell %s's media collection %s (%s): %s name(s) hidden of %s candidate(s), %s refused by "
+                   "the edge", row.cell_id, collection.outcome, collection.reason, *counts)
 
     # D6 step 4.1: a pause is written before the apply it accompanies, so a
     # crash between the two leaves the rollout paused and no other cell can
@@ -2549,6 +2768,14 @@ async def _reconcile_row(
             }
         elif media_mode == MEDIA_RETAINED:
             media_fields = {"media_store_retained": True}
+        collector_version = _media_collector_version(cluster_config, media_active, row)
+        if collector_version is not None:
+            # collect-released-media D3: only the backup Job mounts it. The render digest leaves it out, since the
+            # runtime never reads it, and every hold applies the Secret before it runs its Job. Without a version
+            # the backup still runs and collects nothing.
+            media_fields["media_collector_url"] = edge.url
+            media_fields["media_collector_credential"] = sign_credential(
+                edge.signing_key, cell_id=row.cell_id, version=collector_version, audience=COLLECTOR_AUDIENCE)
         spec = CellManifestSpec(
             cell_id=row.cell_id,
             image=decision.image,
@@ -2678,7 +2905,7 @@ async def _reconcile_row(
         park = memory.refusals.get(row.cell_id)
         jobs_parked = park is not None and park.job_blocked and park.key == refusal_key and now < park.retry_at
         job_refused: list[tuple[str, str]] = []
-        steps = (decision.import_action or decision.run_export_job or decision.run_backup_job
+        steps = (decision.import_action or decision.run_export_job or transfer_run or decision.run_backup_job
                  or decision.run_restore_job_snapshot or decision.create_snapshot or decision.create_clone)
         local = cluster_config.storage.local
         if jobs_parked and steps:
@@ -2698,17 +2925,21 @@ async def _reconcile_row(
                                                 deadline_seconds=int((config.import_deadline if decision.import_action == "import"
                                                                       else config.import_cleanup_deadline).total_seconds())), job_refused)
             if decision.run_export_job:
-                deadline = int(export_deadline(row, config).total_seconds())
-                size = export_size(row)
-                part_urls = ([] if export_item.archive_version_id else
-                             await asyncio.to_thread(export_storage.part_urls, export_item, size.parts,
-                                                     expires_in=deadline))
-                verify_url = (await asyncio.to_thread(export_storage.link, export_item,
-                                                      expires_in=deadline) if export_item.archive_version_id else None)
-                if verify_url:
-                    cluster.apply_all([render_export_verification_secret(spec, export_item, verify_url)])
+                # D8: the pause, under the hold, into the export's own staging claim.
+                _run_cell_job(cluster, row.cell_id, render_export_staging_claim(
+                    spec, export_item, size_gib=staging_gib(row.used_bytes, spec.storage_gib),
+                    storage_class=staging_class), job_refused)
                 _run_cell_job(cluster, row.cell_id, render_export_job(
-                    spec, export_item, size, part_urls=part_urls, deadline_seconds=deadline), job_refused)
+                    spec, export_item, PAUSE, deadline_seconds=int(pause_window(row, config).total_seconds()),
+                    media_mode=("served" if media_mode in MEDIA_KEYED else
+                                "retained" if media_mode == MEDIA_RETAINED else None)), job_refused)
+            if transfer_run == PACK and ("NetworkPolicy", JOB_EGRESS_POLICY) in refused:
+                # D8: the pack holds the media key, so it starts only in a pass whose job-egress,
+                # which keeps it off public egress, landed. The transfer deadline ends a lasting refusal.
+                logger.error("cellctl held back the pack of export %s: job-egress was refused", export_item.export_id)
+            elif transfer_run is not None:
+                await _run_transfer_job(cluster, row, export_item, transfer_run, spec, now, config, secrets_config,
+                                        cluster_config, job_refused)
             if family is not None:
                 cluster.apply_all([render_backup_family_secret(spec, namespace=local.reservation_namespace, token=family["token"],
                     physical_uuid=family["physicalSourceUUID"])])
@@ -2822,15 +3053,21 @@ async def _remove_export(
     connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, storage: ExportStorage,
     updates: dict[str, object],
 ) -> None:
-    """Deletes every version of the export's object and aborts its uploads,
-    then records `updates` with the upload released. A failure keeps
+    """Deletes the export's Jobs, staging claim and verification Secret, every
+    version of its object and its uploads, then records `updates` with the
+    upload released. A failure keeps
     upload_id, so every later pass retries the abort. On a deleted cell the
     outcome is recorded anyway; the staging bucket's lifecycle removes a
     leftover object."""
 
+    namespace = namespace_name(row.cell_id)
     try:
-        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
-                                     cell_id=row.cell_id):
+        # D8: an ended export leaves no step Job and no staging claim; a retry repeats each removal.
+        for name in (*(export_job_name(item.export_id, step) for step in (PAUSE, UPLOAD, PACK, VERIFY)),
+                     legacy_job_name(item.export_id)):
+            cluster.delete_job(namespace, name)
+        cluster.delete_export_staging(namespace, item.export_id)
+        if not cluster.delete_secret(namespace, verification_secret_name(item.export_id), cell_id=row.cell_id):
             return
         await asyncio.to_thread(storage.remove, item)
     except Exception as error:  # noqa: BLE001 - object storage may be down; the row keeps the retry
@@ -2866,43 +3103,100 @@ async def _settle_exports(
 
 
 async def _export_transport(
-    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, job,
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow,
     decision: Decision, secrets_config: SecretsConfig, cluster_config: ClusterConfig,
-) -> ExportStorage | None:
-    """The export decision's object-storage step and C6 write, journalled
+) -> None:
+    """The pause decision's object-storage step and C6 write, journalled
     before the hold is written and the StatefulSet applied."""
 
-    storage = None
-    if decision.export_transport or decision.run_export_job:
-        storage = _export_storage(secrets_config, cluster_config)
+    namespace = namespace_name(row.cell_id)
+    storage = _export_storage(secrets_config, cluster_config) if decision.export_transport else None
     if decision.export_transport == "create":
         decision.export_updates["upload_id"] = await asyncio.to_thread(storage.create, item)
-    elif decision.export_transport == "complete":
-        try:
-            version = await asyncio.to_thread(storage.complete, item, accepted_report(job.report))
-        except ValueError as error:
-            # A part that is not the one the Job uploaded never completes.
-            logger.warning("cellctl: cell %s's export %s upload was refused: %s", row.cell_id, item.export_id, error)
-            decision.export_updates = {"observed_state": "failed", "error_code": EXPORT_UPLOAD_FAILED}
-            decision.export_transport = "remove"
-            decision.stop_export_job = True
-        else:
-            decision.export_updates.update(archive_version_id=version)
-            cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
     await db.write_export(connection, item.export_id, decision.export_updates)
     if decision.export_transport == "remove":
         await _remove_export(connection, cluster, row, item, storage, {})
-    if decision.stop_export_job:
-        if not cluster.delete_secret(namespace_name(row.cell_id), verification_secret_name(item.export_id),
-                                     cell_id=row.cell_id):
-            return storage
-        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id))
-        cluster.delete_job(namespace_name(row.cell_id), export_job_name(item.export_id, verify=True))
+    elif decision.stop_export_job:
+        cluster.delete_job(namespace, export_job_name(item.export_id, PAUSE))
+        cluster.delete_job(namespace, legacy_job_name(item.export_id))
     # The row hold survives a crash before the StatefulSet has been stopped.
     if decision.hold_kind == EXPORT_HOLD and (row.hold_kind != EXPORT_HOLD or row.hold_started_at != decision.hold_started_at):
         await db.write_observed(connection, row.cell_id,
                                 {"hold_kind": EXPORT_HOLD, "hold_started_at": decision.hold_started_at})
-    return storage
+
+
+async def _apply_transfer(
+    connection: asyncpg.Connection, cluster: ClusterGateway, row: CellRow, item: ExportRow, transfer: TransferStep,
+    secrets_config: SecretsConfig, cluster_config: ClusterConfig,
+) -> str | None:
+    """One transfer step's object-storage work, C6 write and removals, in that
+    order. Returns the step Job this pass still has to run, if any."""
+
+    namespace = namespace_name(row.cell_id)
+    updates, transport = dict(transfer.export_updates), transfer.transport
+    storage = _export_storage(secrets_config, cluster_config) if transport else None
+    if transport == "complete":
+        try:
+            version = await asyncio.to_thread(storage.complete, item, json.loads(updates["packing_report"]))
+        except ValueError as error:
+            # A part that is not the one the upload sent never completes.
+            logger.warning("cellctl: cell %s's export %s upload was refused: %s", row.cell_id, item.export_id, error)
+            updates, transport = {"observed_state": "failed", "error_code": EXPORT_UPLOAD_FAILED}, "remove"
+        else:
+            updates["archive_version_id"] = version
+    await db.write_export(connection, item.export_id, updates)
+    if transport == "remove":
+        await _remove_export(connection, cluster, row, item, storage, {})
+        return None
+    for step in transfer.stop:
+        cluster.delete_job(namespace, export_job_name(item.export_id, step))
+    if transfer.remove_staging:
+        cluster.delete_export_staging(namespace, item.export_id)
+    if VERIFY in transfer.stop:
+        cluster.delete_secret(namespace, verification_secret_name(item.export_id), cell_id=row.cell_id)
+    return transfer.run
+
+
+async def _run_transfer_job(
+    cluster: ClusterGateway, row: CellRow, item: ExportRow, step: str, spec: CellManifestSpec, now: datetime,
+    config: ReconcileConfig, secrets_config: SecretsConfig, cluster_config: ClusterConfig,
+    refused: list[tuple[str, str]],
+) -> None:
+    """Start the upload, the pack or the verification on the image the pause
+    ran (D8), with a deadline and part URLs that last until the transfer deadline."""
+
+    state = export_state(item)
+    size = export_size(state["planned_bytes"])
+    deadline = max(1, int((transfer_deadline(item, config) - now).total_seconds()))
+    job_spec = dataclass_replace(spec, image=state["image"])
+    part_urls: list[str] = []
+    if step == UPLOAD:
+        part_urls = await asyncio.to_thread(_export_storage(secrets_config, cluster_config).part_urls, item,
+                                            size.parts, expires_in=deadline)
+    elif step == VERIFY:
+        url = await asyncio.to_thread(_export_storage(secrets_config, cluster_config).link, item, expires_in=deadline)
+        cluster.apply_all([render_export_verification_secret(job_spec, item, url)])
+    _run_cell_job(cluster, row.cell_id, render_export_job(job_spec, item, step, deadline_seconds=deadline, size=size,
+                                                          part_urls=part_urls), refused)
+
+
+def _export_node(row: CellRow, observation: ClusterObservation) -> str | None:
+    """The node an export's staging lands on: a local volume's own node, else the node the cell last ran on."""
+
+    return observation.pv_node or row.node
+
+
+# The reason an export row gives while it waits for its node's export slot.
+EXPORT_WAITING_FOR_SLOT = "node_export_slot"
+
+
+async def _note_export_waiting(connection: asyncpg.Connection, row: CellRow, item: ExportRow) -> None:
+    """D8: an export that waits for its node's slot says so in its row."""
+
+    if export_state(item).get("waiting") != EXPORT_WAITING_FOR_SLOT:
+        logger.info("cellctl: cell %s's export %s waits for its node's export slot", row.cell_id, item.export_id)
+        await db.write_export(connection, item.export_id,
+                              {"packing_report": json.dumps({"waiting": EXPORT_WAITING_FOR_SLOT})})
 
 
 def _note_growth(memory: LoopMemory, row: CellRow, observation: ClusterObservation, decision) -> None:

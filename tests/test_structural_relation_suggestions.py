@@ -513,7 +513,7 @@ def test_shared_open_question_spans_both_question_axes(tmp_path: Path) -> None:
             for other in ("rich", "override", "compact")
             if other != name
         }, name
-        assert all(c["relation_type"] == "relates_to" for c in candidates)
+        assert all(c["relation_type"] is None and c["plain_link"] for c in candidates)
 
 
 def test_shared_open_question_evidence_carries_the_other_pages_unit_identity(
@@ -640,7 +640,8 @@ def test_shared_resolution_target_pairs_pages_answering_the_same_target(
     assert len(candidates) == 1
     candidate = candidates[0]
     assert candidate["to"] == f"{KB}/beta.md"
-    assert candidate["relation_type"] == "relates_to"
+    assert candidate["relation_type"] is None
+    assert candidate["plain_link"]
     match = candidate["evidence"]["matches"][0]
     assert match["target"] == f"{KB}/question.md"
     assert match["relation"] == "answers"
@@ -691,7 +692,7 @@ def test_co_participation_generators_do_not_propose_the_same_edge_twice(
     tmp_path: Path,
 ) -> None:
     """Two pages that share a question usually also answer the same thing, and
-    both generators then propose the identical `relates_to` bullet. Keeping both
+    both generators then propose the identical edge with no relation. Keeping both
     spends two scarce slots on one edge the reviewer can accept only once."""
     vault = tmp_path / "vault"
     question = "Why is the tail latency spiky?"
@@ -714,7 +715,7 @@ def test_co_participation_generators_do_not_propose_the_same_edge_twice(
     to_beta = [
         c
         for c in candidates
-        if c["to"] == f"{KB}/beta.md" and c["relation_type"] == "relates_to"
+        if c["to"] == f"{KB}/beta.md" and c["relation_type"] is None
     ]
 
     assert [c["method"] for c in to_beta] == ["shared_open_question"]
@@ -763,9 +764,11 @@ def test_structural_candidates_are_bounded_and_query_count_is_constant(
     for n in range(200):
         _page(vault, f"other-{n:03d}", f"## Open Question\n- id: q-{n:03d}\n\n{question}\n")
     _build(vault)
+    # The small corpus yields the same three candidates: each shown candidate costs the review
+    # lookup its own point read, so the claim is that the count does not grow with the corpus.
     small = tmp_path / "small"
-    _page(small, "alpha", f"## Open Question\n- id: q-alpha\n\n{question}\n")
-    _page(small, "beta", f"## Open Question\n- id: q-beta\n\n{question}\n")
+    for name in ("alpha", "beta", "gamma", "delta"):
+        _page(small, name, f"## Open Question\n- id: q-{name}\n\n{question}\n")
     _build(small)
 
     # Patched only after both sidecars exist: the proxy covers the read path,
@@ -907,7 +910,10 @@ def test_structural_generators_soft_fail_when_the_snapshot_is_unavailable(
 
     result = epistemic_graph.suggest_relations(vault, path=f"{KB}/source.md", limit=50)
 
-    assert result["warnings"] == []
+    # The generators say nothing; the one warning is the review lookup, which cannot confirm
+    # a candidate.
+    assert len(result["warnings"]) == 1
+    assert "review fields unavailable" in result["warnings"][0]
     assert any(c["method"] == "wikilink" for c in result["candidates"])
     assert not [
         c

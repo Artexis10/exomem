@@ -21,6 +21,7 @@ from exomem import (
     project_keys,
     relation_review,
     replace,
+    semantic_contract,
     semantic_writes,
     temporal,
 )
@@ -360,39 +361,37 @@ def test_manage_memory_file_preserves_tier2_missing_unit_refusals(
     assert append_path.read_bytes() == append_before
 
 
+def _page_needing_review(vault: Path) -> str:
+    """A governed page past the activation boundary that holds no relation decision."""
+    activation_manifest.ensure_manifest(vault)
+    rel = "Knowledge Base/Notes/Insights/public-append.md"
+    (vault / rel).write_text(
+        "---\ntitle: Public append\ntype: insight\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-0000000000d3\n---\n\n"
+        + _compact_content("Public append"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    return rel
+
+
 def test_public_append_facades_validate_and_commit_reviewed_transition(
     vault: Path,
 ) -> None:
-    create_kwargs = {
-        "content": _compact_content("Public append"),
-        "note_type": "insight",
-        "title": "Public append",
-        "today": TODAY,
-    }
-    draft = note.note(vault, validate_only=True, **create_kwargs)
-    created = note.note(
-        vault,
-        draft_id=draft.draft_id,
-        draft_hash=draft.draft_hash,
-        draft_token=draft.draft_token,
-        relation_disposition="reviewed_none",
-        relation_review_hash=draft.draft_hash,
-        relation_review_reason="No honest relation exists in this fixture corpus.",
-        **create_kwargs,
-    )
+    rel = _page_needing_review(vault)
     before = _tree_bytes(vault)
     append_content = "Additional reviewed context.\n"
 
     direct_validation = commands.op_append_to_file(
         vault,
-        path=created.path,
+        path=rel,
         content=append_content,
         validate_only=True,
     )
     manage_validation = commands.op_manage_memory_file(
         vault,
         operation="append",
-        path=created.path,
+        path=rel,
         content=append_content,
         validate_only=True,
     )
@@ -402,7 +401,7 @@ def test_public_append_facades_validate_and_commit_reviewed_transition(
         assert validation["mutated"] is False
         assert validation["transition_token"]
         assert validation["transition_hash"]
-        assert "RELATION_DISPOSITION_STALE" in {
+        assert "RELATION_DISPOSITION_MISSING" in {
             finding["code"]
             for finding in validation["contract_result"]["blocking_findings"]
         }
@@ -411,7 +410,7 @@ def test_public_append_facades_validate_and_commit_reviewed_transition(
     committed = commands.op_manage_memory_file(
         vault,
         operation="append",
-        path=created.path,
+        path=rel,
         content=append_content,
         semantic_transition_token=manage_validation["transition_token"],
         relation_disposition="reviewed_none",
@@ -420,7 +419,99 @@ def test_public_append_facades_validate_and_commit_reviewed_transition(
     )
 
     assert committed["semantic"]["mutated"] is True
+    assert (vault / rel).read_text(encoding="utf-8").endswith(append_content)
+
+
+def test_a_later_append_to_a_reviewed_none_note_needs_no_review_fields(vault: Path) -> None:
+    """The decision recorded at creation binds the page, so an append is one call."""
+    create_kwargs = {
+        "content": _compact_content("Later append"),
+        "note_type": "insight",
+        "title": "Later append",
+        "today": TODAY,
+    }
+    created = note.note(
+        vault,
+        relation_disposition="reviewed_none",
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+        **create_kwargs,
+    )
+    append_content = "Additional context.\n"
+
+    validation = commands.op_manage_memory_file(
+        vault,
+        operation="append",
+        path=created.path,
+        content=append_content,
+        validate_only=True,
+    )
+    committed = commands.op_manage_memory_file(
+        vault,
+        operation="append",
+        path=created.path,
+        content=append_content,
+    )
+
+    assert validation["contract_result"]["should_block"] is False
+    assert committed["semantic"]["mutated"] is True
     assert (vault / created.path).read_text(encoding="utf-8").endswith(append_content)
+
+
+def test_a_fresh_creation_commits_reviewed_none_with_a_reason_in_one_call(vault: Path) -> None:
+    """No validate call, no hash: the server binds the decision to the draft it commits."""
+    created = note.note(
+        vault,
+        content=_compact_content("One call"),
+        note_type="insight",
+        title="One call",
+        today=TODAY,
+        relation_disposition="reviewed_none",
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+    )
+
+    source = (vault / created.path).read_text(encoding="utf-8")
+    identity = source.split("exomem_id: ", 1)[1].splitlines()[0]
+    receipt = relation_review.load_creation_receipt(vault, identity)
+    assert receipt is not None
+    assert receipt.kind == "reviewed_none"
+    assert receipt.reason == "No honest relation exists in this fixture corpus."
+    assert receipt.content_fingerprint == semantic_contract.review_content_fingerprint(
+        identity, source
+    )
+
+
+def test_a_validated_draft_named_without_the_hash_is_refused_by_name(vault: Path) -> None:
+    """Naming a draft ties the call to its validate result, whose hash must then be sent."""
+    activation_manifest.ensure_manifest(vault)
+    note.note(
+        vault,
+        content=_compact_content("First"),
+        note_type="insight",
+        title="First",
+        today=TODAY,
+        relation_disposition="reviewed_none",
+        relation_review_reason="No honest relation exists in this fixture corpus.",
+    )
+    create_kwargs = {
+        "content": _compact_content("Second"),
+        "note_type": "insight",
+        "title": "Second",
+        "today": TODAY,
+    }
+    draft = note.note(vault, validate_only=True, **create_kwargs)
+
+    with pytest.raises(note.NoteError) as refused:
+        note.note(
+            vault,
+            draft_id=draft.draft_id,
+            draft_hash=draft.draft_hash,
+            draft_token=draft.draft_token,
+            relation_disposition="reviewed_none",
+            relation_review_reason="No honest relation exists in this fixture corpus.",
+            **create_kwargs,
+        )
+
+    assert refused.value.code == "INVALID_RELATION_REVIEW"
 
 
 @pytest.mark.parametrize("facade", ("direct", "manage"))

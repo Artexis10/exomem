@@ -1,0 +1,17 @@
+{
+  "acknowledged_on": "2026-11-08",
+  "affected_sections": [
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-11-08",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "48dd0ff05afe0372e0d6c7650ea7afd332a70e22f04535e03457a0dba3939e60",
+  "effective_policy": "Applies after founder acknowledgment. Until then the rules of sequence 9 govern, and no run uses the PP arm, the reduced f35 scale or the Opus decision judge as decision evidence. The f36 and f37 runs under this amendment need no product change and may start once it is acknowledged. The f35 deciding run also waits for a product change that makes Exomem as shipped capture learned facts without the benchmark's sentence, with its product revision bound before generation. Every result stays an internal diagnostic, never a published suite result.",
+  "parent_contract_sha256": "47a984918e82b73c6fd85d0d893f4a9ac0b29b73e5206eea50db1e7c8212373e",
+  "ratifier": "Hugo Ander Kivi",
+  "rationale": "Change the arms, the scale and the judge of the sequence-9 outcome suites on the owner's 2026-11-08 decisions, and add no family. Development rounds showed that Exomem as shipped saved nothing on CL-Bench (0 writes in 50 sessions) and that every CL-Bench memory system receives the benchmark's per-task memory sentence, which the P arm did not. f35 gains the primary arm PP (P with that sentence pointed at Exomem) beside P, which becomes the description-only product gap; the sequence-9 decision rules read PP. The deciding run plays one ordering (run_index 1) and adds run_index 2 and 3, in that order, only when an interval contains a decision bound. The f36 and f37 decision judge becomes claude-opus-5-5 on the Claude subscription, reported as the same model family as the actor, with gpt-6.1-sol re-judging a random 20% sample as description only. Sequence 9's held-out inputs, measures, fault rules and loss bounds stand.",
+  "repository_revision": "b9b00ab39ec7f562e74d174f8b82972e3a840170",
+  "schema_version": 1,
+  "sequence": 10
+}

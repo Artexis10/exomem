@@ -48,6 +48,12 @@ def _tool(vault: Path, name: str, **kwargs):
     return invoke_command(command, vault, **kwargs)
 
 
+def _chosen(route: dict) -> dict:
+    """The route's arguments with the agent's choice filled in: the first ranked relation."""
+    assert "requested_relation" in route["args"], route
+    return {**route["args"], "requested_relation": route["choose"]["options"][0]["key"]}
+
+
 def _quiet(vault: Path, now: float) -> None:
     results = fx.run_to_quiet(vault, now=now)
     assert all(result.stop_reason != "error" for result in results), results
@@ -123,7 +129,7 @@ def test_a_accepting_the_link_resolves_it_and_a_later_session_offers_hydration(
     accepted = _tool(
         vault,
         item["route"]["tool"],
-        **item["route"]["args"],
+        **_chosen(item["route"]),
         why="both notes come from the same field report",
         expected_hash=context["subject"]["content_hash"],
     )
@@ -485,7 +491,7 @@ def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
         accepted = _tool(
             vault,
             item["route"]["tool"],
-            **item["route"]["args"],
+            **_chosen(item["route"]),
             why="both notes come from the same field report",
             expected_hash=context["subject"]["content_hash"],
         )

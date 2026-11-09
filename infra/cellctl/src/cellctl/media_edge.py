@@ -9,8 +9,11 @@ database and the cluster.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import math
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -24,6 +27,9 @@ from .secrets import CONTENT_KEY_VERSION, unwrap_secret, wrap_secret
 
 # The credential's audience and format version: the edge's contract with cellctl.
 EDGE_AUDIENCE = "exomem-media-edge"
+# collect-released-media D3: the backup Job's credential, which may only condemn. The cell's copy is
+# COLLECTOR_AUDIENCE in src/exomem/media_edge_protocol.py; tests/test_media_collection.py fails when they differ.
+COLLECTOR_AUDIENCE = "exomem-media-edge-collector"
 CREDENTIAL_FORMAT = 1
 # The purpose the cell root binds into the wrapped bundle (see secrets._aad).
 BUNDLE_COLUMN = "media_key_wrapped"
@@ -32,6 +38,7 @@ ACTIVE_SET_NAME = "exomem-media-edge-active-set"
 ACTIVE_SET_KEY = "active-set.json"
 EPOCHS_KEY = "credential-epochs.json"
 MAX_SELECTED_CELLS = 1024
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 # -- the media key bundle: an age X25519 identity and the object name key --
@@ -119,8 +126,8 @@ def _compact_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
-def sign_credential(key: Ed25519PrivateKey, *, cell_id: str, version: int) -> str:
-    """A compact EdDSA JWT that binds the edge audience, the cell and the credential version.
+def sign_credential(key: Ed25519PrivateKey, *, cell_id: str, version: int, audience: str = EDGE_AUDIENCE) -> str:
+    """A compact EdDSA JWT that binds the audience, the cell and the credential version.
 
     It has no expiry: the active set revokes it. `issued_ms` equals the version, which is the
     generation at which the credential was admitted, so the same inputs always sign to the same
@@ -128,7 +135,7 @@ def sign_credential(key: Ed25519PrivateKey, *, cell_id: str, version: int) -> st
     deterministic.
     """
     header = _b64url(_compact_json({"alg": "EdDSA", "typ": "JWT"}))
-    claims = {"v": CREDENTIAL_FORMAT, "aud": EDGE_AUDIENCE, "sub": cell_id, "ver": version, "issued_ms": version}
+    claims = {"v": CREDENTIAL_FORMAT, "aud": audience, "sub": cell_id, "ver": version, "issued_ms": version}
     signing_input = f"{header}.{_b64url(_compact_json(claims))}"
     return f"{signing_input}.{_b64url(key.sign(signing_input.encode('ascii')))}"
 
@@ -140,16 +147,26 @@ def sign_credential(key: Ed25519PrivateKey, *, cell_id: str, version: int) -> st
 class ActiveSet:
     """The set of cells the edge admits, each with its current credential version.
 
-    `generation` rises with every change to the set. `epochs` is cellctl's own record of the
-    credential epoch each version was admitted under; the edge never reads it.
+    `generation` rises with every change to the set. `cells` admits runtime credentials and
+    `collectors` admits backup Job credentials (collect-released-media D3). `epochs` is cellctl's own
+    record of the credential epoch each version was admitted under; the edge never reads it.
     """
 
     generation: int = 0
     cells: Mapping[str, int] = field(default_factory=dict)
     epochs: Mapping[str, int] = field(default_factory=dict)
+    collectors: Mapping[str, int] = field(default_factory=dict)
 
     def active_set_json(self) -> str:
-        return _compact_json({"generation": self.generation, "cells": dict(self.cells)}).decode("ascii")
+        document: dict[str, object] = {"generation": self.generation, "cells": dict(self.cells)}
+        if self.collectors:
+            # A set with no collector keeps the bytes that an edge without collection loads.
+            document["collectors"] = dict(self.collectors)
+        return _compact_json(document).decode("ascii")
+
+    def sha256(self) -> str:
+        """The digest of the bytes the edge loads from the ConfigMap, which it reports back."""
+        return hashlib.sha256(self.active_set_json().encode("ascii")).hexdigest()
 
     def epochs_json(self) -> str:
         return _compact_json(dict(self.epochs)).decode("ascii")
@@ -177,29 +194,40 @@ def read_active_set(data: Mapping[str, str] | None) -> ActiveSet:
         generation = document["generation"]
         if type(generation) is not int or generation < 0:
             raise ValueError("the generation is not a whole number")
-        return ActiveSet(generation, _cell_integers(document["cells"]), _cell_integers(json.loads(data.get(EPOCHS_KEY, "{}"))))
+        return ActiveSet(generation, _cell_integers(document["cells"]), _cell_integers(json.loads(data.get(EPOCHS_KEY, "{}"))),
+                         _cell_integers(document.get("collectors", {})))
     except (ValueError, KeyError, TypeError):
         return ActiveSet()
 
 
-def plan_active_set(published: ActiveSet, selected: Mapping[str, int], now_ms: int) -> ActiveSet:
-    """The set to publish for the selected cells, each with its credential epoch.
+def plan_active_set(
+    published: ActiveSet, selected: Mapping[str, int], now_ms: int, *, above: int = 0,
+    collectors: Mapping[str, int] | None = None,
+) -> ActiveSet:
+    """The set to publish for the selected cells and the collecting cells, each with its credential epoch.
 
     A cell keeps its version while its epoch is unchanged. A new cell, and a cell whose epoch changed,
     takes the new generation as its version, which no earlier credential carries. A cell that leaves the set
-    loses its version, and a later return starts afresh, so a revoked credential stays revoked.
+    loses its version, and a later return starts afresh, so a revoked credential stays revoked. Collectors
+    follow the same rule in their own map, under the cell's one epoch.
+
+    `above` is the generation of a set the edge loaded that cellctl did not publish, for example after a
+    clock that went back. The edge refuses a generation at or below the one it loaded, so the plan rises past it.
     """
+    collectors = {} if collectors is None else collectors
+    epochs = {**collectors, **selected}
     # Zero is unpublished state; an empty revocation must still advance the generation.
-    if published.generation > 0 and published.cells.keys() == selected.keys() and all(
-        published.epochs.get(cell, 0) == epoch for cell, epoch in selected.items()
-    ):
+    if (published.generation > max(above, 0) and published.cells.keys() == selected.keys()
+            and published.collectors.keys() == collectors.keys()
+            and all(published.epochs.get(cell, 0) == epoch for cell, epoch in epochs.items())):
         return published
-    generation = max(published.generation + 1, now_ms)
-    cells = {
-        cell: published.cells[cell] if cell in published.cells and published.epochs.get(cell, 0) == epoch else generation
-        for cell, epoch in selected.items()
-    }
-    return ActiveSet(generation, cells, dict(selected))
+    generation = max(published.generation + 1, now_ms, above + 1)
+
+    def versions(admitted: Mapping[str, int], wanted: Mapping[str, int]) -> dict[str, int]:
+        return {cell: admitted[cell] if cell in admitted and published.epochs.get(cell, 0) == epoch else generation
+                for cell, epoch in wanted.items()}
+
+    return ActiveSet(generation, versions(published.cells, selected), epochs, versions(published.collectors, collectors))
 
 
 def render_active_set(active: ActiveSet, namespace: str) -> dict:
@@ -215,15 +243,46 @@ def render_active_set(active: ActiveSet, namespace: str) -> dict:
     }
 
 
-def read_generation(url: str, *, timeout: float = 3.0) -> int:
-    """The generation the edge reports: the newest set it has loaded and drained every earlier request of."""
+@dataclass(frozen=True)
+class EdgeEvidence:
+    """What the edge reports about the set it serves (add-cloud-media-store D6, exact-set evidence).
+
+    `settled` is the newest generation whose earlier requests and writes have finished. `loaded` is the
+    generation of the set in force, `set_sha256` the digest of that set's bytes, and `bucket` the bucket
+    the edge writes to. A generation alone cannot say which set it was.
+    """
+
+    settled: int
+    loaded: int
+    set_sha256: str
+    bucket: str
+
+    def matches(self, active: ActiveSet, bucket: str) -> bool:
+        """Whether the edge serves exactly the set cellctl published, on the bucket cellctl expects."""
+        return (
+            self.loaded == active.generation
+            and self.set_sha256 == active.sha256()
+            and self.bucket == bucket
+            and self.settled >= active.generation
+        )
+
+
+def read_edge_evidence(url: str, *, timeout: float = 3.0) -> EdgeEvidence:
+    """The edge's report of the set it serves. Anything it does not say in full is an error, not a guess."""
     with httpx.Client(timeout=timeout, trust_env=False) as client:
         response = client.get(f"{url.rstrip('/')}/v1/generation")
     response.raise_for_status()
-    generation = response.json().get("generation")
-    if type(generation) is not int or generation < 0:
-        raise ValueError("the media edge reported no generation")
-    return generation
+    report = response.json()
+    settled, loaded, digest, bucket = (report.get(name) for name in ("generation", "loaded", "set_sha256", "bucket"))
+    if (
+        any(type(number) is not int or number < 0 for number in (settled, loaded))
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None  # a hex digest's shape, fixed by SHA-256
+        or not isinstance(bucket, str)
+        or not bucket
+    ):
+        raise ValueError("the media edge reported no complete generation")
+    return EdgeEvidence(settled, loaded, digest, bucket)
 
 
 # -- cellctl's settings for the edge --
@@ -236,13 +295,21 @@ class MediaEdgeConfig:
     url: str
     max_object_bytes: int
     signing_key: Ed25519PrivateKey = field(repr=False)
+    # The bucket the edge must report. An edge on another bucket proves nothing about this one.
+    bucket: str
     cell_ids: tuple[str, ...] = ()
     # The fleet switch: every cell, including each created later. The list stays as the canary.
     all_cells: bool = False
+    # collect-released-media D3: the cells whose backups condemn the media they released. A list, not a
+    # switch, so one test cell collects first; taking a cell off stops its collection.
+    collect_cell_ids: tuple[str, ...] = ()
     # Raise a cell's number to replace its credential and revoke the old one.
     credential_epochs: Mapping[str, int] = field(default_factory=dict)
     # Eviction and hydration settings the runtime reads beside the keys.
     store_policy: Mapping[str, bool | int | float] = field(default_factory=dict)
+    # D10: the physical meter alerts above the cell's allowance times this factor, which leaves room for
+    # versions that stay until the follow-on change destroys them. None leaves that alert off.
+    physical_headroom: float | None = None
 
     def __post_init__(self) -> None:
         if not self.url:
@@ -250,15 +317,23 @@ class MediaEdgeConfig:
         check_media_edge_url(self.url)
         if not isinstance(self.signing_key, Ed25519PrivateKey):
             raise ValueError("the media edge credential signing key must be an Ed25519 private key")
+        if not isinstance(self.bucket, str) or not self.bucket:
+            raise ValueError("the media edge needs the name of its bucket")
         if type(self.max_object_bytes) is not int or self.max_object_bytes <= 0:
             raise ValueError("the media edge object bound must be a positive whole number of bytes")
-        if (
-            not isinstance(self.cell_ids, tuple)
-            or len(self.cell_ids) > MAX_SELECTED_CELLS
-            or len(set(self.cell_ids)) != len(self.cell_ids)
-            or not all(isinstance(cell, str) and CELL_ID_RE.fullmatch(cell) for cell in self.cell_ids)
+        for what, cells in (("selection", self.cell_ids), ("collect list", self.collect_cell_ids)):
+            if (
+                not isinstance(cells, tuple)
+                or len(cells) > MAX_SELECTED_CELLS
+                or len(set(cells)) != len(cells)
+                or not all(isinstance(cell, str) and CELL_ID_RE.fullmatch(cell) for cell in cells)
+            ):
+                raise ValueError(f"the media edge {what} needs at most 1024 unique base32 cell IDs")
+        if self.physical_headroom is not None and not (
+            type(self.physical_headroom) in (int, float) and math.isfinite(self.physical_headroom)
+            and self.physical_headroom >= 1
         ):
-            raise ValueError("the media edge selection needs at most 1024 unique base32 cell IDs")
+            raise ValueError("the media physical headroom factor is a number of at least 1")
         try:
             _cell_integers(dict(self.credential_epochs))
         except ValueError as error:
@@ -271,6 +346,9 @@ class MediaEdgeConfig:
 
     def selects(self, cell_id: str) -> bool:
         return self.all_cells or cell_id in self.cell_ids
+
+    def collects(self, cell_id: str) -> bool:
+        return cell_id in self.collect_cell_ids
 
     def epoch(self, cell_id: str) -> int:
         return self.credential_epochs.get(cell_id, 0)

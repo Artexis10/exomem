@@ -143,6 +143,9 @@ class InternalStateDescriptor:
     #: stays seamless and an older reader accepts it. Set True only for a family that once lived
     #: inside the vault or that a restore writes back inside it, and ship that with its migration.
     migrates_from_vault: bool = False
+    #: Whether store mode owns the files of this family as pages (`vault_store.ownership`). Every other
+    #: reserved family stays outside the store: governance and replica state have their own owners.
+    vault_store: bool = False
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -200,7 +203,8 @@ class GenericFileSnapshot:
     """Bytes and metadata read from the exact retained generic leaf."""
 
     data: bytes
-    identity: held_fs.StableIdentity
+    #: The file's device, inode and link count; None for a page that the vault's store holds.
+    identity: held_fs.StableIdentity | None
     mtime: float
     #: (size, mtime_ns, ctime_ns) from the same handle after the read, or None when the producer has no handle.
     generation: tuple[int, int, int] | None = None
@@ -437,6 +441,7 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
         trees=("_compiled",),
     ),
     InternalStateDescriptor(
@@ -669,10 +674,37 @@ _REGISTRY = (
         patterns=(_COLLECTION_EXPORTED_RE,),
     ),
     InternalStateDescriptor(
+        "collection-archive",
+        "collection_store.conversion",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The item files that a summary conversion retired from the vault, each copy verified,
+        # beside the store that now holds their rows, and the collections cutover's run records
+        # under ``cutover/``. Canonical evidence: no reset touches it.
+        trees=(".collection-archive",),
+    ),
+    InternalStateDescriptor(
         "collection-replica",
         "collection_store.replica",
         StatePlacement.VAULT_CANONICAL,
         trees=("_collections",),
+    ),
+    InternalStateDescriptor(
+        "procedure-approvals",
+        "procedure_approval.ledger",
+        StatePlacement.VAULT_CANONICAL,
+        # Only the owner-only `approve_procedure` operation writes this tree, so no
+        # generic, import, capture, move or recovery route can mint an approval.
+        "approve_procedure",
+        trees=("_approvals",),
+    ),
+    InternalStateDescriptor(
+        "procedure-approval-key",
+        "procedure_approval.key",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The per-owner HMAC key that makes ledger entries authentic. Canonical and
+        # outside the vault, so a copied vault carries entries that fail their MAC
+        # and nothing that resets, wipes or migrates machine-local state may touch it.
+        exact=("procedure-approval.key",),
     ),
     InternalStateDescriptor(
         "batch-workspace",
@@ -856,7 +888,10 @@ _COMMAND_PATH_ROLES = MappingProxyType(
             ("restore_path", "recovery-destination", "path"),
         ),
         "query_dataset": _roles(("path", "dataset", "path")),
-        "read_media": _roles(("path", "media-source", "path")),
+        "read_media": _roles(
+            ("path", "media-source", "path"),
+            ("paths", "media-source", "path-list"),
+        ),
     }
 )
 
@@ -1211,6 +1246,8 @@ def mutation_remediation(descriptor_id: str | None) -> str:
         return "Use govern_memory's reviewed governance lifecycle."
     if descriptor is not None and descriptor.owning_command == "consolidate_memory":
         return "No public command owns consolidation state until consolidate_memory ships."
+    if descriptor is not None and descriptor.owning_command == "approve_procedure":
+        return "Only the owner approves a procedure, through approve_procedure. No file route writes approvals."
     return "Use the owning subsystem's bounded control operation."
 
 
@@ -1419,14 +1456,39 @@ def read_generic_bytes(
     macOS-origin NFD name and its NFKC form are different names, and only the
     walked one exists. Classification is unchanged -- it still reads the NFKC,
     case-folded form -- so a reserved name is refused under any spelling.
+
+    A page that the vault's store owns is read from the store, with no identity and no generation.
+    A reserved or unsafe spelling is refused first, on either path.
     """
 
+    stored = _read_stored_generic(vault_root, value, physical=physical)
+    if stored is not None:
+        return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
             vault_root, value, identities=current, physical=physical
         )
+
+
+def _read_stored_generic(
+    vault_root: Path, value: object, *, physical: bool
+) -> GenericFileSnapshot | None:
+    """The stored page as a snapshot when the store serves ``value``, else None: read the file.
+
+    A page that the store serves but lacks fails as a missing file does.
+    """
+    from .vault_store import read
+
+    parent, leaf = _leaf_spelling(value, physical=physical)
+    try:
+        page = read.owned_page(Path(vault_root), leaf if parent == "." else f"{parent}/{leaf}")
+    except FileNotFoundError as error:
+        raise ReservedPathLeafError("MISSING") from error
+    if page is None:
+        return None
+    return GenericFileSnapshot(page.body, None, page.meta.mtime_ns / 1e9)
 
 
 def _read_generic_bytes_held(
@@ -2431,15 +2493,22 @@ def open_generic_tree(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ):
-    """Yield entries under one held walk; exhaust it before publishing a census."""
+    """Yield entries under one held walk; exhaust it before publishing a census.
+
+    A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
+    unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
+    path and error to it, yields no entry for it and goes on. The completeness check still covers it.
+    """
     with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
         entries = _iter_generic_tree_held(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete,
-            markdown_header_limit=markdown_header_limit, checkpoint=checkpoint,
+            markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
+            checkpoint=checkpoint,
         )
         try:
             yield entries
@@ -2473,6 +2542,7 @@ def _iter_generic_tree_held(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     markdown_header_limit: int | None = None,
+    markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
 ) -> Iterator[GenericTreeEntry]:
 
@@ -2627,15 +2697,24 @@ def _iter_generic_tree_held(
                             with runtime_resources.parser_preparation(info.st_size) as preparation:
                                 preparation.reserve_source(0)
                                 preparation.reserve(preparation.reserved + io.DEFAULT_BUFFER_SIZE)
-                                with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
-                                    markdown = vault.read_frontmatter_header(
-                                        stream, markdown_header_limit, reserve=preparation.reserve_source,
+                                try:
+                                    with os.fdopen(os.dup(descriptor), "rb", buffering=io.DEFAULT_BUFFER_SIZE) as stream:
+                                        markdown = vault.read_frontmatter_header(
+                                            stream, markdown_header_limit, reserve=preparation.reserve_source,
+                                        )
+                                    text = markdown.decode("utf-8")
+                                    frontmatter = vault._FM_PATTERN.match(text)
+                                    preparation.reserve_parser(
+                                        text, yaml_text=frontmatter.group(1) if frontmatter else None,
                                     )
-                                text = markdown.decode("utf-8")
-                                frontmatter = vault._FM_PATTERN.match(text)
-                                preparation.reserve_parser(
-                                    text, yaml_text=frontmatter.group(1) if frontmatter else None,
-                                )
+                                # This file's own header: unterminated, undecodable, or above this one parent's budget.
+                                # A busy shared capacity is no fact about the file, so it still ends the walk.
+                                except (ValueError, runtime_resources.PreparationBudgetExceeded) as error:
+                                    if markdown_header_failed is None:
+                                        raise
+                                    require_current()  # A header that changed while it was read is the walk's failure.
+                                    markdown_header_failed(record.relative_path, error)
+                                    continue
                                 require_current()
                                 yield GenericTreeEntry(
                                     record.relative_path, record.identity, info.st_size,

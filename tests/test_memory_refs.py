@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from record_fixtures import copy_vehicle_maintenance_fixture
 
 from exomem import (
     add,
@@ -54,6 +55,36 @@ def test_a_legacy_bom_negative_row_rebuilds_without_rewriting_the_page(tmp_path:
     ) == {rel: False}
     assert index.ref_for_path(rel) == memory_refs.memory_ref(identity)
     assert path.read_bytes() == raw
+
+
+def test_an_identity_row_from_a_pages_bytes_equals_the_row_that_the_sidecar_holds(
+    tmp_path: Path,
+) -> None:
+    """Defect: store mode derives identities from stored bytes. A row that differs from the file
+    scan's splits one page's identity between the modes (a CRLF page hashed after translation)."""
+    import sqlite3
+
+    pages = {
+        "Knowledge Base/Notes/valid.md": _page(memory_refs.new_id()).encode(),
+        "Knowledge Base/Notes/crlf.md": _page(memory_refs.new_id()).replace("\n", "\r\n").encode(),
+        "Knowledge Base/Notes/malformed.md": _page("not an id").encode(),
+        "Knowledge Base/Notes/missing.md": _page(None).encode(),
+        "Knowledge Base/Notes/binary.md": b"\xff\xfe not text",
+        "Knowledge Base/Notes/diagram.bin": b"\x00\x01",
+    }
+    for rel, raw in pages.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(raw)
+    index = memory_refs.ReferenceIndex(tmp_path)
+    index.rebuild_all()
+    with sqlite3.connect(index.path) as connection:
+        held = {row[0]: row for row in connection.execute("SELECT * FROM identities")}
+
+    from_bytes = {rel: memory_refs.identity_row(tmp_path, rel, raw) for rel, raw in pages.items()}
+
+    assert {rel: row for rel, row in from_bytes.items() if row is not None} == held
+    assert from_bytes["Knowledge Base/Notes/binary.md"] is None  # the scan reads no row for it
+    assert from_bytes["Knowledge Base/Notes/diagram.bin"] is None  # and none for a non-page
 
 
 def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
@@ -515,6 +546,21 @@ def test_backfill_is_dry_run_by_default_and_preserves_content(tmp_path: Path) ->
     assert memory_refs.normalize_id(fm["exomem_id"])
     assert body == "# Legacy\n\nExact body.\n"
     assert applied["updated"] == ["Knowledge Base/Notes/legacy.md"]
+
+
+def test_backfill_leaves_record_files_to_the_records_writer(tmp_path: Path) -> None:
+    # A stamp on an audited record item would change its bytes behind the records writer.
+    vault = tmp_path / "vault"
+    collection = copy_vehicle_maintenance_fixture(vault)
+    record_bytes = {path: path.read_bytes() for path in collection.rglob("*.md")}
+    note = vault / "Knowledge Base" / "Notes" / "legacy.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(_page(None, "# Legacy\n"), encoding="utf-8")
+
+    applied = memory_refs.backfill_ids(vault, dry_run=False)
+
+    assert applied["updated"] == ["Knowledge Base/Notes/legacy.md"]
+    assert {path: path.read_bytes() for path in collection.rglob("*.md")} == record_bytes
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])

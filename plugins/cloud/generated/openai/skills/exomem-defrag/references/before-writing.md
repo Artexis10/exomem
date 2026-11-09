@@ -45,6 +45,8 @@ page for a new identity/type, or the existing entity page for reuse/enrichment.
 For a selected relation candidate, use its source path and add its current `ref`
 with `family="relation-type/v1"`. This reviews both endpoints and returns an
 `application_route` for that directed pair; record the decision before applying it.
+A relation that the candidate itself offers in `options` needs no such decision: accept with
+`requested_relation` set to that option's `key`.
 At a durable capture boundary, call `read_review(operation={'kind': 'vocabulary'})` (four
 actionable items by default; `state="all"` includes decision history), inspect a namespaced item with
 `read_review(operation={'kind': 'item-context', 'ref': 'exomem://review/vocabulary/<item>'})`, and record the

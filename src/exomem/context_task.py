@@ -24,6 +24,7 @@ from . import (
     find_types,
     lifecycle_statuses,
     memory_refs,
+    procedure_approval,
     provenance,
     runtime_resources,
     semantic_index,
@@ -55,10 +56,25 @@ def empty(state: str = "empty", *, reset: bool = False) -> dict[str, Any]:
     return block
 
 
+def _add_missing(block: dict[str, Any], reason: str) -> None:
+    """Record a reason beside those already reported, so a later gap never hides an earlier one."""
+    gap = {"role": "task_context", "reason": reason}
+    if gap not in block["missing"]:
+        block["missing"].append(gap)
+
+
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
     if method:
-        return f"Method: {item.get('attribution', '')}. Read the source for applicability and exclusions."
-    return f"{item.get('title', '')}: {item.get('reason', '')}"
+        # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
+        title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
+        if item.get("approval") == procedure_approval.APPROVED:
+            # The line is part of the method, so the allowance charges it with the method. It carries only the title.
+            return f"Approved procedure: {title}. Read it, then follow it where it fits."
+        return f"Method: {title}. Read the source for applicability and exclusions."
+    line = f"{item.get('title', '')}: {item.get('reason', '')}"
+    # The listed links are served beside the lead, so the allowance charges them with it.
+    links = [f"{link['relation']} {link['title']} {link['target_ref']}" for link in item.get("links") or ()]
+    return f"{line} Links: {'; '.join(links)}" if links else line
 
 
 def packet_chars(block: Mapping[str, Any]) -> int:
@@ -146,6 +162,8 @@ class SourceProjection:
     methods: tuple[str, ...] | None
     title: str | None
     carrier: str | None
+    #: The page's stable memory ref, read from the raw frontmatter, for the approval verdict.
+    ref: str | None = None
 
 
 def _deadline_check() -> None:
@@ -194,6 +212,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
         result = SourceProjection(
             {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body},
             page.snapshot_hash, page.snapshot_hash, methods, egress.without_wikilinks(page.title), page.page_type,
+            procedure_approval.page_ref(page.frontmatter),
         )
     else:
         with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
@@ -260,22 +279,99 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             check()
             version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             result = SourceProjection(released, page.snapshot_hash, version, methods,
-                                      egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None)
+                                      egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None,
+                                      reference)
     if cache is not None and provider is None:
         cache[source_ref] = result
     return result
 
 
+def approvals(root: Path, projections: Mapping[str, SourceProjection]) -> tuple[dict[str, str], bool]:
+    """The approval verdict of each released source for this caller, and whether every source could be checked.
+
+    The projection exists only for a page the caller reads at FULL release, so the release leg is met here. A
+    source that cannot be checked reads `unapproved`, because approval only ever adds an endorsement, and the
+    flag lets the packet say so. The page's holders come from the reference index that every read already
+    consults for a page's ref: one indexed read, only when a ledger entry makes holders matter, and never a
+    walk of the vault. That index follows each write, so a page approved a moment ago reads `approved` here.
+    The owner check runs only when a ledger holds an entry, and a check that fails leaves every source unchecked.
+    """
+    values = dict.fromkeys(projections, procedure_approval.UNAPPROVED)
+    refs = {path: source.ref for path, source in projections.items() if source.ref}
+    if not refs:
+        return values, True
+    ledgers = procedure_approval.ledgers(root, refs.values())
+    owner = False
+    if any(ledgers[ref].held for ref in refs.values()):
+        try:
+            owner = procedure_approval.owner_view(root, principal.effective_principal())
+        except Exception:  # noqa: BLE001 - a failed owner check leaves the sources unapproved and keeps the packet
+            log.warning("approval owner check unavailable", exc_info=True)
+            return values, False
+    named: dict[str, str | None] | None = None
+    # A ledger that cannot be read leaves its source unchecked, even though its verdict reads unapproved.
+    complete = not any(ledgers[ref].unavailable for ref in refs.values())
+
+    def holders(path: str, ref: str) -> tuple[str, ...]:
+        # The index names a ref for a path only when that page is the single valid owner of its id.
+        nonlocal named
+        if named is None:
+            named = memory_refs.ReferenceIndex(root).refs_for_paths(list(refs), recall_reader=True)
+        return (path,) if named.get(path) == ref else ()
+
+    for path, ref in refs.items():
+        source = projections[path]
+
+        def read(path: str = path, source: SourceProjection = source) -> bytes:
+            raw, _guard = vault.read_bounded_guarded_bytes(
+                root, path, limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES, expected_hash=source.raw_hash,
+            )
+            return raw
+
+        try:
+            values[path] = procedure_approval.served_verdict(
+                root, path, ledgers[ref], owner=owner, full_release=True,
+                read=read, holders=lambda path=path, ref=ref: holders(path, ref),
+            ).value
+        except Exception:  # noqa: BLE001 - an unchecked source stays unapproved and the packet reports a failed lane
+            log.warning("approval verdict unavailable for %s", path, exc_info=True)
+            complete = False
+    return values, complete
+
+
+def approved_title(source: SourceProjection) -> str:
+    """The title an approved method shows: the approved page's own title or first heading, else its ref.
+
+    It never falls back to the file name. A move keeps an approval when the bytes are unchanged, so a name
+    given by a rename must not read as part of what the owner approved.
+    """
+    public = source.public
+    title = vault.authored_title(public.get("frontmatter"), str(public.get("body") or ""))
+    return egress.without_wikilinks(title) if title else str(source.ref or "")
+
+
 def _revalidate(root: Path, held: Sequence[Mapping[str, str]], caller: Any, sources: dict) -> bool:
+    checked: list[tuple[Mapping[str, str], SourceProjection]] = []
     for item in held:
         try:
             source = project_source(root, item["source_ref"], caller, cache=sources)
             if (source is None or source.version != item["source_version"]
                     or source.methods is None or item["ref"] not in source.methods):
                 return True
+            checked.append((item, source))
         except Exception:  # noqa: BLE001 - absent, withheld and uncheckable invalidate identically
             return True
-    return False
+    if not checked:
+        return False
+    # Approve and revoke change no page bytes, so the version check alone cannot see them. An entry that carries
+    # no approval reads as unapproved, and an unchecked source reads the same, so it resets only a held approval.
+    try:
+        current, _complete = approvals(root, {item["source_ref"]: source for item, source in checked})
+    except Exception:  # noqa: BLE001 - uncheckable invalidates like an absent source
+        return True
+    return any(
+        item.get("approval", procedure_approval.UNAPPROVED) != current[item["source_ref"]] for item, _source in checked
+    )
 
 
 def _remember_sources(root: Path, caller: Any, sources: Mapping[str, SourceProjection | None]) -> None:
@@ -317,16 +413,17 @@ def compile_context(
             discovered, missing = working_set.task_candidates(
                 root, catalogue=catalogue, caller=caller, turn=turn,
                 focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
-                index_token=index_token, projections=sources,
+                index_token=index_token, projections=sources, timings=timings,
             )
         block["missing"] = missing
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         for candidate in discovered:
-            source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            with find_types.timing_span(timings, "working_set.task_context_projection"):
+                source = project_source(root, candidate["source_ref"], caller, cache=sources)
             if source is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                _add_missing(block, "lane_failed")
                 continue
             item = {
                 **candidate, "source_version": source.version,
@@ -346,7 +443,7 @@ def compile_context(
             identities[identity] = item
             candidates.append(item)
             if source.methods is None:
-                block["missing"] = [{"role": "task_context", "reason": "lane_failed"}]
+                _add_missing(block, "lane_failed")
             for reference in source.methods or ():
                 method = {
                     "ref": reference,
@@ -362,18 +459,65 @@ def compile_context(
             candidates, block["interpretation"] = context_fit.interpret(
                 root, caller=caller, candidates=candidates, turn=turn, conversation=conversation, sources=sources,
             )
+        with find_types.timing_span(timings, "working_set.approvals"):
+            kept = {item["source_ref"] for item in candidates}
+            verdicts, checked = approvals(
+                root, {path: sources[path] for path in methods_by_source if path in kept},
+            )
+        if not checked:
+            _add_missing(block, "lane_failed")
+        for path, methods in methods_by_source.items():
+            value = verdicts.get(path, procedure_approval.UNAPPROVED)
+            # An unapproved method carries no field, so an ordinary method gains nothing; the absence reads unapproved.
+            if value == procedure_approval.UNAPPROVED:
+                continue
+            for method in methods:
+                method["approval"] = value
+                if value == procedure_approval.APPROVED:
+                    method["attribution"] = approved_title(sources[path])
+                    # The read handle is the stable ref, never the path: a rename must not put words into the line.
+                    method["read_ref"] = sources[path].ref
+        linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         for item in candidates:
+            # Links spend only what every lead and method leaves, so a link never displaces one.
+            links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
             if item["ref"] not in covered and item["source_ref"] not in covered:
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
+                else:
+                    linked.append((item, links, False))
+            elif links:
+                # The turn slice carries no links, so a named lead returns here only to list them.
+                linked.append((item, links, True))
             for method in methods_by_source.get(item["source_ref"], ()):
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
-                    block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+                    _add_missing(block, "lane_truncated")
+        for item, links, named in linked:
+            if named:
+                block["candidates"].append(item)
+                if packet_chars(block) > allowance:
+                    block["candidates"].pop()
+                    _add_missing(block, "lane_truncated")
+                    continue
+            item["links"] = []
+            for link in links:
+                item["links"].append(link)
+                if packet_chars(block) > allowance:
+                    item["links"].pop()
+                    break
+            if len(links) > len(item["links"]):
+                item["links_omitted"] = item.get("links_omitted", 0) + len(links) - len(item["links"])
+            if not item["links"]:
+                del item["links"]
+                if named:
+                    # A named lead without one listed link would only repeat the turn slice's route.
+                    block["candidates"].remove(item)
+                    _add_missing(block, "lane_truncated")
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)
@@ -438,8 +582,13 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
     methods = block["methods"]
 
     def versions(items):
-        # These are fixed version-hint fields of the activation protocol.
-        return [{key: item[key] for key in ("ref", "source_ref", "source_version")} for item in items]
+        # These are fixed version-hint fields of the activation protocol. A method item carries `approval` only
+        # when it is approved or stale, so the hint carries it only then.
+        return [
+            {**{key: item[key] for key in ("ref", "source_ref", "source_version")},
+             **({"approval": item["approval"]} if "approval" in item else {})}
+            for item in items
+        ]
 
     retained = {} if methods["reset"] else {item["ref"]: dict(item) for item in held}
     retained.update({item["ref"]: item for item in versions(methods["items"])})
@@ -458,7 +607,7 @@ def continuity_token(packet: dict[str, Any], *, held: Sequence[Mapping[str, str]
                 break
             methods["items"].pop()
         block["state"] = "partial"
-        block["missing"] = [{"role": "task_context", "reason": "lane_truncated"}]
+        _add_missing(block, "lane_truncated")
     packet["budget"]["used_chars"] = context_views.packet_chars(
         packet["map"], packet.get("turn_slice"), block, packet.get("stance"), packet.get("next_action"),
     )

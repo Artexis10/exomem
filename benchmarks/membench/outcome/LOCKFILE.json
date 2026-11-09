@@ -1,0 +1,14 @@
+{
+  "clbench": {
+    "directory": "clbench",
+    "repository": "https://github.com/pgasawa/continual-learning-bench",
+    "commit": "5f8c50eb1e84b2eda2ef4faff757dfc812a0ea26",
+    "license": "Apache-2.0"
+  },
+  "lab": {
+    "directory": "harvey-labs",
+    "repository": "https://github.com/harveyai/harvey-labs",
+    "commit": "ba363f57c900166b616062c8153560d0508d9175",
+    "license": "MIT"
+  }
+}

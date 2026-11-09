@@ -6,6 +6,7 @@ delete one.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import httpx
@@ -83,12 +84,14 @@ class B2ObjectStorage(B2Session):
         self._config = config
 
     def list_object_versions(self, prefix: str) -> list[ObjectVersion]:
+        return list(self.iter_object_versions(prefix))
+
+    def iter_object_versions(self, prefix: str) -> Iterator[ObjectVersion]:
         request = {
             "bucketId": self._config.bucket_id,
             "prefix": prefix,
             "maxFileCount": self._config.page_size,
         }
-        versions: list[ObjectVersion] = []
         seen_cursors: set[tuple[str, str]] = set()
         while True:
             payload = self._post("b2_list_file_versions", request)
@@ -103,13 +106,17 @@ class B2ObjectStorage(B2Session):
                     or not entry["fileId"]
                 ):
                     raise ValueError("malformed B2 file version entry")
-                versions.append(ObjectVersion(key=entry["fileName"], version_id=entry["fileId"]))
+                size, action = entry.get("contentLength"), entry.get("action")
+                yield ObjectVersion(
+                    key=entry["fileName"], version_id=entry["fileId"],
+                    size=size if type(size) is int and size >= 0 else None,
+                    action=action if isinstance(action, str) else None)
 
             if "nextFileName" not in payload or "nextFileId" not in payload:
                 raise ValueError("missing B2 file version cursor")
             next_name, next_id = payload["nextFileName"], payload["nextFileId"]
             if next_name is None and next_id is None:
-                return versions
+                return
             if (
                 not isinstance(next_name, str)
                 or not next_name

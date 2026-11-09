@@ -14,14 +14,15 @@ out of the way.
 | `balanced` | on topic match | durable conclusions | quiet; mentions the KB only on a hit |
 | `maximal` | before every substantive turn | every stepping stone | says what it recalled and saved |
 
-For generated artifacts, balanced and maximal apply a bounded adoption rule:
-a generated draft stays ephemeral, while a user-selected, approved, sent, or
-published output is eligible for `proactive_capture`. Preserve only that
-handle's exact bytes, choose Source or Evidence by semantic role rather than
-MIME, and leave all siblings unwritten. Selection is not write consent. Without
-a usable handle, return a non-committing handoff status instead of claiming a
-save. Delivery is later and receipt-gated through an existing compatible
-Records collection; reported remote identity never proves remote byte equality.
+For generated files, balanced and maximal apply a bounded adoption rule:
+handing a file to the user is the trigger. The agent keeps the exact bytes of
+every generated file it hands over, at hand-over, under `proactive_capture`, and
+chooses Source or Evidence by semantic role rather than MIME. Drafts it never
+hands over stay unwritten, and so do files it writes in your own workspace or
+repository. Without a usable handle, it returns a non-committing handoff status
+instead of claiming a save. Delivery is later and receipt-gated through an
+existing compatible Records collection; reported remote identity never proves
+remote byte equality.
 Off and light remain explicit-request-only.
 
 ## Change the level through your agent
@@ -181,6 +182,19 @@ threshold.
 Watch the recall and capture lines separately, too. A clause such as "stay quiet on
 chit-chat" belongs to recall; moved or generalised to capture, it suppresses exactly
 the casual-looking conversations where a real result tends to arrive.
+
+### The learning instruction — paste it first at Balanced and Maximal
+
+The level blocks state policy. This instruction is your own request to recall
+before a task and to save what the task establishes. Paste it ahead of the
+Balanced or Maximal block. With either block it is longer than one 1,500-character
+field, so on ChatGPT give it a field of its own. `exomem setup` offers the same
+text for Claude Code and Codex. Leave it out at Light and Off: those levels save
+only when you ask.
+
+```text
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+```
 
 ### Maximal — recommended for web and hosted
 

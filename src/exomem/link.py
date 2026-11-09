@@ -29,7 +29,6 @@ from . import (
     promotions,
     provenance,
     relation_registry,
-    relation_review,
     semantic_writes,
     tag_variants,
     temporal,
@@ -399,7 +398,7 @@ def _render_entity(
         for kind, target in relations:
             lines.append(_relation_line(kind, target))
         for c in connections:
-            lines.append(_relation_line(relation_registry.generic_relation_key(), c))
+            lines.append(_relation_line(relation_registry.link_relation_key(), c))
     lines.append("")
     return "\n".join(lines)
 
@@ -512,36 +511,32 @@ def _normalize_relations(
     *,
     vault_root: Path,
     resolver: WikilinkResolver,
-) -> tuple[list[tuple[str, str]], list[str], tuple[tuple[str, str, str], ...]]:
-    """Validate typed `{kind, target[, reason]}` edges and canonicalize each target as
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Validate typed `{kind, target}` edges and canonicalize each target as
     `_normalize_connections` does.
 
     Each pair must render as exactly one canonical `## Relations` bullet that
     parses back to the same kind, so no value can add or reshape a line. Whether
     the kind is registered and in scope stays the creation preflight's decision.
-    Identical pairs collapse; different kinds for one target stay distinct. The third
-    value holds each item's `reason` with its kind and target page: the answer to that edge.
+    Identical pairs collapse; different kinds for one target stay distinct.
     """
     if relations is None:
-        return [], [], ()
+        return [], []
     if not isinstance(relations, list):
-        raise LinkError(
-            "INVALID_LINK", ["relations"], "relations must be a list of {kind, target, reason?}"
-        )
+        raise LinkError("INVALID_LINK", ["relations"], "relations must be a list of {kind, target}")
     pairs: list[tuple[str, str]] = []
     warnings: list[str] = []
-    reasons: list[tuple[str, str, str]] = []
     for index, item in enumerate(relations):
+        # The two fields are the item shape the tool schema fixes, not a vocabulary.
         if (
             not isinstance(item, dict)
-            or not {"kind", "target"} <= set(item) <= {"kind", "target", "reason"}
+            or set(item) != {"kind", "target"}
             or not all(isinstance(item[key], str) and item[key].strip() for key in item)
         ):
             raise LinkError(
                 "INVALID_LINK",
                 ["relations"],
-                f"relations[{index}] must contain non-empty string kind and target, "
-                "and may add a reason",
+                f"relations[{index}] must contain a non-empty string kind and target",
             )
         targets, target_warnings = _normalize_connections(
             [item["target"]], vault_root=vault_root, resolver=resolver
@@ -558,13 +553,7 @@ def _normalize_relations(
             )
         if pair not in pairs:
             pairs.append(pair)
-        if "reason" in item:
-            try:
-                reason = relation_review.review_reason(item["reason"], f"relations[{index}].reason")
-            except relation_review.RelationReviewError as error:
-                raise LinkError("INVALID_LINK", ["relations"], error.reason) from error
-            reasons.append((pair[0], targets[0].removesuffix(".md"), reason))
-    return pairs, warnings, tuple(reasons)
+    return pairs, warnings
 
 
 def _clean_tags(tags: list[str] | None) -> list[str]:
@@ -915,9 +904,9 @@ def link(
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver,
-        bullet_kind=relation_registry.generic_relation_key(),
+        bullet_kind=relation_registry.link_relation_key(),
     )
-    relation_pairs, relation_warnings, generic_reasons = _normalize_relations(
+    relation_pairs, relation_warnings = _normalize_relations(
         relations, vault_root=vault_root, resolver=resolver
     )
     connection_warnings.extend(
@@ -1023,7 +1012,6 @@ def link(
             draft_id=identity,
             draft_token=token,
             registrations=registrations,
-            generic_reasons=generic_reasons,
         )
     except semantic_writes.SemanticWriteError as error:
         raise LinkError(error.code, list(error.missing), error.reason) from error

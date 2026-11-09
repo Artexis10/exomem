@@ -34,6 +34,7 @@ from test_collection_store_service import (  # noqa: F401 - the service fixture
     service,
 )
 from test_collection_store_service import call as served
+from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import manifest_path
 from test_collection_store_writer import store as store
 from test_governance_egress import _external
@@ -647,7 +648,7 @@ def test_a_served_export_imports_members_that_start_on_later_store_checkouts(
     monkeypatch.setattr(capability, "RELEASED", ON)
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 3)
     served_cid = "77777777-7777-4777-8777-777777777777"
-    text = manifest_text(served_cid, "Served", FIELDS).replace("lifecycle: active\n", "lifecycle: active\nview_mode: summary\n")
+    text = sqlite_text(manifest_text(served_cid, "Served", FIELDS))
     served(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Served"),
            manifest_text=text, why="served samples")
     members = {"samples/1-autumn.json": AUTUMN, "samples/2-november.json": NOVEMBER}

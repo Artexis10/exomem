@@ -207,7 +207,7 @@ def test_cellctl_admission_policy_allowlists_projected_sources_and_denies_csi_vo
 
     documents = _helm_template()
     policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
-    rules = [v for v in policy["spec"]["validations"] if "projected" in v["expression"]]
+    rules = [v for v in policy["spec"]["validations"] if "projected volume sources" in v["message"]]
     assert len(rules) == 1
     expression = rules[0]["expression"]
     assert "['statefulsets', 'jobs']" in expression
@@ -366,7 +366,12 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
     # Security MED-1: the policy pins NetworkPolicies, the Secret, the PVC,
     # the quota and pod-template placement to cellctl's own renderer, and
     # cellctl deletes only namespaces and Jobs. Its literals must match the
-    # renderer's constants, or every cell's apply would be refused.
+    # renderer's constants, or every cell's apply would be refused, and a
+    # renamed media key or export Job kind would slip past the key-mount rule.
+    import re
+    import uuid
+
+    from cellctl.export_layout import PACK, UPLOAD, job_name, staging_claim_name
     from cellctl.manifests import (
         CELL_HEALTH_PORT,
         CELL_PORT,
@@ -374,7 +379,14 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         GATEWAY_NAMESPACE,
         GATEWAY_POD_LABEL,
         GATEWAY_POD_LABEL_VALUE,
+        JOB_KIND_BACKUP,
+        JOB_KIND_EXPORT_PACK,
+        JOB_KIND_EXPORT_PAUSE,
         JOB_KIND_LABEL,
+        MEDIA_COLLECTOR_CREDENTIAL_KEY,
+        MEDIA_CREDENTIAL_KEY,
+        MEDIA_IDENTITY_KEY,
+        MEDIA_NAME_KEY_KEY,
         STORAGE_CLASS,
         CellManifestSpec,
     )
@@ -401,8 +413,22 @@ def test_cellctl_admission_policy_pins_every_object_cellctl_writes_to_what_it_re
         "has(v.persistentVolumeClaim) || has(v.emptyDir)",
         "!has(variables.podSpec.nodeName)",
         "!has(variables.podSpec.runtimeClassName)",
+        f"'{JOB_KIND_EXPORT_PACK}'",
+        f"'{JOB_KIND_EXPORT_PAUSE}'",
     ):
         assert literal in expressions, literal
+    variables = "\n".join(v["expression"] for v in policy["spec"]["variables"])
+    # The key-mount rule reads which pod may hold which media key from the policy's variables.
+    for literal in (MEDIA_IDENTITY_KEY, MEDIA_CREDENTIAL_KEY, MEDIA_NAME_KEY_KEY, MEDIA_COLLECTOR_CREDENTIAL_KEY,
+                    JOB_KIND_EXPORT_PACK, JOB_KIND_BACKUP):
+        assert f"'{literal}'" in variables, literal
+    # The staging claim and the pack's affinity to its own upload follow the renderer's names.
+    export_id = str(uuid.uuid4())
+    assert "'^export-staging-[0-9a-f]{32}$'" in expressions
+    assert re.fullmatch("export-staging-[0-9a-f]{32}", staging_claim_name(export_id))
+    assert "'^export-[0-9a-f]{32}-pack$'" in expressions and ".substring(0, 39) + '-upload'" in expressions
+    assert re.fullmatch("export-[0-9a-f]{32}-pack", job_name(export_id, PACK))
+    assert job_name(export_id, PACK)[:39] + "-upload" == job_name(export_id, UPLOAD)
     values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
     import json
 
@@ -708,8 +734,8 @@ def test_the_cloud_ingress_sets_the_trusted_ingress_source_header_the_gateway_ex
     assert middleware["metadata"]["namespace"] == EDGE_NAMESPACE
     assert middleware["spec"]["headers"]["customRequestHeaders"] == {header: value}
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
-    (rule,) = route["spec"]["routes"]
-    assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
+    for rule in route["spec"]["routes"]:
+        assert rule["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}], rule["match"]
 
 
 # --- harden-exomem-cloud-operator-access: edge isolation (D1-D3) ---
@@ -823,8 +849,11 @@ def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
     assert external["metadata"]["name"] == "exomem-cloud-gateway"
     assert external["spec"]["externalName"] == "exomem-cloud-gateway.exomem-cloud.svc.cluster.local"
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
-    (rule,) = route["spec"]["routes"]
-    assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}]
+    for rule in route["spec"]["routes"]:
+        assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}], rule["match"]
+    # Without this route, clients that show the server's site icon fall back to the parent domain's.
+    assert any("Path(`/favicon.ico`)" in rule["match"] and "Method(`HEAD`)" in rule["match"]
+               for rule in route["spec"]["routes"])
 
     # The edge namespace holds no Secret but the certificate cert-manager
     # writes there at runtime: the chart itself renders none, and no issuer.
@@ -1505,14 +1534,17 @@ def test_cellctl_may_read_the_alert_delivery_secret_it_is_told_and_no_other(monk
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
-def test_cellctl_reads_the_export_ttl_and_deadline_the_chart_sets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cellctl_reads_the_export_settings_the_chart_sets(monkeypatch: pytest.MonkeyPatch) -> None:
     # C6: a name the chart and cellctl disagree on would keep every export
-    # for the 24-hour default whatever the operator configured.
+    # for the 24-hour default, or pause and queue it at the defaults,
+    # whatever the operator configured.
     from datetime import timedelta
 
     from cellctl.main import build_reconcile_config
 
-    documents = _helm_template("--set", "cellctl.exportTtlHours=6", "--set", "cellctl.exportDeadlineMinutes=12")
+    documents = _helm_template("--set", "cellctl.exportTtlHours=6", "--set", "cellctl.exportDeadlineMinutes=12",
+                               "--set", "cellctl.exportPauseCopyFloorMiB=40",
+                               "--set", "cellctl.exportConcurrencyPerNode=2")
     deployment = _find(documents, "Deployment", "cellctl")
     env = {entry["name"]: entry.get("value") for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
     for name, value in env.items():
@@ -1520,6 +1552,7 @@ def test_cellctl_reads_the_export_ttl_and_deadline_the_chart_sets(monkeypatch: p
             monkeypatch.setenv(name, value)
     config = build_reconcile_config()
     assert (config.export_ttl, config.export_deadline) == (timedelta(hours=6), timedelta(minutes=12))
+    assert (config.export_pause_copy_floor_mib, config.export_concurrency_per_node) == (40, 2)
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

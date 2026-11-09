@@ -438,7 +438,8 @@ class SelectedParent:
 
     `definitions` is None when the page's selected instance is unavailable to
     this operation; `structure` then holds only core-safe units and is marked
-    incomplete. Shared sidecars never store this object.
+    incomplete. No shared sidecar stores this object. The lexical store's unit
+    base keeps only the ranking contribution of a public-instance parent.
     """
 
     path: str
@@ -481,7 +482,9 @@ class Interpretations:
 
     The operation owns this map and discards it with the request: admitted
     snapshots are memoized per selected instance, and each parent summary is
-    interpreted at most once. No caller-independent cache retains a result.
+    interpreted at most once. No result is retained here. The lexical store's
+    unit base keeps what a public-instance parent contributes to ranking, keyed
+    by `public_dependency`; it never keeps a private instance's.
     """
 
     def __init__(self, vault_root: Path) -> None:
@@ -509,6 +512,14 @@ class Interpretations:
     def dependency(self) -> tuple:
         """The selected inputs this operation uses, including extension definitions."""
         return self.selection.dependency()
+
+    def public_dependency(self) -> tuple:
+        """The public instance's share of `dependency`: no private instance's definitions.
+
+        A refused public instance enters by its refusal's class, so a caller refused
+        it never shares this identity with one admitted to it.
+        """
+        return self.selection.dependency(public_only=True)
 
     def admitted_instances(self) -> tuple[tuple[str, Mapping[str, Any]], ...]:
         """Every configured instance this caller may interpret, public first.

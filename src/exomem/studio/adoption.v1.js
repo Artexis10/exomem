@@ -947,7 +947,7 @@ function proposalSummary(context, item) {
   if (payload.relation_type || context.kind === "relation") {
     const from = payload.from || payload.subject_path || "";
     const to = payload.to || payload.duplicate_of || "";
-    if (from || to) rows.push(el("p", `${payload.relation_type || "relates_to"}: ${from} → ${to}`));
+    if (from || to) rows.push(el("p", `${payload.relation_type ? `${payload.relation_type}: ` : ""}${from} → ${to}`));
   }
   if (payload.name) rows.push(el("p", `${payload.entity_type || "entity"}: ${payload.name}`));
   if (payload.summary) rows.push(el("p", payload.summary, "fine-print"));

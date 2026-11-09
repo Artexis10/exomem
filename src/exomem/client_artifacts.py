@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
+from . import memory_refs, originals
 from .cli_ops import OpError
 from .preserve import (
     _ADOPTION_RECEIPT_FIELD,
@@ -31,6 +32,7 @@ from .preserve import (
     PreserveError,
     destination_duplicate_index,
     destination_segment_refusal,
+    find_duplicate_artifact,
     preserve_stream,
     validate_raw_capture,
 )
@@ -835,7 +837,11 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     return {
         "files": final,
         "summary": {
-            "stored": sum(item.get("outcome") == "stored" for item in final),
+            "stored": sum(
+                item.get("outcome") == "stored" and item.get("state") != "already_stored"
+                for item in final
+            ),
+            "already_stored": sum(item.get("state") == "already_stored" for item in final),
             "replayed": sum(item.get("outcome") == "replayed" for item in final),
             "failed": sum(item.get("outcome") == "failed" for item in final),
             "unselected": sum(item.get("outcome") == "unselected" for item in final),
@@ -1102,7 +1108,11 @@ def _existing_receipt(
         "destination": destination,
     }
     if any(receipt[field] != value for field, value in expected.items()):
-        raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for another identity")
+        raise _receipt_error(
+            "ADOPTION_KEY_REUSED",
+            "this adoption.key already names another file or destination; give this hand-over its own key, "
+            "such as the file name plus a version",
+        )
     _verify_canonical_artifact(vault_root, receipt)
     return snapshot
 
@@ -1111,6 +1121,103 @@ def _effective_content_type(artifact: StagedArtifact, *, lane: str) -> str | Non
     if artifact.content_type is not None or lane == "source":
         return artifact.content_type
     return mimetypes.guess_type(artifact.filename)[0]
+
+
+def _revision_filename(
+    vault_root: Path, *, scope: str, category: str, filename: str, raw_protection: bool
+) -> str:
+    """The name an Evidence artifact is stored under: `filename`, or the next free `-2`, `-3` beside it.
+
+    A hand-over under a name that holds other bytes is a revision, kept beside the first because
+    Evidence is append-only. `artifact_pair` is the collision rule the Source lane already uses.
+    """
+    from .add import artifact_pair
+    from .preserve import _artifact_name, evidence_folder
+
+    safe, protected = _artifact_name(
+        vault_root, scope, category, filename, raw_protection=raw_protection
+    )
+    if not safe:
+        return filename  # `preserve` refuses an empty name, so this call does too
+    stored = Path(safe)
+    artifact, _page = artifact_pair(
+        evidence_folder(vault_root, scope, category),
+        stored.stem,
+        stored.suffix,
+        vault_root=vault_root,
+        protected=protected,
+    )
+    return artifact.name
+
+
+def _source_duplicate(
+    vault_root: Path, destination: str, sha256: str, *, raw_protection: bool
+) -> DuplicateArtifact | None:
+    """The Source already captured under `destination` with these exact bytes.
+
+    Each page names its own original and its hash (`originals.binary_binding`), so this answers for
+    every Source page that stores bytes. An owner-only capture is not matched across captures: its
+    pairing is proved by the protection layer, which the Evidence lookup applies and this one does not.
+    """
+    from .governance.raw_protection import marked
+
+    if raw_protection:
+        return None
+    folder = vault_root / destination
+    try:
+        pages = sorted(folder.glob("*.md"))
+    except OSError:
+        return None
+    for page in pages:
+        if marked(page.name):
+            continue
+        try:
+            source, _guard = read_guarded_text(vault_root, page)
+        except (FileNotFoundError, OSError, PathGuardError, UnicodeDecodeError):
+            continue
+        if sha256 not in source:
+            continue
+        try:
+            frontmatter, _body, marker = parse_frontmatter(source, strict=True)
+        except FrontmatterError:
+            continue
+        binding = originals.binary_binding(frontmatter)
+        ref = memory_refs.ref_from_markdown(source)
+        if (
+            marker is None
+            or binding is None
+            or binding.sha256 != sha256
+            or not ref
+            or PurePosixPath(binding.path).parent != PurePosixPath(destination)
+        ):
+            continue
+        try:
+            read_bounded_guarded_bytes(
+                vault_root, binding.path, limit=binding.size, expected_hash=sha256
+            )
+        except (FileNotFoundError, OSError, PathGuardError, ValueError):
+            continue
+        return DuplicateArtifact(
+            hash=sha256,
+            path=binding.path,
+            sidecar_path=page.relative_to(vault_root).as_posix(),
+            ref=ref,
+        )
+    return None
+
+
+def _already_stored_outcome(
+    artifact: StagedArtifact, duplicate: DuplicateArtifact, *, lane: str
+) -> dict[str, object]:
+    """The hand-over's answer when its exact bytes are already stored: the earlier copy, nothing written."""
+    return {
+        "file_id": artifact.file_id,
+        **duplicate.receipt(
+            size=artifact.size, content_type=_effective_content_type(artifact, lane=lane)
+        ),
+        # A stored row names its page as `page`; the earlier copy's page answers the same question.
+        "page": duplicate.sidecar_path,
+    }
 
 
 def _validate_staged_adoption(
@@ -1144,7 +1251,11 @@ def _assert_replay_identity(
         "media_id": f"sha256:{artifact.sha256}",
     }
     if any(receipt[field] != value for field, value in identity.items()):
-        raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for different bytes")
+        raise _receipt_error(
+            "ADOPTION_KEY_REUSED",
+            "this adoption.key already names other bytes; give this revision its own key, "
+            "such as the file name plus a version",
+        )
     _verify_canonical_artifact(vault_root, receipt)
     try:
         snapshot.page_guard.recheck(vault_root)
@@ -1293,6 +1404,17 @@ def _capture_source_adoption(
             outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
+        # After staging, before the commit boundary, as the ordinary path does: the bytes are already
+        # here, so a new key for them reports the earlier copy and writes nothing.
+        duplicate = _source_duplicate(
+            vault_root, destination, artifact.sha256,
+            raw_protection=bool(source_fields.get("raw_protection")),
+        )
+        if duplicate is not None:
+            mark_active_mutation_committed()
+            outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
+            return _finish_adoption(outcomes)
+
         manager = active_manager()
         payload: dict | None = None
         try:
@@ -1414,7 +1536,9 @@ def _preserve_evidence_adoption(
             return _finish_adoption(outcomes)
 
         try:
-            validate_raw_capture(artifact.filename, destination=destination, raw_protection=raw_protection)
+            protected = validate_raw_capture(
+                artifact.filename, destination=destination, raw_protection=raw_protection
+            )
         except PreserveError as error:
             outcomes[selected_index] = _failed(artifact.file_id, error)
             return _finish_adoption(outcomes)
@@ -1426,6 +1550,20 @@ def _preserve_evidence_adoption(
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
             outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            return _finish_adoption(outcomes)
+
+        # Same answer as the Source lane's: the bytes are already stored under another key or name.
+        duplicate = (
+            find_duplicate_artifact(
+                vault_root, scope=scope, category=category,
+                sha256=artifact.sha256, raw_protection=raw_protection,
+            )
+            if protected == raw_protection
+            else None
+        )
+        if duplicate is not None:
+            mark_active_mutation_committed()
+            outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="evidence")
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1447,7 +1585,10 @@ def _preserve_evidence_adoption(
                             vault_root,
                             scope=scope,
                             category=category,
-                            filename=artifact.filename,
+                            filename=_revision_filename(
+                                vault_root, scope=scope, category=category,
+                                filename=artifact.filename, raw_protection=raw_protection,
+                            ),
                             stream=stream,
                             content_type=artifact.content_type,
                             max_bytes=budget.max_file_bytes,

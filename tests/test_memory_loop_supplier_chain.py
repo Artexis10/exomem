@@ -513,11 +513,8 @@ def _save_relation(
         )
 
 
-def _replace_body(root: Path, path: str, new_body: str, *, generic_reason: str | None = None) -> None:
-    """A body replacement through the reviewed-edit handshake an agent uses.
-
-    `generic_reason` keeps a generic edge to an entity, which the write refuses without one.
-    """
+def _replace_body(root: Path, path: str, new_body: str) -> None:
+    """A body replacement through the reviewed-edit handshake an agent uses."""
 
     from exomem import commands
     from exomem.vault import content_hash
@@ -527,37 +524,28 @@ def _replace_body(root: Path, path: str, new_body: str, *, generic_reason: str |
         "new_body": new_body,
         "expected_hash": content_hash((root / path).read_text(encoding="utf-8")),
     }
-    kept = (
-        {"relation_disposition": "generic", "relation_review_reason": generic_reason}
-        if generic_reason
-        else {}
-    )
     preview = commands.op_edit_memory(
         root,
         path=path,
         why="scripted fixture capture",
-        operation={**operation, **kept, "validate_only": True},
+        operation={**operation, "validate_only": True},
     )["semantic"]
-    if generic_reason:
-        kept["relation_review_hash"] = preview["transition_hash"]
     commands.op_edit_memory(
         root,
         path=path,
         why="scripted fixture capture",
-        operation={**operation, **kept, "transition_token": preview["transition_token"]},
+        operation={**operation, "transition_token": preview["transition_token"]},
     )
 
 
-def _relate(
-    root: Path, path: str, relation: str, target: str, *, generic_reason: str | None = None
-) -> None:
+def _relate(root: Path, path: str, relation: str, target: str) -> None:
     body = (root / path).read_text(encoding="utf-8").split("\n---\n", 1)[1].rstrip()
     bullet = f"- {relation} [[{target}]]"
     if "\n## Relations\n" in f"\n{body}\n":
         body = body.replace("## Relations\n", f"## Relations\n\n{bullet}", 1)
     else:
         body = f"{body}\n\n## Relations\n\n{bullet}"
-    _replace_body(root, path, body + "\n", generic_reason=generic_reason)
+    _replace_body(root, path, body + "\n")
 
 
 def _note(root: Path, title: str, slug: str, body: str) -> str:
@@ -590,7 +578,7 @@ def _note(root: Path, title: str, slug: str, body: str) -> str:
     ).path
 
 
-def test_scripted_brand_capture_passes_and_a_generic_relation_does_not(
+def test_scripted_brand_capture_passes_and_a_plain_link_does_not(
     worlds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, world = _copy(worlds, "brand", tmp_path, monkeypatch)
@@ -598,13 +586,8 @@ def test_scripted_brand_capture_passes_and_a_generic_relation_does_not(
     _entity(root, "brand", "Tarrow Crown", "The valley growers' quality mark.")
     _save_relation(root, "vault.sells_under", "Sells its produce under a mark or label.")
     _relate(root, world.key_to_path["org_merrow"], "vault.sells_under", "Tarrow Crown")
-    _relate(
-        root,
-        world.key_to_path["org_pellow"],
-        "relates_to",
-        "Tarrow Crown",
-        generic_reason="The capture names no narrower relation than the mark.",
-    )
+    # The last-resort plain link is a valid write, and still no capture of the brand relation.
+    _relate(root, world.key_to_path["org_pellow"], "links_to", "Tarrow Crown")
 
     check = _check("brand", root, world, before)
     assert check.failed() == ("brand/pellow-sells-under",), check.results

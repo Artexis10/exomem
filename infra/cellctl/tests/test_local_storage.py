@@ -467,11 +467,13 @@ def test_a_local_cells_quota_admits_the_clone_and_one_backup_job_beside_the_serv
 
     hard = render_resource_quota(spec)["spec"]["hard"]
 
-    # Serving 125m/512Mi requests and a 2-CPU limit, plus the Job's 100m/256Mi and 1 CPU.
+    # Serving 125m/512Mi requests and a 2-CPU limit, plus 100m/256Mi and 1 CPU for each of three
+    # Jobs: the backup, and an export's upload and pack. The claims are the cell, its clone and
+    # the export's 14 GiB staging claim.
     assert {key: hard[key] for key in ("persistentvolumeclaims", "requests.storage", "requests.cpu",
                                        "requests.memory", "limits.cpu")} == {
-        "persistentvolumeclaims": "2", "requests.storage": "20Gi", "requests.cpu": "225m",
-        "requests.memory": "768Mi", "limits.cpu": "3",
+        "persistentvolumeclaims": "3", "requests.storage": "34Gi", "requests.cpu": "425m",
+        "requests.memory": "1280Mi", "limits.cpu": "5",
     }
 
 
@@ -1345,11 +1347,12 @@ def test_a_vault_check_that_cannot_run_is_reported_apart_from_a_volume_with_no_v
     assert not calls.exists() or "backup" not in calls.read_text(encoding="utf-8").split()
 
 
-def _run_backup_job(tmp_path, exomem: str):
+def _run_backup_job(tmp_path, exomem: str, *, retention: list[str] | None = None, **spec_overrides: object):
     """Run the rendered backup command under sh and read its termination message back as ClusterClient.observe() does.
 
     restic and the cell image's `exomem` are stubs on PATH, and the Job's paths move under tmp_path.
-    `exomem` is the body of the stub's shell script. Returns what cellctl observed, and the data directory.
+    `exomem` is the body of the stub's shell script. restic appends each call to tmp_path / "calls".
+    Returns what cellctl observed, and the data directory.
     """
     import os
     import subprocess
@@ -1368,6 +1371,7 @@ def _run_backup_job(tmp_path, exomem: str):
     restic = bin_dir / "restic"
     restic.write_text(
         "#!/bin/sh\n"
+        f"echo \"restic $*\" >> {tmp_path / 'calls'}\n"
         f"if [ \"$1\" = backup ]; then echo '{{\"message_type\":\"summary\",\"snapshot_id\":\"{SNAPSHOT_ID}\"}}'; fi\n",
         encoding="utf-8",
     )
@@ -1375,11 +1379,12 @@ def _run_backup_job(tmp_path, exomem: str):
     (bin_dir / "exomem").write_text(f"#!/bin/sh\n{exomem}\n", encoding="utf-8")
     (bin_dir / "exomem").chmod(0o755)
     spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=1, read_only=False,
-                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD)
+                            hold_kind="snapshot-backup", hold_started_at=CURRENT_HOLD, **spec_overrides)
     shell, flag, script = render_backup_job(spec, bucket_name="b", endpoint="https://s3.example",
-                                            retention=None)["spec"]["template"]["spec"]["containers"][0]["command"]
+                                            retention=retention)["spec"]["template"]["spec"]["containers"][0]["command"]
     for path, moved in (("/dev/termination-log", tmp_path / "termination-log"),
-                        ("/tmp/backup.json", tmp_path / "backup.json"), ("/data", data)):
+                        ("/tmp/backup.json", tmp_path / "backup.json"),
+                        ("/tmp/media-manifest.json", tmp_path / "media-manifest.json"), ("/data", data)):
         script = script.replace(path, str(moved))
 
     subprocess.run([shell, flag, script], check=True, env={
@@ -1494,7 +1499,8 @@ async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a
         await run(5)
 
         assert applied("PersistentVolumeClaim", "cell-data")["spec"]["resources"]["requests"]["storage"] == "14Gi"
-        assert applied("ResourceQuota", "cell-quota")["spec"]["hard"]["requests.storage"] == "28Gi"
+        # The grown claim, its clone and an export's staging claim of 14 GiB + 10% + 2 GiB over 95%.
+        assert applied("ResourceQuota", "cell-quota")["spec"]["hard"]["requests.storage"] == "47Gi"
         statefulset = applied("StatefulSet", "cell")
         assert HOLD_ANNOTATION not in statefulset["metadata"]["annotations"]
         assert statefulset["spec"]["template"] == template

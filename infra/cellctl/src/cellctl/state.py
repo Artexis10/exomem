@@ -42,6 +42,17 @@ GROWTH_NOT_NEEDED = "fits"
 
 
 @dataclass(frozen=True)
+class MediaCollection:
+    """collect-released-media D5: what a backup Job's collector reported. A count is None when it is unknown."""
+
+    outcome: str
+    reason: str
+    hidden: int | None
+    candidates: int | None
+    skipped: int | None
+
+
+@dataclass(frozen=True)
 class MediaCensus:
     """add-cloud-media-store D12: a backup Job's count of evicted originals.
 
@@ -300,6 +311,9 @@ class ClusterObservation:
     # add-cloud-media-store D12: the evicted originals the finished backup Job
     # counted, and when it captured the volume. None when it reported none.
     backup_job_media_census: MediaCensus | None = None
+    # collect-released-media D5: the result line of the finished backup Job's collector, the termination message's
+    # third line. None when the Job ran no collection or reported a line that cellctl cannot read.
+    backup_job_media_collection: MediaCollection | None = None
     # D5: a failed backup Job's own value-free code (backup_source.py), or
     # None when it left none.
     backup_job_failure_code: str | None = None
@@ -322,6 +336,9 @@ class ClusterObservation:
     # Every export and import object of the cell in the staging bucket: all versions, hidden ones
     # and unfinished uploads included. It holds for every cell, old or new.
     staging_objects_absent_confirmed: bool = False
+    # add-cloud-media-store D9: the edge may still admit the deleted cell. reconcile.py sets it from the
+    # edge's exact-set evidence; a cell that stays admitted keeps `deleting`.
+    media_revocation_pending: bool = False
 
 
 @dataclass

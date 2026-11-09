@@ -65,7 +65,8 @@ from exomem.governance.principal import library_scope, owner_principal, request_
 DERIVED = "88888888-8888-4888-8888-888888888888"
 PATH = manifest_path().replace("Work", "Samples")
 ROLLUP = "rollups:\n  daily:\n    bucket: day\n    timestamp: local_date\n    values:\n      value: [sum, max]\n"
-TEXT = manifest_text(DERIVED, "Samples", FIELDS).replace(
+# A new collection keeps its rows in the store (storage.strategy sqlite); a derived one keeps them beside it.
+TEXT = manifest_text(DERIVED, "Samples", FIELDS).replace("strategy: markdown-items\n", "strategy: sqlite\n").replace(
     "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n").removesuffix("---\n") + ROLLUP + "---\n"
 # Four hourly samples on each of three November days: values in tenths, local Tallinn (+02:00) time.
 DAYS = {
@@ -582,11 +583,13 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
         for trigger in ("collections_item_key_scheme_fixed", "collections_ordered_keys_derived"):
             raw.execute(f"DROP TRIGGER {trigger}")
         raw.execute("ALTER TABLE collections DROP COLUMN item_key_scheme")
+        for table in schema.VAULT_STORE_TABLES:  # schema 15 added these; a revision 13 store has none
+            raw.execute(f"DROP TABLE {table}")
         raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
         raw.execute("UPDATE alembic_version SET version_num='13'")
 
     with connection.open_writer(path, lease_check=lambda: True) as handle:
-        assert schema.schema_version(handle.connection) == schema.SCHEMA_VERSION == 14
+        assert schema.schema_version(handle.connection) == schema.SCHEMA_VERSION
         assert handle.connection.execute("SELECT collection_id,item_key_scheme FROM collections").fetchall() == [
             (DERIVED, "hashed-v1")]
         restarted = CollectionWriter(writer.root, handle)

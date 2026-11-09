@@ -217,7 +217,8 @@ class EdgeFact:
     candidate_path: str
     relation_type: str | None
     direction: str
-    family: str
+    #: True for a registered relation that is not a plain link; it ranks before plain links.
+    typed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,7 +506,7 @@ def resolve_referents(
         graph_edges = sorted(
             edges_by_candidate.get(entity.path, ()),
             key=lambda item: (
-                1 if item.relation_type == "links_to" or item.family in {"", "link"} else 0,
+                0 if item.typed else 1,
                 item.seed_path,
                 item.relation_type or "",
                 item.direction,
@@ -520,11 +521,11 @@ def resolve_referents(
                     "graph",
                     {
                         "seed": edge.seed_path,
+                        # Debt (K16): an edge with no registered relation shows as the plain
+                        # link.
                         "relation_type": edge.relation_type or "links_to",
                         "direction": edge.direction,
-                        "tier": 1
-                        if edge.relation_type == "links_to" or edge.family in {"", "link"}
-                        else 0,
+                        "tier": 0 if edge.typed else 1,
                     },
                 )
             )

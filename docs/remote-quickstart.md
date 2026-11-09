@@ -235,9 +235,20 @@ client to do this once. Keep the connector definition and URL unchanged: after
 that final login, Codex/Claude reuse the Exomem-owned session across fresh chats
 and processes without depending on the temporary GitHub token.
 
-Then add Exomem behavior to the hosted client. Paste the instruction block from
-[ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
-asking it to call `bootstrap(profile="compact")` once before using the KB.
+Then add Exomem behavior to the hosted client:
+
+1. Paste this learning instruction into the account-level or project-level custom instructions.
+2. Paste the instruction block from [ai-assistant-guide.md](ai-assistant-guide.md) after it.
+
+```text
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+```
+
+The agent then recalls what Exomem holds before a task and saves what it learns.
+The two texts together are longer than a 1,500-character field, so where the
+client caps a field, give each its own field. If you cannot paste the block, at
+minimum start new chats by asking the agent to call `bootstrap(profile="compact")`
+once before using the KB.
 
 ### Act as the owner from your remote connectors (optional)
 

@@ -378,12 +378,15 @@ def test_the_shipped_skill_packs_and_hook_name_no_grouped_spelling() -> None:
 
 
 def test_every_call_the_skill_shows_names_an_operation_that_tool_carries() -> None:
-    carried = {
-        spec.name: {entry.action for entry in operations.entries if entry.rendering == spec.name}
-        for operations in operation_entries.OPERATIONS.values()
-        for spec in operations.renderings
-    }
-    call = re.compile(rf'(?<!\w)({"|".join(carried)})\(operation=\{{"kind": "(\w+)"')
+    # One tool can render several grouped commands, so its kinds are the union over them,
+    # spelled as the wire spells them (`kind`, not the grouped action).
+    carried: dict[str, set[str]] = {}
+    for operations in operation_entries.OPERATIONS.values():
+        for entry in operations.entries:
+            carried.setdefault(entry.rendering, set()).add(entry.kind)
+    # The calls sit in prose with placeholders such as <ref>, which no Python parser
+    # accepts, so a pattern over the fixed call form reads them, in either quote style.
+    call = re.compile(rf'''(?<!\w)({"|".join(carried)})\(operation=\{{["']kind["']: ["']([\w-]+)["']''')
     shown = [
         (path, tool, kind)
         for path, text in _scaffold_texts().items()

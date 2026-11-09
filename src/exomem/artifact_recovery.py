@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from . import (
+    download_links,
     held_fs,
     media_store,
     originals,
@@ -44,6 +45,8 @@ _NATIVE_GRANT: ContextVar[_NativeGrantState | None] = ContextVar("exomem_native_
 _SLOTS = threading.BoundedSemaphore(2)
 # This matches only the fixed signed protocol syntax, never a user's vocabulary or intent.
 _CAPABILITY = re.compile(r"v4\.[0-9]{1,12}\.[0-9a-f]{1,32768}\.[0-9a-f]{64}")
+# A short download link id in a logged request target, in the format download_links fixes.
+_SHORT_GRANT = re.compile(r"grant=" + download_links.ID_PATTERN.pattern + r"(?![A-Za-z0-9_-])")
 
 
 class RecoveryUnavailable(ValueError):
@@ -77,7 +80,8 @@ class _CapabilityRedaction(logging.Filter):
                     for item in (client, method, target, version, status)
                 )
                 return True
-        record.msg = _CAPABILITY.sub("artifact-capability-removed", record.getMessage())
+        record.msg = _CAPABILITY.sub("artifact-capability-removed",
+                                     _SHORT_GRANT.sub("grant=artifact-capability-removed", record.getMessage()))
         record.args = ()
         return True
 
@@ -399,11 +403,16 @@ def complete_native_grant(grant: str) -> None:
     state.completed = True
 
 
-def describe(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
-    """The descriptor of a readable original under the caller's current authority; it mints no delivery."""
+def delegated_principal():
+    """The caller's principal for reading an original: administrative ingress never carries over."""
     from dataclasses import replace
 
-    who = replace(effective_principal(), administrative_ingress=False)
+    return replace(effective_principal(), administrative_ingress=False)
+
+
+def describe(root: Path, selected: str, *, expected_sha256: str | None = None) -> dict:
+    """The descriptor of a readable original under the caller's current authority; it mints no delivery."""
+    who = delegated_principal()
     with stage(root, selected, who, expected_sha256=expected_sha256) as (_copied, descriptor):
         return descriptor
 
@@ -412,9 +421,7 @@ def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) ->
     root_key = signing_root()
     if root_key is None:
         raise ValueError("ORIGINAL_RECOVERY_UNAVAILABLE: private signing authority is unavailable")
-    from dataclasses import replace
-
-    who = replace(effective_principal(), administrative_ingress=False)
+    who = delegated_principal()
     base = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     url = urlsplit(base)
     https = (
@@ -436,8 +443,10 @@ def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) ->
                 deployment=deployment(root),
                 delivery=upload_tokens.ARTIFACT_HTTPS,
             )
+            # A short id the serving process resolves; the full grant only where none can.
+            link = download_links.shorten(token, expires) or token
             deliveries["https"] = {
-                "url": f"{base}/download?grant={quote(token, safe='')}",
+                "url": f"{base}/download?grant={quote(link, safe='')}",
                 "expires_at": expires,
             }
         if who.surface == "mcp" and copied.size <= native_max_bytes():
@@ -463,6 +472,7 @@ def prepare(root: Path, selected: str, *, expected_sha256: str | None = None) ->
             "committed": False,
             "artifact": descriptor,
             "deliveries": deliveries,
-            "preferred_delivery": "native_resource" if "native_resource" in deliveries else "https",
+            # Few clients read MCP resources, while any client can hand a person an HTTPS link.
+            "preferred_delivery": "https" if "https" in deliveries else "native_resource",
             "ttl_seconds": upload_tokens.DEFAULT_TTL,
         }

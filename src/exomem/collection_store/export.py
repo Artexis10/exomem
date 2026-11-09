@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from .. import held_fs, record_formats, records, state_migration, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
+from ..vault_store import availability
 from . import (
     admission,
     authority,
@@ -97,6 +98,9 @@ def _unexportable(manifest, imported, rendered):
     """
     if imported is None:
         return _blocker(STORE_NATIVE, "the store created this collection, so file mode never held it")
+    if manifest.storage.strategy == collections.SQLITE_STORAGE:
+        # A converted collection's item files went to the conversion archive; its rows live only in the store.
+        return _blocker(STORE_NATIVE, "this collection keeps its rows only in the store, so file mode cannot hold it")
     # A log's bound is the adapter's own: _render_log parses the rendered log through it.
     if rendered is None or manifest.storage.strategy == "markdown-log":
         return None
@@ -246,8 +250,9 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
     row = {"collection_id": cid, "path": manifest_path, "layout": layout,
            "rows": conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]}
     rendered, targets, resolved = None, {}, {}
+    in_files = manifest.storage.strategy != collections.SQLITE_STORAGE
     try:
-        if imported is not None and native:
+        if imported is not None and native and in_files:
             rendered = {"manifest": text.encode("utf-8"), "sources": (
                 _render_items(root, conn, manifest, cid) if layout == "markdown-items"
                 else _render_log(root, conn, manifest, cid, frame_json)), "held": _held(conn, manifest, cid)}
@@ -258,7 +263,7 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
                 if path not in held and sha is not None}
             targets = {manifest_path: rendered["manifest"], **dict(rendered["sources"]), **dict(rendered["held"]),
                        **dict.fromkeys(resolved)}
-        elif imported is not None:
+        elif imported is not None and in_files:
             # Projection stamping changes bytes, never the unwritten collection's rollback promise.
             targets = {manifest_path: text.encode("utf-8"), **legacy_originals.export_sources(root, conn, cid),
                        **{path: raw for path, raw in conn.execute(
@@ -656,6 +661,8 @@ def _retire_marker(session, token, intent):
 
 def _tombstone_store(session, at):
     """Fold the live store into one file and rename it, with any derived rows beside it, as the final step."""
+    # The export steps refuse at their own boundary; this one holds for any caller, because a store-mode store holds the pages.
+    availability.refuse_page_loss(session.root, "retiring the live collection store")
     path = session.path
     if path.exists():
         try:
@@ -798,6 +805,8 @@ def apply(session, manager, fence_client, *, plan_id, why) -> dict:
     admission._bind_fence_client(session, fence_client)
     deferred = []
     with manager.consistency_guard(root, operation="collection_store_export"):
+        # Under the mutation boundary, which excludes a concurrent store-mode activation, and before this export takes the lease.
+        availability.refuse_page_loss(root, "exporting the collections to files")
         intent, begun = _local_intent(root), None
         if intent is None:
             if ownership.current(root).marker is None:
@@ -928,7 +937,9 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
                         elif data is not None and (data == target or path == planned["manifest_path"]
                                                    and data == checkpointed):
                             views.append((_sha(data), path))
-                    audit_history = records._audit_events(root, semantic_profile=manifest.semantic_profile)
+                    audit_history = records._audit_events(
+                        root, semantic_profile=manifest.semantic_profile, collection_id=cid,
+                        transition_ids=(transition,))
                     if planned["checkpoint"] and audit_history.parsed and any(
                             event["transition_id"] == transition for event in audit_history.events):
                         # The log holds this checkpoint, so the legacy chain ends there. A checkpoint cut
@@ -970,6 +981,7 @@ def retire_local(session, manager, fence_client) -> dict:
     admission._ProducerSession.bind(session, manager)
     admission._bind_fence_client(session, fence_client)
     with manager.consistency_guard(root, operation="collection_store_export_retire_local"):
+        availability.refuse_page_loss(root, "retiring the local collection store")
         if authority.read_marker(root) is not None:
             raise CollectionStoreError(takeover.SYNC_PENDING, "this vault still routes collections to its store; "
                                        "wait until the exported vault reaches this host")

@@ -82,12 +82,17 @@ def test_governance_variants_have_one_closed_credential_rule(
     assert credential_rule("govern_memory", arguments).value == expected
 
 
-def test_every_non_governance_product_command_is_classified_optional() -> None:
+def _expected_rule(command_name: str) -> str:
+    """Owner-only approvals take matrix row 4; every other non-governance command is optional."""
+    return "non_authorizing" if command_name == "approve_procedure" else "optional"
+
+
+def test_every_non_governance_product_command_has_its_declared_credential_rule() -> None:
     from exomem.governance.authorization_request import credential_rule
 
     for command in commands.PRODUCT_COMMANDS:
         if command.name != "govern_memory":
-            assert credential_rule(command.name, {}).value == "optional"
+            assert credential_rule(command.name, {}).value == _expected_rule(command.name)
 
 
 def test_every_legacy_leaf_is_classified_and_registry_validation_is_total() -> None:
@@ -101,7 +106,7 @@ def test_every_legacy_leaf_is_classified_and_registry_validation_is_total() -> N
         command.name for command in (*commands.PRODUCT_COMMANDS, *commands.COMMANDS)
     }
     for command_name in sorted(registered - {"govern_memory"}):
-        assert credential_rule(command_name, {}).value == "optional"
+        assert credential_rule(command_name, {}).value == _expected_rule(command_name)
 
     validate_credential_registry()
     with pytest.raises(AuthorizationRouteUnclassified):

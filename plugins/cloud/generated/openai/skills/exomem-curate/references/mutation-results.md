@@ -101,23 +101,19 @@ committed-uncertain result—reconcile and retry only as instructed.
 
 ## Relation choices and unlinked names on a write
 
-Write the specific relation when one fits. `relates_to` is for a real generic
-connection. A write can answer in three ways.
+Name a specific relation on every edge. A write can answer in two ways.
 
-- **A new generic edge that joins an entity is refused.** The error is
-  `GENERIC_RELATION_NEEDS_REASON`. The write commits nothing and lists up to four
-  fitting relations. Either write the edge as one of them, or keep it generic:
-  repeat the call with `relation_disposition="generic"`, a `relation_review_reason`
-  that says why none fits, the returned `relation_review_hash`, and the returned
-  draft fields (a creation) or `transition_token` (an edit). On `create-entity`,
-  give the `relations` item a `reason` instead. An edge the page already carried is
-  not asked about again.
-- **A new generic edge between two notes commits.** The write returns
-  `relation_advisory.specific_options`: fitting relations, each with an `edit_note`
-  route that swaps the predicate of that one bullet. Follow a route when the
-  relation states what the source says. Otherwise dismiss the offer with
-  `triage_memory(ref=<its review>, action="dismiss", why=..., expected_fingerprint=<its
-  fingerprint>)`.
+- **A new generic edge is refused.** The error is `GENERIC_RELATION_REFUSED`. It applies
+  to every pair of pages, a note to a note as much as a note to an entity. The write
+  commits nothing. The error lists up to eight `options`, the specific relations that fit
+  the two pages, best first, and `options_route` reads the full list. Its `routes` hold the
+  exact call for each way out. Repeat the call with one of the `options`
+  (`routes.specific`). When none fits, propose a new relation type, then repeat the call
+  with the new key (`routes.propose` holds the `propose-relation` and `save-relations`
+  calls). As a last resort, repeat the call with the plain link (`routes.plain_link`).
+  No other answer keeps the generic edge: neither `relation_disposition="generic"` nor a
+  `reason` on a `relations` item exists. An edge the page already carried is not judged
+  again, so a page that holds an older generic edge stays editable.
 - **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
   this write added and that has no page and no entity, with its `create-entity` route.
   Follow the route when the name is a durable referent: stable, recurring and
@@ -133,18 +129,25 @@ counterpart — a provenance link, a supersession, any typed relation — satisf
 the rule as written and needs no extra argument, so connected material passes
 for free and only disconnected material needs the explicit disposition.
 
-Validation reports the obligation before it can block a commit: a
-`validate_only=true` call returns `relation_review_hash` alongside the draft
-fields, and lists the finding under `blocking_findings`. Read that list on every
-validation rather than only on failure — it is the sole notice you get. To
-commit an unrelated page, re-issue the identical creation with the returned
-`draft_id`, `draft_hash` and `draft_token`, plus
-`relation_disposition="reviewed_none"`, the returned `relation_review_hash`, and
-a `relation_review_reason` naming why nothing qualified. Committing with the
-draft fields alone refuses with `SEMANTIC_CONTRACT_BLOCKED` and a
-`RELATION_DISPOSITION_MISSING` finding whose `remediation` restates this
-sequence. Prefer adding the real relation over asserting none exists; the
-disposition is for material that genuinely stands alone.
+A page that shares its subject with an existing page is not unrelated, even when no
+specific relation holds. Give it a plain link (`- links_to [[...]]`), which satisfies
+the rule; a later measurement or a sibling note on the same topic is the usual case.
+
+To commit an unrelated page, send `relation_disposition="reviewed_none"` and a
+`relation_review_reason` naming why nothing qualified with the creation itself;
+that one call commits and records the decision. Committing without them refuses
+with `SEMANTIC_CONTRACT_BLOCKED` and a `RELATION_DISPOSITION_MISSING` finding
+whose `remediation` restates this. A `validate_only=true` call reports the
+obligation first: it returns `relation_review_hash` alongside the draft fields
+and lists the finding under `blocking_findings`. Committing that validated
+draft sends its `draft_id`, `draft_hash` and `draft_token` and the
+`relation_review_hash` too. Prefer adding the real relation over asserting none
+exists; the disposition is for material that genuinely stands alone.
+
+The decision binds the page, not its bytes. A later edit of a page that holds a
+`reviewed_none` decision commits without any review field, and records no new
+decision, while the page stays unconnected. An edit that removes a page's last
+qualifying relation is still refused.
 
 A refused Record append or update is held rather than lost: the refusal names
 every failing field under `details.issues` and returns a `held` reference, so fix

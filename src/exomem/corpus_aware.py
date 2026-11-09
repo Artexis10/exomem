@@ -804,7 +804,7 @@ def _why(hit, *, ranks: bool = True) -> str:
 def _is_relation_target_eligible(vault_root: Path, rel_path: str) -> bool:
     """False for out-of-KB, readonly, or excluded targets.
 
-    A `relates_to` suggestion has to be actionable: the reader can review and
+    A relation suggestion has to be actionable: the reader can review and
     wire it in via `note()`/`edit()`. Read-only, excluded, and out-of-KB
     material (e.g. `find()`'s scope="kb" auto-widen reaching sibling trees
     like `Handbooks/`/`Reference/`) fails that bar — you can't act on the

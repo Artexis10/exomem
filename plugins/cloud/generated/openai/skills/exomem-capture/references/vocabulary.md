@@ -31,8 +31,9 @@ has note-type role `compiled`.
 Use a parent only when `save.fields` supports `parent`, and inspect its inherited
 meaning. A parent or fixed behavior cannot be redefined in place. New meaning
 uses a new canonical key and deprecates the replaced key according to the returned
-contract. Keep a truthful generic relation or no edge when a specific meaning
-does not fit; a question alone does not justify a new relation type.
+contract. Write a plain link, as a last resort, or no edge when a specific meaning
+does not fit and is not durable and recurring; a question alone does not justify a new
+relation type. A write that adds the generic relation is refused.
 
 `source-kinds` and `domains` use `auto-register` promotion: their owning source
 writer registers valid new labels. Read its receipt; do not require a separate

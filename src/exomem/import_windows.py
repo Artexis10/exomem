@@ -21,6 +21,7 @@ from . import (
     adoption_run,
     cloud_import,
     import_stage,
+    media_allowance,
     media_capacity,
     media_store,
     originals,
@@ -264,8 +265,9 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     if counted is None:
         return {"allowance_bytes": allowance, "unknown": "no owner census is recorded yet; the next offload records one"}
     if counted.used_bytes is None:
-        return {"allowance_bytes": allowance, "unknown": "the stored versions could not be counted",
-                "observed_at": counted.observed_at}
+        return {"allowance_bytes": allowance, "observed_at": counted.observed_at,
+                "unknown": "the stored versions could not be counted",
+                **media_allowance.blocked_fields(counted.blockers)}
     return {"allowance_bytes": allowance, "used_bytes": counted.used_bytes,
             "remaining_bytes": max(0, allowance - counted.used_bytes), "observed_at": counted.observed_at}
 
@@ -302,6 +304,7 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         return max(0, min(largest(), reachable() + pinned))
 
     budget, reach = _figure(window_budget), _figure(reachable)
+    allowance = _allowance(root, config, may_count=series is not None)
     section: dict = {
         "window_budget": budget,
         "reachable_budget": reach,
@@ -309,12 +312,38 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         "effective_file_limit": _figure(effective),
         "classification": _classification(bounds),
         "volume": _volume_section(volume),
-        "media_allowance": _allowance(root, config, may_count=series is not None),
+        "media_allowance": allowance,
+        **_storage_figures(root, volume, allowance),
         "drain": _drain(unfiled, occupancy, idle),
     }
     if series is not None:
         section["demand"] = _demand(root, series, budget, reach)
     return section
+
+
+def _storage_figures(root: Path, volume: _Reading, allowance: dict) -> dict:
+    """The two meters (D10): the volume's bytes without cached copies of stored originals, and the media store's bytes.
+
+    A stored original that is also on the volume is a cached copy: `vault_storage` leaves it out and `media_storage`
+    counts it once, so no byte is in both. Each figure is unknown, with its reason, when its reading is.
+    """
+    def vault_bytes() -> dict:
+        total, used = volume.need()
+        try:
+            cached = media_store.cached_bytes(root)
+        except media_store.MediaStoreError as error:
+            raise _Unknown(str(error)) from error
+        if cached > used:  # A volume holds at least its cached copies, so one of the two readings is wrong.
+            raise _Unknown("the cached originals exceed the bytes that the volume reports in use")
+        return {"bytes": used - cached, "cached_bytes": cached, "volume_bytes": total}
+
+    try:
+        vault = vault_bytes()
+    except _Unknown as why:
+        vault = {"unknown": str(why)}
+    # The figure and its limit only: `media_allowance` keeps the census's time and the notes behind an unknown one.
+    media = {key: allowance[key] for key in ("used_bytes", "allowance_bytes", "unknown") if key in allowance}
+    return {"vault_storage": vault, "media_storage": media}
 
 
 def _volume_section(volume: _Reading) -> dict:

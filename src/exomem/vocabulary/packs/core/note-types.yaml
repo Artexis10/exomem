@@ -37,6 +37,15 @@ entries:
     label: Production log
     description: The record of one produced artifact and its reception.
     attributes: {role: compiled, folder: Notes/Productions, time_bounded: true, partition: medium, stem: dated}
+  procedure:
+    label: Procedure
+    description: A reusable way of working, with when to use it and when not to.
+    attributes: {role: compiled, folder: Notes/Procedures, sources: optional}
+    guidance: >-
+      Write a `summary` that says when to use the procedure. Add a "Not for"
+      section that says when it does not apply, and one `## Procedure` block
+      for each distinct way of working. Keep each step in the procedure block
+      so that the block reads on its own.
   entity:
     label: Entity
     description: A stable identity whose type lives in the entity-type registry.
@@ -55,6 +64,9 @@ entries:
   collection-summary:
     label: Collection summary
     description: The generated summary page of a structured collection.
+  collection-saved-view:
+    label: Collection saved view
+    description: The generated page that names how to run one saved view of a structured collection.
   record:
     label: Record
     description: One item of a Records collection.

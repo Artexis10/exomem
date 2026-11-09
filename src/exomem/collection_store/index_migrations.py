@@ -15,7 +15,7 @@ from ..query_engine.indexes import (
     require_index_dependencies,
 )
 from ..query_engine.scalars import ScalarValueError
-from . import native_metadata, query_freshness, rollups, typed_storage
+from . import native_metadata, query_freshness, rollups, typed_storage, types
 from .query_indexes import ProjectionPlan, build_projection_plan
 
 _MAX_CELL_BYTES = 256 * 1024
@@ -341,13 +341,28 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
 
 
 def _declared(data, declared):
-    """A manifest's declared fields and normalized index intent, inherited type indexes first."""
+    """A manifest's declared fields and normalized index intent, inherited type indexes first.
+
+    Each declared field that a named validator follows as a reference is also indexed, as if it were
+    declared filterable, so a write finds the items that name another one by an index range read
+    (`references.neighbourhood`). When that index does not fit the declaration's index budget or
+    field type, the declaration keeps only its own indexes and the validator reads every item.
+    """
     fields = data["item_schema"]["fields"]
     inherited = {index.name: {"keys": [{"field": key.field, "direction": key.direction}
                  for key in index.keys]} for index in declared.indexes}
     authored = data.get("indexes", {})
     if not isinstance(authored, Mapping):
         raise ValueError("collection indexes must be a mapping")
+    followed = {reference.field for name in declared.validators
+                for reference in types.named_validator(name).references()}
+    flagged = {name: {**spec, "filterable": True} for name, spec in fields.items()
+               if name in followed and isinstance(spec, Mapping)}
+    if flagged:
+        try:
+            return {**fields, **flagged}, normalize_indexes({**fields, **flagged}, {**inherited, **authored})
+        except IndexDeclarationError:
+            pass  # The declaration's own normalization below names any error that is its own.
     return fields, normalize_indexes(fields, {**inherited, **authored})
 
 

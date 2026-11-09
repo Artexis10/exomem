@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,24 +12,32 @@ from urllib.parse import parse_qs, urlsplit
 import asyncpg
 import pytest
 from botocore.exceptions import ClientError
+from kubernetes.client.exceptions import ApiException
 
 from cellctl import db, reconcile
 from cellctl.capacity import GIB
+from cellctl.export_layout import MAX_PART_BYTES, job_name, staging_claim_name
 from cellctl.exports import (
+    ARCHIVE_BOUND,
+    PACK,
+    PAUSE,
+    UPLOAD,
+    VERIFY,
     ExportJob,
     ExportRow,
     ExportSize,
     decide_export,
     etag_digest,
-    export_deadline,
     export_size,
+    pause_window,
 )
-from cellctl.manifests import CellManifestSpec, namespace_name, render_export_job
+from cellctl.manifests import JOB_EGRESS_POLICY, CellManifestSpec, namespace_name, render_export_job
 from cellctl.state import CellRow, ClusterObservation
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 
 from .fake_s3 import FakeS3
 from .test_reconcile import (
+    STORAGE_CLASS,
     FakeClusterGateway,
     _cluster_config,
     _observed_from_applied,
@@ -42,7 +51,9 @@ OTHER_CELL = "bbbbbbbbbbbbbbbb"
 IMAGE = "registry.example/cell@sha256:" + "a" * 64
 EXPORT_ID = "00000000-0000-4000-8000-000000000001"
 MIB = 1024 * 1024
-REPORT = {"bytes": 5, "sha256": "b" * 64, "parts": 1, "etag_digest": "c" * 64, "used": 4096, "total": 8192}
+# The pause's numbers-only plan, with the statvfs measurement every cell Job reports.
+PAUSE_REPORT = {"phase": "pause", "members": 3, "member_bytes": 4096, "evicted": 1, "evicted_bytes": 1024,
+                "planned_bytes": 8192, "used": 3 * 1024 * 1024, "total": 10 * 1024 ** 3}
 # Shared with the cell command's own test (tests/test_cloud_export.py).
 DIGEST_VECTOR = "91124627b9b8d6bffcbbfb35d09b5fb3cea67f87e4e84d341fac87ba0d0586da"
 
@@ -60,9 +71,10 @@ SERVING = ClusterObservation(statefulset_exists=True, statefulset_image=IMAGE, s
                              pod_exists=True, pod_uses_volume=True, pod_ready=True)
 HELD = replace(SERVING, statefulset_hold_kind="export", statefulset_hold_started_at=NOW, statefulset_replicas=0)
 DRAINED = replace(HELD, pod_exists=False, pod_uses_volume=False, pod_ready=False)
-PACKING = _export(observed_state="packing", upload_id="upload-one")
-READY = replace(PACKING, observed_state="ready", upload_id=None, archive_bytes=5, archive_sha256="b" * 64,
-                ready_at=NOW, expires_at=NOW + timedelta(hours=24))
+PACKING = _export(observed_state="packing", upload_id="upload-one",
+                  packing_report=json.dumps({"step": "pause", "image": IMAGE}))
+TRANSFERRING = replace(PACKING, packing_report=json.dumps({"step": "transfer", "image": IMAGE,
+                                                           "paused_at": NOW.isoformat(), "planned_bytes": 8192}))
 
 
 def test_a_stopped_cells_export_never_asks_for_a_replica():
@@ -70,19 +82,19 @@ def test_a_stopped_cells_export_never_asks_for_a_replica():
     row = _row(desired_state="stopped", observed_state="stopped", ready=False)
     held_row = replace(row, hold_kind="export", hold_started_at=NOW)
     stopped = replace(DRAINED, statefulset_hold_kind=None)
+    paused = ExportJob(exists=True, succeeded=True, report=PAUSE_REPORT)
     passes = [
         decide_export(row, _export(), stopped, ExportJob(), now=NOW),
         decide_export(held_row, PACKING, DRAINED, ExportJob(), now=NOW),
-        decide_export(held_row, PACKING, DRAINED, ExportJob(exists=True, succeeded=True, report=REPORT), now=NOW),
-        decide_export(held_row, READY, DRAINED, ExportJob(exists=True, succeeded=True, report=REPORT), now=NOW),
-        decide_export(held_row, READY, DRAINED, ExportJob(), now=NOW),
+        decide_export(held_row, PACKING, DRAINED, paused, now=NOW),
+        decide_export(held_row, TRANSFERRING, DRAINED, paused, now=NOW),
+        decide_export(held_row, TRANSFERRING, DRAINED, ExportJob(), now=NOW),
     ]
     assert [decision.replicas for decision in passes] == [0, 0, 0, 0, 0]
     assert passes[0].export_transport == "create" and passes[0].hold_kind == "export"
     assert passes[1].run_export_job
-    assert passes[2].export_transport == "complete"
-    assert passes[2].export_updates["observed_state"] == "packing"
-    assert "expires_at" not in passes[2].export_updates
+    assert json.loads(passes[2].export_updates["packing_report"])["step"] == "transfer"
+    assert passes[2].stop_export_job and passes[2].hold_kind == "export"
     assert passes[3].stop_export_job and passes[3].hold_kind == "export"
     assert passes[4].hold_kind is None and passes[4].row_updates["hold_kind"] is None
 
@@ -99,17 +111,20 @@ def test_an_export_waits_while_its_volume_is_unavailable_but_a_packing_one_keeps
     assert packing is not None and packing.run_export_job
 
 
-def test_a_running_cells_export_waits_for_the_volume_and_restarts_the_runtime_after():
-    """Defect: the export Job mounts the volume beside the runtime, or the cell stays stopped after."""
+def test_a_running_cells_pause_waits_for_the_volume_and_restarts_the_runtime_at_its_report():
+    """Defect: the pause mounts the volume beside the runtime, the cell stays stopped for the
+    whole upload, or the upload runs another image than the pause."""
     row = _row()
     held_row = replace(row, hold_kind="export", hold_started_at=NOW)
     start = decide_export(row, _export(), SERVING, ExportJob(), now=NOW)
-    assert start.replicas == 0 and start.export_updates == {"observed_state": "packing"}
+    assert start.replicas == 0 and start.export_updates["observed_state"] == "packing"
+    assert json.loads(start.export_updates["packing_report"]) == {"step": "pause", "image": IMAGE}
     draining = decide_export(held_row, PACKING, HELD, ExportJob(), now=NOW)
     assert draining.replicas == 0 and not draining.run_export_job
     assert decide_export(held_row, PACKING, DRAINED, ExportJob(), now=NOW).run_export_job
-    released = decide_export(held_row, READY, DRAINED, ExportJob(), now=NOW)
+    released = decide_export(held_row, TRANSFERRING, DRAINED, ExportJob(), now=NOW)
     assert released.replicas == 1 and released.hold_kind is None
+    assert decide_export(row, TRANSFERRING, SERVING, ExportJob(), now=NOW) is None  # the transfer needs no hold
 
 
 def test_an_export_past_its_deadline_fails_and_frees_the_cell():
@@ -125,15 +140,38 @@ def test_an_export_past_its_deadline_fails_and_frees_the_cell():
     assert decide_export(held_row, failed, DRAINED, ExportJob(), now=late).replicas == 1
 
 
-def test_a_larger_cell_gets_the_deadline_once_per_started_10_gib():
-    """Defect: a flat deadline fails every export of a cell grown past 10 GiB."""
-    assert export_deadline(_row()) == timedelta(minutes=30)
-    assert export_deadline(_row(grown_storage_gib=11)) == timedelta(minutes=60)
-    large = _row(grown_storage_gib=110, hold_kind="export", hold_started_at=NOW)
+def test_the_pause_lasts_as_long_as_copying_the_used_bytes_at_the_floor_rate():
+    """Defect: a large but nearly empty cell stays stopped as long as its size allows, or a
+    cell never measured fails while it still copies."""
+    nearly_empty = _row(grown_storage_gib=110, used_bytes=GIB, usage_observed_at=NOW)
+    # Two 2-minute start allowances, a third for the plan, and 1 GiB at 25 MiB/s (41 s).
+    assert pause_window(nearly_empty) == timedelta(minutes=6, seconds=41)
+    assert pause_window(_row(grown_storage_gib=110)) == timedelta(minutes=6, seconds=4506)  # all 110 GiB
+    held = replace(nearly_empty, hold_kind="export", hold_started_at=NOW)
     running_job = ExportJob(exists=True, active=True, pods_present=True)
-    assert decide_export(large, PACKING, DRAINED, running_job, now=NOW + timedelta(minutes=329)).export_updates == {}
-    expired = decide_export(large, PACKING, DRAINED, running_job, now=NOW + timedelta(minutes=330))
+    assert decide_export(held, PACKING, DRAINED, running_job, now=NOW + timedelta(seconds=400)).export_updates == {}
+    expired = decide_export(held, PACKING, DRAINED, running_job, now=NOW + timedelta(seconds=401))
     assert expired.export_updates == {"observed_state": "failed", "error_code": "EXPORT_HOLD_EXPIRED"}
+
+
+# Each case is its own branch of the pause deadline.
+@pytest.mark.parametrize(("job", "now", "diagnostic"), [
+    (ExportJob(exists=True, active=True, created_at=NOW), NOW + timedelta(minutes=2), "staging_not_running"),
+    (ExportJob(exists=True, active=True, pods_present=True, created_at=NOW, running_at=NOW),
+     NOW + timedelta(seconds=161), "pause_below_copy_floor"),
+])
+def test_a_pause_that_misses_its_start_or_its_copy_rate_fails_and_frees_the_cell(job, now, diagnostic):
+    """Defect: a staging volume that never attaches, or a copy far below the floor, keeps
+    the account stopped until the whole window ends, with nothing to say why."""
+    held = _row(used_bytes=GIB, usage_observed_at=NOW, hold_kind="export", hold_started_at=NOW)
+    before = decide_export(held, PACKING, DRAINED, job, now=now - timedelta(seconds=1))
+    assert before.export_updates == {} and before.hold_kind == "export"
+    missed = decide_export(held, PACKING, DRAINED, job, now=now)
+    assert (missed.export_updates["observed_state"], missed.export_updates["error_code"]) == ("failed", "EXPORT_FAILED")
+    assert json.loads(missed.export_updates["packing_report"])["diagnostic"] == diagnostic
+    assert missed.export_transport == "remove" and missed.stop_export_job
+    failed = replace(PACKING, observed_state="failed", error_code="EXPORT_FAILED")
+    assert decide_export(held, failed, DRAINED, ExportJob(), now=now).replicas == 1
 
 
 # The controller branches only on whether the Job's token is a C6 code.
@@ -167,14 +205,13 @@ def test_an_export_waits_while_another_hold_owns_the_volume():
     assert decide_export(backing_up, _export(), observed, ExportJob(), now=NOW) is None
 
 
-def test_an_export_covers_everything_the_cell_can_hold_in_at_most_1000_parts():
-    """Defect: a cell grown past 10 GiB, or past its last measurement, can never be exported."""
-    assert export_size(_row()) == ExportSize(max_bytes=10 * GIB, part_bytes=64 * MIB, parts=164)
-    grown = export_size(_row(grown_storage_gib=110))
-    assert grown.max_bytes == 110 * GIB and grown.parts <= 1000 and grown.part_bytes % MIB == 0
-    assert grown.parts * grown.part_bytes >= grown.max_bytes * 1.02  # the ZIP's own headers
-    measured = export_size(_row(used_bytes=GIB, filesystem_bytes=12 * GIB, usage_observed_at=NOW))
-    assert measured.max_bytes == 12 * GIB
+def test_an_archive_up_to_the_bound_fits_1000_parts_of_at_most_1_gib():
+    """Defect: a large plan needs more part URLs than a Job carries, or a part larger than
+    the pack's two-part spool on staging."""
+    assert export_size(10 * GIB) == ExportSize(max_bytes=10 * GIB, part_bytes=64 * MIB, parts=164)
+    largest = export_size(ARCHIVE_BOUND)
+    assert largest.parts <= 1000 and largest.part_bytes <= MAX_PART_BYTES and largest.part_bytes % MIB == 0
+    assert largest.parts * largest.part_bytes >= ARCHIVE_BOUND * 1.02  # the ZIP's own headers
 
 
 def test_the_part_digest_matches_the_cell_commands_vector():
@@ -182,32 +219,38 @@ def test_the_part_digest_matches_the_cell_commands_vector():
     assert etag_digest(['"0cc175b9c0f1b6a831c399e269772661"', '"92eb5ffee6ae2fec3ad71c777531578f"']) == DIGEST_VECTOR
 
 
-def test_the_export_job_carries_part_urls_but_no_storage_credential():
-    """Defect: the Job could reach other objects, or stages an archive without reserving node storage."""
-    spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=0, read_only=False, storage_gib=20,
-                            hold_kind="export", hold_started_at=NOW.isoformat())
+def test_the_upload_carries_part_urls_and_staging_but_no_cell_volume_or_credential():
+    """Defect: the upload could reach other objects or the live vault, or stages the
+    archive on node storage instead of the export's own claim."""
+    spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=1, read_only=False, storage_gib=20)
     size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
-    job = render_export_job(spec, _export(), size, part_urls=["https://storage.test/one", "https://storage.test/two"],
-                            deadline_seconds=1800)
+    job = render_export_job(spec, _export(), UPLOAD, size=size, deadline_seconds=1800,
+                            part_urls=["https://storage.test/one", "https://storage.test/two"])
     pod = job["spec"]["template"]["spec"]
     container = pod["containers"][0]
-    assert container["command"][-4:] == ["--part-url", "https://storage.test/one", "--part-url", "https://storage.test/two"]
+    assert container["command"][container["command"].index("--part-url"):][:4] == [
+        "--part-url", "https://storage.test/one", "--part-url", "https://storage.test/two"]
     assert container["command"][container["command"].index("--max-bytes") + 1] == str(20 * GIB)
     assert {env["name"]: set(env) for env in container["env"]} == {
         name: {"name", "value"} for name in ("EXOMEM_CLOUD_CELL", "EXOMEM_CLOUD_CELL_ID", "TMPDIR", "EXOMEM_LOG_DIR")}
     assert "envFrom" not in container
-    assert "ephemeral-storage" not in container["resources"]["requests"]
+    claims = {volume["persistentVolumeClaim"]["claimName"] for volume in pod["volumes"] if "persistentVolumeClaim" in volume}
+    assert claims == {staging_claim_name(EXPORT_ID)}
+    assert not [volume for volume in pod["volumes"] if "secret" in volume or "projected" in volume]
     assert all(volume.get("emptyDir", {}).get("medium") == "Memory"
                for volume in pod["volumes"] if "emptyDir" in volume)
     assert job["spec"]["template"]["metadata"]["labels"]["exomem.io/cell-job"] == "export"
 
 
-def test_a_local_export_job_tolerates_its_cordoned_node():
-    """Defect: the removal playbook cordons a local cell's node, so its export Job never schedules."""
+# Each step that mounts a volume carries the toleration; the verification mounts none.
+@pytest.mark.parametrize("step", [PAUSE, PACK, UPLOAD])
+def test_a_local_export_step_tolerates_its_cordoned_node(step):
+    """Defect: the removal playbook cordons a local cell's node, so its export never schedules."""
     spec = CellManifestSpec(cell_id=CELL, image=IMAGE, replicas=0, read_only=False, storage_gib=20,
                             local_volume=True, hold_kind="export", hold_started_at=NOW.isoformat())
     size = ExportSize(max_bytes=20 * GIB, part_bytes=64 * MIB, parts=327)
-    job = render_export_job(spec, _export(), size, part_urls=["https://storage.test/one"], deadline_seconds=1800)
+    job = render_export_job(spec, _export(), step, size=size, part_urls=["https://storage.test/one"],
+                            deadline_seconds=1800)
     assert job["spec"]["template"]["spec"]["tolerations"] == [
         {"key": "node.kubernetes.io/unschedulable", "operator": "Exists", "effect": "NoSchedule"}]
 
@@ -222,9 +265,9 @@ class Harness:
         self.cell_db = cell_db
         self.cluster = FakeClusterGateway()
         self.s3 = FakeS3()
-        self.jobs: dict[str, ExportJob] = {}
-        self.cluster.observe_export_job = lambda namespace, export_id, verify=False: self.jobs.get(
-            export_id + ("-verify" if verify else ""), ExportJob())
+        self.jobs: dict[tuple[str, str], ExportJob] = {}
+        self.cluster.observe_export_job = lambda namespace, export_id, *, step: self.jobs.get(
+            (export_id, step), ExportJob())
         monkeypatch.setattr(reconcile, "_staging_s3_client", self.s3.client)
 
     async def __aenter__(self) -> Harness:
@@ -262,33 +305,58 @@ class Harness:
     async def cell(self, cell_id: str) -> CellRow:
         return next(row for row in await db.select_all_rows(self.cellctl) if row.cell_id == cell_id)
 
+    def created(self, export_id: str, step: str) -> dict:
+        """The last manifest cellctl created under the step's name."""
+        name = staging_claim_name(export_id) if step == "staging" else job_name(export_id, step)
+        return next(job for job in reversed(self.cluster.jobs) if job["metadata"]["name"] == name)
+
     async def verify(self, export_id: str) -> None:
         item = await self.export(export_id)
         assert item["observed_state"] == "packing" and item["archive_version_id"]
         assert item["ready_at"] is None and item["download_url"] is None
-        self.jobs[export_id + "-verify"] = ExportJob(exists=True, succeeded=True,
+        await self.run()
+        assert self.created(export_id, VERIFY)
+        self.jobs[(export_id, VERIFY)] = ExportJob(exists=True, succeeded=True,
             report={"verified": True, "bytes": item["archive_bytes"], "sha256": item["archive_sha256"],
                     "version": item["archive_version_id"]})
         await self.run()
 
-    async def pack(self, cell_id: str, export_id: str, archive: bytes) -> dict:
-        """Hold the cell, release its volume, then act as the export Job: upload
-        the archive to the rendered part URLs and report it."""
+    async def pause(self, cell_id: str, export_id: str, *, planned_bytes: int = 8192) -> dict:
+        """Hold the cell, release its volume, act as the pause Job, then let the
+        runtime take its volume back."""
         await self.run()
         self.cluster.observations[cell_id] = _observed_from_applied(self.cluster, cell_id)
         await self.run()
-        name = f"export-{uuid.UUID(export_id).hex}"
-        job = next(job for job in reversed(self.cluster.jobs) if job["metadata"]["name"] == name)
-        command = job["spec"]["template"]["spec"]["containers"][0]["command"]
-        urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--part-url"]
-        part_bytes = int(command[command.index("--part-bytes") + 1])
+        job = self.created(export_id, PAUSE)
+        self.jobs[(export_id, PAUSE)] = ExportJob(exists=True, succeeded=True, pods_present=True, finished_at=NOW,
+                                                  report={**PAUSE_REPORT, "planned_bytes": planned_bytes})
+        await self.run()  # records the plan and stops the pause Job
+        self.jobs[(export_id, PAUSE)] = ExportJob()
+        await self.run()  # the pause Job is gone, so the hold ends
+        self.cluster.observations[cell_id] = _observed_from_applied(self.cluster, cell_id)
+        return job
+
+    async def pack(self, cell_id: str, export_id: str, archive: bytes, *, planned_bytes: int = 8192) -> dict:
+        """Pause, then act as the upload and the pack: send the archive to the
+        upload's part URLs, in the pack's part size, and report it."""
+        await self.pause(cell_id, export_id, planned_bytes=planned_bytes)
+        await self.run()  # starts the upload
+        upload = self.created(export_id, UPLOAD)
+        self.jobs[(export_id, UPLOAD)] = ExportJob(exists=True, active=True, pods_present=True)
+        await self.run()  # starts the pack beside it
+        pack = self.created(export_id, PACK)
+        upload_command = upload["spec"]["template"]["spec"]["containers"][0]["command"]
+        pack_command = pack["spec"]["template"]["spec"]["containers"][0]["command"]
+        urls = [upload_command[index + 1] for index, arg in enumerate(upload_command) if arg == "--part-url"]
+        part_bytes = int(pack_command[pack_command.index("--part-bytes") + 1])
         chunks = [archive[offset:offset + part_bytes] for offset in range(0, len(archive), part_bytes)]
         etags = [self.s3.put_part(url, chunk) for url, chunk in zip(urls, chunks, strict=False)]
         report = {"bytes": len(archive), "sha256": hashlib.sha256(archive).hexdigest(), "parts": len(etags),
-                  "etag_digest": etag_digest(etags), "used": 3 * MIB, "total": 10 * 1024 * MIB}
-        self.jobs[export_id] = ExportJob(exists=True, succeeded=True, report=report, pods_present=True,
-                                         finished_at=NOW)
-        return {"urls": urls, "job": job}
+                  "etag_digest": etag_digest(etags)}
+        self.jobs[(export_id, PACK)] = ExportJob(exists=True, succeeded=True, pods_present=True, finished_at=NOW)
+        self.jobs[(export_id, UPLOAD)] = ExportJob(exists=True, succeeded=True, report=report, pods_present=True,
+                                                   finished_at=NOW)
+        return {"urls": urls, "upload": upload, "pack": pack}
 
 
 async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_db, monkeypatch):
@@ -305,20 +373,24 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         assert harness.cluster.jobs == []  # the runtime's pod still holds the volume
 
         packed = await harness.pack(CELL, export_id, archive)
-        assert packed["job"]["metadata"]["name"] == f"export-{uuid.UUID(export_id).hex}"
+        staging = harness.created(export_id, "staging")
+        assert staging["spec"]["storageClassName"] == STORAGE_CLASS
+        # A cell never measured stages its whole 10 GiB, plus 10% and the pack's two-part spool,
+        # in the 95% of the claim that ext4 leaves to a user that is not root: 13 GiB / 0.95.
+        assert staging["spec"]["resources"]["requests"]["storage"] == "14Gi"
+        # The hold ended at the pause report, before the upload started.
+        assert (await harness.cell(CELL)).hold_kind is None
+        statefulset_replicas = [event[2] for event in harness.cluster.events if event[0] == "apply_statefulset"]
+        assert statefulset_replicas[-1] == 1
+        assert packed["upload"]["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGE
         await harness.run()
+        assert ("delete_export_staging", namespace_name(CELL), export_id) in harness.cluster.events
         await harness.verify(export_id)
         ready = await harness.export(export_id)
         assert ready["observed_state"] == "ready" and ready["archive_bytes"] == len(archive)
         assert ready["expires_at"] == NOW + timedelta(hours=24) and ready["archive_version_id"]
         usage = await harness.cell(CELL)
         assert (usage.used_bytes, usage.filesystem_bytes, usage.usage_observed_at) == (3 * MIB, 10 * 1024 * MIB, NOW)
-
-        harness.jobs[export_id] = ExportJob()  # the deleted Job is gone
-        harness.jobs[export_id + "-verify"] = ExportJob()
-        await harness.run()
-        assert (await harness.cell(CELL)).hold_kind is None
-        assert harness.cluster.events[-1] == ("apply_statefulset", namespace_name(CELL), 1)
 
         await harness.app.execute("UPDATE exomem_cloud_exports SET link_requested_at=now() WHERE export_id=$1",
                                   uuid.UUID(export_id))
@@ -338,6 +410,31 @@ async def test_a_running_cells_export_is_verified_kept_linked_and_deleted(cell_d
         assert harness.s3.versions == {} and harness.s3.uploads == {}
 
 
+async def test_a_staging_removal_that_failed_after_the_upload_is_repeated(cell_db, monkeypatch):
+    """Defect: one failed delete after the upload keeps the staging claim until the export expires, and
+    the quota of a cell without a local volume admits one staging claim, so the next export cannot stage."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        export_id = await harness.request(CELL)
+        await harness.pack(CELL, export_id, b"PK archive whose staging outlives one delete")
+        removed = ("delete_export_staging", namespace_name(CELL), export_id)
+        attempts = []
+
+        def fail_first_removal(namespace: str, export: str) -> None:
+            attempts.append(export)
+            if len(attempts) == 1:
+                raise ApiException(status=500)
+            harness.cluster.events.append(("delete_export_staging", namespace, export))
+
+        monkeypatch.setattr(harness.cluster, "delete_export_staging", fail_first_removal)
+        await harness.run()  # completes the upload, then the removal fails
+        assert (await harness.export(export_id))["archive_version_id"] and removed not in harness.cluster.events
+
+        await harness.run(NOW + timedelta(seconds=10))
+
+        assert removed in harness.cluster.events
+
+
 async def test_a_stopped_cell_is_exported_without_its_runtime_starting(cell_db, monkeypatch):
     """Defect: exporting a suspended account starts its runtime."""
     async with Harness(cell_db, monkeypatch) as harness:
@@ -347,9 +444,6 @@ async def test_a_stopped_cell_is_exported_without_its_runtime_starting(cell_db, 
         await harness.pack(CELL, export_id, b"PK archive of a stopped cell")
         await harness.run()
         await harness.verify(export_id)
-        harness.jobs[export_id] = ExportJob()
-        harness.jobs[export_id + "-verify"] = ExportJob()
-        await harness.run()
         assert (await harness.export(export_id))["observed_state"] == "ready"
         assert (await harness.cell(CELL)).hold_kind is None
         statefulset_replicas = [event[2] for event in harness.cluster.events[applied_before:]
@@ -396,7 +490,9 @@ async def test_a_substituted_part_never_completes(cell_db, monkeypatch):
         refused = await harness.export(export_id)
         assert (refused["observed_state"], refused["error_code"]) == ("failed", "EXPORT_UPLOAD_FAILED")
         assert refused["upload_id"] is None and harness.s3.uploads == {} and harness.s3.versions == {}
-        assert ("delete_job", namespace_name(CELL), f"export-{uuid.UUID(export_id).hex}") in harness.cluster.events
+        removed = {event for event in harness.cluster.events if event[0] in ("delete_job", "delete_export_staging")}
+        assert {("delete_job", namespace_name(CELL), job_name(export_id, step)) for step in (UPLOAD, PACK)} <= removed
+        assert ("delete_export_staging", namespace_name(CELL), export_id) in removed
 
 
 async def test_deleting_the_cell_aborts_its_export_upload_until_the_abort_succeeds(cell_db, monkeypatch):
@@ -418,15 +514,70 @@ async def test_deleting_the_cell_aborts_its_export_upload_until_the_abort_succee
         assert (await harness.export(export_id))["upload_id"] is None and harness.s3.uploads == {}
 
 
-async def test_a_large_cells_job_and_part_urls_last_as_long_as_its_hold(cell_db, monkeypatch):
-    """Defect: a large cell's export Job or part URLs expire long before its hold deadline."""
+async def test_a_large_archives_steps_and_part_urls_last_its_whole_transfer(cell_db, monkeypatch):
+    """Defect: a large archive's upload, pack or part URLs expire long before its transfer
+    deadline, or a deadline from the pause's own time cuts the transfer short."""
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)
-        await harness.cellctl.execute("UPDATE exomem_cloud_cells SET grown_storage_gib=110 WHERE cell_id=$1", CELL)
         export_id = await harness.request(CELL)
-        packed = await harness.pack(CELL, export_id, b"PK archive")
-        assert packed["job"]["spec"]["activeDeadlineSeconds"] == 330 * 60
+        packed = await harness.pack(CELL, export_id, b"PK archive", planned_bytes=110 * GIB)
+        # The configured 30 minutes for each started 10 GiB of the plan.
+        assert packed["upload"]["spec"]["activeDeadlineSeconds"] == 330 * 60
+        assert packed["pack"]["spec"]["activeDeadlineSeconds"] == 330 * 60
         assert {parse_qs(urlsplit(url).query)["expires"][0] for url in packed["urls"]} == {str(330 * 60)}
+        assert harness.created(export_id, PAUSE)["spec"]["activeDeadlineSeconds"] < 30 * 60
+
+
+async def test_a_second_export_on_one_node_waits_until_the_first_one_ends(cell_db, monkeypatch):
+    """Defect: two exports pause two cells on one node and compete for its disk, or a
+    waiting export stops its cell before it can run."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        await harness.serve(OTHER_CELL)
+        for cell_id in (CELL, OTHER_CELL):
+            await db.write_observed(harness.cellctl, cell_id, {"node": "node-a"})
+        exports = {cell_id: await harness.request(cell_id) for cell_id in (CELL, OTHER_CELL)}
+        await harness.run()
+        states = {cell_id: (await harness.export(export_id))["observed_state"] for cell_id, export_id in exports.items()}
+        assert sorted(states.values(), key=str) == [None, "packing"]  # either one may go first
+        first = next(cell_id for cell_id, state in states.items() if state == "packing")
+        second = next(cell_id for cell_id in exports if cell_id != first)
+        waiting = await harness.export(exports[second])
+        assert json.loads(waiting["packing_report"]) == {"waiting": "node_export_slot"}
+        assert (await harness.cell(second)).hold_kind is None
+
+        await harness.app.execute("UPDATE exomem_cloud_exports SET requested_state='superseded' WHERE export_id=$1",
+                                  uuid.UUID(exports[first]))
+        await harness.run()
+        assert (await harness.export(exports[first]))["observed_state"] == "expired"
+        await harness.run()
+        assert (await harness.export(exports[second]))["observed_state"] == "packing"
+        assert (await harness.cell(second)).hold_kind == "export"
+
+
+async def test_the_pack_waits_until_the_job_egress_that_keeps_it_off_public_egress_lands(cell_db, monkeypatch):
+    """Defect: a cell namespace keeps a job-egress from before the split, which gives every Job
+    public egress, and cellctl starts the pack, which holds the media key, under it."""
+    async with Harness(cell_db, monkeypatch) as harness:
+        await harness.serve(CELL)
+        export_id = await harness.request(CELL)
+        await harness.pause(CELL, export_id)
+        await harness.run()  # starts the upload
+        harness.jobs[(export_id, UPLOAD)] = ExportJob(exists=True, active=True, pods_present=True)
+        apply_all = harness.cluster.apply_all
+
+        def refuse_job_egress(manifests: list[dict]) -> None:
+            if any(m["kind"] == "NetworkPolicy" and m["metadata"]["name"] == JOB_EGRESS_POLICY for m in manifests):
+                raise ApiException(status=403, reason="Forbidden")
+            apply_all(manifests)
+
+        harness.cluster.apply_all = refuse_job_egress
+        await harness.run()
+        assert job_name(export_id, PACK) not in {job["metadata"]["name"] for job in harness.cluster.jobs}
+
+        harness.cluster.apply_all = apply_all
+        await harness.run(NOW + timedelta(minutes=3))  # past the refusal's backoff
+        assert harness.created(export_id, PACK)
 
 
 async def test_every_export_goes_through_the_staging_key_under_its_own_cells_prefix(cell_db, monkeypatch):
@@ -535,7 +686,7 @@ async def test_verification_get_capability_stays_in_its_secret_and_failure_remov
     import base64
     import json
 
-    from cellctl.exports import verification_secret_name
+    from cellctl.export_layout import verification_secret_name
 
     async with Harness(cell_db, monkeypatch) as harness:
         await harness.serve(CELL)
@@ -559,7 +710,7 @@ async def test_verification_get_capability_stays_in_its_secret_and_failure_remov
         assert all("persistentVolumeClaim" not in volume for volume in job["spec"]["template"]["spec"]["volumes"])
         unrelated = (namespace_name(CELL), "Secret", verification_secret_name(EXPORT_ID))
         harness.cluster.applied[unrelated] = {"unrelated": True}
-        harness.jobs[export_id + "-verify"] = ExportJob(exists=True, succeeded=True,
+        harness.jobs[(export_id, VERIFY)] = ExportJob(exists=True, succeeded=True,
             report={"verified": True, "bytes": item["archive_bytes"], "sha256": item["archive_sha256"],
                     "version": "wrong-version"})
         await harness.run()
