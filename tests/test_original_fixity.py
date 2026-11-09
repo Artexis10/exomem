@@ -365,6 +365,48 @@ def test_a_restore_that_cannot_put_its_copy_in_place_tries_again_at_the_next_pas
     assert original.read_bytes() == TRANSCRIPT
 
 
+def test_a_replace_that_keeps_failing_keeps_one_trash_copy_of_the_changed_bytes(
+        vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = _stored(vault, "Recordings")
+    _stored(vault, "Spares")
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    rename = original_fixity._rename
+
+    def locked(*args, replace: bool = False, **kwargs):
+        if replace:
+            raise PermissionError("held open by another program")
+        return rename(*args, replace=replace, **kwargs)
+
+    monkeypatch.setattr(original_fixity, "_rename", locked)
+    original.write_bytes(DAMAGED)
+    for _ in range(3):
+        assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+
+    payloads = [data for name, data in _trash(vault).items() if not name.endswith(".meta.json")]
+    assert payloads == [DAMAGED]
+    monkeypatch.setattr(original_fixity, "_rename", rename)
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+    assert original.read_bytes() == TRANSCRIPT
+    assert [data for name, data in _trash(vault).items() if not name.endswith(".meta.json")] == [DAMAGED]
+
+
+def test_a_text_source_whose_fenced_text_never_matched_raises_no_alarm_until_it_matches(vault: Path) -> None:
+    # Source pages rendered before 2026-10-25 fenced the text trimmed, so the hash of the file never matches.
+    text = "Meeting notes from the gauge survey.\nThe river rose overnight.\n"
+    planned = {"title": "Gauge survey", "original_path": "Notes/gauge-survey.md",
+               "original_sha256": hashlib.sha256(text.encode()).hexdigest(), "original_bytes": len(text.encode())}
+    page = vault / "Knowledge Base" / "Sources" / "Gauge survey.md"
+    page.write_text(adopt.render_text_source(planned, text.rstrip(), date_iso="2026-10-01", collection=None))
+    original_fixity.walk(vault)
+
+    assert original_fixity.run_pass(vault).outcomes == {"unmatched": 1}
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {}
+    assert _findings(vault) == []
+    assert original_fixity.readiness(vault)["unresolved"] == 0
+    assert original_fixity.status(vault)["counts"]["unmatched"] == 1
+
+
 @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")
 def test_a_binding_that_cannot_be_read_keeps_its_original_for_the_next_pass(vault: Path) -> None:
     blob = _member_blob(vault)

@@ -62,6 +62,9 @@ RESTORED = "restored"
 MISSING = "missing"
 CORRUPT_NO_COPY = "corrupt_no_copy"
 EVICTED = "evicted"
+# A text original whose fenced text has never hashed to its binding: no evidence of damage, so no alarm.
+# Source pages rendered before 2026-10-25 fenced trimmed text, whose hash can never match the untrimmed file.
+UNMATCHED = "unmatched"
 EDITED = "edited"  # the file's identity changed since its last verification
 CORRUPTED = "corrupted"  # the identity is the recorded one, so no write explains the change
 UNKNOWN_CAUSE = "unknown"  # no identity was recorded before the change, as after a table rebuild
@@ -93,7 +96,7 @@ UNRESOLVED = (MISSING, CORRUPT_NO_COPY)
 REPORTED = (RESTORED, MISSING, CORRUPT_NO_COPY)
 # Rows whose bytes may restore another row; a copy is hashed again before use.
 _PRESENT = (UNVERIFIED, VERIFIED, RESTORED)
-_STATES = (UNVERIFIED, VERIFIED, RESTORED, MISSING, CORRUPT_NO_COPY, EVICTED)
+_STATES = (UNVERIFIED, VERIFIED, RESTORED, MISSING, CORRUPT_NO_COPY, EVICTED, UNMATCHED)
 
 # Defaults until task 5.1 measures them; each has an environment setting (design D4).
 DEFAULT_PASS_SECONDS = 3600.0
@@ -592,6 +595,10 @@ def _verify(vault: Path, row: Row, pace: _Pace, result: PassResult, reads: _Read
         result.rescheduled += 1
     elif not confirmed:
         _retire(vault, row)
+    elif row.kind == TEXT and (row.state == UNMATCHED or (row.state == UNVERIFIED and row.verified_at is None)):
+        # Only a text original that matched once can show damage; the check time keeps it in the cycle.
+        _record(vault, row, state=UNMATCHED, identity=hashed.identity, verified=True)
+        _count(result, UNMATCHED)
     elif row.kind == TEXT:
         # A repair would write the Source page, which the append-only guard forbids (D10).
         _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause,
@@ -761,12 +768,14 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
 def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
             reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
+    kept = _kept_trash(vault, row, hashed)
     for copy in _copies(vault, row, reads):
         staged = _stage(vault, row, copy, pace)
         if staged is None:
             continue
+        trashed: list[str] = []
         try:
-            identity = _install(vault, row, hashed, staged, cause)
+            identity = _install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
         except (_Changed, OpError):
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
@@ -775,8 +784,11 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
             # verification time, so the next pass finds it changed or due, and tries again.
             code = getattr(error, "code", None) or type(error).__name__
             log.warning("original fixity: a restore failed: %s", code)
+            # The entry names the Trash copy of these bytes, so a retry adds no second one.
+            trash = trashed[0] if trashed else kept
             _record(vault, row, state=CORRUPT_NO_COPY, identity=row.identity, cause=cause,
-                    route=[{**copy, "code": str(code)}])
+                    route=[{**copy, "code": str(code),
+                            **({"trash": trash, "found_sha256": hashed.sha256} if trash else {})}])
             _count(result, CORRUPT_NO_COPY)
             return
         finally:
@@ -787,6 +799,15 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         return
     _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, verified=True)
     _count(result, CORRUPT_NO_COPY)
+
+
+def _kept_trash(vault: Path, row: Row, hashed: _Hashed) -> str | None:
+    """The Trash copy that an earlier failed replace of this row left of these same bytes, if it is still there."""
+    for entry in row.route:
+        trash = entry.get("trash")
+        if trash and entry.get("found_sha256") == hashed.sha256 and (vault / trash).is_file():
+            return str(trash)
+    return None
 
 
 def _after_restore(vault: Path, row: Row) -> None:
@@ -801,14 +822,17 @@ def _after_restore(vault: Path, row: Row) -> None:
         log.warning("original fixity: the media cache of a restored original was not recorded", exc_info=True)
 
 
-def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -> Identity:
+def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *, kept: str | None,
+             trashed: list[str]) -> Identity:
     """Put the verified bytes in place of the damaged original, and the changed bytes in Trash.
 
     Both copies are written beside the original, outside the vault guard, under names noted first so
     that a stopped process's are swept at the next start. Under the guard the file and its binding are
     checked again and the changed bytes move to Trash with their metadata. The file is checked once
     more, and the verified bytes replace it in one rename. Returns the restored file's stat identity.
-    The Trash move comes first, so a failed replace never loses the changed bytes.
+    The Trash move comes first, so a failed replace never loses the changed bytes. `kept` names the
+    Trash copy that an earlier failed replace left of these same bytes, and then no second copy is made;
+    `trashed` receives the vault path of a new Trash copy.
     """
     from . import media_store
     from .delete_file import free_trash_path, planned_trash_path
@@ -830,13 +854,14 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -
                         raise _Changed
 
             try:
-                with filesystem.file(parent, target.name).require() as damaged:
-                    if damaged.version() != hashed.version:
-                        raise _Changed
-                    filesystem.copy(damaged, parent, damaged_name).require()
-                    written[damaged_name] = _identity_of(filesystem, parent, damaged_name)
-                    if damaged.version() != hashed.version:
-                        raise _Changed
+                if kept is None:
+                    with filesystem.file(parent, target.name).require() as damaged:
+                        if damaged.version() != hashed.version:
+                            raise _Changed
+                        filesystem.copy(damaged, parent, damaged_name).require()
+                        written[damaged_name] = _identity_of(filesystem, parent, damaged_name)
+                        if damaged.version() != hashed.version:
+                            raise _Changed
                 with filesystem.file(parent, restored_name, access="write", create=True,
                                      exclusive=True).require() as fresh:
                     written[restored_name] = fresh.identity  # known before the write, so a failed one is removed
@@ -846,18 +871,20 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str) -
                     if not _still_bound(vault, row):
                         raise _Changed
                     unchanged()
-                    with filesystem.parent(planned.parent.as_posix(), create=True,
-                                           access="mutate").require() as folder:
-                        leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
-                        metadata = {
-                            "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
-                            "reason": "original_fixity", "cause": cause,
-                            "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
-                        }
-                        held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
-                                              json.dumps(metadata, indent=2).encode("utf-8")).require()
-                        _rename(filesystem, parent, damaged_name, written, folder, leaf)
-                        filesystem.flush_directory(folder).require()
+                    if kept is None:
+                        with filesystem.parent(planned.parent.as_posix(), create=True,
+                                               access="mutate").require() as folder:
+                            leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
+                            metadata = {
+                                "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
+                                "reason": "original_fixity", "cause": cause,
+                                "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
+                            }
+                            held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
+                                                  json.dumps(metadata, indent=2).encode("utf-8")).require()
+                            _rename(filesystem, parent, damaged_name, written, folder, leaf)
+                            filesystem.flush_directory(folder).require()
+                        trashed.append((planned.parent / leaf).as_posix())
                     unchanged()  # A write outside Exomem since the first check keeps its bytes.
                     _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
                     filesystem.flush_directory(parent).require()
