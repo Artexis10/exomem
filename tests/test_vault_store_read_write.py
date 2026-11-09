@@ -287,7 +287,7 @@ def test_two_commits_to_one_page_leave_one_intent_with_the_oldest_age_and_the_la
     """A queue that keeps one intent per commit, so the projector writes a page twice, or one that
     restarts the intent's age at each commit, so a backlog never shows how old it is."""
     stamps = iter(("2030-01-01T00:00:01Z", "2030-01-01T00:00:02Z"))
-    monkeypatch.setattr(write, "_timestamp", lambda: next(stamps))
+    monkeypatch.setattr(write, "timestamp", lambda: next(stamps))
     first = write.commit(writer, put(ALPHA, EDITED))
     second = write.commit(writer, put(ALPHA, EDITED + b"More.\n"))
     queue = rows(stored, "SELECT path, revision, operation, queued_at FROM store_projection_queue")

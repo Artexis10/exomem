@@ -38,8 +38,8 @@ env:
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.165.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "61cab7c3284e0e85c426e331a1e086605097863e3cc58e6b81dda54515cbac09"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.166.0"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "090c6275c01b98964d4e3a865268eb660ba483b7b4949260702ae1320a43d099"
 
 jobs:
   suite:
@@ -69,9 +69,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
+          # v10 no longer prunes by default; keep v5's small, pruned uv cache in the shared cache budget.
+          prune-cache: true
       # No bubblewrap step: process isolation is Linux-only and the suite skips
       # what it cannot run. No Bun step either -- if a test turns out to need it,
       # that dependency is itself a finding this lane exists to surface.

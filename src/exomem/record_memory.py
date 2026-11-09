@@ -18,7 +18,7 @@ from . import (
 )
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
-from .structured_collections import CollectionError
+from .structured_collections import CollectionError, collection_remediation
 
 _QueryFilters = public_filter_annotation()
 
@@ -407,6 +407,7 @@ def record_memory(
         raise OpError(
             error.code,
             error.reason,
+            collection_remediation(error) if isinstance(error, CollectionError) else None,
             details=_json_safe_details(getattr(error, "details", None)),
         ) from error
     except QueryError as error:

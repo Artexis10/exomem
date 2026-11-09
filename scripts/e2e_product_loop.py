@@ -3082,7 +3082,9 @@ def _orchestrate(args: argparse.Namespace) -> int:
                     ],
                     env=_clean_env(s1 / "home", s1 / "vault"),
                     cwd=s1,
-                    timeout=max(180.0, args.request_timeout * 14),
+                    # The compatible-application rollback step adds about 14 s, and the
+                    # slowest recorded branch without it took 258 s of the earlier 280 s.
+                    timeout=max(240.0, args.request_timeout * 18),
                 )
                 print(s1_journey.stdout.strip())
             finally:

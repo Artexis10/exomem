@@ -22,6 +22,7 @@ from record_presentation_fixtures import ITEM_KEY as OBSERVATION
 from record_presentation_fixtures import manifest_text as observed_manifest
 from record_presentation_fixtures import values as observation
 from test_collection_store_migration import (  # noqa: F401 - the env fixture
+    LEDGER_ID,
     PLANNING,
     WORK,
     env,
@@ -44,6 +45,7 @@ from exomem.collection_store import (
     conversion,
     edit_back,
     export,
+    governance,
     runtime,
     summary,
 )
@@ -82,9 +84,26 @@ def settled(root, cid):
         return not summary.publication_outstanding(reader, cid)
 
 
-def convert(root, collection):
+def convert_now(root, collection):
+    """One conversion attempt, for a test of what the conversion refuses."""
     with request_scope(OWNER):
         return conversion.convert(root, collection, why="cutover to summary storage")
+
+
+def convert(root, collection):
+    """Convert, retrying the refusal that asks for a retry once edit-back and publication settle.
+
+    Publication of a fresh item view can reopen a settled collection by itself, so waiting for
+    `settled` and then converting still races. The refusal leaves no state, so a retry is safe.
+    """
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return convert_now(root, collection)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_CONVERSION_OUTSTANDING" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
 
 
 def serve(root, monkeypatch):
@@ -338,7 +357,7 @@ def test_conversion_refuses_while_a_view_edit_is_unsettled(served, monkeypatch):
     time.sleep(1)
     edited = root / item
     edited.write_text(edited.read_text().replace("title: One", "title: Edited"))
-    refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
+    refused(lambda: convert_now(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert edited.exists() and "title: Edited" in edited.read_text()
 
 
@@ -444,6 +463,65 @@ def test_a_query_keeps_a_link_to_an_old_item_path_when_the_reader_may_read_that_
         service.stop()
 
 
+def test_a_query_reads_a_linked_collection_once_and_shows_its_links_only_to_a_reader_of_its_rows(
+        env, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: after conversion each link value that names an old item path runs its own governed read of
+    the linked collection, so a query reads every row there once per link, on the legacy and on the typed
+    query route; or that one read shows a guest a link to a row withheld from it, or hides a link to a row
+    it may read."""
+    root = legacy_vault(env, relationships=True)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        _until(lambda: settled(root, LEDGER_ID), 30)
+        # Each new Work row links to one Publications item file, an old item path once Publications converts.
+        entries = sorted((root / Path(LEDGER).parent / "Entries").glob("*.md"))
+        links = {f"Cites {index}": f"[[{path.relative_to(root / 'Knowledge Base').with_suffix('').as_posix()}]]"
+                 for index, path in enumerate(entries)}
+        assert len(links) == 4
+        for title, link in links.items():
+            call(root, "record_memory", action="append", collection=WORK,
+                 item={"title": title, "count": 1, "related": link}, why="cite a publication")
+        _until(lambda: settled(root, CID), 30)
+        for path in (LEDGER, WORK):
+            convert(root, path)
+
+        reads = []
+        authorized_rows = governance.OperationAuthorization.authorized_rows
+
+        def counted(operation, cid):
+            reads.append(cid)
+            return authorized_rows(operation, cid)
+
+        monkeypatch.setattr(governance.OperationAuthorization, "authorized_rows", counted)
+
+        def shown(read, route):
+            reads.clear()
+            rows = read(root, "record_memory", action="query", collection=WORK, **route)["rows"]
+            return {row["title"]: row.get("related") for row in rows if row["title"] in links}
+
+        routes = ({}, {"query": {"version": 1, "select": ["title", "related"]}})
+        for route in routes:
+            assert shown(call, route) == links, route
+            # One read of the Publications rows answers all four links.
+            assert reads.count(LEDGER_ID) == 1, (route, reads)
+        # One linked row is withheld from the guest, by its ref: the guest keeps the other three links.
+        [(withheld,)] = store(root, "SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
+                              LEDGER_ID, entries[0].relative_to(root).as_posix())
+        write_scope(root, paths="Unrelated/**")
+        scope = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [{collections.record_ref(LEDGER_ID, withheld)}]\n")
+        write_rule(root, ceiling=0)
+        for route in routes:
+            assert shown(as_guest, route) == {**links, "Cites 0": None}, route
+            assert shown(call, route) == links, route
+        write_scope(root, paths="Records/Publications/**", default_deny=True)
+        for route in routes:
+            assert shown(as_guest, route) == dict.fromkeys(links), route
+    finally:
+        service.stop()
+
+
 def test_the_history_page_of_a_converted_collection_links_only_pages_that_exist(served):
     """Defect: after conversion the generated history page keeps each imported event's link to its
     retired item path, a dead link in the vault."""
@@ -466,7 +544,7 @@ def test_conversion_refuses_while_an_edit_to_the_manifest_view_is_unsettled(serv
     manifest = root / WORK
     edited = manifest.read_text() + "\nA note the owner added outside the store.\n"
     manifest.write_text(edited)
-    refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
+    refused(lambda: convert_now(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert store(root, "SELECT view_mode FROM collections WHERE collection_id=?", CID) == [("items",)]
     assert manifest.read_text() == edited and item_files(root, WORK)
 
