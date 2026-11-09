@@ -108,8 +108,11 @@ def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_thre
     assert 0 < len(error["options"]) <= 8
     assert all(set(option) == {"key", "label", "description", "parent"} for option in error["options"])
     assert "relates_to" not in [option["key"] for option in error["options"]]
-    # The agent reads the top of the ranked menu as `candidates`, capped at five.
-    assert refused["error"]["candidates"] == [option["key"] for option in error["options"][:5]]
+    # The agent reads the top of the ranked menu as `candidates`, with the plain link last.
+    assert refused["error"]["candidates"] == [
+        *(option["key"] for option in error["options"][:4]),
+        "links_to",
+    ]
     routes = error["routes"]
     assert set(routes) == {"specific", "propose", "plain_link"}
     assert f"- {error['options'][0]['key']} [[{anchor}]]" in routes["specific"]["do"]
@@ -172,8 +175,10 @@ def test_a_relation_the_vault_already_authors_between_these_note_types_ranks_fir
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _vault, call, anchor = _anchored(tmp_path, monkeypatch)
-    refused = _create(call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]")
-    unused = refused["error"]["candidates"]
+    refused = _create(
+        call, "Probe", _source(call, "Probe"), f"relates_to [[{anchor}]]", response_detail="full"
+    )
+    unused = [option["key"] for option in refused["diagnostics"]["error"]["options"]]
     # Pick a relation the registry order would not rank first, and author it between two insights.
     chosen = unused[-1]
     assert chosen != unused[0]
@@ -446,11 +451,11 @@ def test_identical_bullets_to_one_page_count_as_one_refused_edge(
 
 
 def _offered(call, source_type: str, target: str) -> list[str]:
-    """The relation keys a refused generic edge from a new `source_type` entity to `target` lists."""
+    """The ranked relation keys a refused generic edge from a new `source_type` entity to `target` offers."""
     refused = _entity(
         call, source_type, "Cy Dock", relations=[{"kind": "relates_to", "target": target}]
     )
-    return refused["error"]["candidates"]
+    return [option["key"] for option in refused["diagnostics"]["error"]["options"]]
 
 
 def test_relations_whose_endpoints_name_both_pages_come_before_those_that_name_neither(
@@ -466,7 +471,7 @@ def test_relations_whose_endpoints_name_both_pages_come_before_those_that_name_n
     assert person_to_organization[:4] == ["member_of", "affiliated_with", "operates", "supplies"]
     assert person_to_person[:2] == ["kin_of", "supplies"]
     assert "kin_of" not in person_to_organization
-    assert len(person_to_organization) <= 5
+    assert len(person_to_organization) <= 8
 
 
 def test_a_promoted_relation_with_its_own_endpoints_is_offered_ahead_of_its_parent(

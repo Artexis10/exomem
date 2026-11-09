@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from . import capabilities, relation_options, relation_registry, semantic_contract
+from . import agent_refusal, capabilities, relation_options, relation_registry, semantic_contract
 
 CODE = "GENERIC_RELATION_REFUSED"
 REMEDIATION = (
@@ -52,6 +52,11 @@ class Refusal:
             "edge": {"relation": self.relation, "target": self.target},
             "refused_edges": self.count,
             "routes": self._routes(),
+            # The agent sees at most `MAX_CANDIDATES` names, so the plain link keeps the last slot.
+            "candidates": [
+                *(option["key"] for option in self.options[: agent_refusal.MAX_CANDIDATES - 1]),
+                self.link,
+            ],
         }
 
     @property
