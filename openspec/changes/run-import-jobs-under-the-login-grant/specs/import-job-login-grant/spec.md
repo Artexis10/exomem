@@ -1,34 +1,59 @@
 ## ADDED Requirements
 
-### Requirement: An import job runs under the login grant that started it
+### Requirement: An import job runs while the login that started it stays valid
 
-An import job SHALL bind the login grant (the refresh-token family) of the call that starts or resumes it, together with its principal and access session. Before each batch and at commit, the job SHALL recheck that the grant is live. A live grant is one that is active, issued by this server for this audience, allowed for this identity and in the current generation. The expiry of the access token used to start the job SHALL NOT pause it. A job whose grant is live SHALL NOT pause at a fixed window. A job SHALL pause with `authority_lost` when its grant is revoked, logged out or superseded by a generation change, or when its source release or target authority ends. Only an explicit continuation from the same principal SHALL resume it.
+Before each batch and at commit, an import job SHALL revalidate its bound origin session, applying every check that request validation applies:
+- status
+- issuer and audience
+- the bound client
+- identity
+- generation
+- structural validity
+
+An access session's own expiry SHALL NOT end the job. In its place, an expiring access session SHALL require its refresh-token family to be active for the same client. A session without an expiry SHALL be revalidated without a family check. A job whose origin stays valid SHALL NOT pause at a fixed window.
+
+A job SHALL pause with `authority_lost` when the revalidation answers that the origin is not valid, or when its source release or target authority ends. Logout, revocation, refresh-token reuse, a generation change, a disallowed identity and a client mismatch each make the origin not valid. If the session store cannot be read, the job SHALL take the host-local `store_unavailable` pause and retry on a later tick. Only an explicit continuation from the same principal SHALL resume a job paused with `authority_lost`.
 
 #### Scenario: A long import outlives its first access token
 
-- **WHEN** an owner starts an import whose batches take longer than one access-token lifetime, and the owner's login stays active
-- **THEN** the job runs to `complete` with no continuation, and every batch rechecks the login grant before it commits
+- **WHEN** an owner starts an import with an expiring access session whose batches take longer than that token's lifetime, and the owner's login stays valid
+- **THEN** the job runs to `complete` with no continuation, and every batch revalidated the origin before it committed
 
-#### Scenario: Logging out stops the job at the next batch
+#### Scenario: Ending the login stops the job at the next batch
 
-- **WHEN** the owner logs out, or the refresh family is revoked, while a job runs
+- **WHEN** the owner logs out, the refresh family is revoked, the refresh token is reused, the generation changes or the identity is disallowed while a job runs
 - **THEN** the next batch refuses without advancing the checkpoint, the job pauses with `authority_lost`, and a continuation from a current login of the same principal resumes it from the same row
 
-#### Scenario: A generation change stops the job
+#### Scenario: A session without an expiry runs through
 
-- **WHEN** the session authority's generation changes while a job runs
-- **THEN** the next batch refuses and the job pauses with `authority_lost`
+- **WHEN** a local-ingress owner, or an OAuth session issued without offline access, starts an import that runs longer than one hour
+- **THEN** the job runs to `complete` while that session stays active, and revoking the session pauses it with `authority_lost`
+
+#### Scenario: An unreadable session store is not a revocation
+
+- **WHEN** the session store cannot be read during a batch's revalidation
+- **THEN** the job pauses as `store_unavailable` without advancing the checkpoint, and a later tick continues it once the store answers
 
 #### Scenario: Another principal cannot continue the job
 
 - **WHEN** a different principal sends a continuation for a paused job
-- **THEN** the continuation refuses, exactly as for a job bound to an access session
+- **THEN** the continuation refuses, exactly as before this change
 
-### Requirement: A job without a login grant reports its real deadline
+### Requirement: Status shows only the deadlines a job keeps
 
-A job whose principal has no refresh family SHALL keep its access-session binding. The job's deadline SHALL be the earlier of its window and the bound session's expiry. When that deadline passes, the job SHALL pause with `time_cap`, and status SHALL show that deadline. Status for a grant-bound job SHALL state that the job runs while the login that started it stays active, and SHALL NOT show a deadline the job will not keep.
+A job bound to a governance authorization session SHALL keep that session's expiry as its deadline, and the login SHALL NOT extend it. A job without an origin session SHALL keep the fixed one-hour window as its deadline. When a deadline passes, the job SHALL pause with `time_cap`, and its status SHALL have shown that deadline. Status for a job without a deadline SHALL state that it runs while the login that started it stays valid, and SHALL NOT show a deadline. Status, receipts and diagnostics SHALL NOT show session, family or client identifiers.
 
-#### Scenario: A session-bound job pauses at its session expiry
+#### Scenario: A running job without a deadline says so
 
-- **WHEN** a job bound only to an access session reaches that session's expiry before its window ends
-- **THEN** the job pauses with `time_cap` at that moment, and the status read just before showed the session expiry as its deadline
+- **WHEN** an owner reads the status of a running job whose origin session stays valid
+- **THEN** status says the import runs until it finishes while the login that started it stays valid, and shows no `expires_at`
+
+#### Scenario: A governance session's expiry still ends the job
+
+- **WHEN** a job bound to a governance authorization session reaches that session's expiry, and the owner's login is still valid
+- **THEN** the job pauses with `time_cap` at that moment, and the status read just before showed that expiry as its deadline
+
+#### Scenario: A job without an origin session keeps the window
+
+- **WHEN** a stdio owner's import runs for one hour
+- **THEN** it pauses with `time_cap`, its status showed the window's end, and a continuation resumes it from the same row

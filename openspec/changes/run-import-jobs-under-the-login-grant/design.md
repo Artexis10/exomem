@@ -1,67 +1,98 @@
 ## Context
 
-Today, `importer._bound_principal` stores the caller's `origin_session` (`session_id`, `generation`, `audience`) in the job binding. Before each batch, `importer._grant` calls `auth_sessions.origin_session_active_sync`, which runs `authority.validate_binding` on that one access session. `_validate_record_authoritatively` rejects the session once `expires_at`, which is the issue time plus 3600 seconds, has passed.
+`importer._bound_principal` stores the caller's verified `client_binding` and `origin_session` (`session_id`, `generation`, `audience`) in the job binding. Before each batch, `importer._grant` calls `auth_sessions.origin_session_active_sync`, which runs `authority.validate_binding`, and from there `_validate_record_authoritatively`. That function checks the session's status, issuer, audience, identity and generation. For an access session (schema 2), it also rejects the session once `expires_at`, the issue time plus 3600 seconds, has passed.
 
-Each access `SessionRecord` already carries the `family_id` of the refresh family it was issued from. `RefreshFamilyRecord` holds the family's status, issuer, audience, identity and generation. `SessionAuthority._family_is_active` decides whether a family is live, and `_revoke_family` ends a family on logout, revocation or refresh reuse.
+A session with an `expires_at` always carries a `family_id`, and a session without one has neither (`auth_sessions.py`, the access record's structural check). The sessions without an expiry are:
 
-`JOB_WINDOW_SECONDS = 3600` is a second clock. `_step` pauses a job with `time_cap` once `window_expires` passes, and only an explicit continuation renews it.
+- OAuth sessions issued without `offline_access`
+- local-ingress sessions issued by `exomem auth issue-local`
+
+Every per-session revocation also revokes the family: `revoke_bearer` and `tombstone` both do. Refresh reuse calls `_revoke_family`. `_family_is_active` checks the family's status, issuer, audience, identity and generation.
+
+`_grant` also raises `_Lost` once a bound governance authorization session's `expires_at` passes. That session lives at most one hour (`MAX_SESSION_TTL_SECONDS`).
+
+`JOB_WINDOW_SECONDS = 3600` is a separate clock. `_step` pauses a job with `time_cap` once `window_expires` passes, and only an explicit continuation renews it.
+
+Cloud cells carry the gateway's family in the origin binding, but `cloud_origin.matches` is false outside a request. Stdio, CLI and library owners carry no origin session.
 
 ## Goals / Non-Goals
 
 **Goals**
 
-- A healthy import of any length runs to completion without a continuation.
-- The job's authority is rechecked before every batch and at commit, and ends as soon as the owner's login ends.
+- A healthy import of any length runs to completion without a continuation, for every principal whose login the server can revalidate.
+- Authority is still rechecked before every batch and at commit, and ends as soon as the login ends.
 - Every pause reason and every deadline that status shows is true.
 
 **Non-Goals**
 
 - No automatic resume of a job whose authority really ended. That still needs an explicit continuation from the same principal.
-- No change to source release, target authority, cancel, status authorization, or host takeover rules.
-- No change to how long access or refresh tokens live.
+- No change to source release, target authority, cancel or status authorization, host takeover, or the lifetime of any token or session.
+- No change for Cloud cells, or for stdio, CLI and library owners.
 
 ## Decisions
 
-### D1. Bind the refresh family, not the access session
+### D1. Revalidate the bound origin, minus one access token's lifetime
 
-- At start and at resume, the job binding stores `origin_family`: the `family_id` of the caller's access session and the family's generation. The authority that verified the request resolves both, without reading the bearer again.
-- `origin_session` stays in the binding for audit and for principals without a family.
-- The family id is not a credential. Knowing it grants nothing, because liveness is decided only on the server.
+- Add one background revalidation to the session authority. It loads the bound session by `session_id` and applies every check in `validate_binding`:
+  - status
+  - the issuer and audience of the authority
+  - client id equal to the bound client binding
+  - identity allowed
+  - current generation
+  - structural validity
+- An access session's own `expires_at` is the one check it skips. In its place, the session's family must pass `_family_is_active`, and the family's client id must equal the bound client.
+- A session without an expiry has no family, so no family check applies.
+- The job binding stays unchanged, and no new key is stored. A job bound before this change gets the fix at its next batch, without a continuation.
+- Alternatives rejected:
+  - Storing the family id in the binding. It duplicates what the session record already carries, and it needs a migration case.
+  - A separately minted job grant. It is a new credential to store, rotate and revoke, while the login already has exactly the lifetime and revocation of the owner's consent.
+  - Capping the window at the token's expiry and relabelling the pause. Status becomes honest, but the job still cannot complete unattended.
 
-### D2. Recheck family liveness before every batch
+### D2. Three outcomes, so a store failure is not a revocation
 
-- `_grant` asks the authority whether `origin_family` is live, through one read-only method that reuses `_family_is_active`.
-- A job whose binding has no family falls back to today's access-session check.
-- A family that is revoked or logged out, has the wrong issuer or audience, has a disallowed identity, or is in an old generation makes the batch raise `_Lost`. The job then pauses with `authority_lost`, as today.
+The revalidation returns one of three results:
 
-### D3. The window stops only a job with no live family
+- **valid:** the batch proceeds.
+- **not valid:** the batch raises `_Lost`, and the job pauses with `authority_lost`, as today.
+- **unreadable:** the session store could not be read. The job takes the existing host-local `store_unavailable` pause and a later tick retries.
 
-- For a job bound to a family, `_step` does not pause it at `window_expires`.
-- The binding's window fields stay in the schema and keep recording when the job was last started or resumed.
-- Status replaces `window.expires_at` with `runs_while: "login_active"` for such a job.
-- For a job without a family, the window is capped at the bound access session's expiry. When it passes, the job pauses with `time_cap`, and status shows that real deadline.
-- Alternative rejected: renewing the window from the job's own ticks. That is ambient authority, which the import requirement forbids.
-- Alternative rejected: a separate minted job grant with its own lifetime. It adds a credential to store, rotate and revoke, while the refresh family already has exactly the lifetime and revocation of the owner's consent.
+Today `SessionStoreUnavailable` reads as lost authority. Once the hourly expiry is gone, that would become the main false `authority_lost`.
+
+### D3. Which clock still applies
+
+| The job's origin | Deadline | Pause at the deadline |
+|---|---|---|
+| Origin session that stays valid (expiring access session with a live family, or a session without an expiry) | none | none |
+| Also bound to a governance authorization session | that session's `expires_at`, at most one hour | `time_cap` |
+| No origin session (stdio, CLI, library, Cloud cell) | the one-hour window, as today | `time_cap` |
+
+- These are the only deadlines.
+- The login never extends a governance authorization session.
+- Status for a job without a deadline reports `runs_while: "login_active"` and no `expires_at`.
+- Status for a job with a deadline shows that deadline.
+- The window fields stay in the store and keep recording when the job last started or resumed.
 
 ### D4. Wording an agent can repeat
 
-- Status for a running family-bound job says the job runs until done while the login that started it stays active.
-- A pause from family loss says the login that started the job ended, and that a continuation from a current login resumes it.
-- A `time_cap` pause says the session that started the job expired, and that a continuation resumes it from the same row.
-- Error codes and identifiers stay in the diagnostics part.
+- A running job without a deadline: "This import runs until it finishes, while the login that started it stays valid."
+- A pause from lost authority: "The login or access that started this import ended. A continuation from a current login resumes it from the same row."
+- A `time_cap` pause after a governance session: "The authorization session that started this import expired. A continuation resumes it from the same row."
+- A `time_cap` pause after the window: "This import's one-hour run window ended. A continuation resumes it from the same row."
+- Error codes go in diagnostics. Session ids, family ids and client ids appear nowhere in status, receipts or diagnostics.
 
 ## Risks / Trade-offs
 
-- **A job keeps running after the client disconnects, for as long as the owner stays logged in.**
-  - Accepted. The job is bounded by its source and can be cancelled.
+- **A job outlives its client's disconnect, for as long as the login stays valid.**
+  - A refresh family has no absolute or idle lifetime today, so in practice "valid" means "until it is revoked".
+  - Accepted. The job only completes one fixed, owner-started import into one collection.
   - Logout and revocation end it at the next batch.
-- **Family liveness reads the session store before each batch.**
-  - The read is one keyed lookup, the same cost as today's access-session lookup.
-  - The authority's existing stale-grace cache applies.
-- **Jobs bound before this change carry no family.**
-  - They keep today's behaviour until they are resumed. The next continuation binds a family.
+- **A leaked one-hour access token could start an import that then runs to completion, unless the owner revokes the login.**
+  - Today, such a token's job dies within the hour.
+  - The risk is low. The holder of a leaked token can already import within that hour. What it gains is completion of one bounded job, not ambient authority: every batch rereads the session store, so this is not an initial cached grant.
+- **The revalidation reads the session store before each batch.**
+  - That is one keyed lookup plus one family lookup, close to today's cost.
+  - No cache is involved, because the bearer-keyed validation cache does not serve the background path.
 
 ## Migration
 
-- No store schema change. The family id lives in the existing `binding_json`.
-- Task 1.1 verifies that an older release reading a binding with the extra key still loads the job, and that a job it resumes binds the session, as before.
+None. Bindings are unchanged, and the new rule applies at each job's next batch.
