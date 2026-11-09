@@ -57,46 +57,13 @@ def ship_relations_pack() -> Iterator[Callable[[Callable[[str], str]], None]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_shipped_pack_gives_each_behaviour_to_the_relations_the_design_names() -> None:
-    """No reader reads a behaviour yet, so a dropped or extra relation shows nowhere else."""
+def test_the_order_pair_and_assesses_are_typed_edges_that_carry_no_behaviour() -> None:
+    """The parity module reads each other behaviour through its reader; these three have none."""
     core = relation_registry.core_registry()
 
-    assert {
-        behaviour: sorted(core.keys_with(behaviour))
-        for behaviour in sorted(relation_registry.RELATION_BEHAVIOURS)
-    } == {
-        "associative": [
-            "cites",
-            "derived_from",
-            "evidenced_by",
-            "links_to",
-            "mentions",
-            "observed_in",
-        ],
-        "bears_on": ["contradicts", "evidenced_by", "resolves", "supports"],
-        "corrects": ["answers", "contradicts", "refines", "resolves", "supersedes", "supports"],
-        "earlier_than_target": ["precedes"],
-        "later_than_target": ["follows"],
-        "lifts": [
-            "answers",
-            "contradicts",
-            "duplicates",
-            "evidenced_by",
-            "raises_question",
-            "refines",
-            "resolves",
-            "supports",
-        ],
-        "membership": ["member_of"],
-        "names_subject": ["about_entity"],
-        "opposes": ["contradicts"],
-        "plain_link": ["links_to"],
-        "replaces": ["supersedes"],
-        "settles": ["answers", "resolves"],
-        "sources": ["cites", "derived_from", "evidenced_by"],
-    }
-    # The order pair and `assesses` are typed edges: neither carries `associative`.
     assert core.behaviours_of("assesses") == frozenset()
+    assert core.behaviours_of("precedes") == frozenset({"earlier_than_target"})
+    assert core.behaviours_of("follows") == frozenset({"later_than_target"})
     assert core.core["precedes"].inverse == "follows"
     assert core.core["follows"].inverse == "precedes"
     assert {core.core[key].family for key in ("precedes", "follows")} == {"order"}
@@ -133,6 +100,19 @@ def test_keys_with_refuses_a_behaviour_the_schema_does_not_declare(tmp_path: Pat
     """A mistyped name must not read as "no relation has it"."""
     with pytest.raises(ValueError, match="not a relation behaviour"):
         _registry(tmp_path).keys_with("settle")
+
+
+def test_has_reads_a_behaviour_and_refuses_one_the_schema_does_not_declare(
+    tmp_path: Path,
+) -> None:
+    """A mistyped name must not read false for every relation."""
+    registry = _registry(tmp_path)
+
+    assert registry.has("answers", "settles") is True
+    assert registry.has("links_to", "settles") is False
+    assert registry.has("x.unregistered", "settles") is False
+    with pytest.raises(ValueError, match="not a relation behaviour"):
+        registry.has("answers", "settle")
 
 
 def test_the_pack_binds_seven_frontmatter_fields_and_each_bound_relation_accepts_the_origin() -> (

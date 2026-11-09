@@ -690,7 +690,7 @@ def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
         # Only a link this page's selected meaning authors names an entity, and a
         # Source citation is not one: its page's registry decides, so Python reads it.
         edge = view.edge_row(edge_row)
-        if edge is None or "sources" in view.behaviours(edge) or str(path) in linked:
+        if edge is None or view.has(edge, "sources") or str(path) in linked:
             continue
         linked.append(str(path))
         if len(linked) >= _HYDRATION_ENTITIES_PER_PAGE:
@@ -770,7 +770,7 @@ def _hydration_detect(ctx: Context, entity: str, keep=None) -> dict[str, Any] | 
         # A candidate its page does not author spends no contributor slot, and a
         # Source citation is no contribution (its page's registry decides it).
         edge = view.edge_row(edge_row)
-        if edge is None or "sources" in view.behaviours(edge) or (path, str(src_key)) in seen:
+        if edge is None or view.has(edge, "sources") or (path, str(src_key)) in seen:
             continue
         seen.add((path, str(src_key)))
         if _governed(ctx, path, keep) is None:

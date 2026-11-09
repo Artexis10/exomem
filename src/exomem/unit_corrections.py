@@ -198,8 +198,7 @@ def discover(
             target = seeds.get(edge.get("dst_key"))
             if (target is None
                     or not relation_registry.traversable_resolution_status(edge.get("registry_status"))
-                    or "corrects" not in view.registry_for(str(edge.get("source_path") or "")).behaviours_of(
-                        str(edge.get("relation_type") or ""))):
+                    or not view.has(edge, "corrects")):
                 return False
             candidate = counterpart(str(edge.get("src_key") or ""))
             if candidate is None:

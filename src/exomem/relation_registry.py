@@ -256,6 +256,13 @@ class RelationRegistry:
         parent = self.core.get(definition.parent or "")
         return parent.behaviours if parent is not None else frozenset()
 
+    def has(self, key: str, behaviour: str) -> bool:
+        """Whether edges of `key` have `behaviour`. A name outside `RELATION_BEHAVIOURS` is a
+        defect in the caller, so it raises instead of reading false for every key."""
+        if behaviour not in RELATION_BEHAVIOURS:
+            raise ValueError(f"{behaviour!r} is not a relation behaviour")
+        return behaviour in self.behaviours_of(key)
+
     def behaviours_of_label(self, label: str) -> frozenset[str]:
         """`behaviours_of` for a relation as an author wrote it: a key, an alias or an extension."""
         return self.behaviours_of(self.resolve(label).canonical or "")

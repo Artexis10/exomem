@@ -8639,9 +8639,7 @@ class EpistemicGraphIndex:
                                 other_rel=other_path,
                                 relation_type=relation_type,
                                 direction=direction,
-                                plain_link="plain_link" in authored.behaviours_of(
-                                    str(relation_type or "")
-                                ),
+                                plain_link=authored.has(str(relation_type or ""), "plain_link"),
                                 relation_label=(
                                     relation_registry.display_label(authored, definition.key)
                                     if definition
@@ -9489,7 +9487,7 @@ class EpistemicGraphIndex:
             authored_relation = relation_registry.normalize_relation(str(raw_relation or ""))
             if (
                 definition is None
-                or "lifts" not in lift_registry.behaviours_of(definition.key)
+                or not lift_registry.has(definition.key, "lifts")
                 or not _is_writable_relation_label(authored_relation)
             ):
                 continue
@@ -13578,6 +13576,11 @@ class GraphView:
         registry = self.registry_for(str(edge.get("source_path") or ""))
         return registry.behaviours_of(str(edge.get("relation_type") or ""))
 
+    def has(self, edge: dict[str, Any], behaviour: str) -> bool:
+        """Whether the edge's relation has `behaviour`; a name outside the closed set raises."""
+        registry = self.registry_for(str(edge.get("source_path") or ""))
+        return registry.has(str(edge.get("relation_type") or ""), behaviour)
+
     def serve(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """A stored node as this operation serves it; None when it is no unit here."""
         path = str(row.get("path") or "")
@@ -13704,7 +13707,7 @@ class GraphView:
         def behaves(*args: Any) -> int | None:
             *row, behaviour = args
             edge = interpret(*row)
-            return None if edge is None else int(behaviour in self.behaviours(edge))
+            return None if edge is None else int(self.has(edge, behaviour))
 
         width = len(_EDGE_FIELDS)
         self.conn.create_function("exomem_edge_relation", width, relation)
@@ -14534,7 +14537,7 @@ def _unit_relation_lift_candidates(
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for _source, dst_key, raw_relation, relation_type, source_anchor, unit_ref in rows:
         definition = registry.definition(str(relation_type or ""))
-        if definition is None or "lifts" not in registry.behaviours_of(definition.key):
+        if definition is None or not registry.has(definition.key, "lifts"):
             continue
         authored = relation_registry.normalize_relation(str(raw_relation or ""))
         if not authored or not _is_writable_relation_label(authored):
@@ -15029,14 +15032,14 @@ def _resolution_matches(
     labels = _resolution_labels(view)
     if unit_relations is None:
         unit_relations = _unit_relation_rows(conn, view, sources=sources, labels=labels)
-    mine = [edge for edge in unit_relations if "settles" in view.behaviours(edge)]
+    mine = [edge for edge in unit_relations if view.has(edge, "settles")]
     if not mine:
         return []
     theirs = [
         edge for edge in _unit_relation_rows(
             conn, view, labels=labels, target_pages={edge["dst_page_key"] for edge in mine},
         )
-        if "settles" in view.behaviours(edge)
+        if view.has(edge, "settles")
     ]
     authored = authored or {}
     generic = relation_registry.generic_relation_key()

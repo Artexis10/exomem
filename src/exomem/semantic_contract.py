@@ -4790,7 +4790,7 @@ def _structural_relation_reasons(
     expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
     mutual_supersession = bool(
         definition is not None
-        and "replaces" in registry.behaviours_of(definition.key)
+        and registry.has(definition.key, "replaces")
         and target_page is not None
         and target_page.status_class == "superseded"
         and any(
@@ -4856,12 +4856,12 @@ def qualify_relation(
     reasons, definition = _structural_relation_reasons(
         fact, registry=registry, corpus=corpus, target_paths=corpus.eligible_governed_paths
     )
-    if definition is not None and "associative" in registry.behaviours_of(definition.key):
+    if definition is not None and registry.has(definition.key, "associative"):
         reasons.append("excluded_family")
     if definition is not None and definition.generic:
         reasons.append("generic_relation")
     if fact.origin == "frontmatter":
-        if definition is None or "replaces" not in registry.behaviours_of(definition.key):
+        if definition is None or not registry.has(definition.key, "replaces"):
             reasons.append("frontmatter_not_supersession")
     elif fact.origin not in {"markdown_relation", "semantic_relation", "semantic_block"}:
         reasons.append("unsupported_origin")

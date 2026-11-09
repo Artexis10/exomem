@@ -4579,9 +4579,8 @@ def _bears_on_unit(
 ) -> bool:
     """True when the unit itself authors a relation that bears on it, whatever its extension."""
     return any(
-        "bears_on"
-        in relations.behaviours_of(
-            relations.resolve(relation.kind, origin="semantic_relation").canonical or ""
+        relations.has(
+            relations.resolve(relation.kind, origin="semantic_relation").canonical or "", "bears_on"
         )
         for relation in unit.relations
     )

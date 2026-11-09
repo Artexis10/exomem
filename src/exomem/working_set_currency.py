@@ -70,7 +70,7 @@ def relation_targets(relations: Sequence[Mapping[str, Any]] | None, *,
     registry = registry or relation_registry.core_registry()
     for relation in relations or ():
         definition = registry.resolve(str(relation.get("kind") or "")).definition
-        if definition is not None and "replaces" in registry.behaviours_of(definition.key):
+        if definition is not None and registry.has(definition.key, "replaces"):
             target = str(relation.get("target") or "").strip()
             if target:
                 out.append(target)

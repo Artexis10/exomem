@@ -346,7 +346,7 @@ def _link_key(raw: str) -> str:
 def _replaces(view: Any, edge: dict[str, Any]) -> bool:
     """True when the authoring page's registry reads the edge as one that replaces its target."""
     registry = view.registry_for(str(edge.get("source_path") or ""))
-    return "replaces" in registry.behaviours_of(str(edge.get("relation_type") or ""))
+    return registry.has(str(edge.get("relation_type") or ""), "replaces")
 
 
 def page_facts(graph: sqlite3.Connection, rel_path: str, view: Any) -> PageFacts | None:

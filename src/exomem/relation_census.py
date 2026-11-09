@@ -509,7 +509,7 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         # Core meanings are shared; an extension reads through its authoring page's registry.
         relation = edge["relation"]
         registry = core if relation in core.core else reader.view.registry_for(edge["source_path"])
-        return "plain_link" in registry.behaviours_of(relation)
+        return registry.has(relation, "plain_link")
 
     def names_relation(edge: dict) -> bool:
         return isinstance(edge.get("relation"), str)

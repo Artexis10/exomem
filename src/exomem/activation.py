@@ -388,13 +388,13 @@ def measure_document(
     for field, binding in registry.frontmatter_fields().items():
         count = frontmatter_counts.get(field, 0)
         frontmatter_links += count
-        if "plain_link" not in registry.behaviours_of(binding.relation):
+        if not registry.has(binding.relation, "plain_link"):
             registered.extend([binding.relation] * count)
 
     assertion_blocks = sum(
         1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )
-    provenance_relations = sum(1 for kind in registered if "sources" in registry.behaviours_of(kind))
+    provenance_relations = sum(1 for kind in registered if registry.has(kind, "sources"))
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered
     }
