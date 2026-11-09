@@ -1337,7 +1337,8 @@ def test_all_duplicate_batch_still_carries_the_mutation_terminal(
     )
 
     assert duplicate["ok"] is True
-    assert duplicate["status"] == "committed"
+    # Nothing was written, so the batch settles and reports `mutated: false` instead of claiming a commit.
+    assert (duplicate["status"], duplicate["mutated"]) == ("settled", False)
     assert duplicate["terminal"] is True
     assert duplicate["request_id"]
     assert duplicate["receipt_id"]
@@ -1379,7 +1380,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
     )
 
     assert duplicate["ok"] is True
-    assert duplicate["status"] == "committed"
+    assert (duplicate["status"], duplicate["mutated"]) == ("settled", False)
     assert duplicate["terminal"] is True
     assert duplicate["request_id"]
     assert duplicate["receipt_id"]
@@ -1656,10 +1657,8 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     assert duplicate["family_added"] is False
     assert retry["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
     assert sorted(item.name for item in evidence.iterdir()) == before
-    # The retry writes nothing and yet marks the mutation committed: it has a
-    # terminal answer about canonical state, which is what earns it a terminal
-    # envelope. The directory listing above is what proves nothing was written.
-    assert commits == ["commit", "commit"]
+    # The retry writes nothing, so it marks no commit and settles with `mutated: false`.
+    assert commits == ["commit"]
 
 
 def test_one_photo_handed_into_two_families_is_stored_once_and_found_in_both(
@@ -1676,7 +1675,8 @@ def test_one_photo_handed_into_two_families_is_stored_once_and_found_in_both(
         "stage_artifact",
         lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], names[file["file_id"]], payload),
     )
-    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
+    commits: list[str] = []
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: commits.append("commit"))
     monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
 
     def hand_over(category: str, file_id: str) -> dict:
@@ -1693,6 +1693,12 @@ def test_one_photo_handed_into_two_families_is_stored_once_and_found_in_both(
 
     assert tripod["state"] == "already_stored"
     assert tripod["family_added"] is True
+    # The family addition changed a page, so it counts as a commit; handing the same photo over again does not.
+    assert commits == ["commit", "commit"]
+    repeat = hand_over("tripod", "file-tripod")
+    assert repeat["state"] == "already_stored"
+    assert repeat["family_added"] is False
+    assert commits == ["commit", "commit"]
     assert tripod["families"] == [
         {"scope": "work", "category": "studio"},
         {"scope": "work", "category": "tripod"},

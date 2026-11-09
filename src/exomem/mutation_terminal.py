@@ -557,12 +557,17 @@ def settled_media_terminal(
 
 
 def is_reused_capture(leaf_result: Any) -> bool:
-    """Whether a capture matched an earlier copy and wrote nothing (`capture_outcome` is a closed protocol value)."""
+    """Whether a capture or file hand-over matched an earlier copy and wrote nothing (`capture_outcome` is a closed protocol value)."""
     return (
         isinstance(leaf_result, Mapping)
         and leaf_result.get("mutated") is False
         and leaf_result.get("capture_outcome") == "reused"
     )
+
+
+def as_reused(result: Mapping[str, Any]) -> dict[str, Any]:
+    """`result` marked as a reuse that wrote nothing, which `is_reused_capture` reads: it settles and never commits."""
+    return {**result, "mutated": False, "capture_outcome": "reused"}
 
 
 def reused_capture_terminal(
@@ -2233,13 +2238,13 @@ def _user_summary(
     """
     if verb is None or result.get("ok") is not True:
         return None
-    if result.get("status") == "committed":
-        head = verb.capitalize()
+    reused = result.get("status") == "settled" and is_reused_capture(result.get("leaf_result"))
+    if result.get("status") == "committed" or reused:
+        # A reused batch can still hold a failed file, so its rows speak before the settled sentence does.
+        head = f"Already {verb}" if reused else verb.capitalize()
         if (partial := _partial_batch_summary(verb, batch)) is not None:
             return partial
-    elif result.get("status") == "replayed" or (
-        result.get("status") == "settled" and is_reused_capture(result.get("leaf_result"))
-    ):
+    elif result.get("status") == "replayed":
         head = f"Already {verb}"
     else:
         return None

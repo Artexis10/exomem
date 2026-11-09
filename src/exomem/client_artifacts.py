@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlsplit
 
 from . import duplicates, evidence_reuse
 from .cli_ops import OpError
+from .mutation_terminal import as_reused
 from .preserve import (
     _ADOPTION_RECEIPT_FIELD,
     _ADOPTION_RECEIPT_FIELDS,
@@ -704,12 +705,12 @@ def _batch_result(rows: list[dict | None]) -> dict:
         if row is None:
             continue
         files.append(row if "state" in row else {**row, "state": row["outcome"]})
-    return {
+    return _unless_written({
         "files": files,
         "summary": {
             state: sum(row["state"] == state for row in files) for state in _PRESERVE_STATES
         },
-    }
+    })
 
 
 def _bounded_file_id(file: object) -> str:
@@ -830,9 +831,29 @@ def _adoption_outcomes(
     ]
 
 
+def _wrote(duplicate: DuplicateArtifact | None) -> bool:
+    """Whether storing a file changed the vault: a miss stores it, and a reuse that adds a family edits its page."""
+    return duplicate is None or duplicate.family_added
+
+
+def _unless_written(result: dict) -> dict:
+    """`result` as the settled reuse terminal reads it when no row stored a file or added a family, and one reused a copy.
+
+    A call that wrote nothing reports `mutated: false` and is never marked committed, so the reply states the outcome
+    and carries no durable-write text.
+    """
+    reused = False
+    for row in result.get("files") or ():
+        if row.get("outcome") == "stored":
+            if row.get("state") != "already_stored" or row.get("family_added"):
+                return result
+            reused = True
+    return as_reused(result) if reused else result
+
+
 def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     final = [outcome for outcome in outcomes if outcome is not None]
-    return {
+    return _unless_written({
         "files": final,
         "summary": {
             "stored": sum(
@@ -844,7 +865,7 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
             "failed": sum(item.get("outcome") == "failed" for item in final),
             "unselected": sum(item.get("outcome") == "unselected" for item in final),
         },
-    }
+    })
 
 
 def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
@@ -1414,8 +1435,7 @@ def _capture_source_adoption(
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(raced.receipt)
             elif duplicate is not None:
-                # A terminal answer about canonical state with nothing written: the earlier copy.
-                mark_active_mutation_committed()
+                # Nothing is written: the earlier copy answers, and the call settles without a commit.
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
             else:
                 mark_active_mutation_committed()
@@ -1565,7 +1585,8 @@ def _preserve_evidence_adoption(
                 outcomes[selected_index] = _replayed_outcome(raced.receipt)
                 return _finish_adoption(outcomes)
 
-            mark_active_mutation_committed()
+            if _wrote(duplicate):
+                mark_active_mutation_committed()
             if duplicate is not None:
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="evidence")
                 return _finish_adoption(outcomes)
@@ -1706,7 +1727,8 @@ def capture_source_artifacts(
                             ),
                             **source_fields,
                         )
-                mark_active_mutation_committed()
+                if _wrote(duplicate):
+                    mark_active_mutation_committed()
                 if duplicate is not None:
                     outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
                     continue
@@ -1767,7 +1789,7 @@ def capture_source_artifacts(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
-    return out
+    return _unless_written(out)
 
 
 def preserve_artifacts(
@@ -1881,11 +1903,12 @@ def preserve_artifacts(
                                     else {}
                                 ),
                             )
-                # Nothing is written for a reused copy and the audit chain does not advance, but the call has
-                # a terminal answer about canonical state, so it is marked committed and gets the same terminal
-                # envelope a stored file gets. Without that an all-duplicate batch, which is what retrying under
-                # a new identity produces, would come back as a bare leaf dict with no request or receipt identity.
-                mark_active_mutation_committed()
+                # A reused copy writes nothing unless it adds a family to its page, and the audit chain does not
+                # advance. An all-duplicate batch, which is what retrying under a new identity produces, is
+                # marked unwritten by `_batch_result`, so it settles with the request and receipt identity and
+                # without a commit.
+                if _wrote(held.duplicate):
+                    mark_active_mutation_committed()
                 if held.duplicate is not None:
                     duplicate = held.duplicate
                     outcomes[index] = {

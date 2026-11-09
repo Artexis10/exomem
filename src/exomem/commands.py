@@ -5395,22 +5395,24 @@ def op_preserve(
     )
     duplicate = held.duplicate
     if duplicate is not None:
+        from .mutation_terminal import as_reused
         from .writer_lease import mark_active_mutation_committed
 
-        # Nothing is written, but the call has a terminal answer about canonical
-        # state, so it is marked committed and comes back inside the same
-        # terminal envelope the stored branch gets -- with the same field set,
-        # so one command does not have two response shapes.
-        mark_active_mutation_committed()
         # Nothing is handed to the ledger: this call committed nothing, and the
         # path it resolved to was recorded by the call that did.
-        return duplicate.receipt(
+        receipt = duplicate.receipt(
             size=len(content.encode("utf-8")) if isinstance(content, str) else None,
             # The same derivation the stored branch uses, from the sanitized
             # filename: a name whose sanitized form has a different extension
             # must not yield two content types for one set of bytes.
             content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
         )
+        if duplicate.family_added:
+            # The page gained a family: that edit is a committed write.
+            mark_active_mutation_committed()
+            return receipt
+        # Nothing was written, so the call settles with the request identity and no commit.
+        return as_reused(receipt)
     try:
         result = preserve_module.preserve(
             vault_root,
