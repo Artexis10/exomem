@@ -1412,8 +1412,8 @@ class _SelectedUnits:
         names every parent that had a stored row and so was interpreted, even
         when its interpretation emitted no unit.
 
-        An empty `settled` receives each parent as its last row is interpreted, with its units (none, for a
-        parent that emitted none). A read that raises, as when the request budget stops it, leaves there
+        An empty `settled` receives each parent, with its units (none, for a parent that emitted none), at the
+        end of the batch in which a later parent's row arrives: rows come in parent order. A read that raises, as when the request budget stops it, leaves there
         every parent it finished and never the one it was in the middle of.
         """
         if not parents:
@@ -3207,6 +3207,16 @@ class _AdmittedBase:
 _UNIT_BASE_BYTES_MAX = 64 << 20
 _UNIT_BYTES = 370
 _TOKEN_BYTES = 8
+
+
+def _keeps_interpretation(view: Any, path: str) -> bool:
+    """Whether a parent's interpretation may enter the shared unit base: only a public instance's.
+
+    An owner-only instance's interpretation belongs to its caller, so every request interprets it again.
+    """
+    from .vocabulary.registry import PUBLIC_INSTANCE
+
+    return view.instance(path) == PUBLIC_INSTANCE
 
 
 def _units_bytes(units: Iterable[_UnitContribution]) -> int:
@@ -10519,7 +10529,6 @@ class LexicalStore:
         A build that the request budget stops keeps no figures, but keeps the parents it finished.
         """
         from . import bm25 as bm25_module
-        from .vocabulary.registry import PUBLIC_INSTANCE
 
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
@@ -10594,7 +10603,7 @@ class LexicalStore:
                     # Only a parent with no stored row holds no interpretation at all.
                     parent = (
                         _ParentUnits(revision, units)
-                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
+                        if path not in interpreted or _keeps_interpretation(view, path) else None
                     )
                 else:
                     units = parent.units
@@ -10620,10 +10629,7 @@ class LexicalStore:
                 MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
             )
             with self._term_frequency_cache_lock:
-                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
-                    self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
-                else:
-                    self._unit_bases.pop(scope, None)
+                self._store_unit_base(scope, base_key, kept_parents, kept_bytes)
         with self._term_frequency_cache_lock:
             # Equivalent snapshot aliases must not evict another admitted corpus.
             for retained_key, other in tuple(self._admitted_statistics.items()):
@@ -10644,25 +10650,30 @@ class LexicalStore:
         whose coverage is incomplete, and a base of another key is replaced, not merged. The base keeps
         every parent it held, each used again only at its own revision.
         """
-        from .vocabulary.registry import PUBLIC_INSTANCE
-
         # A finished parent was resolved by the read, so `instance` answers from the view's memory.
         kept = {
             path: _ParentUnits(revisions[path], units) for path, units in finished.items()
-            if path not in view.parents.unavailable and view.instance(path) == PUBLIC_INSTANCE
+            if path not in view.parents.unavailable and _keeps_interpretation(view, path)
         }
         if not kept:
             return
+        # One critical section: a build that stored in between would otherwise lose its parents.
         with self._term_frequency_cache_lock:
             base = self._unit_bases.get(scope)
-        merged = dict(base.parents) if base is not None and base.key == base_key else {}
-        merged.update(kept)
-        kept_bytes = sum(_units_bytes(parent.units) for parent in merged.values())
-        with self._term_frequency_cache_lock:
-            if kept_bytes <= _UNIT_BASE_BYTES_MAX:
-                self._unit_bases[scope] = _UnitBase(base_key, merged)
-            else:
-                self._unit_bases.pop(scope, None)
+            merged = dict(base.parents) if base is not None and base.key == base_key else {}
+            merged.update(kept)
+            self._store_unit_base(
+                scope, base_key, merged, sum(_units_bytes(parent.units) for parent in merged.values())
+            )
+
+    def _store_unit_base(
+        self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int
+    ) -> None:
+        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock."""
+        if kept_bytes <= _UNIT_BASE_BYTES_MAX:
+            self._unit_bases[scope] = _UnitBase(base_key, parents)
+        else:
+            self._unit_bases.pop(scope, None)
 
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:
