@@ -52,6 +52,7 @@ CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "revert",
 )
 READ_ONLY_ACTIONS: Final[frozenset[str]] = frozenset({"work-item", "preview", "status"})
+# nosemgrep: ep-word-set -- the closed step kinds this module implements, each with its own handler.
 STEP_KINDS: Final[tuple[str, ...]] = (
     "create-note",
     "create-entity",
