@@ -881,17 +881,23 @@ class BM25Index:
         """
         if not query.strip():
             return []
-        from . import lexstore
+        from . import find_corpus, lexstore
 
-        indexed = lexstore.search_bm25(
-            vault_root,
-            query,
-            k,
-            scope=scope,
-            freshness=freshness,
-            allowed_paths=allowed_paths,
-            admitted_paths=admitted_paths,
-            repair=repair,
+        # A store-mode vault never asks the sidecar: it is built from files, and a query that it
+        # cannot serve schedules a repair that rebuilds from those same files (as `warm` holds).
+        indexed = (
+            None
+            if find_corpus.store_serves(vault_root)
+            else lexstore.search_bm25(
+                vault_root,
+                query,
+                k,
+                scope=scope,
+                freshness=freshness,
+                allowed_paths=allowed_paths,
+                admitted_paths=admitted_paths,
+                repair=repair,
+            )
         )
         if indexed is not None:
             return indexed

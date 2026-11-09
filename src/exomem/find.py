@@ -118,6 +118,11 @@ _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 # of the command; the owner learns that under this name rather than finding them silently missing.
 _STORE_UNAVAILABLE_COMPONENT = "collection_store"
 
+# Store-mode lag disclosure. The lexical catalogue is built from files, so it does not yet cover a
+# page that only the store holds; the in-process lanes serve it, and the answer says so under this
+# name. A file-mode vault's lag keeps `_RECALL_PROJECTION_STALE_COMPONENT`.
+_STORE_CATALOG_LAG_COMPONENT = "catalog_lag"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -5995,9 +6000,9 @@ def _find_semantic(
                     catalog_lags = True
                     if (
                         degraded_out is not None
-                        and _RECALL_PROJECTION_STALE_COMPONENT not in degraded_out
+                        and _STORE_CATALOG_LAG_COMPONENT not in degraded_out
                     ):
-                        degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+                        degraded_out.append(_STORE_CATALOG_LAG_COMPONENT)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:

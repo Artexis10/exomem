@@ -3160,7 +3160,11 @@ def op_find(
         degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
-        hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
+        hidden_freshness = {
+            find_module._PENDING_VISIBILITY_COMPONENT,
+            find_module._RECALL_PROJECTION_STALE_COMPONENT,
+            find_module._STORE_CATALOG_LAG_COMPONENT,
+        }
         degraded = [component for component in degraded if component not in hidden_freshness]
     if degraded:
         warming = {"components": sorted(set(degraded))}
@@ -6762,6 +6766,9 @@ def op_served_context(vault_root: Path, *, served_context_id: str | None = None)
 #: A search reply says one sentence when part of the index was not ready. The tokens are the
 #: closed component names `find` defines for `warming`, not vocabulary a customer configures.
 _SEARCH_NOTICE_UNREADABLE = "Some pages could not be read just now, so these results may be incomplete."
+_SEARCH_NOTICE_CATALOG_LAG = (
+    "The search index is still catching up with recent saves, so these results may miss some pages."
+)
 _SEARCH_NOTICE_RECENT = "Pages saved in the last minute may be missing from these results."
 _SEARCH_NOTICE_WARMING = "Search is still starting up, so these results may miss related pages."
 _SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss related pages."
@@ -6781,6 +6788,8 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
     if components:
         if find_module._STORE_UNAVAILABLE_COMPONENT in components:
             return _SEARCH_NOTICE_UNREADABLE
+        if find_module._STORE_CATALOG_LAG_COMPONENT in components:
+            return _SEARCH_NOTICE_CATALOG_LAG
         if (
             find_module._PENDING_VISIBILITY_COMPONENT in components
             or find_module._RECALL_PROJECTION_STALE_COMPONENT in components

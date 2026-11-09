@@ -11054,8 +11054,11 @@ class LexicalStore:
         Every non-`available` outcome is reported (never raised); raw SQLite is
         classified here and never escapes this seam.
         """
+        from . import find_corpus
         from . import freshness as freshness_module
 
+        # The repair rebuilds from files, so in a store-mode vault it never converges.
+        schedule_repair = schedule_repair and not find_corpus.store_serves(self.vault_root)
         backend_name = backend()
         # Explicit checkpoints belong to strict proofs or independent callers.
         # Only an ambient request query may borrow its selection transaction.

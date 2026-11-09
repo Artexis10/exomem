@@ -105,7 +105,7 @@ def damage_every_owned_projection(root, damage):
 
 @pytest.mark.parametrize("damage", DAMAGE)
 def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_file_is_damaged(
-    stored, writer, damage  # noqa: F811
+    stored, writer, damage, monkeypatch  # noqa: F811
 ):
     """A reader that still takes the file for the page: a stale projection, one that a failed
     projector left half-written, a missing one or a link at the page's name reaches the person who
@@ -115,6 +115,8 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
         write.commit(writer, put(rel, body))
     sampled = range(0, GENERATED, max(1, GENERATED // 10))
     find_module.clear_cache()
+    scheduled = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: scheduled.append(1))
     before = answers(stored, sampled)
     stored_only = f"{generated_page(0)[0].rsplit('/', 1)[0]}/"
     for answered in (before["find"], before["ask"]):
@@ -123,9 +125,9 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
             "pages that only the store holds must be among the answers"
         )
     # The catalogue is built from files, so it does not cover those pages: the answer says so.
-    assert before["notice"]
+    assert before["notice"] == commands._SEARCH_NOTICE_CATALOG_LAG
     diagnosed = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
-    assert find_module._RECALL_PROJECTION_STALE_COMPONENT in diagnosed["warming"]["components"]
+    assert find_module._STORE_CATALOG_LAG_COMPONENT in diagnosed["warming"]["components"]
     assert len(before["listing"]) == GENERATED
     assert len(before["corpus"]) >= GENERATED + 2
     for listed in before["notes"].values():
@@ -137,6 +139,8 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
 
     assert after == before
     assert SENTINEL.decode().strip() not in json.dumps(after)
+    # That repair rebuilds the catalogue from files, so in store mode it would run on every find.
+    assert scheduled == []
 
 
 def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolver(
