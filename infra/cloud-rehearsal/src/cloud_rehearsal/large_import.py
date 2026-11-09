@@ -651,9 +651,11 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         consumed += int(recorded.get("consumed") or 0)
-        # A done reply carries the residual of the newest page's own `finish`; a newest page that closed has none to compare.
+        # A done reply re-reads the newest page's residual from the stage; a newest page that closed has none to compare.
+        # Only `finish` removes empty folders, so only its residual counts them: that count is left out of the comparison.
+        held = {key: value for key, value in (recorded.get("residual") or {}).items() if key != "removed_empty_folders"}
         if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
-                and recorded.get("residual") != (reply.get("filed") or {}).get("residual"):
+                and (held or None) != (reply.get("filed") or {}).get("residual"):
             problems["compact_reply"].append(
                 f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
