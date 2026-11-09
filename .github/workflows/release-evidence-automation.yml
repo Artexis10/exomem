@@ -1,8 +1,10 @@
 # Explicit release intent supplies evidence and refreshes checks. An intent that
 # names the reviewed release head also lands it: once evidence and every required
 # check pass, the guarded merge runs for that exact source and head. An intent
-# without a head, a Full run no intent named, or RELEASE_AUTO_MERGE=off leaves the
-# merge to the release session. Long-lived GitHub auto-merge is not release intent.
+# without a head, a Full run no intent named, or RELEASE_AUTO_MERGE=off when a run
+# starts leaves the merge to the release session. An intent stays valid for one day
+# while main and the release head stay unchanged. Long-lived GitHub auto-merge is
+# not release intent. Landing reads the release App secrets at repository level.
 name: release evidence automation
 
 on:
@@ -71,7 +73,7 @@ jobs:
           name: release-intent
           path: release-intent.json
           if-no-files-found: error
-          retention-days: 2
+          retention-days: 1
       - name: Mint the release App token
         if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
         id: app-token
@@ -79,6 +81,9 @@ jobs:
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          # Only what the merge needs.
+          permission-contents: write
+          permission-pull-requests: write
       - name: Land the intended release on reused evidence
         if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
         env:
@@ -101,15 +106,24 @@ jobs:
           EVIDENCE_RUN: ${{ inputs.evidence_run }}
           EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
         run: python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"
-      - name: Mint the release App token
+      - name: Find a release intent for the release PR's source and head
         if: ${{ env.LAND == 'true' }}
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_evidence.py land --find
+      - name: Mint the release App token
+        if: ${{ steps.find.outputs.intended == 'true' }}
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-      - name: Land the release PR if an intent named its source and head
-        if: ${{ env.LAND == 'true' }}
+          # Only what the merge needs.
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Land the intended release
+        if: ${{ steps.find.outputs.intended == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}

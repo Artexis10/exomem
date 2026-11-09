@@ -285,7 +285,12 @@ head, with the release App token so that Release Please tags the merge. It
 merges nothing when main moved, the release head changed, a required check
 failed, or no intent named that head; a scheduled Full run alone never merges.
 Its run log names the reason. The repository variable `RELEASE_AUTO_MERGE=off`
-turns landing off.
+turns landing off for runs that start afterwards.
+
+An intent stays valid for one day while main and the release head stay
+unchanged, so a later Full run, such as the nightly, can still land it after a
+failed attempt. To hold a release, set `RELEASE_AUTO_MERGE` to `off` before the
+next evidence run.
 
 6. If the release PR is still open (intent without a head, landing off, or a failed landing), run the guarded merge with the recorded inputs; expect the reviewed head to merge.
 

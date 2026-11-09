@@ -12,6 +12,10 @@ Release automation SHALL merge a release PR only when a release intent dispatche
 - **WHEN** the release intent named an earlier head of the release PR
 - **THEN** automation does not merge the newer head
 
+#### Scenario: Required checks are not all reported yet
+- **WHEN** a CI run on the release head is still queued or running, or no required check is reported yet
+- **THEN** automation keeps waiting and does not treat the partial list as final
+
 #### Scenario: A required check fails
 - **WHEN** an intent names the release PR's current source and head and a required check fails
 - **THEN** automation does not merge, and its run fails naming the check
@@ -21,5 +25,5 @@ Release automation SHALL merge a release PR only when a release intent dispatche
 - **THEN** automation merges exactly that head and the release workflow creates the tag
 
 #### Scenario: Landing is switched off
-- **WHEN** the repository variable `RELEASE_AUTO_MERGE` is `off`
-- **THEN** no automation run merges a release PR, and the release session merges with the supported command
+- **WHEN** the repository variable `RELEASE_AUTO_MERGE` is `off` as an automation run starts
+- **THEN** that run merges no release PR, and the release session merges with the supported command

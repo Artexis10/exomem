@@ -88,9 +88,9 @@ def _harness_modules_from_file() -> list[str]:
 
 @pytest.mark.parametrize("job_id", [row[0] for row in PR_TIER_JOBS])
 def test_pr_tiers_exercise_native_mcp_sdk_fields(job_id: str) -> None:
-    assert _run_step(_workflow()["jobs"][job_id])["env"].get(
-        "FASTMCP_MCP_CAMELCASE_COMPAT"
-    ) == "false"
+    assert (
+        _run_step(_workflow()["jobs"][job_id])["env"].get("FASTMCP_MCP_CAMELCASE_COMPAT") == "false"
+    )
 
 
 @pytest.mark.parametrize("job_id,shards,tier", PR_TIER_JOBS)
@@ -150,8 +150,7 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
 
     assert job["name"] == (
-        f"{tier} tests (py${{{{ matrix.python-version }}}}, "
-        f"shard ${{{{ matrix.shard }}}}/{shards})"
+        f"{tier} tests (py${{{{ matrix.python-version }}}}, shard ${{{{ matrix.shard }}}}/{shards})"
     )
 
     command = _run_step(job)["run"]
@@ -167,17 +166,13 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
     assert checkout["with"]["fetch-depth"] == 0
     assert any(step.get("name") == "Install pinned Bun runtime" for step in job["steps"])
-    assert any(
-        step.get("name") == "Install process-isolation runtime" for step in job["steps"]
-    )
+    assert any(step.get("name") == "Install process-isolation runtime" for step in job["steps"])
     assert any(step.get("name") == "Verify lockfile is current" for step in job["steps"])
 
     assert (ROOT / ".test_durations.json").is_file()
     assert HARNESS_MODULES_FILE.is_file()
 
-    smoke_steps = [
-        step for step in job["steps"] if step.get("name", "").startswith("Sample vault")
-    ]
+    smoke_steps = [step for step in job["steps"] if step.get("name", "").startswith("Sample vault")]
     if job_id == "core-tests":
         assert len(smoke_steps) == 1
         assert smoke_steps[0]["if"] == "matrix.shard == 1"
@@ -214,8 +209,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
     assert "github.event_name == 'schedule'" in condition
     assert "github.event_name == 'workflow_dispatch'" in condition
     assert durations_step["with"]["name"] == (
-        f"test-durations-{tier}-py${{{{ matrix.python-version }}}}"
-        "-shard-${{ matrix.shard }}"
+        f"test-durations-{tier}-py${{{{ matrix.python-version }}}}-shard-${{{{ matrix.shard }}}}"
     )
     assert durations_step["with"]["path"] == _run_step(job)["env"]["EXOMEM_DURATIONS_PATH"]
 
@@ -329,7 +323,9 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     assert timing_job["strategy"]["matrix"] == {
         "python-version": core_job["strategy"]["matrix"]["python-version"]
     }
-    assert timing_job["needs"] == core_job["needs"] == "scope", "timing checks must overlap the worker pools"
+    assert timing_job["needs"] == core_job["needs"] == "scope", (
+        "timing checks must overlap the worker pools"
+    )
     serial_selections = list(core_job["env"].values())
     pooled_exclusions = []
     for variable, selection in core_job["env"].items():
@@ -364,9 +360,14 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     latency_shards: set[str] = set()
     for shard in latency_job["strategy"]["matrix"]["shard"]:
         selected = _collect_items(
-            f"latency shard {shard}", None,
-            [NIGHTLY_OWNED_MODULE, "--splits=4", f"--group={shard}",
-             "--splitting-algorithm=least_duration"],
+            f"latency shard {shard}",
+            None,
+            [
+                NIGHTLY_OWNED_MODULE,
+                "--splits=4",
+                f"--group={shard}",
+                "--splitting-algorithm=least_duration",
+            ],
         )
         assert not latency_shards & selected, "latency shards repeat cases"
         latency_shards |= selected
@@ -432,9 +433,7 @@ def test_every_package_install_is_bounded_and_retried() -> None:
     """
     offenders: list[str] = []
     workflows = sorted(
-        path
-        for suffix in ("*.yml", "*.yaml")
-        for path in (ROOT / ".github/workflows").glob(suffix)
+        path for suffix in ("*.yml", "*.yaml") for path in (ROOT / ".github/workflows").glob(suffix)
     )
     assert workflows, "no workflows found; this contract would pass vacuously"
 
@@ -491,9 +490,9 @@ def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> N
         "form; a bare `sudo apt-get` is the unbounded fetch again"
     )
     # Retries, which only help once an attempt can end on its own.
-    assert 'CI_APT_ATTEMPTS:=3' in script
-    assert 'CI_APT_UPDATE_TIMEOUT_SECONDS:=' in script
-    assert 'CI_APT_INSTALL_TIMEOUT_SECONDS:=' in script
+    assert "CI_APT_ATTEMPTS:=3" in script
+    assert "CI_APT_UPDATE_TIMEOUT_SECONDS:=" in script
+    assert "CI_APT_INSTALL_TIMEOUT_SECONDS:=" in script
     # Kept as a cheap inner bound; useful, just never sufficient.
     assert "Acquire::Retries=3" in script
     assert "Acquire::http::Timeout=15" in script
@@ -515,15 +514,23 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
 
 def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> None:
     jobs = _workflow()["jobs"]
-    discovery, sampler, aggregate = (jobs[name] for name in (
-        "recall-latency-series", "recall-latency-paired", "recall-latency-aggregate",
-    ))
+    discovery, sampler, aggregate = (
+        jobs[name]
+        for name in (
+            "recall-latency-series",
+            "recall-latency-paired",
+            "recall-latency-aggregate",
+        )
+    )
     assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
     assert discovery["needs"] == "scope"
     assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
     assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
     assert "!cancelled()" in aggregate["if"]
-    assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
+    assert (
+        sampler["strategy"]["matrix"]["shard"]
+        == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
+    )
     assert sampler["strategy"]["fail-fast"] is False
     source = discovery["steps"][-1]["run"]
     assert 'git rev-parse --verify "refs/tags/$tag^{commit}"' in source
@@ -533,18 +540,29 @@ def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> N
     assert '--shard "$SHARD" --shards "$SHARDS"' in sample["run"]
     assert sample["env"]["BASE_COMMIT"] == "${{ needs.recall-latency-series.outputs.base_commit }}"
     assert sample["timeout-minutes"] < sampler["timeout-minutes"]
-    assert sampler["steps"][-1]["with"]["name"].endswith("${{ github.run_id }}-${{ github.run_attempt }}")
-    download = next(step for step in aggregate["steps"] if "download-artifact" in step.get("uses", ""))
+    assert sampler["steps"][-1]["with"]["name"].endswith(
+        "${{ github.run_id }}-${{ github.run_attempt }}"
+    )
+    download = next(
+        step for step in aggregate["steps"] if "download-artifact" in step.get("uses", "")
+    )
     assert download["with"]["merge-multiple"] is False
-    compare = next(step for step in aggregate["steps"] if "--aggregate-paired" in step.get("run", ""))
+    compare = next(
+        step for step in aggregate["steps"] if "--aggregate-paired" in step.get("run", "")
+    )
     assert compare["env"]["PRODUCER_OUTCOME"] == "${{ needs.recall-latency-paired.result }}"
     assert '--producer-outcome "$PRODUCER_OUTCOME"' in compare["run"]
     assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
     for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
         assert name in jobs["gate"]["needs"]
-    instrument_jobs = [name for name, job in jobs.items() if any(
-        "tests/test_recall_latency_gate.py" in step.get("run", "") for step in job.get("steps", [])
-    )]
+    instrument_jobs = [
+        name
+        for name, job in jobs.items()
+        if any(
+            "tests/test_recall_latency_gate.py" in step.get("run", "")
+            for step in job.get("steps", [])
+        )
+    ]
     assert instrument_jobs == ["recall-latency-series"]
 
 
@@ -556,12 +574,18 @@ def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None
     assert job["timeout-minutes"] == 15
     assert job["env"]["UV_NO_MANAGED_PYTHON"] == "true"
     assert job["env"]["UV_PYTHON_DOWNLOADS"] == "never"
-    verify = next(step for step in job["steps"]
-                  if step.get("name") == "Verify reference interpreter and SQLite")
+    verify = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Verify reference interpreter and SQLite"
+    )
     assert verify["run"].count('assert sqlite3.sqlite_version == "3.45.1"') == 2
     run = next(step for step in job["steps"] if step.get("name") == "Run structural recall gate")
     assert "--python /usr/bin/python3.12" in run["run"]
-    assert "tests/test_ranking_catalogue_metadata.py::test_public_recall_work_does_not_scale_with_unrelated_pages" in run["run"]
+    assert (
+        "tests/test_ranking_catalogue_metadata.py::test_public_recall_work_does_not_scale_with_unrelated_pages"
+        in run["run"]
+    )
     assert run["if"] == "steps.scope.outputs.docs_only != 'true'"
     assert "recall-structural-reference" in workflow["jobs"]["gate"]["needs"]
     assert "tests/test_ranking_catalogue_metadata.py" not in _harness_modules_from_file()
@@ -591,9 +615,7 @@ def test_governance_wire_characterization_runs_every_registered_route() -> None:
     command = job["steps"][-1]["run"]
     assert "--python 3.13" in command
     assert "tests/test_governance_projection_wire_gate.py" in command
-    assert job["steps"][-1]["env"]["EXOMEM_GOVERNANCE_TIMING_ROUTE"] == (
-        "${{ matrix.route }}"
-    )
+    assert job["steps"][-1]["env"]["EXOMEM_GOVERNANCE_TIMING_ROUTE"] == ("${{ matrix.route }}")
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
@@ -640,9 +662,7 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
         "MKL_NUM_THREADS": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"][
-        "needs"
-    ]
+    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"]["needs"]
 
 
 def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
@@ -652,7 +672,9 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
     assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
     for name in FULL_CI_JOBS:
-        assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
+        assert "scope" in (
+            [jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"]
+        )
         assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]
     for name in RELEASE_PR_SKIPPED_JOBS:
         assert jobs[name]["needs"] == "scope"
@@ -808,7 +830,12 @@ def test_change_scope_relies_on_docs_paths_being_outside_package_inputs() -> Non
     # These distribution roots justify omitting unchanged installed inputs.
     assert set(wheel["packages"]) == {"src/exomem", "src/kb_mcp"}
     assert "force-include" not in build and "force-include" not in wheel
-    assert set(build["targets"]["sdist"]["include"]) == {"/src", "/LICENSE", "/README.md", "/pyproject.toml"}
+    assert set(build["targets"]["sdist"]["include"]) == {
+        "/src",
+        "/LICENSE",
+        "/README.md",
+        "/pyproject.toml",
+    }
 
 
 def test_release_evidence_is_enforced_on_the_release_pr() -> None:
@@ -833,8 +860,12 @@ def test_full_receipt_records_the_checkout_only_after_required_dependencies_pass
     assert check["name"] == "Require the selected CI tier to succeed"
     for step in (checkout, record, upload):
         assert step["if"] == "needs.scope.outputs.full == 'true'"
-    assert record["run"] == "python3 scripts/release_evidence.py record --output full-ci-evidence.json"
-    assert upload["with"]["name"] == "full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert (
+        record["run"] == "python3 scripts/release_evidence.py record --output full-ci-evidence.json"
+    )
+    assert (
+        upload["with"]["name"] == "full-ci-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
     assert upload["with"]["if-no-files-found"] == "error"
 
 
@@ -872,7 +903,6 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     full_ci = " ".join(str(gate["steps"][0]["env"]["FULL_CI"]).split())
     assert full_ci == "${{ needs.scope.outputs.full == 'true' }}"
     assert "release-please" not in full_ci
-
 
 
 @pytest.mark.parametrize(
@@ -991,7 +1021,9 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
 
 
 def test_release_evidence_automation_merges_only_through_land_with_the_app_token() -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release-evidence-automation.yml").read_text())
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/release-evidence-automation.yml").read_text()
+    )
     assert set(_triggers(workflow)) == {"workflow_dispatch"}
     jobs = workflow["jobs"]
     intent = jobs["dispatch-evidence"]
@@ -1002,17 +1034,26 @@ def test_release_evidence_automation_merges_only_through_land_with_the_app_token
     assert "scripts/release_evidence.py refresh" in refresh["steps"][1]["run"]
     for job in (intent, refresh):
         assert job["steps"][0]["with"]["ref"] == "main"
+        merges = [
+            step
+            for step in job["steps"]
+            if "release_evidence.py land" in step.get("run", "") and "--find" not in step["run"]
+        ]
+        assert len(merges) == 1
         # A merge made with the workflow token starts no Release Please run, so no tag would follow.
-        for step in job["steps"]:
-            if "release_evidence.py land" in step.get("run", ""):
-                assert step["env"]["RELEASE_MERGE_TOKEN"] == "${{ steps.app-token.outputs.token }}"
+        assert merges[0]["env"]["RELEASE_MERGE_TOKEN"] == "${{ steps.app-token.outputs.token }}"
     # The workflow token itself can read pull requests but never merge one.
     assert workflow["permissions"] == {
-        "actions": "write", "contents": "read", "pull-requests": "read",
+        "actions": "write",
+        "contents": "read",
+        "pull-requests": "read",
     }
     landed = _workflow()["jobs"]["release-evidence-landed"]
     assert landed["needs"] == "gate"
-    assert landed["if"] == "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}"
+    assert (
+        landed["if"]
+        == "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}"
+    )
     assert landed["steps"][0]["env"]["EVIDENCE_ATTEMPT"] == "${{ github.run_attempt }}"
 
 
@@ -1024,15 +1065,23 @@ def test_python_qualification_does_not_wait_for_image_publication() -> None:
     assert "needs.plan.outputs.pypi_present == 'true'" in job["if"]
     assert "needs.plan.outputs.dry_run != 'true'" in job["if"]
     assert job["permissions"] == {"contents": "read", "actions": "read"}
-    qualify = next(step for step in job["steps"] if step.get("name", "").startswith("Qualify official"))
+    qualify = next(
+        step for step in job["steps"] if step.get("name", "").startswith("Qualify official")
+    )
     assert '--run-id "$GITHUB_RUN_ID" --attempt "$PRODUCER_ATTEMPT"' in qualify["run"]
     assert '--verification-attempt "$GITHUB_RUN_ATTEMPT"' in qualify["run"]
-    assert qualify["env"]["PRODUCER_ATTEMPT"] == "${{ needs.build-artifacts.outputs.producer_attempt }}"
+    assert (
+        qualify["env"]["PRODUCER_ATTEMPT"]
+        == "${{ needs.build-artifacts.outputs.producer_attempt }}"
+    )
     build = workflow["jobs"]["build-artifacts"]
     assert build["outputs"]["producer_attempt"] == "${{ steps.producer.outputs.attempt }}"
     producer = next(step for step in build["steps"] if step.get("id") == "producer")
     assert producer["run"] == 'echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"'
-    assert job["steps"][-1]["with"]["name"] == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
+    assert (
+        job["steps"][-1]["with"]["name"]
+        == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
 
 
 #: The worst cross-platform session observed, in seconds. No longer censored:
