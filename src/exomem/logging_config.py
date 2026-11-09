@@ -14,7 +14,9 @@ from .log_events import JsonLinesFormatter
 # rename-on-rotate step fails when another process holds the file open), and
 # one checkout runs more than one process kind: the long-lived server,
 # one-shot CLI invocations, and the media worker child. Each gets its own
-# file so nothing contends for another's handle.
+# file so nothing contends for another's handle. Two servers still share the
+# server file during a standby handoff, and roles without an entry here log to
+# it too, so the handler follows the path when another process rotates it.
 _LOG_FILENAMES: dict[str, str] = {
     "server": "exomem.log",
     "cli": "exomem-cli.log",
@@ -221,9 +223,11 @@ class _ReopeningRotatingFileHandler(RotatingFileHandler):
     does, keeps every process writing to the path that readers open.
     """
 
-    def emit(self, record: logging.LogRecord) -> None:
+    def shouldRollover(self, record: logging.LogRecord) -> int:  # noqa: N802 - stdlib name
+        # The base `emit` calls this inside its try, so a failed reopen reaches
+        # `handleError` instead of the code that logged.
         self._reopen_if_replaced()
-        super().emit(record)
+        return super().shouldRollover(record)
 
     def _reopen_if_replaced(self) -> None:
         if self.stream is None:
@@ -238,10 +242,14 @@ class _ReopeningRotatingFileHandler(RotatingFileHandler):
         if on_disk is not None and (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino):
             return
         self.stream.close()
+        # A failed open leaves no stream, and the base `shouldRollover` opens the path again on the next record.
+        self.stream = None
         self.stream = self._open()
 
 
-def configure_logging(log_dir: Path, level: int = logging.INFO, *, process: str = "server") -> None:
+def configure_logging(
+    log_dir: Path, level: int = logging.INFO, *, process: str = "server"
+) -> None:
     """Configure root JSONL file logging for one process role.
 
     `process` selects the per-process-role log file
