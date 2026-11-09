@@ -1693,9 +1693,8 @@ def _rich_context(
 
 #: Why a number is no verdict, said once for every boundary that refuses one.
 NO_CONFIDENCE_RULE = (
-    "A verdict is categorical state about how a claim turned out. A confidence is not a "
-    "verdict, so a score, probability or percentage is never valid here; state a degree of "
-    "belief in a belief unit."
+    "A verdict is categorical state about how a claim turned out. A confidence, score or "
+    "probability is not a verdict, so a number or percentage is never valid here."
 )
 
 

@@ -68,6 +68,7 @@ def kind_vault(tmp_path: Path) -> Path:
 # The kinds the code ships
 # ---------------------------------------------------------------------------
 
+# Migration guard: these copies of the kinds pack's tables retire with this change's archive.
 # The 27 portable kinds and the compact `observation`, with the description
 # every schema read shows for each.
 CORE_KINDS = (

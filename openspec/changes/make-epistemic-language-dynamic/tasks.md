@@ -23,7 +23,7 @@
 
 ## 4. Belief and the new keys
 
-- [ ] 4.1 Add the `belief` kind, the belief-level registry, the `credence`, `credence_holder` and `credence_basis` keys and the `assesses` relation, with validation that names the missing key and points misplaced rows to the belief form.
+- [ ] 4.1 Add the `belief` kind, the belief-level registry, the `credence`, `credence_holder` and `credence_basis` keys and the `assesses` relation, with validation that names the missing key and points misplaced rows to the belief form. Point the `invalid_rich_verdict` remediation to the belief form.
 - [ ] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
 - [ ] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
 - [ ] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
@@ -38,7 +38,7 @@
 ## 6. Language and teaching
 
 - [ ] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases.
-- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, `judge_categorically` and the verdict-set comment, and say that `credence` is a unit row, never frontmatter.
+- [ ] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, `judge_categorically`, the verdict-set comment and the `observe_memory` verdict docstring, and say that `credence` is a unit row, never frontmatter.
 
 ## 7. Proof and delivery
 

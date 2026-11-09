@@ -284,4 +284,4 @@ Kinds:
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
 - **The grandfathered family-mismatch case flips silently.** The fixture holds one such extension.
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.
-- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them.
+- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them. A vault overlay is not: older code reads a saved `verdicts:` section or a kind's `traits:` as `unknown_field` errors, so every vault category then resolves `registry_invalid`. Rolling back after a vault saves verdicts or kind traits needs those sections removed from its registry first.
