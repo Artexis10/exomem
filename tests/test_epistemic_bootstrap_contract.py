@@ -32,7 +32,6 @@ from exomem import (
     semantic_units,
     workflow_skills,
 )
-from exomem import observe_memory as observe_module
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -301,10 +300,17 @@ def test_taught_metadata_keys_are_the_runtime_keys(vault: Path) -> None:
     assert tuple(vocabulary["governed_unit_metadata"]) == (
         semantic_units.GOVERNED_UNIT_METADATA_KEYS
     )
-    # The writer's own argument keys each carry a description. The other governed rows are
-    # named in the list; task 6.2 of `make-epistemic-language-dynamic` teaches them in full.
-    for key in observe_module._GOVERNED_ARGUMENT_KEYS:
-        assert vocabulary[key]
+    # Each governed key that the published observation tool takes as an argument carries a
+    # description. The other governed rows are named in the list; task 6.2 of
+    # `make-epistemic-language-dynamic` teaches them in full.
+    schemas = json.loads(
+        (Path(__file__).parent / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
+    )
+    operation = schemas["change_observations"]["inputSchema"]["properties"]["operation"]
+    arguments = sorted(set(operation["properties"]) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS))
+    assert arguments
+    for key in arguments:
+        assert vocabulary[key], key
 
 
 def test_verdict_is_taught_as_categorical_state(vault: Path) -> None:
