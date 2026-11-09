@@ -128,14 +128,14 @@ Version 1 SHALL support up to 4 group keys, source-local day/ISO-week/month buck
 
 ### Requirement: Joins follow only declared current-item relations
 
-Type declarations SHALL define named one-to-one/many-to-one links to a target type, and collection instances SHALL bind each used link to one target collection in the same vault. Requests SHALL follow only those links with inner/left semantics, at most 2 hops and 2 edges. Joins SHALL resolve current item identities, never infer arbitrary keys, traverse reverse fan-out, recurse or resolve historical pins. Both sides SHALL pass the same row governance before joining.
+Joins SHALL follow only the single-valued references that `collection-row-references` declares, resolving each value through the target's single-field natural key or a canonical row ref. Requests SHALL use inner or left semantics, with at most 2 hops and 2 edges. Joins SHALL NOT match undeclared keys, traverse many-valued references or reverse fan-out, recurse, or resolve historical pins. Many-valued and reverse relations SHALL be served only as bounded expansion. Both sides SHALL pass the same row governance before joining. A withheld or missing target collection SHALL be refused with the same generic `COLLECTION_NOT_FOUND` whenever a request names a reference to it.
 
 #### Scenario: Withheld right item is indistinguishable from absent
 - **WHEN** a visible execution links to a withheld recipe in one fixture and a missing recipe in its twin
 - **THEN** a left join retains the same visible execution with an absent target, and an inner join excludes it in both fixtures
 
 #### Scenario: Undeclared or excessive traversal is refused
-- **WHEN** a request supplies a new join key, reverse one-to-many edge, cycle or third hop
+- **WHEN** a request supplies an undeclared join key, a many-valued or reverse edge, a cycle or a third hop
 - **THEN** it fails before any target values are decoded
 
 ### Requirement: Governance is SQL row admission before every reduction

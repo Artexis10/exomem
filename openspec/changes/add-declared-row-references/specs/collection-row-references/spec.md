@@ -2,67 +2,86 @@
 
 ### Requirement: A collection field declares a reference to one target collection
 
-A Records or Planning manifest SHALL let a string field, an array of strings, or a string property of objects in an array declare `references: {collection: <collection ref>}`. A scalar field SHALL be single-valued and an array SHALL be many-valued. Create and revise SHALL refuse a declaration whose target is in another vault, is not admitted to the author, has no single-field natural key, or whose source field is not a string, naming what to change. A value SHALL match the target row whose natural-key field equals it, or the row a canonical row ref names. No other key SHALL be matched, and code SHALL NOT list relations or branch on a relation name.
+A Records or Planning manifest SHALL let a string field, an array of strings, or a string property of objects in an array declare `references: {collection: <collection ref>}`. A scalar field SHALL be single-valued and an array SHALL be many-valued. Create and revise SHALL refuse a target that is missing, in another vault or not admitted to the author with one generic error, before naming anything about the target. They SHALL then refuse, naming what to change, a target without a single-field natural key of type string, date or datetime, and a source field that is not a string. Code SHALL NOT list relations or branch on a relation name.
 
 #### Scenario: A diary field refers to a sites collection
 
 - **WHEN** an owner revises a diary manifest so that `site` declares `references: {collection: <sites ref>}` and Sites has the natural key `site_id`
-- **THEN** the revise commits, and a diary row whose `site` equals a site's `site_id` reads that site as resolved
+- **THEN** the revise commits, and a diary row whose `site` equals a released site's `site_id` reads that site as resolved
 
-#### Scenario: A target without a single-field natural key is refused
+#### Scenario: Withheld and missing targets are refused alike
 
-- **WHEN** the declared target's natural key has two fields
-- **THEN** the revise is refused with an error that names the target's natural key and asks for a single-field key or canonical row refs
+- **WHEN** one revise names a target collection the author cannot read and its twin names one that does not exist
+- **THEN** both are refused with the same error, which names nothing about either target
 
-### Requirement: A write keeps an unresolved reference and warns
+### Requirement: A value resolves only through its declared key
 
-A create, append, update or import that stores a value no target row matches SHALL commit the value and return a warning naming the field and the value. It SHALL NOT be refused for that reason.
+A value that parses as a canonical record or plan row ref SHALL be read only as that ref, and a ref to another collection SHALL NOT resolve. Any other value SHALL match the target row whose natural-key field equals it under the target's natural-key normalisation: Unicode NFC, case-sensitive, untrimmed. A null, absent or empty value SHALL be no reference. A value repeated in one array SHALL count once.
+
+#### Scenario: Case differs
+
+- **WHEN** a diary row's `site` holds `north-field` and the site's key is `North-Field`
+- **THEN** the reference does not resolve
+
+### Requirement: Each reference read is resolved or unresolved
+
+Every declared reference on a returned row SHALL read `resolved` or `unresolved`. It SHALL be `unresolved` when no released target row matches, when the target row is withheld, and when the target's natural-key field is withheld from the caller. A withheld target row SHALL read exactly as a missing one. A query that names a reference to a withheld or missing target collection SHALL be refused with `COLLECTION_NOT_FOUND`. A filter or inverse expansion over a source field the caller cannot read SHALL be refused with `QUERY_FIELD_UNAVAILABLE`.
+
+#### Scenario: Withheld and missing target rows read the same
+
+- **WHEN** one fixture's diary row names a site row the caller cannot read and its twin names a site that does not exist
+- **THEN** both rows return with `site` unresolved, and no field, count or diagnostic tells them apart
+
+### Requirement: A row query expands references, filters through them and totals honestly
+
+A row query SHALL accept `related`, naming declared references to expand into each returned row with the target's released fields, bounded per row with an exact count. A filter SHALL be able to address a released field of a single-valued reference's target. Expansion SHALL NOT multiply base rows. Each target collection SHALL pass its own admission and field plan before any of its values are read, and a truncated expansion SHALL say so with its reason. One filter SHALL feed the row page and any aggregate on the same snapshot. The aggregate SHALL report `combined` with `count`, `unresolved_rows` (combined rows where a named reference did not resolve) and `excluded_unresolved` (base rows a reference filter excluded only because their reference did not resolve). The row page and its cursor SHALL name the combined rows. A cursor SHALL bind each target collection's authorization and freshness, and SHALL refuse once any of them changed.
+
+#### Scenario: One call answers a question across three collections
+
+- **WHEN** an agent queries the diary with a filter on `site.name`, `related: [site, skills.skill_id]`, a sum of `hours` and a count of entries whose leave-day field is true
+- **THEN** the reply lists each matching entry with its site and skills expanded, and the totals combine exactly those entries
+
+#### Scenario: A renamed site is not a silent zero
+
+- **WHEN** a site's key was renamed so that three diary rows still hold the old key, and an agent totals hours filtered on that site's name
+- **THEN** `combined.count` counts only the rows that resolve, and `excluded_unresolved` is 3
+
+#### Scenario: A combined row with an unresolved skill
+
+- **WHEN** an agent totals hours over diary rows filtered on a site, expands `skills.skill_id`, and one matching row names a skill that does not exist
+- **THEN** that row is combined, and `unresolved_rows` is 1
+
+### Requirement: A write warns, under the writer's own view, and never refuses for an unresolved value
+
+A create, append, update or import that stores a value which does not resolve for the writer SHALL commit and return a warning naming the field and value, computed under the writer's admission and field plan. An import SHALL report the count and a bounded list of distinct unresolved values.
 
 #### Scenario: An entry written before its site exists
 
 - **WHEN** an owner appends a diary row whose `site` names a site not yet recorded
 - **THEN** the row commits, and the reply warns that `site` does not resolve
 
-### Requirement: Each reference read has a visible state
-
-Every declared reference on a returned row SHALL read as `resolved` (one released target row), `unresolved` (no released target row, including a withheld one) or `ambiguous` (more than one target row). A withheld target row or collection SHALL read exactly as a missing one. A query SHALL count each state and SHALL NOT drop a row, or count it as zero, because its reference did not resolve.
-
-#### Scenario: Withheld and missing targets read the same
-
-- **WHEN** one fixture's diary row names a site that the caller cannot read and its twin names a site that does not exist
-- **THEN** both rows return with `site` unresolved, and no field, count or diagnostic tells them apart
-
-### Requirement: A row query expands references and filters through them
-
-A row query SHALL accept `related`, naming declared references to expand into each returned row with the target's released fields, bounded per row with an exact count of the related rows. A filter SHALL be able to address a released field of a single-valued reference's target. Expansion SHALL NOT multiply base rows. Each target collection SHALL pass its own admission and field plan before any of its values are read. A truncated expansion SHALL say so and give its reason.
-
-#### Scenario: One call answers a question across three collections
-
-- **WHEN** an agent queries the diary with a filter on `site.name`, `related: [site, skills.skill_id]` and aggregates over `hours` and the leave-day field
-- **THEN** the reply lists each matching entry with its site and skills expanded, and totals over exactly those entries
-
-### Requirement: An aggregate names the rows it combined
-
-An aggregate SHALL report `combined` with the exact count of the rows it combined, their row refs (paged when they exceed one page), and `unresolved_rows`, the combined rows that carry an unresolved or ambiguous reference. These rows SHALL be counted from the same snapshot and admitted set as the row page.
-
-#### Scenario: Total hours with one entry whose site does not resolve
-
-- **WHEN** an agent sums `hours` over diary rows filtered on a site's id, and one of those rows holds an unresolved skill reference
-- **THEN** the total combines every matching row, `combined.count` equals the row count, and `unresolved_rows` is 1
-
 ### Requirement: Reverse expansion is bounded and never reveals a hidden collection
 
-A row query on a target collection SHALL accept `related: [{inverse: "<source collection>.<field>", limit}]`, listing the admitted source rows that refer to each returned row, capped per row, with an exact count. Only declarations of collections admitted to the caller SHALL be consulted.
+A row query on a target collection SHALL accept `related: [{inverse: {collection: <source ref>, field: <field path>}, limit}]`, listing the admitted source rows that refer to each returned row, capped per row, with an exact count. Only declarations of collections admitted to the caller SHALL be consulted, and `inspect` SHALL list those inbound declarations. Until the reference index is built, an inverse read SHALL report warming, never an empty list.
 
 #### Scenario: The entries that practised a skill
 
-- **WHEN** an agent queries a skill with the inverse of `diary.skills.skill_id`
+- **WHEN** an agent queries a skill with the inverse of the diary's `skills.skill_id`
 - **THEN** each skill row lists the diary entries that name it and how many there are
 
 #### Scenario: A hidden source collection stays hidden
 
 - **WHEN** a collection the caller cannot read declares a reference to the queried collection
-- **THEN** the inverse expansion of that collection is refused as an unknown relation, exactly as for one that does not exist
+- **THEN** an inverse expansion naming it is refused exactly as for a collection that does not exist, and `inspect` does not list it
+
+### Requirement: Declarations change without breaking unrelated work
+
+Removing a `references` declaration SHALL drop its index rows, and saved views that use it SHALL report a visible stale state. A target that is later deleted, or withheld from the author, SHALL NOT block unrelated revises of the source collection.
+
+#### Scenario: A declaration is removed under a saved view
+
+- **WHEN** an owner removes `references` from `site` while a saved view filters on `site.name`
+- **THEN** the revise commits, and the saved view reports that it cannot be served, naming the view
 
 ### Requirement: A reference never changes Planning state
 

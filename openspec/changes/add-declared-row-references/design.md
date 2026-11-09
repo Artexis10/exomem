@@ -13,87 +13,106 @@ Design sources: Anthropic, "Writing effective tools for agents". An agent should
 | Link fields and arrays of links | Partial. Any string is accepted. Values are projected per caller against pages, so a row ref resolves to no page and is omitted. | `record_governance.py` link projection |
 | `links.plans[]` Records-to-Planning binding | Partial. Value equality on unchecked plan text. Consumed only by an audit check. Refused on summary collections. | `structured_collections.py`, `audit.py` |
 | Join IR and validator | Dead code. At most two forward joins over a declared `relations` block that nothing produces. Every executor refuses `query.joins`. | `query_engine/ir.py`, `validation.py`, `typed_rows.py`, `route.py` |
-| Cross-collection read snapshot | Works. One connection, one transaction, admission cached per collection. | `collection_store/runtime.py` |
+| Cross-collection read snapshot | Works. One connection, one transaction, admission and field plans kept per collection; the link projector is still one per session. | `collection_store/runtime.py` |
 | Aggregates | Partial. Per-group count, sum, avg, min, max and latest, with exact totals. No aggregate names its rows. Reductions cannot filter. | `query_engine/reductions.py` |
 | Graph, entities, `memory_refs` | Works for pages and entities. Rows are never graph nodes. | `vocabulary/packs/core/relations.yaml` |
 
 ## Gaps
 
 1. No collection can say that a field refers to another collection. So an agent must guess, and an owner copies facts instead.
-2. Planned joins resolve only by `item_key`, a value owners never write. Natural keys such as a site id are what rows actually hold.
+2. Planned joins resolve only by `item_key`, a value owners never write. Rows actually hold natural keys, such as a site id.
 3. A many-valued reference, such as the skills listed on a diary entry, has no shape. Planned joins allow only many-to-one.
 4. Reverse lookups are refused, so a back-link list kept by hand cannot be derived.
-5. No aggregate shows its working, and no read reports a reference that does not resolve.
+5. No aggregate shows its working. Reductions cannot filter. No read reports a reference that does not resolve.
 
 ## Decisions
 
 ### D1. Declare references on the source field, in the manifest
 
-Add `references: {collection: <stable collection ref>}` to a string field, an array of strings, or a string property of objects in an array. Cardinality follows from the field's shape: a scalar is single-valued and an array is many-valued. Revise validates the declaration:
+Add `references: {collection: <stable collection ref>}` to a string field, an array of strings, or a string property of objects in an array. Cardinality follows from the field's shape: a scalar is single-valued and an array is many-valued. Revise validates the declaration and refuses one target that is missing, in another vault or not admitted to the author with one generic error. It checks that before it names anything about the target. It then requires:
 
-- the target is in the same vault and admitted to the author;
-- the target has a single-field natural key;
-- the source field is a string.
+- a single-field natural key on the target, of type string, date or datetime;
+- a string source field.
 
-A type-level declaration, as in CQ4, is rejected, because a relation binds two collections that one owner keeps, not two shapes. Relations are per-vault schema data in the manifest. The vocabulary registry keeps graph relation types. Code never lists relations or branches on a relation key.
+A type-level declaration, as in the earlier CQ4 text, is rejected, because a relation binds two collections that one owner keeps, not two shapes. This change amends CQ4 to match. Relations are per-vault schema data in the manifest. The vocabulary registry keeps graph relation types. Code never lists relations or branches on a relation key. Planning `parent` and `area` and the `links.plans[]` binding stay separate in this change. Whether `links.plans[]` folds into declared references is a follow-up question.
 
 ### D2. Resolve by the target's natural key, or by a canonical row ref
 
-A value matches the target row whose single natural-key field equals it, or the row a canonical `exomem://record/<cid>/<key>` ref names. This is declared, not inferred: the manifest names the target, and the target names its own key. Fuzzy matching is excluded, and so is matching on an undeclared field.
+A value that parses as a canonical `exomem://record/<cid>/<key>` or `exomem://plan/<cid>/<key>` ref is read only as that ref; a ref to another collection does not resolve. Any other value matches the target row whose natural-key field equals it, under the target's own natural-key normalisation: Unicode NFC, case-sensitive, no trimming. A null, absent or empty value is no reference. A value repeated in one array counts once. Revise forbids changing a collection's natural key or schema version, and the store keeps one row per natural key, so a value matches at most one row. Fuzzy matching is excluded, and so is matching on an undeclared field.
 
-### D3. A reference index, with resolution at read time
+### D3. Phase 1 needs no new table
 
-The store keeps `item_references(source collection, row, field path, ordinal, raw value)`, indexed on `(source collection, field path, value)`. It is maintained in the canonical item transaction, beside the rollups, and rebuilt like other projections. Resolution happens at read time. Renaming a target rewrites nothing; the old values become `unresolved` and stay visible. Materialising resolved targets was rejected for now. It would need a write cascade across collections, which the store does not have, and it would turn a rename into a background fan-out. If expansion misses its budget at real sizes, that choice can be revisited.
+Forward resolution is a lookup on the target's existing unique natural-key index, or on `(collection, item_key)` for a canonical ref. A filter through a single-valued reference first resolves the released target keys, then applies them to the source field. Declaring `references` marks the source field filterable, as named-validator references already are. Resolution happens at read time, so renaming a target rewrites nothing: the old values stop resolving and stay visible.
+
+Phase 2 adds `item_references(source collection, row, field path, ordinal, raw value)`, indexed on `(source collection, field path, value)`, for inverse expansion. It is maintained in the canonical item transaction, added by a new collection-store schema revision (never by editing a shipped one), kept out of the in-vault replica and rebuilt from items. Until it is built, inverse reads report warming, never an empty list. Materialising resolved targets was rejected. It would need a write cascade across collections, which the store does not have.
 
 ### D4. Every reference has a visible state
 
-Each declared reference on a returned row reads as one of three states:
+Each declared reference on a returned row reads `resolved` or `unresolved`. A reference is `unresolved` in any of these cases:
 
-- `resolved`: one released target row matches.
-- `unresolved`: no released target row matches, or the target is withheld.
-- `ambiguous`: more than one row matches, for example across schema versions.
+- no released target row matches;
+- the target row is withheld;
+- the target's natural-key field is withheld from the caller by field release.
 
-A withheld target is indistinguishable from a missing one, the same rule as CQ4 §6. A query counts each state; it never drops a row or treats it as zero.
+A withheld target is indistinguishable from a missing one, the same rule as CQ4. A query that names a reference to a withheld or missing target collection is refused with the generic `COLLECTION_NOT_FOUND`, as CQ4 requires. A filter or inverse expansion over a source field the caller cannot read is refused with `QUERY_FIELD_UNAVAILABLE`.
 
 ### D5. One query: expand, filter and total
 
-A row query gains two things. `related` names declared references to expand into each row. A filter can address a single-valued reference's target field, such as `site.name`. Expansion is bounded per row and never multiplies base rows. Aggregates run on the base rows in the same snapshot and report `combined`: the exact row count, the row refs (paged when there are more than a page holds) and `unresolved_rows`. The motivating question then becomes one call on the diary: filter on `site.name`, expand `site` and `skills.skill_id`, and sum `hours` and leave days.
+A row query gains two things. `related` names declared references to expand into each row, and a filter can address a single-valued reference's target field, such as `site.name`. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the source collection and each target collection's authorization and freshness, and it refuses once any of them changed.
+
+Totals need two things that do not exist today: reductions with a filter, and a result that carries rows and totals together. `combined` forces the base-row path, never the rollup. It reports three counts:
+
+- `count`: the rows combined;
+- `unresolved_rows`: combined rows where a reference the query names did not resolve;
+- `excluded_unresolved`: base rows that a reference filter excluded only because their reference did not resolve.
+
+The row page and its cursor name the combined rows. So after a site rename, "hours at site X" is not a silent zero: `excluded_unresolved` shows the rows the rename cut off.
+
+The motivating question becomes one call on the diary:
+
+1. Filter on `site.name`.
+2. Expand `site` and `skills.skill_id`.
+3. Sum `hours` and count the entries whose leave-day field is true.
 
 ### D6. Warn on write, never refuse
 
-A write that stores an unresolved value succeeds and returns a warning that names the field and value. A refusal would block imports, and any entry written before its target exists. The owner would pay for it with a failed write and nothing in return, because the read already shows the unresolved state.
+A write that stores a value which does not resolve for the writer succeeds and returns a warning naming the field and value. The check runs under the writer's own admission and field plan, so the warning tells a writer nothing about rows they cannot read. An import reports a bounded warning: the count and a bounded list of distinct values. A refusal would block imports, and any entry written before its target exists, while the read already shows the unresolved state.
 
 ### D7. Reverse expansion is bounded and comes second
 
-`related: [{inverse: "<source collection>.<field>", limit}]` on the target lists the source rows that refer to each returned row, with an exact count, capped per row. Only declarations of collections admitted to the caller are consulted, so a hidden collection is never revealed by its references. This retires hand-kept back-link fields. It is the reverse traversal that CQ4 left to the owner, delivered as expansion rather than as a join, so grouped SQL results never multiply.
+`related: [{inverse: {collection: <source ref>, field: "skills.skill_id"}, limit}]` on the target lists the source rows that refer to each returned row, capped per row, with an exact count. Only declarations of collections admitted to the caller are consulted, and `inspect` lists those inbound declarations so that an agent can discover them. This is expansion, not a reverse join, so grouped SQL results never multiply. It retires hand-kept back-link fields.
 
 ### D8. References never change Planning state
 
-A resolved reference from a Records row to a plan item is evidence, never progress. No status, health or completion is derived from it. This follows the existing rule that time and related rows never prove completion.
+A resolved reference between a Records row and a plan item is evidence, never progress. No status, health or completion is derived from it.
+
+### D9. Declarations change safely
+
+Removing a `references` declaration drops its phase 2 index rows. Saved views that use it then report a visible stale state, as a saved view on an undeclared value does today. If the target is later deleted, or withheld from the author, that does not block unrelated revises of the source collection.
 
 ## Alternatives
 
-- **Q3 joins as specified.** Its governance design is reusable. But it resolves by `item_key`, it cannot reach many-valued skills, and it refuses reverse lookups. It also needs the owner's strings rewritten first.
-- **Rows as graph nodes, through virtual edges.** This gives one model for rows, pages and entities. But it waits on store mode, and path aggregates cannot sum row fields. `add-graph-traversal-queries` can consume this change's index as its row-link edges later, so nothing is built twice.
+- **Q3 joins as first specified.** The governance design is reusable and this change keeps it. But resolving by `item_key` cannot bind the owner's strings, and it cannot reach many-valued skills or reverse lists.
+- **Rows as graph nodes, through virtual edges.** This gives one model for rows, pages and entities. But it waits on store mode, and path aggregates cannot sum row fields. `add-graph-traversal-queries` wants registry-typed edges over resolved refs. A declaration here carries no relation type yet. Adding an optional relation type from the vocabulary registry is the step that would let the graph change read these declarations as edges.
 - **Keep copies by hand.** The status quo. Copies drift, and the owner does the work.
 
 ## Governance
 
-Each target collection passes its own admission and field plan before any target value is read. Today the route wires one link projector and one field plan per session. Each referenced collection needs its own. Results carry their egress receipts. The 64 KiB result cap and the interactive visit budget cover expansion. A truncated expansion says so and gives its reason.
+Each target collection passes its own admission and field plan before any target value is read. The route needs one link projector per referenced collection. Results carry their egress receipts. The 64 KiB result cap and the interactive visit budget cover expansion. A truncated expansion says so and gives its reason.
 
 ## Migration
 
 1. The owner adds `references` to an existing string field. No row changes.
-2. `inspect` reports resolved, unresolved and ambiguous counts, and a bounded list of the distinct unresolved values.
+2. `inspect` reports how many values resolve, and a bounded list of the distinct values that do not.
 3. The owner fixes values, or creates missing targets, through governed writes. An agent may propose a mapping. Nothing matches fuzzily.
-4. Once reverse expansion ships, the owner removes the hand-kept back-link fields.
+4. Once inverse expansion ships, the owner removes hand-kept back-link fields.
 
 ## Single store
 
-The index lives in the collection store, which store mode extends to pages. `make-vault-store-canonical` puts pages and graph tables in the same database and transaction. `add-graph-traversal-queries` plans declared row links as virtual edges maintained in the canonical transaction. This change supplies those declarations and that index.
+`make-vault-store-canonical` keeps pages, graph and identity rows in the same per-vault store, committed on the collection-store writer thread. The phase 2 index fits that model: it uses a new name, a new schema revision taken in landing order, and the canonical item transaction. The graph change can read it from the same database once declarations carry a relation type.
 
 ## Risks
 
 - **Expansion cost at real sizes.** Bound it, measure it in the acceptance run, and materialise only if the run misses its budget.
 - **Derived collections read from a separate attached file.** That file is not atomic with the main store, so they stay out of the first phase.
-- **Renames orphan references.** The unresolved state makes them visible, and canonical row refs avoid the problem for owners who want rename safety.
+- **Renames orphan references.** `unresolved_rows` and `excluded_unresolved` make them visible. Canonical row refs avoid the problem for owners who want rename safety.

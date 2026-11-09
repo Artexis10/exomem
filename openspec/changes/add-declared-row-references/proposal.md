@@ -7,13 +7,13 @@ The query engine already has a join IR and validator (`query_engine/ir.py`, `val
 ## What Changes
 
 - A collection manifest can mark a string field, an array of strings, or a string property of objects in an array as a reference to one target collection, by stable collection id. A value resolves through the target's single-field natural key, or as a canonical row ref. The declaration is manifest data, never a code list.
-- The store keeps a reference index of raw values, maintained in the canonical item transaction. Resolution happens at read time, so renaming a target never rewrites source rows. A rename shows up as an unresolved reference instead.
-- Every reference read has a visible state: `resolved`, `unresolved` or `ambiguous`. A withheld target reads exactly like a missing one.
+- Resolution happens at read time, through the target's existing natural-key index. Renaming a target never rewrites source rows; a rename shows up as unresolved references and as rows a filter excluded.
+- Every reference read is `resolved` or `unresolved`. A withheld target reads exactly like a missing one, and a write warning is computed under the writer's own view.
 - A row query can expand declared references into each returned row, and filter through a forward single-valued reference. Base rows are never multiplied.
-- An aggregate reports which rows it combined, and how many of them had an unresolved reference. Nothing unresolved is dropped silently or counted as zero.
-- A later phase adds bounded reverse expansion, such as "the diary entries that name this skill", with an exact count. That makes hand-kept back-link fields derivable.
+- An aggregate reports which rows it combined, how many carry an unresolved reference, and how many rows a reference filter excluded because their reference did not resolve. Nothing unresolved is dropped silently or counted as zero.
+- A later phase adds a reference index, by a new collection-store schema revision, and bounded reverse expansion, such as "the diary entries that name this skill", with an exact count. That makes hand-kept back-link fields derivable.
 - A write keeps an unresolved reference and reports it as a warning. It is never refused, so an entry written before its target exists still saves.
-- `add-collection-query-engine` CQ4 and Q3 tasks 3.5–3.8 take their relation declarations from this capability instead of type-level declarations.
+- This change amends `add-collection-query-engine`: CQ4 and Q3 tasks 3.5–3.6 take their relation declarations from this capability, not type-level declarations, and many-valued and reverse relations are expansion, not joins.
 
 Out of scope: time-window joins between collections, for example glucose readings joined to sleep nights by time. That is a separate relation kind for a later change. Multi-hop graph paths stay in `add-graph-traversal-queries`, which can consume the reference index as typed virtual edges. Write-time cascades are out of scope too.
 
@@ -25,10 +25,10 @@ Out of scope: time-window joins between collections, for example glucose reading
 
 ### Modified Capabilities
 
-- `collection-query-engine` (in the active change `add-collection-query-engine`): CQ4 joins follow relations declared by `collection-row-references`. They resolve through the declared key and keep their forward-only, at-most-two-hop contract.
+- `collection-query-engine`: no canonical spec exists yet, so this change edits the active change `add-collection-query-engine` directly. CQ4 joins follow references declared by `collection-row-references`, resolve through the declared key and stay forward-only with at most two hops.
 
 ## Impact
 
-- Code: the manifest parser and revise validation (`structured_collections.py`), a store migration that adds the reference index (`collection_store`), the read path and governance binding for target collections (`query_engine`, `record_governance`), `read_records` query arguments and their tool text, and the generated tool schemas and capabilities.
+- Code: the manifest parser and revise validation (`structured_collections.py`), filtered base-row reductions and the read path with per-target governance (`query_engine`, `record_governance`), `read_records` and `read_plans` query arguments and their tool text, and the generated tool schemas and capabilities. Phase 2 adds a collection-store schema revision for the reference index.
 - Data: no rewrite of existing rows. Owners add `references` to existing string fields; `inspect` reports how many values resolve.
-- Undo: remove the `references` declarations. The index is derived and rebuilt from canonical rows.
+- Undo: remove the `references` declarations. The phase 2 index is derived, kept out of the in-vault replica and rebuilt from items.
