@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from test_governance_egress import EXTERNAL, write_rule, write_scope
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_held import (  # noqa: F401
     ALPHA,
@@ -23,7 +24,7 @@ from test_vault_store_held import (  # noqa: F401
     queue,
     stored_page,
 )
-from test_vault_store_migration import vault  # noqa: F401
+from test_vault_store_migration import DIAGRAM, vault  # noqa: F401
 from test_vault_store_read_write import rows, stored, writer  # noqa: F401
 
 from exomem import commands, held_operation, state_paths
@@ -80,9 +81,28 @@ def test_the_review_tool_lists_each_item_with_what_the_store_lists_and_a_sentenc
     )
     assert row["file"] == {"exists": True, "sha256": item.file.sha256, "size": item.file.size}
     assert row["store"] == {"revision": item.store.revision, "sha256": item.store.sha256}
-    assert answer["outcome"].startswith("1 file changed outside Exomem and wait")
-    assert answer["choices"] == ["keep-mine", "keep-store"]
-    assert answer["total"] == 1 and answer["withheld"] == 0 and answer["truncated"] is False
+    assert answer["outcome"].startswith("1 file changed outside Exomem and waits for a choice.")
+    assert (row["resolvable"], row["keep_mine_possible"]) == (True, True)
+    assert row["choices"] == ["keep-mine", "keep-store"]
+    assert answer["total"] == 1 and answer["truncated"] is False
+
+
+def test_the_review_tool_offers_no_choice_for_a_held_binary_and_says_it_stays_held(stored, writer):
+    """A sentence that promises the person a choice that the store cannot take yet."""
+    sha, revision = rows(
+        stored, "SELECT sha256, revision FROM store_binaries WHERE path = ?", DIAGRAM
+    )[0]
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_held(path, kind, store_revision, sha256, detected_at) "
+            "VALUES (?, 'edit', ?, ?, ?)",
+            (DIAGRAM, revision, sha, "2026-11-09T09:00:00Z"),
+        )
+    answer = listed(stored)
+    (row,) = answer["items"]
+    assert (row["resolvable"], row["keep_mine_possible"], row["choices"]) == (False, False, [])
+    assert "wait" not in answer["outcome"]
+    assert "stay held until a later release adds that" in answer["outcome"]
 
 
 def test_the_review_tool_says_when_the_vault_is_not_in_store_mode_instead_of_reporting_none_held(
@@ -129,25 +149,26 @@ def test_the_repair_tool_names_the_argument_to_add(stored, writer, served):
     assert len(held.list_held(stored)) == 1
 
 
-def test_a_caller_who_may_not_read_the_page_sees_no_item_and_cannot_resolve_it(
+def test_a_policy_that_restricts_one_folder_hides_its_held_item_from_an_outside_caller_only(
     stored, writer, served
 ):
-    """A connection that learns a protected page's path from the held list, or that overwrites the
-    page's stored version."""
+    """A visibility check on the page's bytes on disk hides every held item from everyone, the owner
+    too, because a held edit always differs from the store and a held delete has no file. A caller
+    who may not read the folder must still see nothing, and not even a count."""
     hold(stored, writer, "edit")
     version = held.list_held(stored)[0].item_version
-    # A policy that cannot compile blocks every release, which no caller escapes.
-    (stored / "Knowledge Base" / "_Governance" / "rules").mkdir(parents=True)
-    (stored / "Knowledge Base" / "_Governance" / "rules" / "broken.yaml").write_text(
-        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\nscope_ids: []\n"
-        "audience: external\nceiling: 9\n",
-        encoding="utf-8",
-    )
+    write_scope(stored, paths="Notes/**")
+    write_rule(stored, ceiling=0)
     policy._CACHE.clear()
     egress.clear_decision_memo()
-    with principal.request_scope(principal.most_restrictive_principal(surface="mcp")):
+    assert len(listed(stored)["items"]) == 1
+    outsider = principal.RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
+    with principal.request_scope(outsider):
         answer = listed(stored)
-        assert answer["items"] == [] and answer["withheld"] == 1
+        assert answer["items"] == [] and answer["total"] == 0
+        assert "withheld" not in answer and answer["outcome"].startswith("Nothing is held")
         with pytest.raises(write.StoreConflict):
             repair(stored, held.KEEP_MINE, item_version=version)
     assert stored_page(stored)[0][0] != MINE
+    assert repair(stored, held.KEEP_MINE, item_version=version)["choice"] == held.KEEP_MINE
+    assert stored_page(stored)[0][0] == MINE

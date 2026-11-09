@@ -37,12 +37,17 @@ RESOLVE_FIELDS = tuple(_REQUIRED)
 
 
 def _may_see(vault_root: Path, rel: str) -> bool:
-    """Whether this caller may read the page at ``rel`` in full: a held item is its business."""
+    """Whether this caller may read the page at ``rel`` in full: a held item is its business.
+
+    The release level comes from the path alone. The level that compares the page's bytes on disk
+    would hide every held item, since a held edit has file bytes that differ from the stored page
+    and a held delete has no file.
+    """
     from .governance import egress
     from .governance.principal import effective_principal
 
-    level = egress.release_level_for(vault_root, rel, principal=effective_principal())
-    return level is not None and level >= egress.LEVEL_FULL
+    level = egress.release_level_for_path_only(vault_root, rel, principal=effective_principal())
+    return level >= egress.LEVEL_FULL
 
 
 def _count(number: int, one: str, many: str) -> str:
@@ -63,6 +68,9 @@ def _row(item: Any) -> dict[str, Any]:
         "store": None
         if item.store is None
         else {"revision": item.store.revision, "sha256": item.store.sha256},
+        "resolvable": item.resolvable,
+        "keep_mine_possible": item.keep_mine_possible,
+        "choices": list(item.choices),
         "item_version": item.item_version,
         "diagnostics": {
             "held_store_revision": item.held_store_revision,
@@ -84,40 +92,44 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
             f"Pass a limit from 1 to {_MAX_LIMIT}, or omit it to list {_DEFAULT_LIMIT}.",
         )
     root = Path(vault_root)
-    found = held.list_held(root)
-    visible = [item for item in found if _may_see(root, item.path)]
+    visible = [item for item in held.list_held(root) if _may_see(root, item.path)]
     shown = visible[:cap]
-    if not found:
+    # An item the caller may not read is left out without a count, as the release contract omits it.
+    if not visible:
         sentence = (
             "Nothing is held: no outside edit or delete waits for a choice."
             if mode.store_mode_active(root)
             else "This vault is not in store mode, so it holds no held items."
         )
-    elif not visible:
-        sentence = (
-            f"{_count(len(found), 'item is', 'items are')} held, "
-            "and this connection may not read them."
-        )
     else:
-        sentence = (
-            f"{_count(len(visible), 'file', 'files')} changed outside Exomem and wait for a choice"
-            + (f", showing {len(shown)}" if len(shown) < len(visible) else "")
-            + f". Keep the person's file with {held.KEEP_MINE}, "
-            f"or keep Exomem's page with {held.KEEP_STORE}."
-        )
-        if len(visible) < len(found):
-            sentence += f" {len(found) - len(visible)} more are withheld from this connection."
+        binaries = sum(not item.resolvable for item in visible)
+        pages = len(visible) - binaries
+        parts = []
+        if pages:
+            parts.append(
+                f"{_count(pages, 'file', 'files')} changed outside Exomem and "
+                f"{'waits' if pages == 1 else 'wait'} for a choice. "
+                f"Keep the person's file with {held.KEEP_MINE}, "
+                f"or keep Exomem's page with {held.KEEP_STORE}."
+            )
+        if binaries:
+            parts.append(
+                f"{_count(binaries, 'binary file is', 'binary files are')} held. "
+                "Binaries cannot be resolved here yet and stay held "
+                "until a later release adds that."
+            )
+        if len(shown) < len(visible):
+            parts.append(f"Showing {len(shown)} of {len(visible)}.")
+        sentence = " ".join(parts)
     return {
         "kind": LIST_MODE,
         "outcome": sentence,
         "returned": len(shown),
         "total": len(visible),
-        "withheld": len(found) - len(visible),
         "truncated": len(shown) < len(visible),
-        "choices": list(held.CHOICES),
         "resolve_with": (
-            f"{REPAIR_TOOL} kind {RESOLVE_MODE} with path, choice, the item's item_version "
-            "and why. "
+            f"{REPAIR_TOOL} kind {RESOLVE_MODE} with path, one of the item's choices, "
+            "the item's item_version and why. "
             f"{held.KEEP_STORE} saves the person's file first, so no bytes are lost."
         ),
         "items": [_row(item) for item in shown],
@@ -133,7 +145,7 @@ def resolve(
 ) -> dict[str, Any]:
     """Resolve one held item. A refusal changes nothing and names what to change."""
     from .cli_ops import OpError
-    from .vault_store import held, write
+    from .vault_store import held
 
     supplied = {"path": path, "choice": choice, "item_version": item_version, "why": why}
     for name, hint in _REQUIRED.items():
@@ -144,11 +156,7 @@ def resolve(
     root = Path(vault_root)
     if not _may_see(root, path):
         # A page this caller may not read answers as an item that is not held: it reveals nothing.
-        raise write.StoreConflict(
-            path,
-            "nothing is held for this path: another agent may have resolved it",
-            f"Read the held items with {REVIEW_TOOL} kind {LIST_MODE} to see what is held now.",
-        )
+        raise held.nothing_held(path)
     result = held.resolve_held(root, path, choice, why=why, seen=item_version)
     diagnostics: dict[str, Any] = {"revision": result.revision}
     copy = None

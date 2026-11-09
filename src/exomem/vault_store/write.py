@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -124,8 +124,46 @@ class BinaryDelete:
 
 
 @dataclass(frozen=True, slots=True)
+class HeldRow:
+    """A held outside change that the commit resolves, named as the caller read its row.
+
+    The commit drops the row, and refuses when no row matches all four fields.
+    """
+
+    rel: str
+    kind: str
+    detected_at: str
+    sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FileSeen:
+    """The person's file at a path as the caller saw it, which the commit records as what the
+    projection manifest saw there: the projector then replaces that file with the stored page.
+
+    ``sha256`` is None when the file was gone, and the commit then drops the manifest entry; the
+    size and modification time then stay None too.
+    """
+
+    rel: str
+    sha256: str | None
+    size: int | None = None
+    mtime_ns: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.sha256 is None) != (self.size is None) or (self.size is None) != (
+            self.mtime_ns is None
+        ):
+            raise ValueError("a seen file has a hash, a size and a time, or none of them")
+
+
+@dataclass(frozen=True, slots=True)
 class StoreChange:
-    """Everything one commit changes. A path appears in at most one of the operations."""
+    """Everything one commit changes. A path appears in at most one of the operations.
+
+    ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
+    ``commit`` applies them in the same transaction as the page changes.
+    """
 
     origin: Origin
     reason: str
@@ -135,6 +173,8 @@ class StoreChange:
     binaries: tuple[BinaryRecord, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
+    resolves_held: tuple[HeldRow, ...] = ()
+    files_seen: tuple[FileSeen, ...] = ()
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -152,6 +192,8 @@ class StoreChange:
             raise ValueError("a store change names no file")
         if len(set(self.paths)) != len(self.paths):
             raise ValueError("a store change names a path more than once")
+        if not {seen.rel for seen in self.files_seen} <= set(self.paths):
+            raise ValueError("a store change records a file that it does not change")
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,21 +237,15 @@ def _text_keyed(value):
     return value
 
 
-def commit(
-    writer: CollectionWriter,
-    change: StoreChange,
-    *,
-    settle: Callable[[Connection, int], None] | None = None,
-) -> CommitResult:
+def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     """Apply ``change`` in one transaction on the store thread's writer, and return its revision.
 
     The statements run in this order, so that a kill at any point leaves the old state whole: the
     expectations, the pages, the binary records and the manifest, one audit row per file, the
-    projection intents, the caller's ``settle`` and last the revision. One intent stands for each
-    path, and the oldest queue time stays. A move queues one ``move`` intent under its destination
-    path, with the old path in ``from_path``. ``settle(tx, revision)`` runs in the commit's own
-    transaction with the revision that the commit makes, so a caller's bookkeeping stands or falls
-    with the change; an exception from it rolls the whole commit back.
+    projection intents, the held rows that the change resolves, the files that it saw and last the
+    revision. One intent stands for each path, and the oldest queue time stays. A move queues one
+    ``move`` intent under its destination path, with the old path in ``from_path``. A held row that
+    changed or went meanwhile rolls the whole commit back.
     """
     _require_owned(change)
     with writer.handle.transaction() as tx:
@@ -232,8 +268,10 @@ def commit(
         for binary in change.binary_deletes:
             _delete_binary(tx, binary.rel, audit)
         _enqueue(tx, audit.intents, revision, now)
-        if settle is not None:
-            settle(tx, revision)
+        for held in change.resolves_held:
+            _drop_held(tx, held)
+        for seen in change.files_seen:
+            _record_seen(tx, seen, revision)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
@@ -274,6 +312,22 @@ def record_manifest(
         "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
         (rel, sha256, size, mtime_ns, revision),
     )
+
+
+def _drop_held(tx: Connection, held: HeldRow) -> None:
+    dropped = tx.execute(
+        "DELETE FROM store_held WHERE path = ? AND kind = ? AND detected_at = ? AND sha256 IS ?",
+        (held.rel, held.kind, held.detected_at, held.sha256),
+    ).rowcount
+    if dropped != 1:
+        raise StoreConflict(held.rel, "this held item changed while it was resolved")
+
+
+def _record_seen(tx: Connection, seen: FileSeen, revision: int) -> None:
+    if seen.sha256 is None or seen.size is None or seen.mtime_ns is None:
+        tx.execute("DELETE FROM store_manifest WHERE path = ?", (seen.rel,))
+    else:
+        record_manifest(tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision)
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:

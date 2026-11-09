@@ -17,11 +17,12 @@ from datetime import UTC, datetime
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import ALPHA, DIAGRAM, migrate_apply, vault  # noqa: F401
 from test_vault_store_read_write import put, rows, stored, writer  # noqa: F401
 
 from exomem import state_paths
 from exomem.cli_ops import OpError
+from exomem.curation import MAX_WHY_CHARS
 from exomem.vault_store import held, read, write
 
 pytestmark = pytest.mark.skipif(
@@ -123,6 +124,70 @@ def test_the_list_gives_each_item_the_persons_file_and_the_stores_page_as_they_a
     assert only_item(stored).item_version != item.item_version
 
 
+def test_the_list_offers_keep_mine_only_while_the_stores_page_is_as_it_was_when_held(
+    stored, writer
+):
+    """A list that offers keep-mine after Exomem changed the page again, so the agent tries a
+    resolution that the store must refuse."""
+    hold(stored, writer, "edit")
+    before = only_item(stored)
+    assert (before.resolvable, before.keep_mine_possible) == (True, True)
+    assert before.choices == (held.KEEP_MINE, held.KEEP_STORE)
+    write.commit(writer, put(ALPHA, EXOMEM + b"A later Exomem change.\n"))
+    after = only_item(stored)
+    assert (after.resolvable, after.keep_mine_possible) == (True, False)
+    assert after.choices == (held.KEEP_STORE,)
+
+
+def test_a_held_binary_is_listed_as_not_resolvable_and_refuses_both_choices(stored, writer):
+    """A held binary that offers choices it cannot take, or whose refusal sends an agent to
+    rollback commands that the person never asked for."""
+    sha, revision = rows(
+        stored, "SELECT sha256, revision FROM store_binaries WHERE path = ?", DIAGRAM
+    )[0]
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_held(path, kind, store_revision, sha256, detected_at) "
+            "VALUES (?, 'edit', ?, ?, ?)",
+            (DIAGRAM, revision, sha, "2026-11-09T09:00:00Z"),
+        )
+    (item,) = held.list_held(stored)
+    assert (item.resolvable, item.keep_mine_possible, item.choices) == (False, False, ())
+    for choice in held.CHOICES:
+        with pytest.raises(OpError) as refused:
+            held.resolve_held(
+                stored, DIAGRAM, choice, why=WHY, seen=item.item_version, writer=writer
+            )
+        assert refused.value.code == write.NOT_OWNED
+        assert "until a later release adds that" in refused.value.remediation
+        assert "rollback" not in refused.value.remediation
+    assert len(rows(stored, "SELECT path FROM store_held")) == 1
+
+
+@pytest.mark.parametrize(
+    "why",
+    ["", "   ", "two\nlines", "x" * (MAX_WHY_CHARS + 1)],
+    ids=["empty", "blank", "lines", "long"],
+)
+def test_a_reason_that_is_empty_has_several_lines_or_is_long_is_refused_before_anything_changes(
+    stored, writer, why
+):
+    """A reason that fills the append-only audit trail with a page of text, or with nothing."""
+    hold(stored, writer, "edit")
+    with pytest.raises(OpError) as refused:
+        held.resolve_held(
+            stored,
+            ALPHA,
+            held.KEEP_STORE,
+            why=why,
+            seen=only_item(stored).item_version,
+            writer=writer,
+        )
+    assert refused.value.code == "INVALID_INPUT" and "`why`" in refused.value.remediation
+    assert len(rows(stored, "SELECT path FROM store_held")) == 1
+    assert not exports_exist(stored)
+
+
 def test_keep_mine_on_an_edit_makes_the_persons_bytes_the_page_without_projecting_again(
     stored, writer
 ):
@@ -187,9 +252,15 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
         (digest(MINE),)
     ]
     assert rows(stored, "SELECT path FROM store_held") == []
+    copy = exported.relative_to(state_paths.vault_state_dir(stored)).as_posix()
     assert rows(
         stored, "SELECT operation, reason FROM store_audit WHERE revision = ?", revision + 1
-    ) == [("write", f"held keep-store: {WHY}")]
+    ) == [
+        (
+            "write",
+            f"held keep-store: {WHY}; the person's file is saved as {copy} (sha256 {digest(MINE)})",
+        )
+    ]
     assert (stored / ALPHA).read_bytes() == MINE, (
         "the projector, not the resolution, replaces the file"
     )
