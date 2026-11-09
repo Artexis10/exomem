@@ -221,7 +221,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for binary in change.binary_deletes:
             _delete_binary(tx, binary.rel, audit)
         derive.apply(tx, writer.root, change, existing)
-        # The pages above derived with the overlay that the disk still holds; the registry job settles them.
+        # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))

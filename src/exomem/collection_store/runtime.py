@@ -759,7 +759,7 @@ class CollectionStoreRuntime:
             result = replica.publish_replica(
                 self.root, writer, authority_check=lambda: self._authority(token, progress=True),
                 deadline=deadline, cancelled=cancelled,
-                # Store mode changes no collection head, so the replica's marker is copied by this flag alone.
+                # Store mode changes no collection head: only this flag copies the replica's marker.
                 force=vault_marker.replica_stale(self.root, writer.connection),
             )
             if result.status != "published":
@@ -1216,7 +1216,8 @@ class StoreServer:
         self._held_elsewhere_since = None  # when a starved tick began waiting out another thread's hold
         # When each maintenance tick is next due; between two requests the most overdue one runs.
         self._ticks = {
-            "create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0, "registry": 0.0,
+            "create": 0.0, "import": 0.0, "backfill": 0.0, "views": 0.0, "derived": 0.0,
+            "registry": 0.0,
         }
         self._served_at = 0.0  # when the store thread last finished a request
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
@@ -1847,11 +1848,12 @@ class StoreServer:
                 "mismatched": IMPORT_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
 
     def _registry_tick(self):
-        """Derive a store-mode vault's pages again after a commit changed its registries or access policy.
+        """Derive a store-mode vault's pages again after a commit changed its registries or policy.
 
-        The job is ``vault_store.rederive``: one bounded transaction per tick, resumed from the store's own
-        cursor after a restart. A file-mode vault, which no running service ever turns into store mode, and a
-        store whose rows already reflect the overlay each cost one stat of the manifest per tick.
+        The job is ``vault_store.rederive``: one bounded transaction per tick, resumed from the
+        store's own cursor after a restart. A file-mode vault, which no running service ever turns
+        into store mode, and a store whose rows already reflect the overlay each cost one stat of
+        the manifest per tick.
         """
         from ..governance import principal
         from ..vault_store import mode as store_mode
@@ -1866,9 +1868,14 @@ class StoreServer:
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 outcome = self._write(rederive.settle, self.root, writer)
         except Exception:  # noqa: BLE001 - a refused batch leaves the rows behind the store, and a later tick retries
-            logger.warning("the registry state of the vault store could not advance; retrying later", exc_info=True)
+            logger.warning(
+                "the registry state of the vault store could not advance; retrying later",
+                exc_info=True,
+            )
             return IMPORT_RETRY_SECONDS
-        return {rederive.ADVANCED: 0.0, rederive.WAITING: DERIVED_RETRY_SECONDS}.get(outcome, IMPORT_IDLE_SECONDS)
+        return {rederive.ADVANCED: 0.0, rederive.WAITING: DERIVED_RETRY_SECONDS}.get(
+            outcome, IMPORT_IDLE_SECONDS
+        )
 
     def _aside(self):
         """Whether background work ends after its current batch or window, which only frees the store sooner.

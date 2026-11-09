@@ -1,8 +1,9 @@
-"""A store-mode vault says so in its replica, and a file-mode service on another state root reads it.
+"""A store-mode vault says so in its replica, and a file-mode service elsewhere reads it.
 
-OpenSpec make-vault-store-canonical D8. The vault is the migration suite's generated vault, moved by the real
-migrate and rollback routes. The second state root stands for the other machine that shares the vault folder:
-it has no manifest and no store of this vault, and sees only what the vault folder carries.
+OpenSpec make-vault-store-canonical D8. The vault is the migration suite's generated vault, moved
+by the real migrate and rollback routes. The second state root stands for the other machine that
+shares the vault folder: it has no manifest and no store of this vault, and sees only what the
+vault folder carries.
 """
 
 from __future__ import annotations
@@ -41,16 +42,21 @@ def refused(vault_root):
     return error.value
 
 
+def last_reported(capsys):
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
 def test_a_migration_leaves_the_marker_in_the_replica_and_another_state_root_refuses_to_start(
     vault, other_state_root, monkeypatch, capsys  # noqa: F811
 ):
-    """A marker that stays in the owner's state root, so a second machine starts file mode beside the store."""
+    """A marker that stays in the owner's state root, so a second machine starts file mode beside
+    the store."""
     assert marker.read_replica(vault).state == marker.CLEAR
     capsys.readouterr()
 
     assert migrate_apply(vault) == 0
 
-    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["vault_marker"] == marker.STORE
+    assert last_reported(capsys)["vault_marker"] == marker.STORE
     assert marker.read_replica(vault).state == marker.STORE
     on_state_root(monkeypatch, other_state_root)
     assert not mode.store_mode_active(vault), "the other state root holds no record of store mode"
@@ -65,25 +71,31 @@ def test_a_migration_leaves_the_marker_in_the_replica_and_another_state_root_ref
 def test_a_rollback_removes_the_marker_from_the_replica_and_the_other_state_root_starts(
     vault, other_state_root, monkeypatch, tmp_path, capsys  # noqa: F811
 ):
-    """A marker that outlives the rollback, which locks every other machine out of a vault in file mode."""
+    """A marker that outlives the rollback, which locks every other machine out of a file-mode
+    vault."""
     assert migrate_apply(vault) == 0
     capsys.readouterr()
 
     assert rollback_apply(vault, tmp_path / "export") == 0
 
-    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["vault_marker"] == marker.CLEAR
+    assert last_reported(capsys)["vault_marker"] == marker.CLEAR
     assert marker.read_replica(vault).state == marker.CLEAR
     on_state_root(monkeypatch, other_state_root)
     availability.require_servable(vault)
 
 
-def test_a_vault_that_never_migrated_starts_on_another_state_root(vault, other_state_root, monkeypatch):  # noqa: F811
-    """A refusal that reaches the vaults that never entered store mode, whose replica carries no marker."""
+def test_a_vault_that_never_migrated_starts_on_another_state_root(
+    vault, other_state_root, monkeypatch  # noqa: F811
+):
+    """A refusal that reaches the vaults that never entered store mode, whose replica has no
+    marker."""
     on_state_root(monkeypatch, other_state_root)
     availability.require_servable(vault)
 
 
-def test_a_vault_with_no_replica_starts_on_another_state_root(vault, other_state_root, monkeypatch):  # noqa: F811
+def test_a_vault_with_no_replica_starts_on_another_state_root(
+    vault, other_state_root, monkeypatch  # noqa: F811
+):
     """A refusal that waits for a replica that a sync has not delivered yet."""
     shutil.rmtree(replica.replica_path(vault).parent)
     assert marker.read_replica(vault).state == marker.ABSENT
@@ -94,7 +106,7 @@ def test_a_vault_with_no_replica_starts_on_another_state_root(vault, other_state
 def test_an_unreadable_replica_does_not_block_a_file_mode_start_and_status_says_why(
     vault, other_state_root, monkeypatch, caplog  # noqa: F811
 ):
-    """A half-synced replica that locks a file-mode owner out of a vault that may be in file mode."""
+    """A half-synced replica that locks a file-mode owner out of a vault in file mode."""
     assert migrate_apply(vault) == 0
     replica.replica_path(vault).write_bytes(b"half of a database file")
     assert marker.read_replica(vault).state == marker.UNREADABLE
@@ -112,8 +124,8 @@ def test_an_unreadable_replica_does_not_block_a_file_mode_start_and_status_says_
 def test_the_state_root_that_rolled_back_starts_while_its_replica_still_says_store(
     vault, other_state_root, monkeypatch, tmp_path  # noqa: F811
 ):
-    """A failed hand-back after the rollback that leaves the replica saying store, and the owner locked out of
-    the only root that could publish the replica that clears it."""
+    """A failed hand-back after the rollback that leaves the replica saying store, and the owner
+    locked out of the only root that could publish the replica that clears it."""
     assert migrate_apply(vault) == 0
     published = tmp_path / "published-at-migration.sqlite"
     shutil.copyfile(replica.replica_path(vault), published)
@@ -128,14 +140,14 @@ def test_the_state_root_that_rolled_back_starts_while_its_replica_still_says_sto
 
 
 def test_the_status_and_the_doctor_show_the_marker_that_the_replica_carries(
-    vault, other_state_root, monkeypatch, tmp_path  # noqa: F811
+    vault, other_state_root, monkeypatch  # noqa: F811
 ):
-    """A status or a doctor that says nothing of the one record that decides whether another machine may start."""
+    """A status or a doctor that says nothing of the record that lets another machine start."""
     assert mode.status(vault)["vault_marker"] == marker.CLEAR
     assert doctor._check_vault_store_records(vault) is None
     assert migrate_apply(vault) == 0
     assert mode.status(vault)["vault_marker"] == marker.STORE
-    assert doctor._check_vault_store_records(vault) is None, "the root that holds the store has nothing to report"
+    assert doctor._check_vault_store_records(vault) is None, "the root with the store: no finding"
 
     on_state_root(monkeypatch, other_state_root)
     check = doctor._check_vault_store_records(vault)

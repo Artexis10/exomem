@@ -319,7 +319,8 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
         "store-mode migrate",
         lambda session, token, writer: _cutover(root, session, token, writer, why=why),
     )
-    # What the replica says once the hand-back ran: "store" means another state root's file-mode start now refuses.
+    # What the replica says once the hand-back ran: "store" means that a file-mode start on another
+    # state root now refuses.
     return {**result, "vault_marker": marker.read_replica(root).state}
 
 
@@ -493,7 +494,7 @@ def _install_rows(
         "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
         (revision, Origin.MIGRATION.value, why, now),
     )
-    # The vault-side marker commits with the mode row, so a replica never says store for a vault that is not.
+    # The vault-side marker commits with the mode row, so no replica says store for a file vault.
     marker.record(conn)
     rederive.record_derived_from_files(conn, revision)
 

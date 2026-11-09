@@ -136,17 +136,18 @@ STORE_FIGURES = (
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
-    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash window reports
-    its own state. A store-mode vault adds the figures that an operator checks before a rollback: stored
-    pages and binaries, queued projections, the age in seconds of the oldest queued projection that no hold
-    sits on (None when none waits, "unknown" when the clock says it is in the future), and held
-    items in total and by kind. A projection that the projector deferred, such as one on a linked
-    file, stays queued and keeps ageing. The registry figures say whether the derived rows reflect the
-    schema overlay (``current``), are being derived again toward ``registry_target_revision`` (``rebuilding``)
-    or have no record (``unknown``). ``vault_marker`` is what the replica under the vault says: ``store``
-    makes a file-mode start on another state root refuse. A store that cannot be read gives "unknown", for the mode
-    or for each figure, with the error's name in ``unreadable``: an unreadable store never reports
-    zeros. A damaged state manifest raises instead, so that the command refuses and names it.
+    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash
+    window reports its own state. A store-mode vault adds the figures that an operator checks before
+    a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
+    queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
+    is in the future), and held items in total and by kind. A projection that the projector
+    deferred, such as one on a linked file, stays queued and keeps ageing. The registry figures say
+    whether the derived rows reflect the schema overlay (``current``), are being derived again
+    toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
+    ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start on
+    another state root refuse. A store that cannot be read gives "unknown", for the mode or for each
+    figure, with the error's name in ``unreadable``: an unreadable store never reports zeros. A
+    damaged state manifest raises instead, so that the command refuses and names it.
     """
     from . import marker
 

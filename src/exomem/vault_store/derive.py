@@ -10,7 +10,8 @@ no row without its page.
 The registries (traversal profiles, the type basis) and the access policy are the exception: the
 owners' builders read them from disk, while the schema overlay under ``_Schema`` is store-owned. A
 batch that writes the overlay therefore derives its pages with the previous registry, and the
-background job in ``rederive.py`` settles the rows afterwards, one ``rederive_pages`` batch at a time.
+background job in ``rederive.py`` settles the rows afterwards, one ``rederive_pages`` batch at a
+time.
 
 The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.page_graph_rows``,
 ``memory_refs.identity_row``); this module only says which bytes, which resolver and which pages.
@@ -75,7 +76,7 @@ def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[s
 
 
 def rederive_pages(tx: Connection, root: Path, rels: list[str]) -> None:
-    """Derive the rows of the stored pages at ``rels`` again from their own bytes, which no commit changes.
+    """Derive the rows of the stored pages at ``rels`` again from their own bytes.
 
     The registry job calls it once the registries and the access policy that the builders read have
     changed. Every page counts as one that the store already held, so a page whose title is the same

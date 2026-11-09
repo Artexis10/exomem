@@ -129,6 +129,38 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
 - **THEN** the replica holds the collection tables and no page, lexical or graph table
 
+### Requirement: A change to the schema overlay settles the registry state in the background
+In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread.
+
+#### Scenario: A policy change returns before its rows and the job then settles them
+- **WHEN** a commit changes the access policy of a store-mode vault
+- **THEN** the commit returns while status reports `rebuilding` with that commit's revision as the target
+- **AND** when the job finishes status reports `current`, and every derived table equals a fresh derivation from the stored bytes with the new policy
+
+#### Scenario: A kill inside a batch leaves the rows behind the store
+- **WHEN** the process is killed inside a batch of the job
+- **THEN** no derived row is ahead of the recorded overlay revision
+- **AND** the next start resumes the job and ends with the rows of a fresh derivation
+
+#### Scenario: A write does not wait for the job
+- **WHEN** a governed write commits between two batches of the job
+- **THEN** the write commits at once, and the job derives that page with the policy that the vault holds when it finishes
+
+### Requirement: A store-mode vault says so beside the vault
+Activation SHALL record a store-mode marker in the collection store's `store_meta` in the transaction that records store mode, and rollback SHALL remove it in the transaction that records file mode. Both SHALL force the hand-back to copy the replica under the vault, because store mode changes no collection head. A file-mode service on another state root SHALL read the marker from the replica when it starts and SHALL refuse with a named code, the reason and the remediation when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store says file and holds the replica's tenure SHALL start. `exomem store-mode status` and the doctor SHALL show the marker.
+
+#### Scenario: Another state root refuses a store-mode vault
+- **WHEN** a vault is migrated into store mode and a file-mode service starts on another state root over the same vault
+- **THEN** the service refuses to start with `VAULT_STORE_ELSEWHERE` and names the rollback
+
+#### Scenario: Rollback releases the vault
+- **WHEN** the vault is rolled back to file mode
+- **THEN** the replica no longer says store and the file-mode service on the other state root starts
+
+#### Scenario: A replica that cannot be read does not block a file-mode vault
+- **WHEN** the replica is absent or unreadable
+- **THEN** a file-mode service starts, and status names the unreadable replica
+
 ### Requirement: Freshness requirements follow store ownership
 For files the store owns, the requirements that keep derived sidecars in step with Markdown on disk SHALL NOT apply in store mode; a change on disk to such a file SHALL follow the outside-edit requirement of this capability, and caches SHALL key on store revision. For vault content outside the store, those requirements SHALL keep applying in store mode as they do in file mode.
 

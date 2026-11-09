@@ -27,12 +27,12 @@ STORE_ELSEWHERE = "VAULT_STORE_ELSEWHERE"
 
 ROLLBACK = "`exomem store-mode rollback`"
 ELSEWHERE_REASON = (
-    "The vault's replica says another state root holds this vault's pages in the collection store, so a "
-    "file-mode service here would write Markdown beside them."
+    "The vault's replica says another state root holds this vault's pages in the collection store, "
+    "so a file-mode service here would write Markdown beside them."
 )
 ELSEWHERE_REMEDY = (
-    f"Start the service on the state root that holds the store, or run {ROLLBACK} there and let the "
-    "replica sync back to this machine."
+    f"Start the service on the state root that holds the store, or run {ROLLBACK} there and let "
+    "the replica sync back to this machine."
 )
 
 
@@ -61,9 +61,10 @@ def require_servable(vault_root: Path) -> None:
 
     It prevents a service from answering reads out of Markdown that the store has replaced. A false
     refusal needs a store-mode vault on a build that cannot serve it, and the owner's way out is the
-    rollback this message names. A file-mode vault starts, and the crash state that ``marker_inconsistency``
-    names is logged on the way: it is reachable after a crash, so it warns and never refuses. The one refusal
-    of a file-mode vault is ``require_no_store_elsewhere``: its replica says another state root holds the store.
+    rollback this message names. A file-mode vault starts, and the crash state that
+    ``marker_inconsistency`` names is logged on the way: it is reachable after a crash, so it warns
+    and never refuses. The one refusal of a file-mode vault is ``require_no_store_elsewhere``: its
+    replica says another state root holds the store.
     """
     if not mode.store_mode_active(vault_root):
         inconsistency = marker_inconsistency(vault_root)
@@ -83,15 +84,18 @@ def require_servable(vault_root: Path) -> None:
 def require_no_store_elsewhere(vault_root: Path) -> None:
     """Refuse to start a file-mode service on a vault that another state root holds in store mode.
 
-    It prevents this service from writing Markdown beside pages that the other root's store owns. A false
-    refusal needs a replica that says store after the owner rolled back and before the new replica arrives,
-    and the owner's way out is to let the replica sync or to run the rollback's hand-back again. Only a
-    readable replica that says store refuses: an absent or unreadable one is a normal state of a synced vault.
+    It prevents this service from writing Markdown beside pages that the other root's store owns. A
+    false refusal needs a replica that says store after the owner rolled back and before the new
+    replica arrives, and the owner's way out is to let the replica sync or to run the rollback's
+    hand-back again. Only a readable replica that says store refuses: an absent or unreadable one is
+    a normal state of a synced vault.
     """
     from . import marker
 
     if marker.conflict(vault_root) is not None:
-        raise connection.CollectionStoreError(STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {ELSEWHERE_REMEDY}")
+        raise connection.CollectionStoreError(
+            STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {ELSEWHERE_REMEDY}"
+        )
 
 
 def marker_inconsistency(vault_root: Path) -> str | None:

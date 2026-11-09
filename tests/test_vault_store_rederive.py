@@ -1,10 +1,11 @@
 """A store-mode commit that changes the schema overlay is settled by a background job.
 
-OpenSpec make-vault-store-canonical D2 and task 2.4. The vault is the migration suite's generated vault in
-store mode, with the store's writer bound as the store thread holds it. The projector has its own suite, so
-``project`` stands in for it: it puts each queued file on disk, which the job waits for. The job is driven one
-batch at a time, as the store thread's tick drives it. Each case compares the rows with what the owners derive
-from the files (``verify.derive_expected``), which is how migration proves its own rows.
+OpenSpec make-vault-store-canonical D2 and task 2.4. The vault is the migration suite's generated
+vault in store mode, with the store's writer bound as the store thread holds it. The projector has
+its own suite, so ``project`` stands in for it: it puts each queued file on disk, which the job
+waits for. The job is driven one batch at a time, as the store thread's tick drives it. Each case
+compares the rows with what the owners derive from the files (``verify.derive_expected``), which is
+how migration proves its own rows.
 """
 
 from __future__ import annotations
@@ -16,13 +17,20 @@ import signal
 import sqlite3
 import sys
 from contextlib import closing, contextmanager
+from types import SimpleNamespace
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, migrate_apply, rollback_apply, vault  # noqa: F401
+from test_vault_store_migration import (  # noqa: F401
+    ALPHA,
+    BETA,
+    migrate_apply,
+    rollback_apply,
+    vault,
+)
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview, runtime
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import derive, mode, projection, rederive, verify, write
 
@@ -34,7 +42,9 @@ POLICY = "Knowledge Base/_access.yaml"
 PROFILES = "Knowledge Base/_Schema/traversal-profiles.yaml"
 READ_ONLY_NOTES = "readonly:\n  - Notes/\n"
 GAMMA = "Knowledge Base/Notes/Gamma.md"
-GAMMA_TEXT = b"---\ntitle: Gamma\ntype: note\n---\n# Gamma\n\nThe harbour master keeps the tide ledger.\n"
+GAMMA_TEXT = (
+    b"---\ntitle: Gamma\ntype: note\n---\n# Gamma\n\nThe harbour master keeps the tide ledger.\n"
+)
 
 
 def rows(root, sql, *arguments):
@@ -43,7 +53,8 @@ def rows(root, sql, *arguments):
 
 
 def tier(root, rel):
-    return rows(root, "SELECT access_tier FROM graph_nodes WHERE path = ? AND kind = 'file'", rel)[0][0]
+    sql = "SELECT access_tier FROM graph_nodes WHERE path = ? AND kind = 'file'"
+    return rows(root, sql, rel)[0][0]
 
 
 def revision(root):
@@ -52,17 +63,18 @@ def revision(root):
 
 @contextmanager
 def store_writer(root):
-    """A second store writer, once the one that a fixture holds is closed, as a restarted service opens one."""
+    """A second store writer, once a fixture's is closed, as a restarted service opens one."""
     with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
         yield CollectionWriter(root, handle)
 
 
-def commit_policy(writer, root, text):
-    """The access policy changes as a governed binary does: the file is durable, then the store records it."""
+def commit_policy(bound, root, text):
+    """The access policy changes as a governed binary does: the file is durable, then the store
+    records it."""
     (root / POLICY).write_text(text)
     body = text.encode()
     write.commit(
-        writer,
+        bound,
         write.StoreChange(
             write.Origin.GOVERNED,
             "policy",
@@ -71,35 +83,41 @@ def commit_policy(writer, root, text):
     )
 
 
-def project(writer, root):
-    """What the projector does for each queued intent: make the file say what the store says, then clear it."""
-    queued = writer.connection.execute("SELECT path, operation FROM store_projection_queue").fetchall()
+def project(bound, root):
+    """What the projector does for each queued intent: make the file say what the store says, then
+    clear it."""
+    queued = bound.connection.execute(
+        "SELECT path, operation FROM store_projection_queue"
+    ).fetchall()
     for rel, operation in queued:
         if operation == "write":
-            body, mtime_ns = writer.connection.execute(
+            body, mtime_ns = bound.connection.execute(
                 "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
             ).fetchone()
             target = projection.write_file(root, rel, body, durable=False)
-            # The file carries the page's own mtime, so a cold derivation of the files can equal the stored rows.
+            # The file carries the page's own mtime, so a cold derivation of the files can equal
+            # the stored rows.
             os.utime(target, ns=(mtime_ns, mtime_ns))
         else:
             raise AssertionError(f"this suite projects writes only, not {operation}")
-    with writer.handle.transaction() as tx:
+    with bound.handle.transaction() as tx:
         tx.execute("DELETE FROM store_projection_queue")
 
 
-def settle_to_the_end(root, writer, limit=50):
-    """Run the job as the tick does, one batch per call, until it reports done; return each outcome."""
+def settle_to_the_end(root, bound, limit=50):
+    """Run the job as the tick does, one batch per call, until it reports done; return each
+    outcome."""
     outcomes = []
     for _ in range(limit):
-        outcomes.append(rederive.settle(root, writer))
+        outcomes.append(rederive.settle(root, bound))
         if outcomes[-1] in (rederive.DONE, rederive.IDLE):
             return outcomes
     raise AssertionError(f"the job did not finish in {limit} batches: {outcomes}")
 
 
 def assert_cold_derivation(root, tmp_path):
-    """Every derived table equals what the owners derive from the files now, and the stamps agree."""
+    """Every derived table equals what the owners derive from the files now, and the stamps
+    agree."""
     expected = tmp_path / "expected.sqlite"
     verify.derive_expected(root, expected)
     with closing(connection.open_reader(connection.store_path(root))) as reader:
@@ -112,10 +130,11 @@ def assert_cold_derivation(root, tmp_path):
     assert {key: live.get(key) for key in stamps} == {key: cold_stamps.get(key) for key in stamps}
 
 
-def test_a_policy_commit_returns_before_its_rows_and_the_job_then_derives_what_a_cold_derivation_gives(
+def test_a_policy_commit_returns_before_its_rows_and_the_job_then_matches_a_cold_derivation(
     stored, writer, tmp_path  # noqa: F811
 ):
-    """A write that waits for the whole vault's rows, or a job that leaves the tiers it was meant to settle."""
+    """A write that waits for the whole vault's rows, or a job that leaves the tiers it should
+    settle."""
     assert mode.status(stored)["registry"] == rederive.CURRENT
     assert tier(stored, ALPHA) == "read-write"
     commit_policy(writer, stored, READ_ONLY_NOTES)
@@ -125,7 +144,7 @@ def test_a_policy_commit_returns_before_its_rows_and_the_job_then_derives_what_a
     assert behind["registry"] == rederive.REBUILDING
     assert behind["registry_target_revision"] == revision(stored)
     assert behind["registry_revision"] < behind["registry_target_revision"]
-    assert tier(stored, ALPHA) == "read-write", "the commit derived with the policy that the disk held"
+    assert tier(stored, ALPHA) == "read-write", "the commit derived with the policy on the disk"
 
     settle_to_the_end(stored, writer)
 
@@ -139,7 +158,8 @@ def test_a_policy_commit_returns_before_its_rows_and_the_job_then_derives_what_a
 def test_a_registry_page_commit_settles_the_graph_stamps_that_a_cold_derivation_gives(
     stored, writer, tmp_path  # noqa: F811
 ):
-    """A traversal profile that the commit stored and the rows that still carry the old profile's hash."""
+    """A traversal profile that the commit stored and rows that still carry the old profile's
+    hash."""
     old = rows(stored, "SELECT value FROM graph_meta WHERE key = 'traversal_profile_hash'")[0][0]
     write.commit(
         writer,
@@ -159,7 +179,8 @@ def test_a_registry_page_commit_settles_the_graph_stamps_that_a_cold_derivation_
 
 
 def test_a_page_outside_the_overlay_leaves_the_registry_state_current(stored, writer):  # noqa: F811
-    """A job that runs a whole-vault pass for every commit, as it cannot tell an overlay page from a note."""
+    """A job that runs a whole-vault pass for every commit, as it cannot tell an overlay page from
+    a note."""
     write.commit(
         writer,
         write.StoreChange(write.Origin.GOVERNED, "note", puts=(write.PagePut(GAMMA, GAMMA_TEXT),)),
@@ -168,8 +189,11 @@ def test_a_page_outside_the_overlay_leaves_the_registry_state_current(stored, wr
     assert rederive.settle(stored, writer) == rederive.IDLE
 
 
-def test_the_job_waits_until_the_projector_has_put_the_overlay_file_on_disk(stored, writer):  # noqa: F811
-    """Rows derived from the old policy file on disk and recorded as current, while the new one is still queued."""
+def test_the_job_waits_until_the_projector_has_put_the_overlay_file_on_disk(
+    stored, writer  # noqa: F811
+):
+    """Rows derived from the old policy file on disk and recorded as current, while the new one is
+    still queued."""
     write.commit(
         writer,
         write.StoreChange(
@@ -185,7 +209,8 @@ def test_the_job_waits_until_the_projector_has_put_the_overlay_file_on_disk(stor
 def test_a_commit_between_two_batches_is_not_blocked_and_its_page_is_derived_by_the_new_policy(
     stored, writer, tmp_path, monkeypatch  # noqa: F811
 ):
-    """A write that waits for the job to finish, or a page written mid-pass that the pass then misses."""
+    """A write that waits for the job to finish, or a page written mid-pass that the pass then
+    misses."""
     monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
     commit_policy(writer, stored, READ_ONLY_NOTES)
     project(writer, stored)
@@ -223,6 +248,37 @@ def test_a_second_overlay_commit_during_a_pass_restarts_it_at_the_new_target(
     assert_cold_derivation(stored, tmp_path)
 
 
+def test_the_store_threads_tick_derives_one_batch_per_call_and_asks_to_come_back_at_once_until_done(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A tick that never reaches the job, or one that asks to wait a second between every batch of
+    a big vault."""
+    monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
+    commit_policy(writer, stored, READ_ONLY_NOTES)
+    project(writer, stored)
+
+    @contextmanager
+    def checkout(root, handle):
+        yield writer
+
+    # The store thread's checkout needs a lease manager; this suite holds the writer itself, as
+    # the thread does.
+    monkeypatch.setattr(preview, "preview_store", checkout)
+    thread = SimpleNamespace(
+        root=stored,
+        runtime=object(),
+        _idle_released=lambda: False,
+        _write=lambda method, *arguments: method(*arguments),
+    )
+
+    waits = [runtime.StoreServer._registry_tick(thread) for _ in range(200)]
+    first_idle = waits.index(runtime.IMPORT_IDLE_SECONDS)
+
+    assert set(waits[:first_idle]) == {0.0}, "each batch but the last asks to run again at once"
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+    assert tier(stored, ALPHA) == "readonly"
+
+
 def _settle_and_die(environment, root, nth):
     """The job in a fresh interpreter that the operating system kills inside its ``nth`` batch."""
     os.environ.clear()
@@ -246,7 +302,8 @@ def _settle_and_die(environment, root, nth):
 def test_a_kill_inside_a_batch_leaves_the_rows_behind_the_store_and_the_next_start_resumes(
     stored, tmp_path  # noqa: F811
 ):
-    """Rows ahead of the recorded revision, or a restart that begins again or skips the pages that the kill cut."""
+    """Rows ahead of the recorded revision, or a restart that begins again or skips the pages that
+    the kill cut."""
     with store_writer(stored) as before_kill:
         commit_policy(before_kill, stored, READ_ONLY_NOTES)
         project(before_kill, stored)
@@ -263,7 +320,9 @@ def test_a_kill_inside_a_batch_leaves_the_rows_behind_the_store_and_the_next_sta
     assert cursor, "the first batch committed its cursor before the kill"
     derived = {
         rel: value
-        for rel, value in rows(stored, "SELECT path, access_tier FROM graph_nodes WHERE kind = 'file'")
+        for rel, value in rows(
+            stored, "SELECT path, access_tier FROM graph_nodes WHERE kind = 'file'"
+        )
         if rel in (ALPHA, BETA)
     }
     assert "read-write" in derived.values(), "the killed batch's rows were never committed"
@@ -278,8 +337,11 @@ def test_a_kill_inside_a_batch_leaves_the_rows_behind_the_store_and_the_next_sta
     assert_cold_derivation(stored, tmp_path)
 
 
-def test_a_failure_in_a_batch_rolls_back_its_rows_and_its_cursor(stored, writer, monkeypatch):  # noqa: F811
-    """A batch whose rows commit without its cursor, so the next run derives them again over a moved state."""
+def test_a_failure_in_a_batch_rolls_back_its_rows_and_its_cursor(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A batch whose rows commit without its cursor, so the next run derives them again over a
+    moved state."""
     monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
     commit_policy(writer, stored, READ_ONLY_NOTES)
     project(writer, stored)
@@ -304,7 +366,7 @@ def test_a_failure_in_a_batch_rolls_back_its_rows_and_its_cursor(stored, writer,
 def test_migration_records_the_overlay_as_reflected_and_rollback_removes_every_key(
     stored, tmp_path  # noqa: F811
 ):
-    """Keys that outlive store mode, so a later migration reads a pass that belongs to another vault life."""
+    """Keys that outlive store mode, so a later migration reads a pass of another vault life."""
     assert mode.status(stored)["registry"] == rederive.CURRENT
     assert rederive.KEYS[1] in dict(rows(stored, "SELECT key, value FROM store_meta"))
     assert rollback_apply(stored, tmp_path / "export") == 0
