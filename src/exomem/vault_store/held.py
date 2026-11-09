@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from .. import held_fs, state_paths
 from ..cli_ops import OpError
 from ..curation import MAX_WHY_CHARS
-from . import mode, ownership, read, write
+from . import mode, ownership, projector, read, write
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -37,6 +37,7 @@ CHOICES = (KEEP_MINE, KEEP_STORE)  # nosemgrep: ep-word-set -- closed set that d
 
 BAD_CHOICE = "VAULT_STORE_HELD_CHOICE"
 UNREADABLE = "VAULT_STORE_HELD_UNREADABLE"
+TOO_LARGE = "VAULT_STORE_HELD_TOO_LARGE"
 NO_WRITER = "VAULT_STORE_WRITER_UNAVAILABLE"
 #: The folder of the vault's state directory that keeps the person's bytes that keep-store replaced.
 EXPORT_FOLDER = "held-exports"
@@ -185,6 +186,12 @@ def resolve_held(
             "Make the file a readable regular file, not a symlink or a folder, "
             "then list the held items again.",
         )
+    if disk.file.exists and disk.body is None:
+        raise OpError(
+            TOO_LARGE,
+            f"{rel}: the person's file is larger than {projector.HELD_BODY_LIMIT} bytes",
+            "Leave it held. A file that large cannot be saved or adopted here, so tell the person.",
+        )
     if _item(row, disk.file, store).item_version != seen:
         raise write.StoreConflict(rel, "this held item changed after it was listed", _LIST_AGAIN)
     exported: tuple[Path | None, str | None] = (None, None)
@@ -199,7 +206,7 @@ def resolve_held(
         if conflict.remediation is None:
             raise write.StoreConflict(conflict.path, conflict.reason, _LIST_AGAIN) from conflict
         raise
-    return Resolution(rel, choice, result.revision, disk.body is not None, *exported)
+    return Resolution(rel, choice, result.revision, bool(disk.file.exists), *exported)
 
 
 def nothing_held(rel: str) -> write.StoreConflict:
@@ -300,33 +307,22 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
 def _observe(root: Path, rels: Sequence[str], *, keep_body: bool) -> dict[str, _Disk]:
     """The person's file at each path, read through handles that refuse a symlink."""
     try:
-        with held_fs.acquire(root).require() as filesystem:
+        with held_fs.acquire(projector.anchor(root)).require() as filesystem:
             return {rel: _observe_file(filesystem, rel, keep_body) for rel in rels}
     except held_fs.HeldFsError as error:
         return {rel: _Disk(PersonFile(None, unreadable=error.code)) for rel in rels}
 
 
 def _observe_file(filesystem: held_fs.HeldFilesystem, rel: str, keep_body: bool) -> _Disk:
-    folder, _, leaf = rel.rpartition("/")
+    """One file, read as the projector reads it: the hash is streamed, and the bytes come only on
+    request and only up to the projector's limit, so a list of large files costs no memory."""
     try:
-        opened = filesystem.parent(folder)
-        if _missing(opened):
-            return _Disk(PersonFile(False))
-        with opened.require() as parent:
-            found = filesystem.file(parent, leaf)
-            if _missing(found):
-                return _Disk(PersonFile(False))
-            with found.require() as file:
-                version = file.version()
-                body = filesystem.read(file).require()
+        found = projector.observe(filesystem, rel, keep_body=keep_body)
     except held_fs.HeldFsError as error:
         return _Disk(PersonFile(None, unreadable=error.code))
-    facts = PersonFile(True, hashlib.sha256(body).hexdigest(), len(body))
-    return _Disk(facts, version.mtime_ns, body if keep_body else None)
-
-
-def _missing(result: held_fs.HeldResult) -> bool:
-    return result.error is not None and result.error.code == "MISSING"
+    if found is None:
+        return _Disk(PersonFile(False))
+    return _Disk(PersonFile(True, found.sha256, found.size), found.mtime_ns, found.body)
 
 
 def _held_row(row: tuple) -> write.HeldRow:
@@ -348,7 +344,7 @@ def _keep_mine(rel: str, row: tuple, disk: _Disk, why: str) -> write.StoreChange
     }
     reason = f"held {KEEP_MINE}: {why}"
     resolves = (_held_row(row),)
-    if disk.body is None:
+    if not disk.file.exists:
         deletes = (write.PageDelete(rel, on_disk=True, absent_ok=True),)
         return write.StoreChange(
             write.Origin.OUTSIDE_EDITOR,
@@ -357,6 +353,7 @@ def _keep_mine(rel: str, row: tuple, disk: _Disk, why: str) -> write.StoreChange
             expect=expect,
             resolves_held=resolves,
         )
+    assert disk.body is not None  # resolve_held refuses a file whose bytes were not read
     puts = (write.PagePut(rel, disk.body, on_disk_mtime_ns=disk.mtime_ns),)
     return write.StoreChange(
         write.Origin.OUTSIDE_EDITOR, reason, puts=puts, expect=expect, resolves_held=resolves
@@ -383,7 +380,7 @@ def _keep_store(
     if saved is not None:
         copy = saved.relative_to(state_paths.vault_state_dir(root)).as_posix()
         reason += f"; the person's file is saved as {copy} (sha256 {saved_sha256})"
-    if disk.body is None:
+    if not disk.file.exists:
         seen = write.FileSeen(rel, None)
     else:
         assert (

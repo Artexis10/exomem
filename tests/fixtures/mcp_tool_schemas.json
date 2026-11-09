@@ -5871,7 +5871,8 @@
                 "end_sec": {
                   "type": "number",
                   "description": "End, seconds."
-                }
+                },
+                "max_side": {}
               },
               "required": [
                 "kind",
@@ -5897,18 +5898,7 @@
                   "type": "array",
                   "description": "Images to show, in order."
                 },
-                "max_side": {
-                  "anyOf": [
-                    {
-                      "type": "integer"
-                    },
-                    {
-                      "const": "original",
-                      "type": "string"
-                    }
-                  ],
-                  "description": "Long side px or \"original\"."
-                },
+                "max_side": {},
                 "region": {
                   "items": {
                     "type": "number"
@@ -5925,6 +5915,20 @@
           ],
           "discriminator": {
             "propertyName": "kind"
+          },
+          "properties": {
+            "max_side": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "const": "original",
+                  "type": "string"
+                }
+              ],
+              "description": "Long side px or \"original\"."
+            }
           }
         }
       },

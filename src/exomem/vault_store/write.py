@@ -255,7 +255,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         revision = row[1] + 1
         _check(tx, change.expect)
         _degrade_moves(tx, change.paths)
-        now = _timestamp()
+        now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
             _put_page(tx, put, revision, audit)
@@ -297,7 +297,8 @@ def _require_owned(change: StoreChange) -> None:
                 raise OpError(NOT_OWNED, f"the store holds no {kind.value} at {rel}")
 
 
-def _timestamp() -> str:
+def timestamp() -> str:
+    """The store's one time format, to the second in UTC: queue, audit and held rows all use it."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -368,6 +369,21 @@ def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
     queued = tx.execute("SELECT 1 FROM store_projection_queue WHERE path = ?", (rel,)).fetchone()
     held = tx.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
     return manifest == (revision, sha256) and queued is None and held is None
+
+
+#: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
+#: write, an import, or the new side of a move (the row that names the old path) opens a life; a
+#: delete, or the old side of a move, ends one. The projector reads them to tell the bytes that
+#: Exomem put at a path in its current life from those of an earlier life, which a person may have
+#: restored.
+BEGINS_A_LIFE = (
+    "(operation IN ('write', 'import') OR (operation = 'move' AND from_path IS NOT NULL))"
+)
+ENDS_A_LIFE = "(operation = 'delete' OR (operation = 'move' AND from_path IS NULL))"
+#: A migration or a rollback writes one audit row for the whole vault, with no path. Every path's
+#: life starts after the latest one: the vault ran in file mode in between, so no byte that the
+#: audit trail names from before it is known to be Exomem's.
+RESETS_EVERY_LIFE = "(path IS NULL AND operation IN ('migrate', 'rollback'))"
 
 
 class _Trail:

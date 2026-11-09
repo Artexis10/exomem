@@ -23,7 +23,7 @@ from test_vault_store_read_write import put, rows, stored, writer  # noqa: F401
 from exomem import state_paths
 from exomem.cli_ops import OpError
 from exomem.curation import MAX_WHY_CHARS
-from exomem.vault_store import held, read, write
+from exomem.vault_store import held, projector, read, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -65,6 +65,18 @@ def hold(root, writer, kind, *, body=True):
             ),
         )
     return revision
+
+
+def hold_through_the_projector(root, writer, kind):
+    """A person changed ALPHA's file while Exomem changed its page; the real projector held it."""
+    if kind == "edit":
+        (root / ALPHA).write_bytes(MINE)
+    else:
+        (root / ALPHA).unlink()
+    write.commit(writer, put(ALPHA, EXOMEM))
+    projecting = projector.Projector(root, run=lambda work: work(writer))
+    assert projecting.run_pass().held == 1
+    return projecting
 
 
 def only_item(root):
@@ -400,3 +412,41 @@ def test_an_unknown_choice_and_an_item_that_is_not_held_each_name_what_to_change
     with pytest.raises(write.StoreConflict) as gone:
         held.resolve_held(stored, ALPHA, held.KEEP_STORE, why=WHY, seen="x", writer=writer)
     assert "List the held items" in gone.value.remediation
+
+
+def test_after_keep_store_the_projector_replaces_the_persons_file_and_holds_nothing_again(
+    stored, writer
+):
+    """A resolution whose manifest facts leave the projector to hold the same file again, so the
+    item returns after every pass and the store's page never reaches the file."""
+    projecting = hold_through_the_projector(stored, writer, "edit")
+    resolve(stored, writer, held.KEEP_STORE)
+    report = projecting.run_pass()
+    assert (report.projected, report.held) == (1, 0)
+    assert (stored / ALPHA).read_bytes() == EXOMEM
+    assert [path.read_bytes() for path in exports(stored)] == [MINE]
+    assert held.list_held(stored) == [] and queue(stored) == []
+
+
+def test_after_keep_mine_the_projector_leaves_the_persons_file_alone_and_holds_nothing_again(
+    stored, writer
+):
+    """A keep-mine that leaves a queued write behind, so the projector overwrites the edit that the
+    person asked to keep."""
+    projecting = hold_through_the_projector(stored, writer, "edit")
+    resolve(stored, writer, held.KEEP_MINE)
+    assert projecting.run_pass().settled == 0
+    assert (stored / ALPHA).read_bytes() == MINE
+    assert stored_page(stored)[0][0] == MINE
+    assert held.list_held(stored) == [] and queue(stored) == []
+
+
+def test_after_keep_store_on_a_deleted_file_the_projector_writes_the_page_back(stored, writer):
+    """A keep-store on a person's delete that the projector holds again, because the manifest still
+    names a file that is not there."""
+    projecting = hold_through_the_projector(stored, writer, "delete")
+    resolve(stored, writer, held.KEEP_STORE)
+    report = projecting.run_pass()
+    assert (report.projected, report.held) == (1, 0)
+    assert (stored / ALPHA).read_bytes() == EXOMEM
+    assert held.list_held(stored) == [] and queue(stored) == []

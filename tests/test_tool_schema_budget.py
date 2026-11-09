@@ -79,10 +79,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # procedure_approvals listing kind adds 148 B to read_review, which measures 7,591 B. Their ceilings
 # round to 1,750 B and 7,600 B.
 # With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
+# The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
+# size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
 # The held listing kind on read_review (133 B) and the held-resolve kind on repair_memory (442 B)
 # let an agent settle an outside edit that raced an Exomem change: read_review measures 7,724 B
 # and repair_memory 6,487 B, so their ceilings round to 7,750 B and 6,500 B. The complete local
-# wire measures 171,357 B, so the budget is 171,400 B.
+# wire measures 171,400 B, so the budget is 171,400 B.
 TOTAL_BUDGET = 171_400
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
@@ -127,7 +129,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_connections": 3300,
     "read_episode": 2000,
     "read_governance": 2250,
-    "read_media": 1750,
+    "read_media": 1800,
     "read_memory": 3450,
     "read_plans": 2800,
     "read_records": 3350,

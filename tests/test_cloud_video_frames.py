@@ -111,7 +111,8 @@ from exomem import video_frames as v
 
 def decode(source, relative, **kwargs):
     Path(sys.argv[1], "decoded").write_text("yes")
-    return v.FramesResult(relative, 2.0, [v.Frame(0.5, bytes.fromhex("ffd84a504547ffd9"))], 1, 0, kwargs["max_frames"])
+    return v.FramesResult(relative, 2.0, [v.Frame(0.5, bytes.fromhex("ffd84a504547ffd9"))], 1, 0, kwargs["max_frames"],
+                         kwargs["max_side"])
 v.sample_stream = decode
 '''
 
@@ -584,7 +585,8 @@ def test_registered_cloud_read_hydrates_retained_video_and_returns_native_jpegs(
     began = time.monotonic()
     try:
         result = asyncio.run(mcp.call_tool(
-            "read_media", {"operation": {"kind": "video", "path": captured.path, "max_frames": 2}},
+            "read_media", {"operation": {"kind": "video", "path": captured.path, "max_frames": 2,
+                                           "max_side": "original"}},
             run_middleware=True,
         ))
     finally:
@@ -598,12 +600,14 @@ def test_registered_cloud_read_hydrates_retained_video_and_returns_native_jpegs(
     assert 0 < metadata["frame_count"] <= 2
     assert metadata["candidates"] == expected.candidates
     assert metadata["dedup_dropped"] == expected.dedup_dropped
+    # Cloud keeps the edge its worker sizes memory for, and says so, whatever the caller asked.
+    assert metadata["max_side_effective"] == video_frames.CLOUD_MAX_SIDE
     import base64
 
     for block in result.content[1:]:
         assert block.mime_type == "image/jpeg"
         with Image.open(io.BytesIO(base64.b64decode(block.data))) as image:
-            assert image.format == "JPEG" and max(image.size) == video_frames.FRAME_JPEG_MAX_EDGE
+            assert image.format == "JPEG" and max(image.size) == video_frames.CLOUD_MAX_SIDE
     assert path.read_bytes() == original
     assert originals.original_state(vault, path).state == "cached"
     after = {p.relative_to(vault): p.read_bytes() for p in vault.rglob("*") if p.is_file()}
@@ -777,7 +781,7 @@ def test_original_hash_failure_keeps_all_candidates_before_the_frame_cap(codec_v
     original_hash = embeddings._avg_hash
 
     def fail_before_resize(image):
-        if max(image.size) > video_frames.FRAME_JPEG_MAX_EDGE:
+        if max(image.size) > video_frames.CLOUD_MAX_SIDE:
             raise ValueError("the original image hash is unavailable")
         return original_hash(image)
 

@@ -9,7 +9,7 @@ No wait can make an older build's sidecar adoptable, and the promoted worker reb
 
 ## What Changes
 
-- A standby reports the graph snapshot component settled when its adoption proof declines with a verdict that holds for as long as the build runs: graph work is disabled, or the sidecar is absent, another build's or corrupt.
+- A standby reports the graph snapshot component settled when its adoption proof declines with a verdict that waiting is not expected to clear: graph work is disabled, or the sidecar is absent, another build's or corrupt. A rare transient that reads the same way costs one full graph handoff after promotion, not a refused upgrade.
 - Promotion records such a snapshot as `unproven` and carries no graph handoff, so the promoted worker runs the whole graph handoff, which is the one-time rebuild.
 - A decline that can clear, such as an unreadable predecessor or an oversized residue, still holds cutover until the budget expires.
 
@@ -21,7 +21,8 @@ None.
 
 ### Modified Capabilities
 
-- `managed-service-upgrades`: a proven-unusable graph snapshot no longer holds cutover readiness, in the same way that a failed semantic corpus build does not.
+- `managed-service-upgrades`: a graph snapshot found unusable for the build no longer holds cutover readiness, in the same way that a failed semantic corpus build does not.
+- `instant-start`: the cutover component set names the graph snapshot as ready when it is proved or found unusable for the build.
 
 ## Impact
 
