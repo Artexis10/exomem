@@ -2937,6 +2937,7 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
+    dimension_check: dict[str, int] = {}
     projected_continuation: str | None = None
     if projection_runtime is not None:
         who = principal_module.effective_principal()
@@ -3014,6 +3015,7 @@ def op_find(
             retrieval_trace=retrieval_trace,
             catalog_proof_out=catalog_proof,
             admit_path=admit_path,
+            dimension_check_out=dimension_check,
         )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
@@ -3227,6 +3229,16 @@ def op_find(
     budget_block = (
         active_budget.as_response_block() if active_budget is not None else None
     )
+    # A managed runtime checks a `unit.dimension` predicate on the best `limit` units, after the
+    # limit. When the check dropped some of a full ranking, more units in the dimension may rank
+    # below it, and the caller is told so; a ranking shorter than the limit was checked whole.
+    dimension_block = (
+        dimension_check
+        if dimension_check
+        and dimension_check["kept"] < dimension_check["checked"]
+        and dimension_check["checked"] >= retrieval_limit
+        else None
+    )
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -3235,6 +3247,7 @@ def op_find(
         and retrieval_trace is None
         and projected_continuation is None
         and budget_block is None
+        and dimension_block is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -3263,6 +3276,8 @@ def op_find(
         out["referents"] = referents
     if budget_block is not None:
         out["budget"] = budget_block
+    if dimension_block is not None:
+        out["dimension_check"] = dimension_block
     return out
 
 
@@ -6822,6 +6837,9 @@ _SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss r
 _SEARCH_NOTICE_BUDGET = (
     "Part of this search was skipped to stay within its time limit, so results may be incomplete."
 )
+_SEARCH_NOTICE_DIMENSION = (
+    "The dimension filter ran on the best matches only, so more matches in it may exist."
+)
 #: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `ref`
 #: and `unit_ref`: `record_episode` takes only refs in `about`. The MCP door names the page by `id`
 #: and `title`, and keeps `path` only for `detail="full"`.
@@ -6846,14 +6864,18 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
         return _SEARCH_NOTICE_DEGRADED
     if envelope.get("budget"):
         return _SEARCH_NOTICE_BUDGET
+    if envelope.get("dimension_check"):
+        return _SEARCH_NOTICE_DIMENSION
     return None
 
 
 def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
     """Shape a search result for the agent: a summary, the hits, and one notice when partial.
 
-    Index, warming and budget state become a `notice` sentence. A caller that asked for timings or
-    an explanation asked to see retrieval internals, so those raw blocks stay beside them.
+    Index, warming, budget and dimension-check state become a `notice` sentence; a dimension check
+    that dropped hits after the limit also leads the summary with its count. A caller that asked
+    for timings or an explanation asked to see retrieval internals, so those raw blocks stay
+    beside them.
     """
     envelope = {"hits": result} if isinstance(result, list) else dict(result)
     hits = [
@@ -6863,14 +6885,23 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         for hit in envelope.pop("hits", ())
     ]
     notice = _search_notice(envelope)
-    for internal in ("warming", "degraded", "budget"):
+    dimension_check = envelope.get("dimension_check")
+    for internal in ("warming", "degraded", "budget", "dimension_check"):
         if internals:
             continue
         envelope.pop(internal, None)
+    if dimension_check:
+        # The limit applied before the dimension check, so the count says what was checked.
+        summary = (
+            f"{dimension_check['kept']} of the {dimension_check['checked']} best matches are in"
+            " the requested dimension, and more may exist."
+        )
+    elif hits:
+        summary = f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
+    else:
+        summary = "Found no matches."
     reply: dict[str, Any] = {
-        "user_summary": f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
-        if hits
-        else "Found no matches.",
+        "user_summary": summary,
         "hits": hits,
         **envelope,
     }

@@ -59,6 +59,12 @@ UNIT_ROW_KEYS = (
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def carried_row_keys(unit: Any) -> tuple[str, ...]:
+    """The governed metadata keys whose value `unit` carries, in `GOVERNED_UNIT_METADATA_KEYS`
+    order. A row whose value did not parse is not carried, as `$exists` on its filter field says."""
+    return tuple(key for key in GOVERNED_UNIT_METADATA_KEYS if getattr(unit, key, None) is not None)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceSpan:
     """An authored source slice with 1-based, end-exclusive coordinates."""

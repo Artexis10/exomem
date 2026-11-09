@@ -1224,20 +1224,35 @@ def _dimension_counts(
 ) -> dict[str, dict[str, Any]]:
     """How many scanned units, and on how many pages, belong to each dimension of `registry`.
 
-    A dimension with a relation family as a member counts a unit through its page's edges, read
-    from the graph in one query. `edges` says how: "not_needed" for a dimension no edge decides,
-    "counted" when the graph answered, and "unavailable" when it could not, where the counts
-    are None because a count without the edges would present a part as the whole.
+    Membership is the `unit.dimension` filter's, from one graph read for the whole vault. `edges`
+    says how a row was counted: "not_needed" for a dimension no edge decides, "counted" when the
+    graph answered, and "unavailable" when it could not. An unavailable row has no counts,
+    because a count without the edges would present a part as the whole. When the graph is
+    missing or stale, a rebuild is scheduled, as the filter does, and the row names the
+    operation that runs it now.
     """
     relations = relation_registry.load_registry(vault_root)
     lookups = epistemic_dimensions.membership(registry, relations)
-    edges = epistemic_dimensions.read_family_pages(vault_root, relations, lookups.by_family)
-    answer = epistemic_dimensions.UnitDimensions(lookups, edges.pages)
+    edges = epistemic_dimensions.read_edges(vault_root, lookups)
+    if edges.status == "warming":
+        epistemic_graph.schedule_background_rebuild(
+            vault_root,
+            mutation_coordinator=epistemic_graph.EpistemicGraphIndex(
+                vault_root
+            )._canonical_mutation_coordinator(),
+        )
+    answer = epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
     units: Counter[str] = Counter()
     pages: dict[str, set[str]] = {}
     for item in observations:
         belongs = answer(
-            {"path": item["path"]}, {"kind": item["kind"], "row_keys": item["row_keys"]}
+            {"path": item["path"]},
+            {
+                "kind": item["kind"],
+                "form": item["form"],
+                "row_keys": item["row_keys"],
+                "occurrence": item["occurrence"],
+            },
         )
         for key in belongs:
             units[key] += 1
@@ -1255,7 +1270,19 @@ def _dimension_counts(
             "page_count": len(pages.get(key, ())) if counted else None,
             "edges": status,
         }
+        if not counted and edges.status == "warming":
+            counts[key]["repair"] = _GRAPH_REBUILD
     return counts
+
+
+#: The operation that refreshes the graph a dimension row could not read its edges from. A plain
+#: reconcile refreshes a missing or stale graph; `rebuild_graph` is only for a broken lineage.
+_GRAPH_REBUILD: dict[str, Any] = {
+    "tool": "maintain_memory",
+    "args": {"mode": "reconcile"},
+    "reason": "The graph that records typed edges is missing or stale; a rebuild has been "
+    "scheduled, and this operation runs it now.",
+}
 
 
 def category_observations(
@@ -1326,7 +1353,12 @@ def _scan_category_observations(
                     "excerpt_truncated": truncated,
                     "page_type": page.page_type,
                     "projects": projects,
-                    "row_keys": tuple(unit.metadata),
+                    # What the dimension count reads: the governed rows the unit carries and
+                    # where the graph holds it.
+                    "row_keys": semantic_units.carried_row_keys(unit),
+                    "occurrence": semantic_units.occurrence_key(
+                        unit.form, unit.span, unit.source_hash
+                    ),
                     # A rich unit that omits ``- category:`` defaults its category
                     # to the governed kind; that is not an authored category
                     # choice and never seeds a registration candidate.

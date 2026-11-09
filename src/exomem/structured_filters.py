@@ -11,10 +11,10 @@ import dataclasses
 import json
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Final, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, Protocol, TypeAlias, cast
 
 from . import semantic_labels, semantic_language_registry, semantic_units, temporal
 from .vocabulary.registry import PUBLIC_INSTANCE
@@ -104,18 +104,30 @@ _UNIT_FIELDS = frozenset(
     }
 )
 # A unit holds several of these at once, and the registry decides which: membership is read from
-# the unit's kind, its row keys and the typed edges of its page, none of which a catalogue column
-# holds. `$eq`, `$in` and `$ne` mean "is a member of", "is a member of one of" and "is not a member
-# of"; the array operators and the ordered ones have no meaning here.
+# the unit's kind, the governed rows it carries and the typed edges it is an end of, none of which
+# a catalogue column holds. `$eq`, `$in` and `$ne` mean "is a member of", "is a member of one of"
+# and "is not a member of"; the array operators and the ordered ones have no meaning here.
+# nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
 _MEMBERSHIP_FIELDS = frozenset({"unit.dimension"})
+# nosemgrep: ep-word-set -- the closed operators of this filter grammar, not a customer vocabulary
 _MEMBERSHIP_OPERATORS = frozenset({"$eq", "$ne", "$in"})
 
 ScalarKind = Literal["null", "boolean", "number", "string", "date", "datetime"]
 CategoryResolver = Callable[[str], str]
 KindResolver = Callable[[str], str]
 DimensionResolver = Callable[[str], str]
-#: The dimension keys one unit belongs to, from its page's view and its own.
-DimensionSource = Callable[[Mapping[str, Any], Mapping[str, Any]], frozenset[str]]
+
+
+class DimensionSource(Protocol):
+    """The dimension keys one unit belongs to, from its page's view and its own.
+
+    `own_kind` is false when the unit's kind is another vocabulary instance's entry, which
+    belongs to no member kind, as it equals no `unit.kind` operand.
+    """
+
+    def __call__(
+        self, page: Mapping[str, Any], unit: Mapping[str, Any], *, own_kind: bool = True
+    ) -> frozenset[str]: ...
 
 
 class FilterError(ValueError):
@@ -398,6 +410,135 @@ def named_dimensions(plan: FilterPlan) -> frozenset[str]:
 
     visit(plan.root)
     return frozenset(found)
+
+
+def membership_expression(
+    *, kinds: Collection[str], every_kind: bool, keys: Collection[str]
+) -> FilterNode | None:
+    """Indexed predicates that hold for exactly the units of a dimension with these members, or
+    None when the index cannot answer one of them.
+
+    A member kind becomes `unit.kind $in`, a member key `unit.<key> $exists true`, and the kind
+    wildcard `unit.kind $exists true`, which every unit satisfies. A key with no filter field has
+    no index column; for the rest, `plan_index_eligibility` decides whether the index answers the
+    expression exactly.
+    """
+    kind_field = FieldReference("unit.kind", "unit", "$.unit.kind")
+    if every_kind:
+        node: FilterNode = Predicate(kind_field, (("$exists", True),))
+    else:
+        children: list[FilterNode] = []
+        if kinds:
+            operand = tuple(
+                TypedScalar("string", _canonicalize_string("unit.kind", kind))
+                for kind in sorted(kinds)
+            )
+            children.append(Predicate(kind_field, (("$in", operand),)))
+        for key in sorted(keys):
+            name = f"unit.{key}"
+            if name not in _UNIT_FIELDS:
+                return None
+            children.append(Predicate(FieldReference(name, "unit", f"$.{name}"), (("$exists", True),)))
+        if not children:
+            return None
+        node = children[0] if len(children) == 1 else AnyOf(tuple(children))
+    eligibility = plan_index_eligibility(FilterPlan(node, True, 0, 0))
+    return node if eligibility.resolvable and eligibility.exact else None
+
+
+def rewrite_dimensions(plan: FilterPlan, expressions: Mapping[str, FilterNode]) -> FilterPlan:
+    """`plan` with each `unit.dimension` predicate whose every dimension has an indexed expression
+    (`membership_expression`) replaced by those expressions.
+
+    `$eq` and `$in` become the expression, or the `$or` of several, and `$ne` becomes its `$not`.
+    The rewrite is exact, so it holds anywhere in the plan, under `$or` and `$not` too. A predicate
+    that names a dimension with no expression stays as it is.
+    """
+
+    def rewrite(node: FilterNode) -> FilterNode:
+        if isinstance(node, Predicate):
+            if node.field.name not in _MEMBERSHIP_FIELDS:
+                return node
+            parts: list[FilterNode] = []
+            for operator, operand in node.operators:
+                names = [
+                    str(scalar.value)
+                    for scalar in (operand if isinstance(operand, tuple) else (operand,))
+                    if isinstance(scalar, TypedScalar)
+                ]
+                if not names or any(name not in expressions for name in names):
+                    return node
+                union = (
+                    expressions[names[0]]
+                    if len(names) == 1
+                    else AnyOf(tuple(expressions[name] for name in names))
+                )
+                parts.append(Not(union) if operator == "$ne" else union)
+            return parts[0] if len(parts) == 1 else AllOf(tuple(parts))
+        if isinstance(node, Not):
+            return Not(rewrite(node.child))
+        children = tuple(rewrite(child) for child in node.children)
+        return AllOf(children) if isinstance(node, AllOf) else AnyOf(children)
+
+    if plan.root is None or not expressions:
+        return plan
+    root = _normalize_node(rewrite(plan.root))
+    return dataclasses.replace(plan, root=root, has_unit_predicate=_has_unit_predicate(root))
+
+
+@dataclass(frozen=True, slots=True)
+class CheckedDimensions:
+    """A plan split for a reader that checks `unit.dimension` on its hits.
+
+    `index` is what the index answers. `checked` holds the plan's top-level `unit.dimension`
+    predicates, alone or under the top-level `$and`, which the reader evaluates on each hit, or
+    None. `nested` names the path of each one under `$or` or `$not`, which a check on the hits
+    cannot answer, because a hit that the predicate drops may be one its sibling branch keeps.
+    """
+
+    index: FilterPlan
+    checked: FilterPlan | None
+    nested: tuple[str, ...]
+
+
+def split_checked_dimensions(plan: FilterPlan) -> CheckedDimensions:
+    root = plan.root
+    if root is None:
+        return CheckedDimensions(plan, None, ())
+    top = root.children if isinstance(root, AllOf) else (root,)
+    checked = tuple(
+        node for node in top
+        if isinstance(node, Predicate) and node.field.name in _MEMBERSHIP_FIELDS
+    )
+    rest = tuple(node for node in top if node not in checked)
+    nested: list[str] = []
+
+    def visit(node: FilterNode) -> None:
+        if isinstance(node, Predicate):
+            if node.field.name in _MEMBERSHIP_FIELDS:
+                nested.append(node.field.path)
+        elif isinstance(node, Not):
+            visit(node.child)
+        else:
+            for child in node.children:
+                visit(child)
+
+    for node in rest:
+        visit(node)
+    index_root = None if not rest else rest[0] if len(rest) == 1 else AllOf(rest)
+    index = dataclasses.replace(
+        plan, root=index_root, has_unit_predicate=_has_unit_predicate(index_root)
+    )
+    checked_plan = (
+        dataclasses.replace(
+            plan,
+            root=checked[0] if len(checked) == 1 else AllOf(checked),
+            has_unit_predicate=True,
+        )
+        if checked
+        else None
+    )
+    return CheckedDimensions(index, checked_plan, tuple(dict.fromkeys(nested)))
 
 
 def resolve_result_level(requested: str, plan: FilterPlan) -> str:
@@ -710,8 +851,10 @@ _ALWAYS_PRESENT_UNIT_AXES: Final = frozenset(
 
 #: Every field an index can evaluate. A plan naming anything else cannot be
 #: answered without reading pages, so a managed reader refuses it outright
-#: instead of silently becoming the scan. Only `page.frontmatter:/<pointer>`
-#: is outside this set: it is open-ended by construction and has no column.
+#: instead of silently becoming the scan. `page.frontmatter:/<pointer>` is
+#: outside this set because it is open-ended by construction and has no column,
+#: and `unit.dimension` because membership has no column: a managed reader
+#: rewrites it into indexed fields or checks it on its hits instead.
 INDEX_ANSWERABLE_FIELDS: Final = _PAGE_FIELDS | (_UNIT_FIELDS - _MEMBERSHIP_FIELDS)
 
 
@@ -1260,8 +1403,7 @@ def unit_view(unit: Any, *, instance: str | None = None) -> dict[str, Any]:
         "context": unit.context,
         "form": unit.form,
         "instance": instance,
-        # The keys of the rows the unit carries, which decide its membership of a dimension.
-        "row_keys": tuple(getattr(unit, "metadata", None) or ()),
+        **membership_facts(unit),
     }
     verdict = getattr(unit, "verdict", None)
     if verdict is not None:
@@ -1275,6 +1417,20 @@ def unit_view(unit: Any, *, instance: str | None = None) -> dict[str, Any]:
         # acquiring an invented day.
         view["check_by"] = parsed.value if parsed is not None else check_by
     return view
+
+
+def membership_facts(unit: Any, *, occurrence: str | None = None) -> dict[str, Any]:
+    """What `unit.dimension` reads of a unit besides its kind: the governed rows it carries
+    (`row_keys`) and where the graph holds it (`occurrence`).
+
+    `occurrence` is the unit's occurrence key when the caller has it. Otherwise the view keeps the
+    parser's coordinates, and `epistemic_dimensions` derives the key, which costs a hash, only for
+    a unit on a page that some edge ends at a unit of.
+    """
+    if occurrence is None:
+        span = getattr(unit, "span", None)
+        occurrence = (unit.form, span, unit.source_hash) if span is not None else None
+    return {"row_keys": semantic_units.carried_row_keys(unit), "occurrence": occurrence}
 
 
 def _parse_expression(
@@ -2077,19 +2233,28 @@ def _resolve_runtime_field(
                 raise _error(
                     "UNSUPPORTED_FILTER_FIELD",
                     field.path,
-                    f"{field.name} needs the registry and the page's edges, and this reader has neither",
+                    f"{field.name} needs the registry and the unit's edges, and this reader has neither",
                     "a reader that attaches dimension membership to the plan",
                     "Query through recall, which resolves dimensions before it evaluates the filter.",
                 )
-            return dimensions(page, unit)
+            kind = unit.get("kind", MISSING)
+            return dimensions(
+                page, unit, own_kind=not _foreign_entry("unit.kind", kind, unit, instance)
+            )
         value = unit.get(field.name.removeprefix("unit."), MISSING)
-        if field.name in ENTRY_AXES and value is not MISSING and unit.get("instance") != instance:
-            core = semantic_language_registry.core_registry()
-            shared = core.core_categories if field.name == "unit.category" else core.core_kinds
-            if value not in shared:
-                return FOREIGN_ENTRY
+        if field.name in ENTRY_AXES and _foreign_entry(field.name, value, unit, instance):
+            return FOREIGN_ENTRY
         return value
     return page.get(field.name.removeprefix("page."), MISSING)
+
+
+def _foreign_entry(field: str, value: Any, unit: Mapping[str, Any], instance: str) -> bool:
+    """Whether a unit's category or kind is another vocabulary instance's entry: a value that is
+    not core, on a unit whose page selected an instance other than the plan's."""
+    if value is MISSING or unit.get("instance") == instance:
+        return False
+    core = semantic_language_registry.core_registry()
+    return value not in (core.core_categories if field == "unit.category" else core.core_kinds)
 
 
 def _evaluate_operator(
