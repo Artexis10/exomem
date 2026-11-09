@@ -309,6 +309,32 @@ def test_a_patch_costs_the_changed_file_not_the_index(
     assert [e.path for e in data.buckets["Notes/cost-t0-renamed"]] == [rel]
 
 
+def test_a_batch_of_files_that_are_not_pages_leaves_the_resident_index_in_place(vault: Path) -> None:
+    """A curation run writes JSON artifacts. They are no page, so they change neither the registry nor the index.
+
+    The patch used to read them as unproven data and withdraw the index, so the next lookup under the
+    mutation boundary rebuilt it from every page of the vault.
+    """
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "run-target.md").write_text("# Target\n", encoding="utf-8")
+    (notes / "run-linker.md").write_text("# L\n\n[[Notes/run-target]]\n", encoding="utf-8")
+    _seed_registry(vault)
+    find_inbound_wikilinks(vault, "Knowledge Base/Notes/run-target.md")
+    root = str(vault.resolve())
+    resident = vault_module._INBOUND_INDEX[root]
+    artifact = "Knowledge Base/Notes/run-plan.json"
+    (vault / artifact).write_text('{"note": "[[Notes/run-target]]"}', encoding="utf-8")
+
+    _watcher_batch(vault, live=False, changed=(artifact,))
+
+    assert vault_module._INBOUND_INDEX[root] is resident
+    assert artifact not in resident[1].sources
+    assert [link.path for link in find_inbound_wikilinks(vault, "Knowledge Base/Notes/run-target.md")] == [
+        "Knowledge Base/Notes/run-linker.md"
+    ]
+
+
 def test_a_reader_never_sees_half_a_patched_file(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

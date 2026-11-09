@@ -1,6 +1,6 @@
 # Importing a folder or archive
 
-Use this when the person wants existing files in the Knowledge Base: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. Fields of each operation are in [operations](operations.md#collection-adoption).
+Use this when the person wants existing files in the Knowledge Base: a folder, a ZIP or a notes export. Adoption never changes an original, and the person keeps their own copy in every route. A file whose bytes the vault already holds is not stored again: the existing Source records the new path, and a re-run writes nothing (`mapped`, [operations](operations.md#collection-adoption)). Fields of each operation are in [operations](operations.md#collection-adoption).
 
 ## Cloud prerequisites
 

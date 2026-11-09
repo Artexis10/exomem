@@ -358,3 +358,19 @@ def test_same_category_double_anchor_one_item_best_rank_score():
     assert a.score == round(1.0 / (k + 1), 6)
     assert report.summary[C] == 3            # all three contributing findings counted (pre-dedup)
     assert _paths(report).count("A") == 1    # deduped to one item
+
+
+def test_attention_without_a_filter_shows_no_duplicate_finding(vault: Path) -> None:
+    """A vault meets its whole duplicate backlog on the first run, so the daily surface must not carry it."""
+    from duplicate_fixtures import evidence_filing
+
+    data = b"\x89PNG photo of the notice"
+    for category, name in (("letters", "notice.png"), ("exhibits", "exhibit-a.png")):
+        evidence_filing(vault, "Case", category, name, data)
+
+    with library_scope():
+        by_default = attention_module.attention(vault, limit=0)
+        asked_for = attention_module.attention(vault, categories=["duplicate_content"], limit=0)
+
+    assert "duplicate_content" not in {category for item in by_default.items for category in item.categories}
+    assert [item.categories for item in asked_for.items] == [["duplicate_content"]]

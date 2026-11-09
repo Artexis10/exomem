@@ -665,12 +665,20 @@ def test_preserve_artifacts_uses_the_narrow_replay_boundary() -> None:
     assert "preserve_artifacts" in writer_lease._NARROW_BOUNDARY_COMMANDS
 
 
+def _index_built(root: Path) -> None:
+    """The duplicate index as the background repair leaves it: a storing door never builds one, so a root of its own needs it."""
+    from exomem import lexstore
+
+    (root / "Knowledge Base").mkdir(exist_ok=True)
+    assert lexstore.get_store(root).rebuild_atomic()
+
+
 def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import client_artifacts, writer_lease
 
-    (tmp_path / "Knowledge Base").mkdir()
+    _index_built(tmp_path)
     command = _command("preserve_artifacts")
     stage_calls: list[str] = []
     commit_calls: list[str] = []
@@ -990,6 +998,7 @@ def test_preserve_artifacts_marks_commit_before_media_reconciliation(
 ) -> None:
     from exomem import client_artifacts, media_processing
 
+    _index_built(tmp_path)
     staged = client_artifacts.StagedArtifact(
         file_id="file-media",
         path=tmp_path / "staged.bin",
@@ -1065,8 +1074,10 @@ def _staged(tmp_path: Path, file_id: str, filename: str, payload: bytes):  # noq
 
 
 
+@pytest.mark.usefixtures("owner_scope")
 @pytest.mark.parametrize("producer", ["text", "batch"])
 @pytest.mark.parametrize("raw_protection", [False, True])
+@pytest.mark.usefixtures("duplicate_index")
 def test_dedup_reads_only_requested_originals(vault, tmp_path, monkeypatch, producer, raw_protection):
     """A tiny capture/retry verifies matching originals without rereading unrelated bodies."""
     from exomem import client_artifacts, preserve, reserved_paths
@@ -1130,6 +1141,7 @@ def test_preserve_artifacts_reports_one_terminal_state_per_file(
     from exomem import client_artifacts
     from exomem.mutation_terminal import committed_terminal
 
+    _index_built(tmp_path)
     staged_rows = {
         "file-stored": ("stored.bin", b"first"),
         "file-duplicate": ("duplicate.bin", b"first"),
@@ -1299,6 +1311,7 @@ def test_valid_destination_segments_are_used_byte_for_byte(
     )
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_all_duplicate_batch_still_carries_the_mutation_terminal(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1346,7 +1359,8 @@ def test_all_duplicate_batch_still_carries_the_mutation_terminal(
 
     operational = _operational(duplicate)
     assert operational["ok"] is True
-    assert operational["status"] == "committed"
+    # Nothing was written, so the batch settles and reports `mutated: false` instead of claiming a commit.
+    assert (operational["status"], operational["mutated"]) == ("settled", False)
     assert operational["terminal"] is True
     assert operational["request_id"]
     assert operational["receipt_id"]
@@ -1355,6 +1369,7 @@ def test_all_duplicate_batch_still_carries_the_mutation_terminal(
     assert not (vault / "Knowledge Base" / "Evidence" / "case" / "raw" / "two.bin").exists()
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1390,7 +1405,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
 
     operational = _operational(duplicate)
     assert operational["ok"] is True
-    assert operational["status"] == "committed"
+    assert (operational["status"], operational["mutated"]) == ("settled", False)
     assert operational["terminal"] is True
     assert operational["request_id"]
     assert operational["receipt_id"]
@@ -1399,6 +1414,7 @@ def test_duplicate_preserve_evidence_still_carries_the_mutation_terminal(
     ).exists()
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_identical_files_inside_one_batch_are_one_fact(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1433,43 +1449,6 @@ def test_identical_files_inside_one_batch_are_one_fact(
     evidence = vault / "Knowledge Base" / "Evidence" / "case" / "intra"
     assert (evidence / "one.bin").is_file()
     assert not (evidence / "two.bin").exists()
-
-
-def test_the_destination_is_read_once_for_the_whole_batch(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Per-file rescans made an eight-file batch eight passes over the category."""
-    from exomem import client_artifacts, preserve
-
-    scans: list[str] = []
-    real_index = preserve.destination_duplicate_index
-
-    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        scans.append("scan")
-        return real_index(*args, **kwargs)
-
-    monkeypatch.setattr(client_artifacts, "destination_duplicate_index", counted)
-    monkeypatch.setattr(
-        client_artifacts,
-        "stage_artifact",
-        lambda file, _budget, **_kwargs: _staged(
-            tmp_path, file["file_id"], f"{file['file_id']}.bin", file["file_id"].encode()
-        ),
-    )
-    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: None)
-    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
-
-    client_artifacts.preserve_artifacts(
-        vault,
-        scope="case",
-        category="scanned",
-        files=[
-            {"download_url": f"https://files.example/{index}", "file_id": f"file-{index}"}
-            for index in range(4)
-        ],
-    )
-
-    assert scans == ["scan"]
 
 
 def test_a_duplicate_without_a_resolvable_ref_is_stored_not_failed(
@@ -1516,11 +1495,9 @@ def test_a_duplicate_without_a_resolvable_ref_is_stored_not_failed(
     assert retry["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
 
 
-def test_a_sidecar_pointing_outside_its_destination_is_not_a_duplicate(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_page_naming_an_original_outside_its_folder_is_not_a_duplicate(vault: Path) -> None:
     """The page is vault data and its `artifact_path` reaches the client."""
-    from exomem import preserve
+    from exomem import duplicates, preserve
 
     stored = preserve.preserve(
         vault,
@@ -1536,9 +1513,11 @@ def test_a_sidecar_pointing_outside_its_destination_is_not_a_duplicate(
     )
     sidecar.write_text(escaped, encoding="utf-8", newline="\n")
 
-    index = preserve.destination_duplicate_index(vault, scope="case", category="contained")
+    lookup = duplicates.find_duplicate(
+        vault, sha256=stored.hash, lane=duplicates.EVIDENCE, protected=False
+    )
 
-    assert index == {}
+    assert lookup.hit is None
 
 
 @pytest.mark.parametrize(
@@ -1619,6 +1598,7 @@ def test_mixed_batch_states_are_exact_when_the_middle_file_fails(
     assert (evidence / "three.bin").is_file()
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_preserve_evidence_reports_a_duplicate_instead_of_a_second_copy(
     vault: Path,
 ) -> None:
@@ -1647,15 +1627,14 @@ def test_preserve_evidence_reports_a_duplicate_instead_of_a_second_copy(
     ).exists()
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The natural recovery -- retry under a new identity -- stops duplicating.
 
-    Evidence is append-only, so the second write of the same bytes under the
-    same destination is not a correction, it is a second copy of one fact. The
-    lookup is destination-scoped on purpose: the same bytes in another evidence
-    family are two facts and both are stored.
+    Evidence is append-only, so the second write of the same bytes is not a
+    correction, it is a second copy of one fact. The retry writes nothing.
     """
     from exomem import client_artifacts
 
@@ -1703,22 +1682,343 @@ def test_duplicate_bytes_under_a_new_identity_are_reported_not_stored(
     assert duplicate["duplicate_of"] == {"path": stored_path, "ref": stored_ref}
     assert duplicate["path"] == stored_path
     assert duplicate["ref"] == stored_ref
+    assert duplicate["family_added"] is False
     assert retry["summary"] == {"stored": 0, "already_stored": 1, "failed": 0}
     assert sorted(item.name for item in evidence.iterdir()) == before
-    # The retry writes nothing and yet marks the mutation committed: it has a
-    # terminal answer about canonical state, which is what earns it a terminal
-    # envelope. The directory listing above is what proves nothing was written.
-    assert commits == ["commit", "commit"]
+    # The retry writes nothing, so it marks no commit and settles with `mutated: false`.
+    assert commits == ["commit"]
 
-    other_family = client_artifacts.preserve_artifacts(
-        vault,
-        scope="work",
-        category="tripod",
-        files=[{"download_url": "https://files.example/c", "file_id": "file-retry"}],
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_one_photo_handed_into_two_families_is_stored_once_and_found_in_both(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identical bytes are one original and one page; the second family is added to the page's `families` list."""
+    from exomem import client_artifacts
+    from exomem import vault as vault_module
+
+    payload = b"one-photo-of-the-lens"
+    names = {"file-studio": "lens.bin", "file-tripod": "lens-again.bin"}
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], names[file["file_id"]], payload),
     )
-    assert other_family["files"][0]["state"] == "stored"
-    assert other_family["summary"] == {"stored": 1, "already_stored": 0, "failed": 0}
-    assert commits == ["commit", "commit", "commit"]
+    commits: list[str] = []
+    monkeypatch.setattr(client_artifacts, "mark_active_mutation_committed", lambda: commits.append("commit"))
+    monkeypatch.setattr(client_artifacts, "active_manager", _NullBoundaryManager)
+
+    def hand_over(category: str, file_id: str) -> dict:
+        return client_artifacts.preserve_artifacts(
+            vault,
+            scope="work",
+            category=category,
+            files=[{"download_url": f"https://files.example/{file_id}", "file_id": file_id}],
+        )["files"][0]
+
+    studio = hand_over("studio", "file-studio")
+    assert studio["state"] == "stored"
+    tripod = hand_over("tripod", "file-tripod")
+
+    assert tripod["state"] == "already_stored"
+    assert tripod["family_added"] is True
+    assert tripod["fields_not_applied"] == [{"field": "filename", "provided": "lens-again.bin", "kept": "lens.bin"}]
+    # The family addition changed a page, so it counts as a commit; handing the same photo over again does not.
+    assert commits == ["commit", "commit"]
+    repeat = hand_over("tripod", "file-tripod")
+    assert repeat["state"] == "already_stored"
+    assert repeat["family_added"] is False
+    assert commits == ["commit", "commit"]
+    assert tripod["families"] == [
+        {"scope": "work", "category": "studio"},
+        {"scope": "work", "category": "tripod"},
+    ]
+    assert tripod["duplicate_of"] == {"path": studio["path"], "ref": studio["ref"]}
+    evidence = vault / "Knowledge Base" / "Evidence"
+    assert [path.name for path in evidence.rglob("*") if path.is_file()] == [
+        "lens.bin", "lens.bin.md",
+    ]
+    assert not (evidence / "work" / "tripod").exists()
+    page = tripod["path"] + ".md"
+    frontmatter, _body, _marker = vault_module.parse_frontmatter(
+        (vault / page).read_text(encoding="utf-8"), strict=True
+    )
+    assert frontmatter["families"] == tripod["families"]
+
+    for category in ("studio", "tripod"):
+        found = commands.op_find(vault, query="lens", tags=[category], mode="keyword", scope="kb-only")
+        assert [hit["path"] for hit in found] == [page], category
+
+    again = hand_over("tripod", "file-tripod")
+    assert again["state"] == "already_stored"
+    assert again["family_added"] is False
+    assert again["families"] == tripod["families"]
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_two_simultaneous_identical_hand_overs_under_different_identities_store_one_original(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second hand-over finds the first one's copy, because it looks up inside the boundary it commits in.
+
+    Both calls stage before either commits. The first holder stays inside the real boundary until the
+    second call is queued behind it, which is the interleaving that made both store when the lookup ran
+    before the boundary.
+    """
+    import uuid
+
+    from exomem import client_artifacts, media_processing
+
+    payload = b"synthetic hand-over bytes"
+
+    def stage_artifact(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        return _staged(tmp_path, file["file_id"], "brief.bin", payload)
+
+    entries: list[str] = []
+    second_is_queued = threading.Event()
+    real_boundary = client_artifacts.active_manager()
+
+    class _FirstHolderWaitsForTheSecond:
+        @contextmanager
+        def absorbing_mutation_guard(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            entries.append(threading.current_thread().name)
+            first, queued = len(entries) == 1, len(entries) == 2
+            if queued:
+                second_is_queued.set()
+            with real_boundary.absorbing_mutation_guard(*args, **kwargs) as held:
+                if first:
+                    assert second_is_queued.wait(timeout=30), "the second hand-over never reached the boundary"
+                yield held
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage_artifact)
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _FirstHolderWaitsForTheSecond)
+    results: dict[str, dict] = {}
+
+    def hand_over(identity: str) -> None:
+        results[identity] = client_artifacts.capture_source_artifacts(
+            vault,
+            source_schema=source_schema,
+            title="Reasoning input",
+            source_type="research-report",
+            files=[{"download_url": f"https://files.example/{uuid.uuid4().hex}", "file_id": "offer"}],
+            adoption={"key": identity, "trigger": "handed_over", "selected_file_id": "offer"},
+        )
+
+    threads = [threading.Thread(target=hand_over, args=(identity,)) for identity in ("brief:first", "brief:second")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+
+    rows = [result["files"][0] for result in results.values()]
+    states = {row.get("state", row["outcome"]): row for row in rows}
+    assert sorted(states) == ["already_stored", "stored"], rows
+    assert states["already_stored"]["duplicate_of"]["path"] == states["stored"]["stored_path"]
+    folder = vault / "Knowledge Base" / "Sources" / "Reports"
+    held = [entry for entry in folder.iterdir() if entry.name != "index.md"]
+    assert sorted(entry.suffix == ".md" for entry in held) == [False, True]
+    assert [entry.read_bytes() for entry in held if entry.suffix != ".md"] == [payload]
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_a_family_addition_survives_the_compact_terminal(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-over into a second family reports the families it listed, and its summary says nothing was saved."""
+    from exomem import client_artifacts, writer_lease
+
+    payload = b"one-photo-for-two-folders"
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], "photo.bin", payload),
+    )
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    command = _command("preserve_artifacts")
+
+    def hand_over(category: str) -> dict:
+        return writer_lease.invoke_command(
+            command,
+            vault,
+            scope="case",
+            category=category,
+            files=[{"download_url": f"https://files.example/{category}", "file_id": f"file-{category}"}],
+            idempotency_key=f"photo-{category}",
+        )
+
+    assert hand_over("front")["files"][0]["state"] == "stored"
+    added = hand_over("back")
+
+    assert added["files"][0]["state"] == "already_stored"
+    assert added["files"][0]["family_added"] is True
+    assert added["files"][0]["families"] == [
+        {"scope": "case", "category": "front"},
+        {"scope": "case", "category": "back"},
+    ]
+    assert added["user_summary"].startswith("Already saved -> ")
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_a_withheld_copy_reads_as_absent_to_a_restricted_caller(vault: Path) -> None:
+    """Reuse is not an existence oracle: a caller who cannot read the only copy is answered as in a vault without it."""
+    from test_governance_egress import EXTERNAL, write_rule, write_scope
+
+    from exomem import duplicates, preserve
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    with library_scope():
+        stored = preserve.preserve(vault, scope="case", category="raw", filename="proof.txt", content="withheld bytes")
+        owner_view = duplicates.find_duplicate(
+            vault, sha256=stored.hash, lane=duplicates.EVIDENCE, protected=False
+        )
+        assert owner_view.hit is not None
+        readable = preserve.preserve(vault, scope="open", category="raw", filename="open.txt", content="readable bytes")
+    page = vault / stored.sidecar_path
+    before = page.read_bytes()
+    write_scope(vault, paths="Evidence/case/**", name="Case evidence")
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        lookup = duplicates.find_duplicate(
+            vault, sha256=stored.hash, lane=duplicates.EVIDENCE, protected=False
+        )
+
+        control = duplicates.find_duplicate(
+            vault, sha256=readable.hash, lane=duplicates.EVIDENCE, protected=False
+        )
+
+    assert control.hit is not None, "the restricted caller reads every other Evidence page"
+    assert lookup == duplicates.DuplicateLookup()
+    assert page.read_bytes() == before
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_a_caller_who_cannot_write_the_page_adds_no_family_to_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuse that adds a family writes the page, so it needs the caller's write admission on that page."""
+    from exomem import evidence_reuse, preserve
+    from exomem.governance import connector_boundary
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        stored = preserve.preserve(vault, scope="case", category="raw", filename="proof.txt", content="read-only bytes")
+        page = vault / stored.sidecar_path
+        before = page.read_bytes()
+        monkeypatch.setattr(connector_boundary, "effect_admission", lambda _root: lambda _path: False)
+
+        lookup = evidence_reuse.reuse(
+            vault, scope="case", category="elsewhere", sha256=stored.hash, protected=False, filename="proof.txt"
+        )
+
+    assert lookup == evidence_reuse.EvidenceLookup()
+    assert page.read_bytes() == before
+
+
+@pytest.mark.usefixtures("owner_scope")
+@pytest.mark.usefixtures("duplicate_index")
+def test_protected_unprotected_and_cross_lane_copies_never_answer_for_each_other(
+    vault: Path, source_schema
+) -> None:
+    """Identical bytes held owner-only, not owner-only and as a Source are three facts, each answered only by itself."""
+    text = "The same sentence in three places."
+    evidence = dict(scope="case", category="raw", content=text)
+
+    open_copy = commands.op_preserve_evidence(vault, filename="open.txt", **evidence)
+    protected_copy = commands.op_preserve_evidence(vault, filename="owner-only.txt", raw_protection=True, **evidence)
+    source_copy = commands.op_capture_source(vault, source_schema, title="Same sentence", source_kind="session", content=text)
+
+    assert open_copy["state"] == "stored"
+    assert protected_copy["state"] == "stored"
+    assert len({open_copy["path"], protected_copy["path"], source_copy["source"]["path"]}) == 3
+
+    again_open = commands.op_preserve_evidence(vault, filename="open-again.txt", **evidence)
+    again_protected = commands.op_preserve_evidence(vault, filename="owner-only-again.txt", raw_protection=True, **evidence)
+    again_source = commands.op_capture_source(vault, source_schema, title="Same sentence again", source_kind="session", content=text)
+
+    assert (again_open["state"], again_open["path"]) == ("already_stored", open_copy["path"])
+    assert (again_protected["state"], again_protected["path"]) == ("already_stored", protected_copy["path"])
+    assert again_source["capture_outcome"] == "reused"
+    assert again_source["duplicate_of"]["path"] == source_copy["source"]["path"]
+
+
+@pytest.mark.parametrize("door", ["file_handle", "ordinary", "adoption"])
+@pytest.mark.usefixtures("duplicate_index")
+def test_two_simultaneous_identical_hand_overs_store_one_original_at_every_file_door(
+    door: str, vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each door looks up inside the boundary it commits in, so the second of two identical hand-overs finds the first.
+
+    Both calls stage before either commits. The first holder stays inside the real boundary until the
+    second call is queued behind it: the interleaving that made both store when a lookup ran before the boundary.
+    """
+    from exomem import client_artifacts, media_processing
+
+    payload = b"synthetic hand-over bytes"
+    entries: list[str] = []
+    second_is_queued = threading.Event()
+    real_boundary = client_artifacts.active_manager()
+
+    class _FirstHolderWaitsForTheSecond:
+        @contextmanager
+        def absorbing_mutation_guard(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            entries.append(threading.current_thread().name)
+            first, queued = len(entries) == 1, len(entries) == 2
+            if queued:
+                second_is_queued.set()
+            with real_boundary.absorbing_mutation_guard(*args, **kwargs) as held:
+                if first:
+                    assert second_is_queued.wait(timeout=30), "the second hand-over never reached the boundary"
+                yield held
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], f"{file['file_id']}.bin", payload),
+    )
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    monkeypatch.setattr(client_artifacts, "active_manager", _FirstHolderWaitsForTheSecond)
+
+    def hand_over(identity: str) -> dict:
+        files = [{"download_url": f"https://files.example/{identity}", "file_id": f"offer-{identity}"}]
+        if door == "file_handle":
+            return client_artifacts.capture_source_artifacts(
+                vault, source_schema=source_schema, title=f"Reasoning input {identity}",
+                source_type="research-report", files=files,
+            )
+        adoption = {"key": identity, "trigger": "handed_over", "selected_file_id": f"offer-{identity}"}
+        return client_artifacts.preserve_artifacts(
+            vault, scope="case", category="raw", files=files, adoption=adoption if door == "adoption" else None
+        )
+
+    lane = vault / "Knowledge Base" / ("Sources" if door == "file_handle" else "Evidence")
+    seeded = {entry for entry in lane.rglob("*") if entry.is_file()}
+    results: dict[str, dict] = {}
+
+    def run(identity: str) -> None:
+        results[identity] = hand_over(identity)
+
+    threads = [threading.Thread(target=run, args=(identity,)) for identity in ("first", "second")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not any(thread.is_alive() for thread in threads)
+
+    rows = [result["files"][0] for result in results.values()]
+    states = {row.get("state", row["outcome"]): row for row in rows}
+    assert sorted(states) == ["already_stored", "stored"], rows
+    assert states["already_stored"]["duplicate_of"]["path"] == states["stored"]["stored_path"]
+    held = [entry for entry in lane.rglob("*") if entry.is_file() and entry not in seeded]
+    assert sorted(entry.suffix == ".md" for entry in held) == [False, True], held
+    assert [entry.read_bytes() for entry in held if entry.suffix != ".md"] == [payload]
 
 
 # --------------------------------------------------------------------------- #
@@ -2418,6 +2718,7 @@ def test_a_slow_but_healthy_desktop_pull_earns_time_with_each_byte(
     assert staged.size == 10 * 1000
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_later_file_in_a_desktop_call_keeps_the_time_earlier_files_earned(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

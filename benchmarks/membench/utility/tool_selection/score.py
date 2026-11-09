@@ -368,11 +368,21 @@ def _canonical_checks(key: Key, before: Mapping, after: Mapping, *, final: bool)
                     continue
                 expected = key.adoption["plan"]
                 selection_hash = prior.get("selection", {}).get("selection_hash")
+                # Whether the duplicate catalogue was built when the plan was made is the product's state at that
+                # moment, not a fact about an item, so the key does not name it. The flag stays inside the plan
+                # identity below: the id must still be the hash of the items as the plan holds them. The two
+                # tokens are the plan's wire names (`adoption_plan.plan_item`, `adoption_run.plan`), kept literal so
+                # that the scorer does not read its expectations from the product.
+                planned_items = plan.get("items") or []
+                facts = {name: value for name, value in plan.items() if name not in ("created", "plan_id", "selection_hash")}
+                facts["items"] = [{name: value for name, value in item.items() if name != "duplicate_check_unavailable"}
+                                  for item in planned_items]
+                facts["skipped"] = [entry for entry in plan.get("skipped") or []
+                                    if entry.get("code") != "DUPLICATE_CHECK_UNAVAILABLE"]
                 if (actual.get("phase") != key.adoption["phase"] or actual.get("plan_draft") is not None
-                        or {name: value for name, value in plan.items()
-                            if name not in ("created", "plan_id", "selection_hash")} != expected
+                        or facts != expected
                         or plan.get("selection_hash") != selection_hash
-                        or plan.get("plan_id") != plan_id_for(selection_hash, [item_digest(item) for item in expected["items"]])):
+                        or plan.get("plan_id") != plan_id_for(selection_hash, [item_digest(item) for item in planned_items])):
                     reasons.append("adoption plan differs from the independent selection and item facts")
         for path, body in key.adoption["originals"].items():
             digest = hashlib.sha256(body.encode("utf-8")).hexdigest()

@@ -939,7 +939,9 @@ def test_media_warning_cannot_erase_committed_adoption_receipt(
 
     row = result["files"][0]
     assert row["outcome"] == "stored"
-    assert "media reconciliation failed" in row["warnings"][0]
+    # This vault has no built duplicate index, so the row also carries that note: neither warning displaces the other.
+    assert any("media reconciliation failed" in warning for warning in row["warnings"])
+    assert any(warning.startswith("duplicate_check_unavailable") for warning in row["warnings"])
     receipt = row["adoption"]
     frontmatter, _body, _marker = parse_frontmatter(
         (vault / receipt["page_path"]).read_text(encoding="utf-8"), strict=True
@@ -1550,6 +1552,7 @@ def _evidence_listing(vault: Path, category: str = "outputs") -> list[str]:
     return sorted(entry.name for entry in folder.iterdir())
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_handing_over_a_revision_then_the_first_file_again_keeps_each_version_once(
     vault: Path,
     tmp_path: Path,
@@ -1593,6 +1596,7 @@ def test_handing_over_a_revision_then_the_first_file_again_keeps_each_version_on
     assert (vault / revision["stored_path"]).read_bytes() == _PRESET_V2
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_identical_bytes_under_another_file_name_and_key_are_already_stored(
     vault: Path,
     tmp_path: Path,
@@ -1642,6 +1646,7 @@ def test_identical_bytes_under_another_file_name_and_key_are_already_stored(
     assert _evidence_listing(vault) == listing
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_bytes_preserved_without_adoption_are_already_stored_when_handed_over(
     vault: Path,
     tmp_path: Path,
@@ -1673,6 +1678,7 @@ def test_bytes_preserved_without_adoption_are_already_stored_when_handed_over(
     assert _evidence_listing(vault) == ["preset.zip", "preset.zip.md"]
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_source_hand_over_of_identical_bytes_under_a_new_key_is_already_stored(
     vault: Path,
     source_schema,

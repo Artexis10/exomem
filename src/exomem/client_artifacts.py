@@ -22,8 +22,9 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
-from . import memory_refs, originals
+from . import duplicates, evidence_reuse
 from .cli_ops import OpError
+from .mutation_terminal import as_reused
 from .preserve import (
     _ADOPTION_RECEIPT_FIELD,
     _ADOPTION_RECEIPT_FIELDS,
@@ -31,9 +32,7 @@ from .preserve import (
     DESTINATION_ACCEPTED_FORM,
     DuplicateArtifact,
     PreserveError,
-    destination_duplicate_index,
     destination_segment_refusal,
-    find_duplicate_artifact,
     preserve_stream,
     validate_raw_capture,
 )
@@ -707,12 +706,12 @@ def _batch_result(rows: list[dict | None]) -> dict:
         if row is None:
             continue
         files.append(row if "state" in row else {**row, "state": row["outcome"]})
-    return {
+    return _unless_written({
         "files": files,
         "summary": {
             state: sum(row["state"] == state for row in files) for state in _PRESERVE_STATES
         },
-    }
+    })
 
 
 def _bounded_file_id(file: object) -> str:
@@ -833,9 +832,29 @@ def _adoption_outcomes(
     ]
 
 
+def _wrote(duplicate: DuplicateArtifact | None) -> bool:
+    """Whether storing a file changed the vault: a miss stores it, and a reuse that adds a family edits its page."""
+    return duplicate is None or duplicate.family_added
+
+
+def _unless_written(result: dict) -> dict:
+    """`result` as the settled reuse terminal reads it when no row stored a file, added a family or restored a member blob, and one reused a copy.
+
+    A call that wrote nothing reports `mutated: false` and is never marked committed, so the reply states the outcome
+    and carries no durable-write text.
+    """
+    reused = False
+    for row in result.get("files") or ():
+        if row.get("outcome") == "stored":
+            if row.get("state") != "already_stored" or row.get("family_added") or (row.get("archive") or {}).get("restored"):
+                return result
+            reused = True
+    return as_reused(result) if reused else result
+
+
 def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     final = [outcome for outcome in outcomes if outcome is not None]
-    return {
+    return _unless_written({
         "files": final,
         "summary": {
             "stored": sum(
@@ -847,7 +866,7 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
             "failed": sum(item.get("outcome") == "failed" for item in final),
             "unselected": sum(item.get("outcome") == "unselected" for item in final),
         },
-    }
+    })
 
 
 def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
@@ -1151,60 +1170,30 @@ def _revision_filename(
     return artifact.name
 
 
-def _source_duplicate(
-    vault_root: Path, destination: str, sha256: str, *, raw_protection: bool
-) -> DuplicateArtifact | None:
-    """The Source already captured under `destination` with these exact bytes.
+def _earlier_source(
+    vault_root: Path, sha256: str, *, raw_protection: bool
+) -> tuple[DuplicateArtifact | None, bool]:
+    """The Source anywhere in the lane that keeps these exact bytes as a file, and whether the index could answer.
 
-    Each page names its own original and its hash (`originals.binary_binding`), so this answers for
-    every Source page that stores bytes. An owner-only capture is not matched across captures: its
-    pairing is proved by the protection layer, which the Evidence lookup applies and this one does not.
+    An owner-only capture is never matched: its pairing is proved by the protection layer, which answers
+    for an Evidence page and has no Source form, so a protected hand-over always stores its own copy.
     """
-    from .governance.raw_protection import marked
-
     if raw_protection:
-        return None
-    folder = vault_root / destination
-    try:
-        pages = sorted(folder.glob("*.md"))
-    except OSError:
-        return None
-    for page in pages:
-        if marked(page.name):
-            continue
-        try:
-            source, _guard = read_guarded_text(vault_root, page)
-        except (FileNotFoundError, OSError, PathGuardError, UnicodeDecodeError):
-            continue
-        if sha256 not in source:
-            continue
-        try:
-            frontmatter, _body, marker = parse_frontmatter(source, strict=True)
-        except FrontmatterError:
-            continue
-        binding = originals.binary_binding(frontmatter)
-        ref = memory_refs.ref_from_markdown(source)
-        if (
-            marker is None
-            or binding is None
-            or binding.sha256 != sha256
-            or not ref
-            or PurePosixPath(binding.path).parent != PurePosixPath(destination)
-        ):
-            continue
-        try:
-            read_bounded_guarded_bytes(
-                vault_root, binding.path, limit=binding.size, expected_hash=sha256
-            )
-        except (FileNotFoundError, OSError, PathGuardError, ValueError):
-            continue
-        return DuplicateArtifact(
-            hash=sha256,
-            path=binding.path,
-            sidecar_path=page.relative_to(vault_root).as_posix(),
-            ref=ref,
-        )
-    return None
+        return None, True
+    lookup = duplicates.find_duplicate(
+        vault_root, sha256=sha256, lane=duplicates.SOURCES, protected=False, keeps_original=True
+    )
+    if lookup.hit is None:
+        return None, lookup.available
+    hit = lookup.hit
+    return DuplicateArtifact(hash=sha256, path=hit.payload.artifact_path or "", sidecar_path=hit.path, ref=hit.ref), True
+
+
+def _with_unavailable_warning(payload: Mapping[str, object], available: bool, subject: str) -> dict[str, object]:
+    """`payload` with the duplicate-check warning when the index could not answer, so the row says the check did not run."""
+    if available:
+        return dict(payload)
+    return {**payload, "warnings": [*(payload.get("warnings") or ()), duplicates.unavailable_warning(subject)]}
 
 
 def _already_stored_outcome(
@@ -1405,19 +1394,9 @@ def _capture_source_adoption(
             outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
-        # After staging, before the commit boundary, as the ordinary path does: the bytes are already
-        # here, so a new key for them reports the earlier copy and writes nothing.
-        duplicate = _source_duplicate(
-            vault_root, destination, artifact.sha256,
-            raw_protection=bool(source_fields.get("raw_protection")),
-        )
-        if duplicate is not None:
-            mark_active_mutation_committed()
-            outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
-            return _finish_adoption(outcomes)
-
         manager = active_manager()
         payload: dict | None = None
+        duplicate: DuplicateArtifact | None = None
         try:
             with manager.absorbing_mutation_guard(
                 vault_root,
@@ -1432,24 +1411,33 @@ def _capture_source_adoption(
                     _assert_replay_identity(vault_root, raced, artifact, lane="source")
                     payload = None
                 else:
-                    result = add_module.add(
-                        vault_root,
-                        source_schema,
-                        content="",
-                        title=title,
-                        artifact=add_module.SourceArtifact(
-                            staged_path=artifact.path,
-                            filename=artifact.filename,
-                            content_type=artifact.content_type,
-                        ),
-                        adoption_seed=envelope.seed(
-                            lane="source", destination=destination
-                        ),
-                        **source_fields,
+                    # Looked up and committed under this one acquisition: a lookup made before the boundary
+                    # lets two identical hand-overs both find nothing, and both store.
+                    duplicate, available = _earlier_source(
+                        vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                     )
-                    payload = result.as_dict()
+                    if duplicate is None:
+                        result = add_module.add(
+                            vault_root,
+                            source_schema,
+                            content="",
+                            title=title,
+                            artifact=add_module.SourceArtifact(
+                                staged_path=artifact.path,
+                                filename=artifact.filename,
+                                content_type=artifact.content_type,
+                            ),
+                            adoption_seed=envelope.seed(
+                                lane="source", destination=destination
+                            ),
+                            **source_fields,
+                        )
+                        payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(raced.receipt)
+            elif duplicate is not None:
+                # Nothing is written: the earlier copy answers, and the call settles without a commit.
+                outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
             else:
                 mark_active_mutation_committed()
                 outcomes[selected_index] = _stored_outcome(
@@ -1553,21 +1541,8 @@ def _preserve_evidence_adoption(
             outcomes[selected_index] = _replayed_outcome(receipt.receipt)
             return _finish_adoption(outcomes)
 
-        # Same answer as the Source lane's: the bytes are already stored under another key or name.
-        duplicate = (
-            find_duplicate_artifact(
-                vault_root, scope=scope, category=category,
-                sha256=artifact.sha256, raw_protection=raw_protection,
-            )
-            if protected == raw_protection
-            else None
-        )
-        if duplicate is not None:
-            mark_active_mutation_committed()
-            outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="evidence")
-            return _finish_adoption(outcomes)
-
         manager = active_manager()
+        duplicate: DuplicateArtifact | None = None
         try:
             with manager.absorbing_mutation_guard(
                 vault_root,
@@ -1577,34 +1552,47 @@ def _preserve_evidence_adoption(
                 raced = _existing_receipt(
                     vault_root, envelope, lane="evidence", destination=destination, raw_protection=raw_protection,
                 )
+                payload = None
                 if raced is not None:
                     _assert_replay_identity(vault_root, raced, artifact, lane="evidence")
-                    payload = None
                 else:
-                    with artifact.path.open("rb") as stream:
-                        result = preserve_stream(
-                            vault_root,
-                            scope=scope,
-                            category=category,
-                            filename=_revision_filename(
-                                vault_root, scope=scope, category=category,
-                                filename=artifact.filename, raw_protection=raw_protection,
-                            ),
-                            stream=stream,
-                            content_type=artifact.content_type,
-                            max_bytes=budget.max_file_bytes,
-                            adoption_seed=envelope.seed(
-                                lane="evidence", destination=destination
-                            ),
-                            raw_protection=raw_protection,
-                            media_pending=True,
-                        )
-                    payload = result.as_dict()
+                    # Looked up under the same hold that stores a miss: two identical hand-overs, under
+                    # another key, name or family, cannot both find nothing.
+                    held = evidence_reuse.reuse(
+                        vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
+                        filename=artifact.filename,
+                    )
+                    duplicate = held.duplicate
+                    if duplicate is None:
+                        with artifact.path.open("rb") as stream:
+                            result = preserve_stream(
+                                vault_root,
+                                scope=scope,
+                                category=category,
+                                filename=_revision_filename(
+                                    vault_root, scope=scope, category=category,
+                                    filename=artifact.filename, raw_protection=raw_protection,
+                                ),
+                                stream=stream,
+                                content_type=artifact.content_type,
+                                max_bytes=budget.max_file_bytes,
+                                adoption_seed=envelope.seed(
+                                    lane="evidence", destination=destination
+                                ),
+                                raw_protection=raw_protection,
+                                media_pending=True,
+                            )
+                        payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(raced.receipt)
                 return _finish_adoption(outcomes)
 
-            mark_active_mutation_committed()
+            if _wrote(duplicate):
+                mark_active_mutation_committed()
+            if duplicate is not None:
+                outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="evidence")
+                return _finish_adoption(outcomes)
+            assert payload is not None
             warnings = list(payload.get("warnings") or [])
             receipt_payload = payload.get("adoption")
             if not isinstance(receipt_payload, Mapping):
@@ -1723,20 +1711,30 @@ def capture_source_artifacts(
                     operation="capture_source_artifacts_commit",
                 ):
                     body_started = True
-                    result = add_module.add(
-                        vault_root,
-                        source_schema,
-                        content="",
-                        title=item_title,
-                        artifact=add_module.SourceArtifact(
-                            staged_path=artifact.path,
-                            filename=artifact.filename,
-                            content_type=artifact.content_type,
-                        ),
-                        **source_fields,
+                    # Looked up and committed under this one acquisition, so two identical hand-overs
+                    # cannot both find nothing.
+                    duplicate, available = _earlier_source(
+                        vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                     )
-                mark_active_mutation_committed()
-                payload = result.as_dict()
+                    if duplicate is None:
+                        result = add_module.add(
+                            vault_root,
+                            source_schema,
+                            content="",
+                            title=item_title,
+                            artifact=add_module.SourceArtifact(
+                                staged_path=artifact.path,
+                                filename=artifact.filename,
+                                content_type=artifact.content_type,
+                            ),
+                            **source_fields,
+                        )
+                if _wrote(duplicate):
+                    mark_active_mutation_committed()
+                if duplicate is not None:
+                    outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
+                    continue
+                payload = _with_unavailable_warning(result.as_dict(), available, "this file")
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
@@ -1782,14 +1780,18 @@ def capture_source_artifacts(
         raise refusals[0]
 
     resolved = [outcome for outcome in outcomes if outcome is not None]
-    stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
+    already_stored = sum(1 for outcome in resolved if outcome.get("state") == "already_stored")
+    stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored") - already_stored
     out: dict = {
         "files": resolved,
-        "summary": {"stored": stored, "failed": len(resolved) - stored},
+        "summary": {"stored": stored, "failed": len(resolved) - stored - already_stored},
     }
+    if already_stored:
+        # Only when a copy was reused, so a call that stores every file keeps its summary as it was.
+        out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
-    return out
+    return _unless_written(out)
 
 
 def preserve_artifacts(
@@ -1886,13 +1888,6 @@ def preserve_artifacts(
             outcomes[index] = _failed(file_id, error)
 
     manager = active_manager()
-    # One pass over the destination's sidecars for the whole batch. Every file
-    # this call stores is added to it below, so a later file in the same batch
-    # still sees an earlier one's bytes.
-    duplicates = destination_duplicate_index(
-        vault_root, scope=scope, category=category, raw_protection=raw_protection,
-        wanted_hashes=frozenset(artifact.sha256 for artifact in staged.values()),
-    )
     refusals: list[OpError] = []
     body_started = False
 
@@ -1919,40 +1914,54 @@ def preserve_artifacts(
                 ):
                     raise SafeFetchError("INVALID_FILE", "staged file metadata is invalid")
                 if archive is not None:
+                    # A zip kept as members has no original to look up: its blobs are per-family
+                    # content-addressed members, and the same archive in one family is one manifest.
                     outcomes[index] = _preserve_members(
                         vault_root, artifact, scope=scope, category=category, guard=commit_guard
                     )
                     continue
-                # After staging, before the commit boundary: a retry under a new
-                # identity must report what is already there rather than write a
-                # second copy of one fact into an append-only tree. Nothing is
-                # written and the audit chain does not advance for this file --
-                # but the call has a terminal answer about canonical state, so
-                # it is marked committed and gets the same terminal envelope a
-                # stored file gets. Without that an all-duplicate batch, which
-                # is what retrying under a new identity produces, would come
-                # back as a bare leaf dict with no request or receipt identity.
                 protected = validate_raw_capture(
                     artifact.filename, destination=_destination(vault_root, "Evidence", scope, category),
                     raw_protection=raw_protection,
                 )
-                duplicate = duplicates.get(artifact.sha256) if protected == raw_protection else None
-                if duplicate is not None:
+                transcription = transcribed.get(index)
+                with commit_guard():
+                    # A retry under a new identity must report what is already there rather than write a
+                    # second copy of one fact into an append-only tree, and two identical files, in this
+                    # batch or two calls, must not both find nothing. So the lookup runs under the same hold
+                    # that stores a miss.
+                    held = evidence_reuse.reuse(
+                        vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
+                        filename=artifact.filename,
+                    )
+                    if held.duplicate is None:
+                        with artifact.path.open("rb") as stream:
+                            result = preserve_stream(
+                                vault_root,
+                                scope=scope,
+                                category=category,
+                                filename=artifact.filename,
+                                stream=stream,
+                                content_type=artifact.content_type,
+                                max_bytes=budget.max_file_bytes,
+                                raw_protection=raw_protection,
+                                media_pending=True,
+                                **(
+                                    {"text": transcription, "text_origin": "client"}
+                                    if transcription
+                                    else {}
+                                ),
+                            )
+                # A reused copy writes nothing unless it adds a family to its page, and the audit chain does not
+                # advance. An all-duplicate batch, which is what retrying under a new identity produces, is
+                # marked unwritten by `_batch_result`, so it settles with the request and receipt identity and
+                # without a commit.
+                if _wrote(held.duplicate):
                     mark_active_mutation_committed()
+                if held.duplicate is not None:
                     outcomes[index] = {
                         "file_id": artifact.file_id,
-                        "outcome": "stored",
-                        "state": "already_stored",
-                        "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
-                        "stored_path": duplicate.path,
-                        "path": duplicate.path,
-                        "ref": duplicate.ref,
-                        "size": artifact.size,
-                        "hash": artifact.sha256,
-                        "hash_algorithm": "sha256",
-                        "media_id": f"sha256:{artifact.sha256}",
-                        "content_type": artifact.content_type,
-                        "warnings": [],
+                        **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
@@ -1960,27 +1969,10 @@ def preserve_artifacts(
                             "reason": "the original was already preserved; its page is unchanged",
                         }
                     continue
-                transcription = transcribed.get(index)
-                with commit_guard(), artifact.path.open("rb") as stream:
-                    result = preserve_stream(
-                        vault_root,
-                        scope=scope,
-                        category=category,
-                        filename=artifact.filename,
-                        stream=stream,
-                        content_type=artifact.content_type,
-                        max_bytes=budget.max_file_bytes,
-                        raw_protection=raw_protection,
-                        media_pending=True,
-                        **(
-                            {"text": transcription, "text_origin": "client"}
-                            if transcription
-                            else {}
-                        ),
-                    )
-                mark_active_mutation_committed()
                 payload = result.as_dict()
                 warnings = list(payload.get("warnings") or [])
+                if not held.available:
+                    warnings.append(duplicates.unavailable_warning("this file"))
                 try:
                     from . import media_processing
 
@@ -1995,26 +1987,6 @@ def preserve_artifacts(
                 except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
                     warnings.append("media reconciliation failed; evidence remains recoverable")
                 stored_path = payload.get("stored_path") or payload.get("path")
-                stored_hash = payload.get("hash")
-                stored_ref = payload.get("ref")
-                if (
-                    isinstance(stored_hash, str)
-                    and isinstance(stored_path, str)
-                    and isinstance(stored_ref, str)
-                    and stored_ref
-                ):
-                    # Visible to the rest of this batch: two identical files in
-                    # one call are one fact, and the second must report the copy
-                    # the first just wrote.
-                    duplicates.setdefault(
-                        stored_hash,
-                        DuplicateArtifact(
-                            hash=stored_hash,
-                            path=stored_path,
-                            sidecar_path=str(payload.get("sidecar_path") or ""),
-                            ref=stored_ref,
-                        ),
-                    )
                 outcomes[index] = {
                     "file_id": artifact.file_id,
                     "outcome": "stored",
@@ -2069,7 +2041,7 @@ def _preserve_members(
 
     try:
         with artifact.path.open("rb") as stream:
-            receipt, _stored = archive_members.preserve_members(
+            receipt, stored = archive_members.preserve_members(
                 vault_root,
                 guard=guard,
                 scope=scope,
@@ -2082,7 +2054,9 @@ def _preserve_members(
             )
     except archive_members.ArchiveError as error:
         return _failed(artifact.file_id, SafeFetchError(error.code, error.reason))
-    mark_active_mutation_committed()
+    if stored or receipt["archive"].get("restored"):
+        # A replay that restores no blob wrote nothing, so `_unless_written` settles it like any other reuse.
+        mark_active_mutation_committed()
     receipt.pop("sidecar_path", None)
     return {"file_id": artifact.file_id, **receipt}
 

@@ -110,6 +110,21 @@ def test_plan_and_step_schemas_are_closed(mutate, code: str) -> None:  # noqa: A
         curation.validate_forward_plan(value)
 
 
+@pytest.mark.parametrize("kind", ["unfold-recap-revisions", "unfold-duplicate"])
+def test_a_fold_inverse_is_admitted_only_by_the_compensation_flag_never_by_the_records_one(kind: str) -> None:
+    """The episode recorder seals with the records flag: it must not be able to seal the undo of a fold."""
+    from exomem import curation
+
+    value = _plan()
+    value["steps"][0].update({"kind": kind})
+
+    with pytest.raises(curation.CurationError, match="INVALID_STEP_KIND"):
+        curation.validate_forward_plan(value, allow_records=True)
+    # The kind passes with the compensation flag, so the refusal is the edit arguments that the step carries.
+    with pytest.raises(curation.CurationError, match="CURATION_UNKNOWN_FIELD"):
+        curation.validate_forward_plan(value, allow_fold_inverse=True)
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -215,6 +230,10 @@ def test_work_item_uses_recorded_pages_exact_hashes_and_discloses_truncation(
     assert item["truncation"]["pages"] == [path]
     assert "Kieliriippumaton" in source
     assert set(item["step_schemas"]) == set(curation.STEP_KINDS)
+    assert "fold-recap-revisions" in item["step_schemas"]
+    assert "unfold-recap-revisions" not in item["step_schemas"]
+    assert "fold-duplicate" in item["step_schemas"]
+    assert "unfold-duplicate" not in item["step_schemas"]
     assert set(item["registry_ids"]) == {"entities", "relations", "schemas"}
 
 
@@ -411,3 +430,108 @@ def test_create_note_vocabulary_preparation_is_actionable_and_decision_bound(vau
     assert result["phase"] == "completed"
     path = result["step"]["path"]
     assert (vault / path).exists()
+
+
+def test_fold_proposal_refuses_a_head_that_is_not_the_single_live_page(vault, earlier_episode) -> None:  # noqa: ANN001
+    """Only the episode's live page can hold the history, so a superseded page is no head."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    step = _fold_step(pages[:-1], vault)  # the second page is the head, the first its only revision
+
+    with pytest.raises(curation.CurationError, match="single live page"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_a_page_of_another_episode(vault, earlier_episode) -> None:  # noqa: ANN001
+    """One step folds one episode: a revision of another episode, however superseded, is refused."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(3)
+    other = earlier_episode(2, key="ep-" + "b2" * 16)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].append(_fold_step(other, vault)["args"]["revisions"][0])
+
+    with pytest.raises(curation.CurationError, match="not a superseded recap revision of this episode"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_revisions_listed_newest_first(vault, earlier_episode) -> None:  # noqa: ANN001
+    """The history is written oldest first, so the plan must name the revisions in that order."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(4)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].reverse()
+
+    with pytest.raises(curation.CurationError, match="oldest first"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_refuses_the_head_among_its_revisions(vault, earlier_episode) -> None:  # noqa: ANN001
+    """The live page is never a revision to retire, whatever its hash says."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+
+    pages = earlier_episode(2)
+    step = _fold_step(pages, vault)
+    step["args"]["revisions"].append(step["args"]["head"])
+
+    with pytest.raises(curation.CurationError, match="never the head"):
+        curation.propose(vault, _plan(step))
+
+
+def test_fold_proposal_needs_the_whole_namespace_content_authority(vault, earlier_episode) -> None:  # noqa: ANN001
+    """A caller that cannot read the whole namespace cannot prove which revisions a hidden page cites."""
+    from test_curation_execution import _fold_step
+
+    from exomem import curation
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    pages = earlier_episode(3)
+    step = _fold_step(pages, vault)
+
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        with pytest.raises(curation.CurationError, match="SOURCE_IDENTITY_FORBIDDEN"):
+            curation.propose(vault, _plan(step))
+
+
+@pytest.mark.parametrize(
+    ("setup", "code"),
+    [
+        ("different bytes", "CURATION_STEP_INVALID"),
+        ("a Source and an Evidence page", "CURATION_STEP_INVALID"),
+        ("a protected copy", "CURATION_TARGET_PROTECTED"),
+        ("a protected canonical page", "CURATION_TARGET_PROTECTED"),
+        ("an append-only page citing the copy", "CURATION_TARGET_PROTECTED"),
+    ],
+)
+def test_duplicate_fold_proposal_refuses_what_could_retire_content_or_rewrite_what_it_must_not(
+    vault, owner_scope, setup: str, code: str  # noqa: ANN001
+) -> None:
+    """A fold names two pages that hold the same bytes, neither raw-protected, and no page it cannot rewrite cites the copy."""
+    from duplicate_fixtures import evidence_filing, source_filing
+    from test_curation_execution import _fold_duplicate_step
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data, protected=setup == "a protected canonical page")
+    copy = evidence_filing(
+        vault, "Case", "exhibits", "exhibit-a.png", b"\x89PNG another picture" if setup == "different bytes" else data,
+        protected=setup == "a protected copy",
+    )
+    if setup == "a Source and an Evidence page":
+        copy = source_filing(vault, "same-bytes", "A captured passage.", original=data)
+    if setup == "an append-only page citing the copy":
+        source_filing(vault, "citer", f"See [[{copy.removesuffix('.md')}]] for the photo.")
+
+    with pytest.raises(curation.CurationError, match=code):
+        curation.propose(vault, _plan(_fold_duplicate_step(vault, canonical, copy)))
