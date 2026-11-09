@@ -95,9 +95,20 @@ def metadata(packet: dict[str, Any]) -> dict[str, Any]:
         return [{key: item[key] for key in ("ref", "source_ref", "source_version", "read_ref") if key in item}
                 for item in items]
 
+    def leads(items):
+        # A later read can be credited to a listed link only if the record names what was offered; titles stay out.
+        recorded = routes(items)
+        for route, item in zip(recorded, items, strict=True):
+            if item.get("links"):
+                route["links"] = [{"relation": link.get("relation"), "target_ref": link.get("target_ref")}
+                                  for link in item["links"]]
+            if item.get("links_omitted"):
+                route["links_omitted"] = item["links_omitted"]
+        return recorded
+
     return {
         "task_context": {
-            "state": task.get("state"), "candidates": routes(task.get("candidates", ())),
+            "state": task.get("state"), "candidates": leads(task.get("candidates", ())),
             "methods": {"reset": (task.get("methods") or {}).get("reset"),
                         "items": routes((task.get("methods") or {}).get("items", ()))},
         } if task else {},
