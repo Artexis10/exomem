@@ -1,18 +1,18 @@
-"""Baseline of what unit kinds do today, recorded before any reader reads a kind trait.
+"""What unit kinds do, before and after readers read a kind trait.
 
 The change `make-epistemic-language-dynamic` moves the kind sets of five readers
-into registry traits and the kinds themselves into a shipped pack. This module is
-the before-picture, in the style of `test_epistemic_language_parity`: every
-`# CORE` value must never change, and a `# FLIPS <n>` value holds what the code
-did before intended change `<n>` of the change's design.md. The commit that
-converts the reader edits that one line. `# FLIPS protocol` marks the role-review
-scenario that the same design lists beside change 12.
+into registry traits and the kinds themselves into a shipped pack. This module
+began as the before-picture, in the style of `test_epistemic_language_parity`:
+every `# CORE` value never changes, and a `# FLIPS <n>` value is the one that the
+converting commit edited for intended change `<n>` of the change's design.md. The
+comment on each flipped line names the value it held before. `# FLIPS protocol`
+marks the role-review scenario that the same design lists beside change 12.
 
 The vault registers three kinds. `research_question` and `protocol` are the
-fixture's two vault kinds; on unchanged code they gain nothing, because no reader
-reads a trait. `question` is a vault kind that carries the census's literal
-`question` and is a control for dropping it. The page claim of a core kind is
-recorded by `test_epistemic_language_parity`.
+fixture's two vault kinds; each now gains what its trait names. `question` is a
+vault kind that carries no trait, and is a control for the census no longer
+matching its literal. The page claim of a core kind is recorded by
+`test_epistemic_language_parity`.
 """
 
 from __future__ import annotations
@@ -197,7 +197,7 @@ def test_two_pages_that_carry_one_question_are_proposed_as_related(kind_vault: P
 
     assert _suggested(kind_vault, "oq-a", "shared_open_question") == [(None, "oq-b")]  # CORE
     assert _suggested(kind_vault, "syn-a", "shared_open_question") == [(None, "syn-b")]  # CORE
-    assert _suggested(kind_vault, "rq-a", "shared_open_question") == [(None, "rq-b")]  # FLIPS 12
+    assert _suggested(kind_vault, "rq-a", "shared_open_question") == [(None, "rq-b")]  # FLIPS 12: was []
 
 
 # ---------------------------------------------------------------------------
@@ -263,4 +263,4 @@ def test_a_protocol_is_a_reusable_method_only_when_it_has_the_procedure_trait(
 ) -> None:
     protocol = method().replace("## Procedure", "## Protocol")
 
-    assert _promotions(kind_vault, protocol) == 1  # FLIPS protocol
+    assert _promotions(kind_vault, protocol) == 1  # FLIPS protocol: was 0

@@ -1181,6 +1181,17 @@ def infer_category_registry(
             for alias, canonical in sorted(registry.category_aliases.items())
         ],
         "candidate_changes": candidate_changes,
+        # Every verdict a unit's `verdict:` row or an experiment's `outcome:` accepts here: the
+        # shipped ones, then the vault's own once its registry has no error finding.
+        "verdicts": [
+            {
+                "key": definition.key,
+                "label": definition.label,
+                "description": definition.description,
+                "shipped": definition.core,
+            }
+            for definition in registry.verdict_definitions().values()
+        ],
         "proposal": semantic_language_registry.registry_proposal(registry),
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
@@ -1341,20 +1352,22 @@ def diff_category_registries(
     before: semantic_language_registry.SemanticLanguageRegistry,
     after: semantic_language_registry.SemanticLanguageRegistry,
 ) -> dict[str, Any]:
-    """Diff reviewed categories and custom kinds as distinct namespaces."""
+    """Diff reviewed categories, custom kinds and vault verdicts as distinct namespaces."""
     before_proposal = semantic_language_registry.registry_proposal(before)
     after_proposal = semantic_language_registry.registry_proposal(after)
     changes = {
+        # `verdicts` is in a proposal only when the vault has some.
         namespace: _definition_changes(
-            before_proposal[namespace], after_proposal[namespace]
+            before_proposal.get(namespace, {}), after_proposal.get(namespace, {})
         )
-        for namespace in ("categories", "kinds")
+        for namespace in ("categories", "kinds", "verdicts")  # nosemgrep: ep-word-set -- the registry document's own sections, fixed by its schema
     }
     return {
         "subject": "categories",
         "changed": any(_definition_changes_present(value) for value in changes.values()),
         "categories_changed": _definition_changes_present(changes["categories"]),
         "kinds_changed": _definition_changes_present(changes["kinds"]),
+        "verdicts_changed": _definition_changes_present(changes["verdicts"]),
         "before_hash": before.content_hash,
         "after_hash": after.content_hash,
         "changes": changes,

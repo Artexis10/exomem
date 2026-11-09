@@ -12,12 +12,15 @@ from exomem import vault as vault_module
 from exomem.semantic_units import parse_semantic_units
 
 
-def _proposal(*, categories=None, kinds=None):
-    return {
+def _proposal(*, categories=None, kinds=None, verdicts=None):
+    proposal = {
         "schema_version": 1,
         "categories": categories or {},
         "kinds": kinds or {},
     }
+    if verdicts is not None:
+        proposal["verdicts"] = verdicts
+    return proposal
 
 
 def test_missing_file_and_empty_proposal_preserve_portable_defaults(tmp_path: Path) -> None:
@@ -514,4 +517,85 @@ def test_a_saved_vault_kind_keeps_its_traits(tmp_path: Path) -> None:
     reloaded = language_registry.load_registry(tmp_path)
     assert reloaded.findings == ()
     assert reloaded.traits_of("protocol") == {"procedure"}
+    assert language_registry.registry_proposal(reloaded) == proposal
+
+
+# ---------------------------------------------------------------------------
+# Verdicts
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_verdicts_resolve_by_key_and_label_without_a_vault_entry() -> None:
+    registry = language_registry.core_registry()
+
+    assert registry.verdict_keys() == (
+        "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
+    )
+    assert registry.resolve_verdict("  Refuted ") == "refuted"
+    assert registry.resolve_verdict("probably-wrong") is None
+    assert registry.resolve_verdict("0.7") is None
+
+
+def test_a_vault_adds_a_verdict_and_gives_a_shipped_one_a_label() -> None:
+    registry = language_registry.load_registry(
+        proposal=_proposal(
+            verdicts={
+                "retracted": {"label": "Retracted by authors", "description": "Withdrawn"},
+                "refuted": {"label": "Disproved"},
+            }
+        )
+    )
+
+    assert registry.findings == ()
+    assert "retracted" in registry.verdict_keys()
+    assert registry.resolve_verdict("retracted by AUTHORS") == "retracted"
+    assert registry.resolve_verdict("Disproved") == "refuted"
+    assert registry.resolve_verdict("refuted") == "refuted"
+    assert registry.verdict_definitions()["refuted"].description == (
+        language_registry.core_registry().verdict_definitions()["refuted"].description
+    )
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "code"),
+    [
+        (
+            {"retracted": {"label": "Confirmed", "description": "Withdrawn"}},
+            "verdict_label_collision",
+        ),
+        (
+            {
+                "retracted": {"description": "Withdrawn"},
+                "withdrawn": {"label": "Retracted", "description": "Gone"},
+            },
+            "verdict_label_collision",
+        ),
+        ({"retracted": {"label": "Retracted"}}, "missing_description"),
+        ({"refuted": {"description": "Rewritten"}}, "core_verdict_fixed"),
+        ({"retracted": {"description": "Withdrawn", "behaviour": "closes"}}, "unknown_field"),
+        ({"Not A Key": {"description": "Withdrawn"}}, "invalid_key"),
+    ],
+    ids=[
+        "label-is-a-key", "label-is-a-label", "no-description", "shipped-fixed",
+        "unknown-field", "bad-key",
+    ],
+)
+def test_a_malformed_verdict_is_refused_and_hides_every_vault_verdict(verdicts, code: str) -> None:
+    registry = language_registry.load_registry(proposal=_proposal(verdicts=verdicts))
+
+    assert code in [item["code"] for item in registry.findings]
+    # The shipped verdicts always resolve; the vault's own wait for a clean registry.
+    assert registry.verdict_keys() == language_registry.core_registry().verdict_keys()
+
+
+def test_a_saved_vault_verdict_keeps_its_label_and_description(tmp_path: Path) -> None:
+    proposal = _proposal(
+        verdicts={"retracted": {"label": "Retracted by authors", "description": "Withdrawn"}}
+    )
+
+    language_registry.save_registry(tmp_path, proposal)
+
+    reloaded = language_registry.load_registry(tmp_path)
+    assert reloaded.findings == ()
+    assert reloaded.resolve_verdict("Retracted by authors") == "retracted"
     assert language_registry.registry_proposal(reloaded) == proposal

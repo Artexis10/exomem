@@ -188,8 +188,13 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return None
 
 
-def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+def governed_frontmatter_reason(
+    field: str, value: Any, page_type: Any, *, vault_root: Path | None = None
+) -> str | None:
     """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    `vault_root` selects the verdict registry an `outcome` is checked against, so a verdict
+    the vault added is accepted; without it only the shipped verdicts are.
 
     This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
     is refused by that function at every governed write boundary, and
@@ -200,9 +205,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     """
     if field.strip().casefold() != "outcome":
         return None
-    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
-    # imports this module. The vocabulary still has exactly one definition.
-    from .semantic_units import EPISTEMIC_OUTCOMES
+    # Deferred: `semantic_language_registry` imports this module. The vocabulary still has
+    # exactly one definition, the verdict registry.
+    from . import semantic_language_registry, semantic_units
 
     normalized_type = str(page_type or "").strip().casefold()
     if normalized_type != "experiment":
@@ -212,11 +217,16 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
             "conclusion turned out with a semantic unit's `verdict:` metadata "
             "instead."
         )
-    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+    keys = (
+        semantic_language_registry.load_registry(vault_root)
+        if vault_root is not None
+        else semantic_language_registry.core_registry()
+    ).verdict_keys()
+    # An outcome takes a key only; a unit verdict also takes a label.
+    if not isinstance(value, str) or value.strip().casefold() not in keys:
         return (
-            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
-            "It is categorical lifecycle state, not a confidence score, so a "
-            "number or a free-text hedge is never valid."
+            f"`outcome:` must be exactly one of {', '.join(keys)}. "
+            f"{semantic_units.NO_CONFIDENCE_RULE}"
         )
     return None
 

@@ -113,7 +113,9 @@ def create_file(
             raise CreateFileError(code=EXCLUDED_FIELD_CODE, reason=reason)
         page_type = frontmatter.get("type")
         for key in frontmatter:
-            governed = governed_frontmatter_reason(str(key), frontmatter[key], page_type)
+            governed = governed_frontmatter_reason(
+                str(key), frontmatter[key], page_type, vault_root=vault_root
+            )
             if governed is not None:
                 raise CreateFileError(code="INVALID_OUTCOME", reason=governed)
 

@@ -1411,6 +1411,52 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
     assert separate["changes"]["kinds"]["removed"] == ["protocol"]
 
 
+def test_the_categories_read_lists_each_accepted_verdict_and_a_save_keeps_the_vault_ones(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed_category_pages(vault)
+    shipped = commands.op_schema_memory(vault, operation="infer", subject="categories")
+    assert [item["key"] for item in shipped["verdicts"]] == [
+        "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
+    ]
+    assert all(item["shipped"] for item in shipped["verdicts"])
+
+    current = {
+        "schema_version": 1,
+        "categories": {},
+        "kinds": {},
+        "verdicts": {"retracted": {"label": "Retracted by authors", "description": "Withdrawn"}},
+    }
+    created = semantic_language_registry.save_registry(vault, current)
+
+    inferred = commands.op_schema_memory(vault, operation="infer", subject="categories")
+    retracted = next(item for item in inferred["verdicts"] if item["key"] == "retracted")
+    assert retracted == {
+        "key": "retracted", "label": "Retracted by authors",
+        "description": "Withdrawn", "shipped": False,
+    }
+    assert inferred["proposal"]["verdicts"] == current["verdicts"]
+
+    diff = commands.op_schema_memory(
+        vault, operation="diff", subject="categories", proposal={**current, "verdicts": {}}
+    )
+    assert diff["verdicts_changed"] is True
+    assert diff["changes"]["verdicts"]["removed"] == ["retracted"]
+
+    # A category save that omits the vault's verdicts would make every page that uses one stop
+    # parsing, so it is refused like a save that drops a custom kind.
+    with library_scope(), pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal={"schema_version": 1, "categories": {}, "kinds": {}},
+            expected_hash=created["content_hash"],
+        )
+
+
 def test_category_profile_retains_rich_kind_scoped_to_any_attached_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

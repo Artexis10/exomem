@@ -191,7 +191,7 @@ def set_frontmatter_field(
         raise SetFrontmatterError(error.code, error.reason) from error
 
     value = _governed_enum_value(
-        field, value, page_type=_read_yaml_field(fm_text, "type")
+        field, value, page_type=_read_yaml_field(fm_text, "type"), vault_root=vault_root
     )
 
     topic_writes: tuple[PlannedWrite, ...] = ()
@@ -344,7 +344,9 @@ def _plan_project_keys(
     return (PlannedWrite(registry_path, current, guard=guard),)
 
 
-def _governed_enum_value(field: str, value: Any, *, page_type: Any) -> Any:
+def _governed_enum_value(
+    field: str, value: Any, *, page_type: Any, vault_root: Path
+) -> Any:
     """Return the canonical value, or refuse a governed field written wrongly.
 
     The policy itself lives in `vault.governed_frontmatter_reason`, beside the
@@ -353,7 +355,7 @@ def _governed_enum_value(field: str, value: Any, *, page_type: Any) -> Any:
     field-setter needs and a creation path does not: normalizing an accepted
     spelling on the way in, so a file never carries two spellings of one state.
     """
-    reason = governed_frontmatter_reason(field, value, page_type)
+    reason = governed_frontmatter_reason(field, value, page_type, vault_root=vault_root)
     if reason is not None:
         raise SetFrontmatterError(code="INVALID_OUTCOME", reason=reason)
     if field.strip().casefold() == "outcome":
