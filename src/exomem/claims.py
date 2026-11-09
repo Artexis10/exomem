@@ -267,13 +267,13 @@ def extract_claim_text(
     return title or claim_body or None
 
 
-def extract_claim_for_page(page, vault_root: Path | None = None) -> str | None:
+def extract_claim_for_page(page, vault_root: Path) -> str | None:
     """`extract_claim_text` for a `find.ParsedPage` (pulls type/entity_type).
 
     Claims feed a shared sidecar, so they read the withheld search body: an
     origin carrier is never a claim, nor the lead-paragraph fallback. For the same reason they
-    read the vault's shared kind registry, never a private instance's; without `vault_root`
-    only the shipped kinds name a claim.
+    read the shared kind registry of the vault at `vault_root`, never a private instance's.
+    `vault_root` is required, so every claim and every checksum of it reads the same kinds.
     """
     from . import semantic_index
 
@@ -282,9 +282,7 @@ def extract_claim_for_page(page, vault_root: Path | None = None) -> str | None:
         page.search_body,
         page_type=page.page_type,
         entity_type=page.frontmatter.get("entity_type"),
-        language=(
-            semantic_language_registry.load_registry(vault_root) if vault_root is not None else None
-        ),
+        language=semantic_language_registry.load_registry(vault_root),
         projects=semantic_index.page_projects(page.frontmatter),
     )
 
@@ -1001,12 +999,12 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
 
 
 def claim_checksum_for_page(
-    page: Any, *, vault_root: Path | None = None, type_basis: note_types.Basis | None = None
+    page: Any, *, vault_root: Path, type_basis: note_types.Basis | None = None
 ) -> str | None:
     """Expected claim row from an already-bounded parse; None means no row.
 
-    Without `vault_root` only the shipped note types carry a claim. A pass that
-    already holds `producer_basis` passes it as `type_basis`.
+    `vault_root` names the vault whose note types and kinds the claim row was built with. A
+    pass that already holds `producer_basis` passes it as `type_basis`.
     """
     if page.page_type not in _claim_types(type_basis or producer_basis(vault_root)):
         return None
