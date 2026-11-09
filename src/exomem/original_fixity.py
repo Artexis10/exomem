@@ -311,8 +311,14 @@ def walk(vault: Path) -> int:
     """
     vault = Path(vault).resolve()
     found: dict[tuple[str, str], _Found] = {}
-    for item in foreground_priority.yielding(_bindings(vault)):
-        found.setdefault((item.path, item.sha256), item)
+    try:
+        for item in foreground_priority.yielding(_bindings(vault)):
+            found.setdefault((item.path, item.sha256), item)
+    except Exception as error:
+        # Status names the failure; its counts read unknown until a walk succeeds again.
+        with closing(_connect(vault)) as connection, connection:
+            _set_meta(connection, walk_error=str(getattr(error, "code", None) or type(error).__name__))
+        raise
     with closing(_connect(vault)) as connection, connection:
         known = set(connection.execute("SELECT path, sha256 FROM originals").fetchall())
         for key, item in found.items():
@@ -327,7 +333,7 @@ def walk(vault: Path) -> int:
                     (*key, item.kind, item.binding, item.size, int(item.stored),
                      EVICTED if item.evicted else UNVERIFIED))
         connection.executemany("DELETE FROM originals WHERE path = ? AND sha256 = ?", known - found.keys())
-        _set_meta(connection, walk_at=time.time())
+        _set_meta(connection, walk_at=time.time(), walk_error=None)
     return len(found)
 
 
@@ -803,6 +809,8 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
 
 def _kept_trash(vault: Path, row: Row, hashed: _Hashed) -> str | None:
     """The Trash copy that an earlier failed replace of this row left of these same bytes, if it is still there."""
+    if hashed.sha256 is None:
+        return None  # Bytes that no longer decode have no hash to match an earlier Trash copy by.
     for entry in row.route:
         trash = entry.get("trash")
         if trash and entry.get("found_sha256") == hashed.sha256 and (vault / trash).is_file():
@@ -940,11 +948,27 @@ def _stale(meta: dict[str, Any]) -> bool:
     return time.time() - float(meta["pass_at"]) > 3 * pass_seconds()
 
 
+def _no_answer(meta: dict[str, Any]) -> dict[str, object] | None:
+    """Why the table's counts are no answer, or None when they are one.
+
+    Counts answer only after a pass and a walk, while neither is stale: a table that no walk filled
+    holds no originals to count. A walk is stale after two walk intervals. A failed walk is named.
+    """
+    failure = {"walk_error": meta["walk_error"]} if meta.get("walk_error") else {}
+    if "pass_at" not in meta or "walk_at" not in meta:
+        return {"state": SIGNAL_UNKNOWN, **failure}
+    if _stale(meta):
+        return {"state": SIGNAL_UNKNOWN, "last_pass_at": _when(meta["pass_at"]), **failure}
+    if time.time() - float(meta["walk_at"]) > 2 * walk_seconds():
+        return {"state": SIGNAL_UNKNOWN, "last_walk_at": _when(meta["walk_at"]), **failure}
+    return None
+
+
 def readiness(vault: Path | None) -> dict[str, object]:
     """The content-free readiness block: the count of unresolved originals, `unknown`, or `off`.
 
-    `unknown` holds before the first pass and when the last pass is stale; a stale answer also carries
-    `last_pass_at`. It carries no path, name or hash, and never makes a cell unready (D9).
+    `unknown` holds until a pass and a walk have finished and while either is stale; it then carries the stale
+    time and any walk failure code. It carries no path, name or hash, and never makes a cell unready (D9).
     """
     if disabled():
         return {"state": SIGNAL_OFF}
@@ -956,10 +980,11 @@ def readiness(vault: Path | None) -> dict[str, object]:
             meta = _meta(connection)
     except (sqlite3.Error, OSError, ValueError):
         return {"state": SIGNAL_UNKNOWN}
-    if "pass_at" not in meta or not isinstance(meta.get("unresolved"), int):
+    unknown = _no_answer(meta)
+    if unknown is not None:
+        return unknown
+    if not isinstance(meta.get("unresolved"), int):
         return {"state": SIGNAL_UNKNOWN}
-    if _stale(meta):
-        return {"state": SIGNAL_UNKNOWN, "last_pass_at": _when(meta["pass_at"])}
     return {"state": SIGNAL_MEASURED, "unresolved": meta["unresolved"]}
 
 
@@ -983,10 +1008,9 @@ def status(vault: Path | None) -> dict[str, object]:
                 "SELECT MIN(verified_at) FROM originals WHERE state = ?", (VERIFIED,)).fetchone()[0]
     except (sqlite3.Error, OSError, ValueError):
         return {"state": SIGNAL_UNKNOWN, "code": "ORIGINAL_FIXITY_UNREADABLE"}
-    if "pass_at" not in meta:
-        return {"state": SIGNAL_UNKNOWN}
-    if _stale(meta):
-        return {"state": SIGNAL_UNKNOWN, "last_pass_at": _when(meta["pass_at"])}
+    unknown = _no_answer(meta)
+    if unknown is not None:
+        return unknown
     return {
         "state": SIGNAL_MEASURED,
         "coverage": "partial" if meta.get("pass_started_at", 0) > meta["pass_at"] else "complete",
@@ -995,6 +1019,7 @@ def status(vault: Path | None) -> dict[str, object]:
         "last_pass_unreadable": meta.get("unreadable"),
         "last_pass_rescheduled": meta.get("rescheduled"),
         "last_walk_at": _when(meta.get("walk_at")),
+        "last_walk_error": meta.get("walk_error"),
         "oldest_verification_at": _when(oldest),
     }
 

@@ -31,6 +31,7 @@ from exomem import (
     media_store,
     original_fixity,
     preserve,
+    reserved_paths,
 )
 from exomem.governance.principal import library_scope
 
@@ -405,6 +406,30 @@ def test_a_text_source_whose_fenced_text_never_matched_raises_no_alarm_until_it_
     assert _findings(vault) == []
     assert original_fixity.readiness(vault)["unresolved"] == 0
     assert original_fixity.status(vault)["counts"]["unmatched"] == 1
+
+    page.write_text(adopt.render_text_source(planned, text, date_iso="2026-10-01", collection=None))
+    assert original_fixity.run_pass(vault, budget=len(page.read_bytes())).outcomes == {"verified": 1}
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")
+def test_a_note_the_walk_cannot_read_leaves_the_counts_unknown_with_the_failure_named(vault: Path) -> None:
+    _stored(vault, "Recordings")
+    note = vault / "Knowledge Base" / "Tide log.md"
+    note.write_text("# Tide log\n\nHigh water at 06:10.\n")
+    note.chmod(0)
+    try:
+        with pytest.raises(reserved_paths.ReservedPathLeafError):
+            original_fixity.walk(vault)
+        original_fixity.run_pass(vault)
+        assert original_fixity.status(vault) == {"state": "unknown", "walk_error": "IO_REFUSED"}
+        assert original_fixity.readiness(vault) == {"state": "unknown", "walk_error": "IO_REFUSED"}
+    finally:
+        note.chmod(0o644)
+
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    assert original_fixity.readiness(vault) == {"state": "measured", "unresolved": 0}
+    assert original_fixity.status(vault)["counts"]["verified"] == 1
 
 
 @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")

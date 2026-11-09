@@ -126,12 +126,17 @@ Fixity SHALL report a missing original with its path, its expected SHA-256 and a
 
 ### Requirement: Fixity results reach the owner without new agent steps
 
-Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A `restored` finding SHALL be informational. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. Another audience SHALL receive a copy outside the vault by its kind, without its path. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass completes, and SHALL NOT report a zero for an unknown count. When the last pass is older than three pass intervals, the block SHALL report `unknown` with the last pass time. After a pass, it SHALL report the count of each state, the last pass time, the last pass's unreadable and rescheduled originals, and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Attention SHALL report the category's coverage as `unknown` before the first pass, after a stale pass and while fixity is off. Fixity SHALL add no tool and no agent step.
+Attention SHALL compose an `original_fixity` category in its default union, with one finding for each original in `restored`, `missing` or `corrupt_no_copy`. A `restored` finding SHALL be informational. A finding SHALL carry the path, the state, the cause when there is one, the expected SHA-256 and the route. Another audience SHALL receive a copy outside the vault by its kind, without its path. `exomem status` SHALL carry an `originals` block. The block SHALL report `unknown` until the first pass and the first binding walk complete, and SHALL NOT report a zero for an unknown count. When the last walk failed, the block SHALL name its failure code. When the last successful walk is older than two walk intervals, the block SHALL report `unknown` with that walk's time. When the last pass is older than three pass intervals, the block SHALL report `unknown` with the last pass time. After a pass, it SHALL report the count of each state, the last pass time, the last pass's unreadable and rescheduled originals, and the age of the oldest verification. A pass that stopped early SHALL say that its counts are partial. Attention SHALL report the category's coverage as `unknown` before the first pass, after a stale pass and while fixity is off. Fixity SHALL add no tool and no agent step.
 
 #### Scenario: Status before the first pass
 
 - **WHEN** `exomem status` runs before any pass has completed
 - **THEN** the `originals` block reports `unknown` and no count
+
+#### Scenario: The walk cannot read a note
+
+- **WHEN** the binding walk cannot read a note on an install whose table no walk has filled, and a pass runs
+- **THEN** the `originals` block and the readiness answer report `unknown` with the walk's failure code, and no count
 
 #### Scenario: A damaged original reaches attention
 
@@ -140,7 +145,7 @@ Attention SHALL compose an `original_fixity` category in its default union, with
 
 ### Requirement: A Cloud cell reports fixity without content
 
-A Cloud cell's readiness answer SHALL carry the count of originals in `missing` or `corrupt_no_copy`. It SHALL carry `unknown` before the first pass, and `unknown` with the last pass time when that pass is stale. A `restored` original SHALL NOT enter the count, because it needs no action. It SHALL carry no path, name or hash. The count SHALL NOT make the cell unready. cellctl SHALL alert when the count is above zero. An unknown or unreadable answer SHALL neither fire nor resolve the alert.
+A Cloud cell's readiness answer SHALL carry the count of originals in `missing` or `corrupt_no_copy`. It SHALL carry `unknown` before the first pass and the first walk, `unknown` with the last pass time when that pass is stale, and `unknown` with the last walk time when that walk is stale. An `unknown` answer SHALL name the last walk's failure code when it failed. A `restored` original SHALL NOT enter the count, because it needs no action. It SHALL carry no path, name or hash. The count SHALL NOT make the cell unready. cellctl SHALL alert when the count is above zero. An unknown or unreadable answer SHALL neither fire nor resolve the alert.
 
 #### Scenario: A cell holds a damaged original
 
