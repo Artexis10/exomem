@@ -52,7 +52,8 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 #: default. A request is spooled to temporary storage before the copy-time check, so this
 #: bound is refused early from Content-Length; a whole export fits, a runaway client stops.
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
-#: Multipart framing and form fields that ride with the file part.
+#: Multipart framing and form fields that ride with the file part. The early Content-Length checks
+#: take it as the most a body carries beyond its file; only a client that pads its fields exceeds it.
 _FORM_OVERHEAD_BYTES = 1024 * 1024
 #: tus 1.0 (tus.io resumable-upload protocol): the extensions served. `upload_sessions`
 #: holds the version, the secret header and the route, which an upload handoff advertises.
@@ -68,20 +69,22 @@ _header_count = upload_sessions.header_count
 
 
 async def _allowance_refused(
-    vault_root: Path, file_bytes: int | None, filename: str, lane: str,
+    vault_root: Path, file_bytes: int | None, filename: str | None, lane: str, *, most_bytes: int | None = None,
 ) -> dict[str, str] | None:
     """The refusal body for an upload that the media allowance cannot hold, read before its bytes are kept (D10).
 
     In the Evidence lane the file's name decides whether it charges the allowance. A multipart body names its
-    file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte. A resumable
-    session names it at creation, before any byte. A request without a size carries nothing to admit
-    here; offload's own admission then keeps its original local.
+    file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte. The
+    ticket lane also asks before the body, from Content-Length, with no name: that can refuse only a Source upload.
+    A resumable session names its file at creation, before any byte. A request without a size carries nothing to
+    admit here; offload's own admission then keeps its original local.
     """
     from . import media_allowance, media_store
 
     if file_bytes is None:
         return None
-    reason = await run_in_threadpool(media_store.upload_refusal, vault_root, file_bytes, filename, lane)
+    reason = await run_in_threadpool(
+        media_store.upload_refusal, vault_root, file_bytes, filename, lane, most_bytes=most_bytes)
     return None if reason is None else {"code": media_allowance.MEDIA_ALLOWANCE_EXCEEDED, "reason": reason}
 
 
@@ -714,6 +717,13 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
         return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}, status_code=413)
+    # Content-Length less the framing allowance is the least the file can hold. With no name yet, only a
+    # Source upload can be refused here; any other request reads its form and asks again below.
+    if declared is not None and declared > _FORM_OVERHEAD_BYTES:
+        refused = await _allowance_refused(
+            vault_root, declared - _FORM_OVERHEAD_BYTES, None, ticket["lane"], most_bytes=declared)
+        if refused is not None:
+            return JSONResponse(refused, status_code=413)
     try:
         async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
